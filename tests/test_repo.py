@@ -451,3 +451,25 @@ async def test_list_audit_rounds_batch(repo: Repo):
     assert got["r2"].prompt_md5 == "m2"
     assert got["r1"].mode == "paper"
     assert await repo.list_audit_rounds([]) == {}
+
+
+async def test_latest_audit_round(repo: Repo):
+    """latest_audit_round：按 mode 取 started_at 最新一轮；空表 None；模式间隔离。"""
+    assert await repo.latest_audit_round("paper") is None  # 空表
+    await repo.start_audit_round("r1", "paper", started_at=1000.0)
+    await repo.start_audit_round("r2", "paper", started_at=2000.0)
+    await repo.start_audit_round("r3", "testnet", started_at=3000.0)  # 其他模式不参与
+    latest = await repo.latest_audit_round("paper")
+    assert latest is not None
+    assert latest.round_id == "r2"  # 同模式内取 started_at 最新
+    testnet = await repo.latest_audit_round("testnet")
+    assert testnet is not None and testnet.round_id == "r3"
+    assert await repo.latest_audit_round("live") is None  # 该模式无记录
+
+
+async def test_latest_audit_round_tie_breaks_by_insert_order(repo: Repo):
+    """started_at 并列时取后插入者（rowid 大者），保证「最新」语义确定。"""
+    await repo.start_audit_round("r-first", "paper", started_at=1000.0)
+    await repo.start_audit_round("r-second", "paper", started_at=1000.0)
+    latest = await repo.latest_audit_round("paper")
+    assert latest is not None and latest.round_id == "r-second"

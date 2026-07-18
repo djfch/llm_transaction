@@ -205,3 +205,29 @@ async def test_agent_start_stop_callbacks_drive_scheduler(build_ctx):
     await deps.agent_stop()
     assert not ctx.scheduler.is_running
     assert deps.status_provider()["agent_running"] is False
+
+
+async def test_status_provider_includes_in_round(build_ctx):
+    """status_provider 暴露 in_round 键（未运行时为 False），供 /api/agent/live 实时展示。"""
+    ctx = await build_ctx()
+    deps = ctx.server_deps
+    assert deps is not None and deps.status_provider is not None
+    status = deps.status_provider()
+    assert "in_round" in status
+    assert status["in_round"] is False
+
+
+async def test_on_wake_pushes_round_start_then_round(build_ctx):
+    """决策轮事件序：round_start（轮开始）先于 round（轮结束）入队——
+    前端实时决策卡靠 round_start 进入"决策中"轮询态（稳态可达性回归）。"""
+    ctx = await build_ctx()  # fixture 默认 mock_llm + mock_market
+    await ctx.scheduler.start()
+    try:
+        ctx.scheduler.wake_now("test_event_order")
+        first = await asyncio.wait_for(ctx.event_queue.get(), timeout=5)
+        second = await asyncio.wait_for(ctx.event_queue.get(), timeout=5)
+    finally:
+        await ctx.scheduler.stop()
+    assert first["type"] == "round_start"
+    assert first["data"]["wake_source"] == "test_event_order"
+    assert second["type"] == "round"

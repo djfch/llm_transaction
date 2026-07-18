@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from decimal import Decimal
 from typing import Any
@@ -10,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src.config import Settings, load_settings
 from src.gateway.base import Gateway, GatewayError
-from src.memory.models import AuditRound
+from src.memory.models import AuditRound, AuditToolCall
 from src.server.deps import ServerDeps
 
 
@@ -31,6 +32,27 @@ def _audit_summary(audit: AuditRound | None) -> dict[str, Any] | None:
         "started_at": audit.started_at,
         "ended_at": audit.ended_at,
         "error": audit.error,
+    }
+
+
+def _parse_json_field(raw: str) -> Any:
+    """审计落库的 args_json/result_json 还原为对象；非法 JSON 保留原字符串。"""
+    try:
+        return json.loads(raw)
+    except ValueError:  # json.JSONDecodeError 是 ValueError 子类
+        return raw
+
+
+def _tool_call_item(call: AuditToolCall) -> dict[str, Any]:
+    """实时展示的单次工具调用（键与 /api/agent/live 前端契约逐字对齐）。"""
+    return {
+        "seq": call.seq,
+        "tool": call.tool,
+        "args": _parse_json_field(call.args_json),
+        "risk_verdict": call.risk_verdict,
+        "risk_reason": call.risk_reason,
+        "result": _parse_json_field(call.result_json),
+        "duration_ms": call.duration_ms,
     }
 
 
@@ -87,11 +109,46 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             "agent_running": runtime.get("agent_running", False),
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
+            "llm_configured": runtime.get("llm_configured", False),
+        }
+
+    @router.get("/agent/live")
+    async def get_agent_live() -> dict[str, Any]:
+        """实时决策展示：当前模式最新一轮审计 + 已落库工具调用（响应键与前端契约冻结）。
+
+        in_round 取运行时状态的 in_round 键（调度器防重入标记），缺省 False；
+        mode 优先 runtime_settings（agent 实际运行模式），未接线回退配置文件；
+        进行中的轮 ended_at 为 null、llm_raw 为空串；无轮次时 round 为 null。
+        in_round 与 round 非原子配对：调度器标记先于/晚于审计行落库，存在 ms 级
+        窗口（in_round=true 时可能短暂返回上一已结束轮），前端应以 round.ended_at
+        为轮次进行中的最终判据；配对一致性依赖单调度器单决策循环的构造不变量
+        （bootstrap 接线保证）。
+        """
+        runtime = deps.runtime_status()
+        settings = deps.runtime_settings or load_settings(deps.config_path)
+        round_row = await deps.repo.latest_audit_round(settings.mode)
+        if round_row is None:
+            return {"in_round": runtime.get("in_round", False), "round": None, "tool_calls": []}
+        calls = await deps.repo.list_audit_tool_calls(round_row.round_id)
+        return {
+            "in_round": runtime.get("in_round", False),
+            "round": round_row.model_dump(exclude={"mode"}),  # 契约不含 mode 键
+            "tool_calls": [_tool_call_item(c) for c in calls],
         }
 
     @router.get("/account")
     async def get_account() -> dict[str, Any]:
-        return _require_gateway(deps).get_account().model_dump()
+        """账户概览：available/unrealised_pnl + equity（前端 AccountInfo 契约要求 equity 必在）。
+
+        equity = available + Σ持仓保证金 + 未实现盈亏；持仓查询失败时降级为
+        available + unrealised_pnl（近似值，保证前端永远拿到数字）。
+        """
+        account = _require_gateway(deps).get_account().model_dump()
+        equity = _account_equity(deps)
+        account["equity"] = (
+            equity if equity is not None else account["available"] + account["unrealised_pnl"]
+        )
+        return account
 
     @router.get("/positions")
     async def get_positions() -> list[dict[str, Any]]:
@@ -115,12 +172,18 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/rounds/{round_id}")
     async def get_round(round_id: str) -> dict[str, Any]:
+        """决策轮详情：round 字段展平到顶层 + 工具调用 args/result 解析为对象。
+
+        响应形态与前端 RoundDetail 类型逐字对齐（此前嵌套 round/args_json 的形态
+        会让前端读顶层字段时崩页，契约测试锁定本形态）。
+        """
         if deps.audit_trail is None:
             raise HTTPException(status_code=503, detail="审计追踪未配置")
         data = await deps.audit_trail.get_round(round_id)
         if data is None:
             raise HTTPException(status_code=404, detail=f"决策轮不存在: {round_id}")
-        return data
+        calls = await deps.repo.list_audit_tool_calls(round_id)
+        return {**data["round"], "tool_calls": [_tool_call_item(c) for c in calls]}
 
     @router.get("/trades")
     async def list_trades(

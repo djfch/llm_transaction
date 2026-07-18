@@ -61,7 +61,10 @@ async def default_daily_stats(repo: Repo, mode: str) -> DailyStats:
 
 
 class DecisionLoop:
-    """LLM 自主决策循环。所有依赖构造期注入，provider 可替换。
+    """LLM 自主决策循环。所有依赖构造期注入，provider 可空、可热替换。
+
+    provider 为 None（LLM 未配置，如缺 API key）时 run_once 跳过本轮：
+    不落审计、不计连续失败；配置补齐后经 set_provider 热替换即恢复决策。
 
     可选依赖：
     - drain_fills：paper 网关成交缓冲泄放钩子（PaperGateway.drain_fills）；
@@ -75,7 +78,7 @@ class DecisionLoop:
         *,
         settings: Settings,
         watchlist: list[str],
-        provider: LLMProvider,
+        provider: LLMProvider | None,
         gateway: Gateway,
         risk_engine: RiskEngine,
         repo: Repo,
@@ -126,8 +129,23 @@ class DecisionLoop:
     def risk_locked(self) -> bool:
         return self._risk_locked
 
+    @property
+    def llm_configured(self) -> bool:
+        """provider 是否已配置（status_provider 透出 /api/status 用）。"""
+        return self._provider is not None
+
+    def set_provider(self, provider: LLMProvider) -> None:
+        """热替换 LLM provider（配置前端化：改 key/模型重建后下轮决策即生效）。"""
+        self._provider = provider
+
     async def run_once(self, wake_source: str) -> RoundResult:
         """执行一轮决策。失败不向上抛；每轮结束（含失败轮）统一 drain 成交落库。"""
+        if self._provider is None:
+            # LLM 未配置（缺 key）：跳过本轮，不落审计、不计连续失败；
+            # 但先泄放成交缓冲——paper 强平/挂单成交与 LLM 无关，跳轮不得滞留丢失
+            await self._drain_round_fills("")
+            logger.warning("LLM 未配置，跳过本轮决策")
+            return RoundResult(round_id="", ok=False, wake_source=wake_source, error="LLM 未配置")
         prompt, prompt_md5 = self._prompts.system_prompt(self._registry.specs)
         # 先落审计行（空上下文快照）：后续任何失败都在 audit_rounds 留痕迹
         round_id = await self._audit.begin_round(self._settings.mode, wake_source, prompt)

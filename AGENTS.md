@@ -9,6 +9,7 @@ Gate.io 永续合约 LLM 自主交易 Agent。后端 Python 3.11（uv 管理）�
 - 后端：`uv sync` 安装依赖；`uv run pytest tests/ -q` 测试；`uv run ruff check src tests` lint
 - 前端：`cd web && npm ci`；`npm run dev` 开发；`npm run build` 构建
 - 运行：`uv run python -m src.main`（默认 paper 模式）
+- 整机冒烟：`uv run python scripts/e2e_web_smoke.py`（需先 `cd web && npm run build`；真实端口起服务验证 dist 托管与 API 操作链）
 - CI：`uvx pre-commit install` 安装提交钩子；GitHub Actions 见 `.github/workflows/ci.yml`
 
 ## 目录约定

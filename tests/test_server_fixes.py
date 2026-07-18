@@ -115,14 +115,14 @@ async def test_put_config_updates_shared_runtime_scheduler(deps: ServerDeps, cli
 
 
 async def test_put_config_restart_fields_not_written_back(deps: ServerDeps, client: AsyncClient):
-    """llm.model 在 provider 构造期绑定，写不回运行时，须标 needs_restart。"""
+    """mode 等构造期绑定字段写不回运行时，须标 needs_restart（llm 热键已移出，见 secrets 测试）。"""
     runtime = Settings()
     deps.runtime_settings = runtime
     raw = (await client.get("/api/config")).json()
-    raw["llm"]["model"] = "claude-opus-4"
+    raw["mode"] = "testnet"
     r = await client.put("/api/config", json=raw)
-    assert r.json()["needs_restart"] == ["llm.model"]
-    assert runtime.llm.model == "claude-sonnet-4-5"  # 运行时不被改写
+    assert r.json()["needs_restart"] == ["mode"]
+    assert runtime.mode == "paper"  # 运行时不被改写
 
 
 async def test_put_config_without_runtime_marks_restart(deps: ServerDeps, client: AsyncClient):
@@ -244,3 +244,23 @@ async def test_ws_connection_cleans_up_on_disconnect():
     ws = _FakeWS(WebSocketDisconnect())
     await ws_connection(ws, manager)
     assert manager.count == 0
+
+
+async def test_put_config_merges_preserves_untouched_sections(
+    deps: ServerDeps, client: AsyncClient
+):
+    """PUT 只提交字段子集时，未提及的段/键必须原样保留（回归：整体写回曾把
+    gate/paper/server 等段静默重置为默认值）。"""
+    raw = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
+    raw["paper"]["initial_equity"] = 23456
+    raw["gate"]["testnet_host"] = "https://custom.example.com"
+    deps.config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    r = await client.put("/api/config", json={"risk": {"max_position_pct": 0.2}})
+    assert r.status_code == 200
+
+    saved = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
+    assert float(saved["paper"]["initial_equity"]) == 23456.0  # 未提及段保留
+    assert saved["gate"]["testnet_host"] == "https://custom.example.com"
+    assert float(saved["risk"]["max_position_pct"]) == 0.2  # 提交的键已更新
+    assert int(saved["risk"]["max_leverage"]) == 5  # 同段未提及键保留

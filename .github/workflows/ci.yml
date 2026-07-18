@@ -45,3 +45,27 @@ jobs:
         run: npm run test
       - name: 构建
         run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: 安装后端依赖
+        run: uv sync --frozen
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装前端依赖
+        working-directory: web
+        run: npm ci
+      - name: 构建前端
+        working-directory: web
+        run: npm run build
+      - name: 整机冒烟（真实端口 + dist 静态托管 + 操作链）
+        run: uv run python scripts/e2e_web_smoke.py

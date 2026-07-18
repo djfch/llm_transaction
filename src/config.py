@@ -42,6 +42,8 @@ class SchedulerConfig(BaseModel):
     default_wake_minutes: int = Field(default=60, ge=1)
     min_wake_minutes: int = Field(default=5, ge=1)
     max_wake_minutes: int = Field(default=720, le=720)  # 上限 12 小时
+    # 启动时是否自动开始 LLM 决策：默认 False——由用户在监控主页点击"启动 agent"才开始
+    autostart: bool = False
 
     @model_validator(mode="after")
     def _check_wake_window(self) -> SchedulerConfig:

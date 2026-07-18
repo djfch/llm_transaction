@@ -391,6 +391,15 @@ class Repo:
         )
         return {a.round_id: a for a in (AuditRound(**dict(r)) for r in await cur.fetchall())}
 
+    async def latest_audit_round(self, mode: str) -> AuditRound | None:
+        """按模式取最近一轮审计（started_at 最新，并列取后插入者）；无记录返回 None。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM audit_rounds WHERE mode=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (mode,),
+        )
+        row = await cur.fetchone()
+        return AuditRound(**dict(row)) if row else None
+
     async def save_audit_tool_call(
         self,
         round_id: str,

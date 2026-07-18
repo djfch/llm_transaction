@@ -19,12 +19,12 @@ import uvicorn
 from src.agent.loop import DecisionLoop
 from src.agent.prompts import PromptLoader
 from src.agent.providers.anthropic import AnthropicProvider
-from src.agent.providers.base import LLMProvider
+from src.agent.providers.base import LLMError, LLMProvider
 from src.agent.providers.mock import MockProvider
 from src.agent.providers.openai_compat import OpenAICompatProvider
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
-from src.config import ROOT, Settings, Watchlist
+from src.config import ROOT, LLMConfig, Settings, Watchlist
 from src.config_io import read_settings_raw, write_settings
 from src.gateway.base import Candle, Contract, Gateway, Ticker
 from src.gateway.gate_rest import GateRestGateway
@@ -113,12 +113,49 @@ def _build_gateway(
     return gateway
 
 
-def _build_provider(settings: Settings, mock_llm: bool) -> LLMProvider:
+def _create_provider(llm_config: LLMConfig) -> LLMProvider:
+    """按配置构造真实 provider；缺 key 抛 LLMError（由调用方决定降级或保留旧 provider）。"""
+    if llm_config.provider == "anthropic":
+        return AnthropicProvider(llm_config)
+    return OpenAICompatProvider(llm_config)
+
+
+def _build_provider(settings: Settings, mock_llm: bool) -> LLMProvider | None:
+    """构造 provider：mock 走 MockProvider；缺 key 等 LLMError 降级为 None（启动不崩）。
+
+    None 时决策循环跳过每轮（见 DecisionLoop.run_once），待前端补齐 key 后热重建。
+    """
     if mock_llm or os.environ.get("LLM_MOCK") == "1":
         return MockProvider()
-    if settings.llm.provider == "anthropic":
-        return AnthropicProvider(settings.llm)
-    return OpenAICompatProvider(settings.llm)
+    try:
+        return _create_provider(settings.llm)
+    except LLMError as exc:
+        logger.warning("LLM provider 初始化失败（可经前端配置后热重建）：%s", exc)
+        return None
+
+
+def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Awaitable[dict]]:
+    """生成 LLM 热重建回调：按运行时 settings.llm + 当前环境变量重建 provider 并热替换。
+
+    重建失败（LLMError）保留旧 provider，诚实回报 llm_configured（旧 provider 是否存在）
+    与 error 原文；mock 模式直接回报已配置。响应契约：{"llm_configured": bool, "error": str}。
+    """
+
+    async def reconfigure() -> dict:
+        if mock_llm or os.environ.get("LLM_MOCK") == "1":
+            return {"llm_configured": True, "error": ""}
+        try:
+            provider = _create_provider(ctx.settings.llm)
+        except LLMError as exc:
+            logger.warning("LLM provider 热重建失败（保留旧 provider）：%s", exc)
+            return {"llm_configured": ctx.loop.llm_configured, "error": str(exc)}
+        ctx.loop.set_provider(provider)
+        logger.info(
+            "LLM provider 已热重建（%s / %s）", ctx.settings.llm.provider, ctx.settings.llm.model
+        )
+        return {"llm_configured": True, "error": ""}
+
+    return reconfigure
 
 
 def _build_source(settings: Settings, watchlist: Watchlist, mock_market: bool) -> PriceSource:
@@ -221,6 +258,9 @@ async def build_app(
     _backfill_candles(candles, watchlist.contracts, skip=mock_market and candle_provider is None)
 
     async def on_wake(wake_source: str) -> None:  # 晚绑定 loop：启动后才会被调度器调用
+        # 轮开始先推 round_start：前端实时决策卡据此立即进入"决策中"轮询态
+        # （此前只在轮末推 round，稳态下卡片永远只能看到"上轮决策"）
+        await event_queue.put({"type": "round_start", "data": {"wake_source": wake_source}})
         result = await loop.run_once(wake_source)
         await event_queue.put(
             {
@@ -259,11 +299,13 @@ async def build_app(
         triggers=triggers,
         watchlist=watchlist.contracts,
     )
-    ctx.server, ctx.server_deps = _build_server(ctx, audit)
+    ctx.server, ctx.server_deps = _build_server(ctx, audit, mock_llm=mock_llm)
     return ctx
 
 
-def _build_server(ctx: AppContext, audit: AuditTrail) -> tuple[uvicorn.Server, ServerDeps]:
+def _build_server(
+    ctx: AppContext, audit: AuditTrail, *, mock_llm: bool = False
+) -> tuple[uvicorn.Server, ServerDeps]:
     """创建监控 HTTP 服务（与 agent 同进程运行）；runtime_* 与决策循环共享同一实例。"""
     settings = ctx.settings
 
@@ -273,8 +315,10 @@ def _build_server(ctx: AppContext, audit: AuditTrail) -> tuple[uvicorn.Server, S
             "uptime_seconds": int(time.time() - ctx.started_at),
             "kill_switch": settings.risk.kill_switch,
             "agent_running": ctx.scheduler.is_running,
+            "in_round": ctx.scheduler.in_round,
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
+            "llm_configured": ctx.loop.llm_configured,
         }
 
     def on_kill_switch(enabled: bool) -> None:
@@ -305,6 +349,7 @@ def _build_server(ctx: AppContext, audit: AuditTrail) -> tuple[uvicorn.Server, S
         paper_reset=paper_reset if isinstance(ctx.gateway, PaperGateway) else None,
         agent_start=ctx.scheduler.start,
         agent_stop=ctx.scheduler.stop,
+        llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
     )
@@ -351,7 +396,12 @@ async def run_app(
     """启动并运行应用；duration 为 None 时长驻（Ctrl+C 退出），否则到时自动关闭。"""
     assert ctx.server is not None
     await ctx.source.start()
-    await ctx.scheduler.start()
+    if ctx.settings.scheduler.autostart:
+        await ctx.scheduler.start()
+    else:
+        logger.info(
+            "agent 决策未自动启动（scheduler.autostart=false）：监控已可用，请在主页点击“启动 agent”"
+        )
     server_task = asyncio.create_task(ctx.server.serve())
     pusher_task = asyncio.create_task(price_pusher(ctx)) if price_pusher else None
     funding_task = asyncio.create_task(_funding_loop(ctx))

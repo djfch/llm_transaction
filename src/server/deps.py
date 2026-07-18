@@ -44,12 +44,16 @@ class ServerDeps:
     paper_reset: Callable[[Decimal], None] | None = None
     agent_start: Callable[[], Awaitable[None]] | None = None
     agent_stop: Callable[[], Awaitable[None]] | None = None
+    # LLM 热重建回调（主程序接线）：改 key/模型后重建 provider 并热替换；
+    # None 时相关端点诚实回报 "agent 未接线"。契约 {"llm_configured": bool, "error": str}
+    llm_reconfigure: Callable[[], Awaitable[dict]] | None = None
     event_queue: asyncio.Queue[dict[str, Any]] | None = None
     runtime_settings: Settings | None = None
     runtime_watchlist: list[str] | None = None
     config_path: Path = field(default_factory=lambda: ROOT / "config.yaml")
     watchlist_path: Path = field(default_factory=lambda: ROOT / "watchlist.yaml")
     prompt_path: Path = field(default_factory=lambda: ROOT / "system_prompt.md")
+    env_path: Path = field(default_factory=lambda: ROOT / ".env")
     web_dist: Path = field(default_factory=lambda: ROOT / "web" / "dist")
 
     def runtime_status(self) -> dict[str, Any]:

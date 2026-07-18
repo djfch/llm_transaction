@@ -55,6 +55,9 @@ async def main() -> None:
     Path(DB_PATH).unlink(missing_ok=True)
     settings = load_settings()
     settings.server.port = 0  # 随机空闲端口，避免占用
+    settings.scheduler.autostart = (
+        True  # 冒烟需要调度器响应手动唤醒（生产默认 false 由用户点击启动）
+    )
     watchlist = load_watchlist()
     setup_logging(settings.log.dir, settings.log.level)
     ctx = await build_app(settings, watchlist, mock_llm=True, mock_market=True, db_path=DB_PATH)

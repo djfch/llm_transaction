@@ -1,4 +1,4 @@
-"""主入口：加载配置 → 组装应用 → 运行（Ctrl+C 优雅退出）。
+"""主入口：加载 .env 与配置 → 组装应用 → 运行（Ctrl+C 优雅退出）。
 
 用法：
     uv run python -m src.main                # 按 config.yaml 的 mode 运行（默认 paper）
@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 
+from dotenv import load_dotenv
+
 from src.audit.logger import setup_logging
 from src.bootstrap import build_app, run_app
 from src.config import load_settings, load_watchlist
 
 
 async def _main() -> None:
+    load_dotenv()  # 启动时加载 .env（交易所/LLM key）；已存在的环境变量优先
     settings = load_settings()
     watchlist = load_watchlist()
     setup_logging(settings.log.dir, settings.log.level)

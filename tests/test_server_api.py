@@ -125,12 +125,15 @@ async def test_status(client: AsyncClient):
         "agent_running": False,  # status_provider 未提供时缺省 False
         "llm_provider": "anthropic",
         "llm_model": "claude-sonnet-4-5",
+        "llm_configured": False,  # status_provider 未提供时缺省 False
     }
 
 
 async def test_account_and_positions(client: AsyncClient):
     account = (await client.get("/api/account")).json()
     assert float(account["available"]) == 9000.0
+    # 前端 AccountInfo 契约：equity 必在（缺了会让前端 fmtNum(undefined) 整页崩溃）
+    assert "equity" in account and float(account["equity"]) > 0
     positions = (await client.get("/api/positions")).json()
     assert positions[0]["contract"] == "BTC_USDT"
 
@@ -156,8 +159,11 @@ async def test_round_detail_and_404(client: AsyncClient):
     r = await client.get("/api/rounds/r1")
     assert r.status_code == 200
     body = r.json()
-    assert body["round"]["llm_raw"] == "LLM 原文"
+    # 契约形态：round 展平到顶层（前端 RoundDetail 逐字对齐），tool_calls 解析为对象
+    assert body["llm_raw"] == "LLM 原文"
+    assert body["round_id"] == "r1"
     assert body["tool_calls"][0]["tool"] == "place_order"
+    assert isinstance(body["tool_calls"][0]["args"], dict)
     assert (await client.get("/api/rounds/unknown")).status_code == 404
 
 
@@ -202,7 +208,8 @@ async def test_config_get_and_put(client: AsyncClient, deps: ServerDeps):
     assert raw["risk"]["max_leverage"] == 5
     raw["llm"]["model"] = "claude-opus-4"
     r = await client.put("/api/config", json=raw)
-    # llm.model 在 provider 构造期绑定，运行时不生效，须标 needs_restart
+    # 本 fixture 未接线 runtime_settings：llm.model 无法原地生效，诚实标 needs_restart
+    # （接线后热重建生效的契约见 test_server_secrets.py）
     assert r.json() == {"saved": True, "needs_restart": ["llm.model"]}
     assert (await client.get("/api/config")).json()["llm"]["model"] == "claude-opus-4"
 
