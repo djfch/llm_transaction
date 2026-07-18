@@ -3,50 +3,10 @@
  */
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api'
-import type { ToolCall } from '../api/types'
 import { useApiData } from '../hooks/useApiData'
-import Badge from '../components/Badge'
 import Card from '../components/Card'
 import StateHint from '../components/StateHint'
-
-/** 单个工具调用卡片：<details> 折叠展示入参与结果 */
-function ToolCallItem({ call }: { call: ToolCall }) {
-  const denied = call.risk_verdict !== 'allow'
-  return (
-    <details className="group rounded-lg border border-slate-800 bg-slate-900/60" open={denied}>
-      <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm">
-        <span className="text-slate-500 transition-transform group-open:rotate-90">▸</span>
-        <span className="font-mono text-xs text-slate-500">#{call.seq}</span>
-        <span className="font-medium text-slate-200">{call.tool}</span>
-        <Badge
-          text={denied ? 'deny(风控拒绝)' : 'allow(风控放行)'}
-          tone={denied ? 'danger' : 'ok'}
-        />
-        <span className="ml-auto text-xs tabular-nums text-slate-500">
-          duration_ms(耗时)={call.duration_ms}ms
-        </span>
-      </summary>
-      <div className="space-y-3 border-t border-slate-800 px-4 py-3 text-sm">
-        <div>
-          <div className="mb-1 text-xs text-slate-500">args(调用入参)</div>
-          <pre className="overflow-x-auto rounded bg-slate-950 p-3 text-xs text-slate-300">
-            {JSON.stringify(call.args, null, 2)}
-          </pre>
-        </div>
-        {call.risk_reason && (
-          <div>
-            <div className="mb-1 text-xs text-slate-500">risk_reason(风控理由)</div>
-            <p className="rounded bg-rose-500/10 p-3 text-xs text-rose-300">{call.risk_reason}</p>
-          </div>
-        )}
-        <div>
-          <div className="mb-1 text-xs text-slate-500">result(执行结果)</div>
-          <p className="rounded bg-slate-950 p-3 text-xs text-slate-300">{call.result}</p>
-        </div>
-      </div>
-    </details>
-  )
-}
+import ToolCallItem from '../components/ToolCallItem'
 
 export default function RoundDetailPage() {
   const { roundId = '' } = useParams()

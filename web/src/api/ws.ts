@@ -35,17 +35,26 @@ function subscribeMock(handler: WsHandler, onStatus?: WsStatusHandler): () => vo
   return () => clearInterval(timer)
 }
 
-/** 真实模式：连接同源 /ws，断线 3 秒后自动重连 */
+/** 真实模式：连接同源 /ws，断线指数退避重连（3s→6s→…→30s 封顶，连上后重置）。
+ * 后端未启动时避免固定间隔重试把 vite proxy 错误刷满控制台。
+ * 首次连接推迟一个事件循环 tick：React StrictMode 开发模式会"挂载→立刻卸载→再挂载"，
+ * 立即连接会让浏览器掐断握手（控制台报 closed before established + vite 报 ECONNABORTED）；
+ * 推迟后首个 tick 的清理函数会取消这次连接，第二次（真实）挂载才发起。
+ */
 function subscribeReal(handler: WsHandler, onStatus?: WsStatusHandler): () => void {
   let stopped = false
   let ws: WebSocket | null = null
   let retry: ReturnType<typeof setTimeout> | null = null
+  let delay = 3000
 
   const connect = () => {
     if (stopped) return
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
     ws = new WebSocket(`${scheme}://${location.host}/ws`)
-    ws.onopen = () => onStatus?.(true)
+    ws.onopen = () => {
+      delay = 3000 // 连上后重置退避
+      onStatus?.(true)
+    }
     ws.onmessage = (ev) => {
       try {
         handler(JSON.parse(ev.data as string) as WsMessage)
@@ -55,10 +64,13 @@ function subscribeReal(handler: WsHandler, onStatus?: WsStatusHandler): () => vo
     }
     ws.onclose = () => {
       onStatus?.(false)
-      if (!stopped) retry = setTimeout(connect, 3000)
+      if (!stopped) {
+        retry = setTimeout(connect, delay)
+        delay = Math.min(delay * 2, 30_000)
+      }
     }
   }
-  connect()
+  retry = setTimeout(connect, 0) // 见函数头注释：推迟首连，兼容 StrictMode 双挂载
 
   return () => {
     stopped = true

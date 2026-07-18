@@ -53,6 +53,15 @@ export default function StatusCard({
               <dd className="text-xs">{status.llm_model}</dd>
             </div>
             <div className="flex items-center justify-between">
+              <dt className="text-slate-500">llm_configured(LLM配置)</dt>
+              <dd>
+                <Badge
+                  text={status.llm_configured ? '已配置' : '未配置'}
+                  tone={status.llm_configured ? 'ok' : 'warn'}
+                />
+              </dd>
+            </div>
+            <div className="flex items-center justify-between">
               <dt className="text-slate-500">kill_switch(紧急停止)</dt>
               <dd>
                 <Badge

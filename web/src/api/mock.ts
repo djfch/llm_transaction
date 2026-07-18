@@ -4,6 +4,7 @@
  */
 import { ApiError } from './http'
 import type {
+  AgentLiveState,
   ApiClient,
   AppConfig,
   Candle,
@@ -33,6 +34,7 @@ function hoursAgoSeries(n: number): Date[] {
 let killSwitch = false
 let agentRunning = true // 交易 Agent 运行状态（内存态）
 let paperEquity = 10_842.36 // paper 模式权益（resetPaperEquity 可改）
+let llmConfigured = true // LLM API Key 配置状态（setSecrets 可改）
 const bootTime = Date.now() - 26 * 3600_000 // 假设已运行 26 小时
 
 const positions: Position[] = [
@@ -176,6 +178,7 @@ export const mockApi: ApiClient = {
       kill_switch: killSwitch,
       llm_provider: config.llm.provider,
       llm_model: config.llm.model,
+      llm_configured: llmConfigured,
       agent_running: agentRunning,
     }),
   getAccount: () =>
@@ -188,6 +191,8 @@ export const mockApi: ApiClient = {
     if (!meta) return Promise.reject(new Error(`决策轮不存在: ${roundId}`))
     return reply(buildRoundDetail(meta))
   },
+  // 样例：一条已完成决策轮（3 次工具调用），in_round=false 对应"上轮决策"展示
+  getAgentLive: () => reply(buildAgentLive()),
   getTrades: (offset, limit, contract) => {
     const list = [...trades].reverse().filter((t) => !contract || t.contract === contract)
     return reply({ items: list.slice(offset, offset + limit), total: list.length, offset, limit })
@@ -222,7 +227,8 @@ export const mockApi: ApiClient = {
   getConfig: () => reply(structuredClone(config)),
   putConfig: (next) => {
     Object.assign(config, next)
-    return reply(structuredClone(config))
+    // 与后端契约对齐：{saved, needs_restart} + llm 热键（恒按变更处理）两键
+    return reply({ saved: true, needs_restart: [], llm_configured: llmConfigured, llm_error: '' })
   },
   getStrategy: () => reply(strategy),
   putStrategy: (content) => {
@@ -235,7 +241,14 @@ export const mockApi: ApiClient = {
     watchlist.settle = list.settle
     return reply(structuredClone(watchlist))
   },
-  getSecretsStatus: () => reply({ gate_key: true, llm_key: true, telegram: false }),
+  getSecretsStatus: () => reply({ gate_key: true, llm_key: llmConfigured, telegram: false }),
+  setSecrets: (body) => {
+    // 契约：空串/缺省 = 不改动；任一 key 非空则视为已配置（mock 无法模拟失败，error 恒空）
+    const anthropic = body.anthropic_api_key ?? ''
+    const openai = body.openai_api_key ?? ''
+    if (anthropic !== '' || openai !== '') llmConfigured = true
+    return reply({ saved: true, llm_configured: llmConfigured, error: '' })
+  },
   setKillSwitch: (enabled) => {
     killSwitch = enabled
     return reply({ kill_switch: killSwitch })
@@ -307,6 +320,75 @@ function buildRoundDetail(meta: RoundSummary): RoundDetail {
         risk_reason: '',
         result: '已保存笔记',
         duration_ms: 5,
+      },
+    ],
+  }
+}
+
+/** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮（get_account/write_note/set_next_wakeup） */
+function buildAgentLive(): AgentLiveState {
+  const meta = rounds[0]
+  const startedAt = Math.floor(new Date(meta.started_at).getTime() / 1000)
+  return {
+    in_round: false,
+    round: {
+      round_id: meta.round_id,
+      wake_source: meta.wake_source,
+      prompt_md5: '9f2c1a3b7e5d40f2a1b3c5d7e9f0a1b3',
+      prompt_snapshot: [
+        '# System Prompt（md5: 9f2c…a1）',
+        '',
+        strategy.trim(),
+      ].join('\n'),
+      context_snapshot: [
+        `唤醒来源: ${meta.wake_source}`,
+        '账户权益: 10842.36 USDT，可用: 7315.20 USDT',
+        '持仓: BTC_USDT +12 张（浮盈 +159.60），ETH_USDT -30 张（浮盈 +96.00）',
+        'BTC_USDT 1h 近 20 根 K 线摘要: 震荡上行，收于均线上方。',
+      ].join('\n'),
+      llm_raw: JSON.stringify(
+        {
+          thoughts: '波动率不足，维持现有持仓，记录观察结论后 30 分钟后再唤醒。',
+          tool_calls: [
+            { tool: 'get_account', args: {} },
+            { tool: 'write_note', args: { content: '突破有效性待确认，继续观察。' } },
+            { tool: 'set_next_wakeup', args: { minutes: 30 } },
+          ],
+        },
+        null,
+        2,
+      ),
+      started_at: startedAt,
+      ended_at: startedAt + 42,
+      error: '',
+    },
+    tool_calls: [
+      {
+        seq: 1,
+        tool: 'get_account',
+        args: {},
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: { text: 'equity=10842.36, available=7315.20' },
+        duration_ms: 12,
+      },
+      {
+        seq: 2,
+        tool: 'write_note',
+        args: { content: '突破有效性待确认，继续观察。' },
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: { text: '已保存笔记' },
+        duration_ms: 5,
+      },
+      {
+        seq: 3,
+        tool: 'set_next_wakeup',
+        args: { minutes: 30 },
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: { text: '已设置 30 分钟后唤醒' },
+        duration_ms: 2,
       },
     ],
   }

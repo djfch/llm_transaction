@@ -1,6 +1,9 @@
 /**
- * 仪表盘：权益曲线、K 线、账户概览、持仓卡片、运行状态（含 kill_switch 与 agent 启停）、最近笔记。
- * WS 推送 position/trade/round 时自动刷新对应数据。
+ * 仪表盘（行情决策优先布局）：
+ * 行1 账户指标+PaperEquitySetter(2/3) | StatusCard(1/3)
+ * 行2 CandleCard K线(2/3) | LiveRoundCard 实时决策(1/3)
+ * 行3 持仓卡片(2/3) | 权益小图+最近笔记(1/3)
+ * 小屏（<lg）全部退化为单列堆叠。WS 推送 position/trade/round 时自动刷新对应数据。
  */
 import { useEffect } from 'react'
 import { api } from '../api'
@@ -9,6 +12,7 @@ import { useWs } from '../hooks/useWs'
 import CandleCard from '../components/CandleCard'
 import Card from '../components/Card'
 import EquityChart from '../components/EquityChart'
+import LiveRoundCard from '../components/LiveRoundCard'
 import MetricCard from '../components/MetricCard'
 import PaperEquitySetter from '../components/PaperEquitySetter'
 import PositionCard from '../components/PositionCard'
@@ -51,36 +55,56 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* 账户概览（paper 模式下可设置金额） */}
-      <StateHint loading={accountQ.loading} error={accountQ.error}>
-        {account && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <MetricCard label="equity(账户权益 USDT)" value={fmtNum(account.equity)} />
-              <MetricCard label="available(可用余额 USDT)" value={fmtNum(account.available)} />
-              <MetricCard
-                label="unrealised_pnl(未实现盈亏 USDT)"
-                value={fmtSigned(account.unrealised_pnl)}
-                tone={account.unrealised_pnl > 0 ? 'up' : account.unrealised_pnl < 0 ? 'down' : 'default'}
-              />
-            </div>
-            {status?.mode === 'paper' && <PaperEquitySetter onReset={refreshAccount} />}
-          </div>
-        )}
-      </StateHint>
+      {/* LLM 未配置：自动决策暂停，顶部琥珀色横幅提示 */}
+      {status?.llm_configured === false && (
+        <div
+          role="alert"
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300"
+        >
+          LLM 未配置：监控与手动操作可用，自动决策已暂停。请到配置中心设置 LLM API Key。
+        </div>
+      )}
+      {/* 行 1：账户指标（2/3）+ 运行状态（1/3） */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3" data-testid="row-account-status">
+        <div className="lg:col-span-2">
+          <StateHint loading={accountQ.loading} error={accountQ.error}>
+            {account && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <MetricCard label="equity(账户权益 USDT)" value={fmtNum(account.equity)} />
+                  <MetricCard label="available(可用余额 USDT)" value={fmtNum(account.available)} />
+                  <MetricCard
+                    label="unrealised_pnl(未实现盈亏 USDT)"
+                    value={fmtSigned(account.unrealised_pnl)}
+                    tone={
+                      account.unrealised_pnl > 0 ? 'up' : account.unrealised_pnl < 0 ? 'down' : 'default'
+                    }
+                  />
+                </div>
+                {status?.mode === 'paper' && <PaperEquitySetter onReset={refreshAccount} />}
+              </div>
+            )}
+          </StateHint>
+        </div>
+        <StatusCard
+          status={status}
+          loading={statusQ.loading}
+          error={statusQ.error}
+          onChanged={statusQ.reload}
+        />
+      </div>
 
-      {/* 权益曲线 */}
-      <Card title="权益曲线 equity">
-        <StateHint loading={equityQ.loading} error={equityQ.error}>
-          {equityQ.data && <EquityChart data={equityQ.data} />}
-        </StateHint>
-      </Card>
+      {/* 行 2：K 线（2/3）+ 实时决策（1/3） */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3" data-testid="row-market-decision">
+        <div className="lg:col-span-2">
+          <CandleCard />
+        </div>
+        {/* 实时决策：进行中 3 秒轮询，空闲展示上一轮 */}
+        <LiveRoundCard />
+      </div>
 
-      {/* K 线（合约/周期可切换） */}
-      <CandleCard />
-
-      {/* 持仓 + 运行状态 */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* 行 3：持仓（2/3）+ 权益小图与笔记（1/3） */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3" data-testid="row-positions-secondary">
         <div className="space-y-4 lg:col-span-2">
           <h2 className="text-sm font-semibold text-slate-300">当前持仓 positions</h2>
           <StateHint
@@ -97,28 +121,29 @@ export default function DashboardPage() {
         </div>
 
         <div className="space-y-4">
-          <StatusCard
-            status={status}
-            loading={statusQ.loading}
-            error={statusQ.error}
-            onChanged={statusQ.reload}
-          />
+          <Card title="权益曲线 equity">
+            <StateHint loading={equityQ.loading} error={equityQ.error}>
+              {equityQ.data && <EquityChart data={equityQ.data} />}
+            </StateHint>
+          </Card>
+          <Card title="最近笔记 notes">
+            <StateHint
+              loading={notesQ.loading}
+              error={notesQ.error}
+              empty={(notesQ.data ?? []).length === 0}
+            >
+              <ul className="space-y-3">
+                {(notesQ.data ?? []).slice(0, 5).map((n, i) => (
+                  <li key={i} className="text-sm">
+                    <span className="mr-3 text-xs tabular-nums text-slate-500">{fmtTime(n.time)}</span>
+                    <span className="text-slate-300">{n.content}</span>
+                  </li>
+                ))}
+              </ul>
+            </StateHint>
+          </Card>
         </div>
       </div>
-
-      {/* 最近笔记 */}
-      <Card title="最近笔记 notes">
-        <StateHint loading={notesQ.loading} error={notesQ.error} empty={(notesQ.data ?? []).length === 0}>
-          <ul className="space-y-3">
-            {(notesQ.data ?? []).slice(0, 5).map((n, i) => (
-              <li key={i} className="text-sm">
-                <span className="mr-3 text-xs tabular-nums text-slate-500">{fmtTime(n.time)}</span>
-                <span className="text-slate-300">{n.content}</span>
-              </li>
-            ))}
-          </ul>
-        </StateHint>
-      </Card>
 
       {/* 底部账户汇总条（盈亏着色示例） */}
       {account && (

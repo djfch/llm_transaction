@@ -1,13 +1,14 @@
 /**
  * 配置中心：风控参数、常规设置（provider/model/通知）、白名单、system_prompt、密钥状态。
  */
+import { useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import Card from '../components/Card'
 import StateHint from '../components/StateHint'
 import GeneralForm from './config/GeneralForm'
 import RiskForm from './config/RiskForm'
-import SecretsBadges from './config/SecretsBadges'
+import SecretsForm from './config/SecretsForm'
 import StrategyEditor from './config/StrategyEditor'
 import WatchlistEditor from './config/WatchlistEditor'
 
@@ -16,27 +17,38 @@ export default function ConfigPage() {
   const secretsQ = useApiData(() => api.getSecretsStatus(), [])
   const watchlistQ = useApiData(() => api.getWatchlist(), [])
   const strategyQ = useApiData(() => api.getStrategy(), [])
+  // PUT /api/config 响应附带的 LLM 热生效错误（空 = 正常）
+  const [llmError, setLlmError] = useState<string | null>(null)
 
   return (
     <div className="space-y-6">
-      <Card title="secrets(密钥配置状态)">
+      <Card title="secrets(密钥配置)">
         <StateHint loading={secretsQ.loading} error={secretsQ.error}>
-          {secretsQ.data && <SecretsBadges status={secretsQ.data} />}
+          {secretsQ.data && <SecretsForm status={secretsQ.data} onSaved={secretsQ.reload} />}
         </StateHint>
       </Card>
 
-      <Card title="常规设置 general（保存后下一轮决策生效）">
+      <Card title="常规设置 general（LLM 设置保存即生效并持久化）">
         <StateHint loading={configQ.loading} error={configQ.error}>
           {configQ.data && (
             <GeneralForm
               initial={configQ.data}
               onSave={async (next) => {
-                await api.putConfig(next)
+                const res = await api.putConfig(next)
+                setLlmError(res.llm_error || null)
                 configQ.reload()
               }}
             />
           )}
         </StateHint>
+        {llmError && (
+          <p
+            role="alert"
+            className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+          >
+            llm_error(LLM 热生效错误)：{llmError}
+          </p>
+        )}
       </Card>
 
       <Card title="风控参数 risk">

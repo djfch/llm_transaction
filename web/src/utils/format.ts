@@ -1,9 +1,11 @@
 /**
  * 展示格式化工具（纯函数，与业务解耦）。
+ * 全部函数对 undefined/NaN 防御：后端字段缺失时显示 '-' 而不是让整页渲染崩溃。
  */
 
-/** 数字千分位，保留 2 位小数 */
+/** 数字千分位，保留 2 位小数；空值显示 '-' */
 export function fmtNum(n: number, digits = 2): string {
+  if (n == null || Number.isNaN(n)) return '-'
   return n.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 
@@ -13,8 +15,9 @@ export function fmtSigned(n: number, digits = 2): string {
   return `${sign}${fmtNum(n, digits)}`
 }
 
-/** 整数或多位小数自适应价格 */
+/** 整数或多位小数自适应价格；空值显示 '-' */
 export function fmtPrice(n: number): string {
+  if (n == null || Number.isNaN(n)) return '-'
   return n >= 100 ? fmtNum(n, 2) : n.toLocaleString('zh-CN', { maximumFractionDigits: 6 })
 }
 

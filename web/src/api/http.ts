@@ -4,6 +4,7 @@
  */
 import type {
   AccountInfo,
+  AgentLiveState,
   AgentStateResult,
   ApiClient,
   AppConfig,
@@ -14,9 +15,12 @@ import type {
   Note,
   PaperResetResult,
   Position,
+  PutConfigResult,
   RoundDetail,
   RoundSummary,
   SecretsStatus,
+  SetSecretsBody,
+  SetSecretsResult,
   StatusInfo,
   Trade,
   TradesPageResult,
@@ -95,6 +99,86 @@ function adaptTrade(raw: RawTrade): Trade {
   }
 }
 
+/** 后端原始账户：数字字段可能是数字字符串（Decimal 序列化） */
+type RawAccount = { [K in keyof AccountInfo]: number | string }
+
+/** 后端 Account → 前端 AccountInfo：数字字符串统一转 number */
+function adaptAccount(raw: RawAccount): AccountInfo {
+  return {
+    equity: Number(raw.equity),
+    available: Number(raw.available),
+    unrealised_pnl: Number(raw.unrealised_pnl),
+  }
+}
+
+/** 后端原始持仓：数字字段可能是数字字符串 */
+type RawPosition = { [K in keyof Position]: number | string }
+
+/** 后端 Position → 前端 Position：数字字符串统一转 number */
+function adaptPosition(raw: RawPosition): Position {
+  return {
+    contract: String(raw.contract),
+    size: Number(raw.size),
+    entry_price: Number(raw.entry_price),
+    mark_price: Number(raw.mark_price),
+    leverage: Number(raw.leverage),
+    unrealised_pnl: Number(raw.unrealised_pnl),
+    liq_price: Number(raw.liq_price),
+  }
+}
+
+/** 后端 /api/equity：{initial_equity, baseline_source, points:[{t(Unix秒), equity}]} */
+interface RawEquity {
+  initial_equity: number
+  baseline_source: string
+  points: Array<{ t: number; equity: number }>
+}
+
+/** 后端 equity 响应 → 前端 EquityPoint[]（取 points，t 转 ISO time） */
+function adaptEquity(raw: RawEquity): EquityPoint[] {
+  return raw.points.map((p) => ({
+    time: new Date(p.t * 1000).toISOString(),
+    equity: Number(p.equity),
+  }))
+}
+
+/** 后端 /api/notes：{items:[{created_at(Unix秒), content, ...}]} */
+interface RawNotes {
+  items: Array<{ created_at: number; content: string }>
+}
+
+/** 后端 notes 响应 → 前端 Note[]（created_at 转 ISO time） */
+function adaptNotes(raw: RawNotes): Note[] {
+  return raw.items.map((n) => ({
+    time: new Date(n.created_at * 1000).toISOString(),
+    content: n.content,
+  }))
+}
+
+/** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 */
+interface RawRoundItem {
+  round_id: string
+  wake_source: string
+  context_summary: string
+  created_at: number
+}
+
+interface RawRounds {
+  items: RawRoundItem[]
+}
+
+/** 后端 rounds 响应 → 前端 RoundSummary[]（started_at←created_at、summary←context_summary；
+ * pnl_after 后端暂无此口径，留 undefined，页面显示 '-'） */
+function adaptRounds(raw: RawRounds): RoundSummary[] {
+  return raw.items.map((r) => ({
+    round_id: r.round_id,
+    started_at: new Date(r.created_at * 1000).toISOString(),
+    wake_source: r.wake_source,
+    summary: r.context_summary,
+    pnl_after: undefined,
+  }))
+}
+
 /** GET /api/trades 适配：{items,total,offset,limit} + items 内字段转换 */
 async function fetchTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult> {
   const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
@@ -114,10 +198,14 @@ async function fetchCandles(contract: string, interval: string, limit = 200): Pr
 
 export const httpApi: ApiClient = {
   getStatus: () => request<StatusInfo>('/status'),
-  getAccount: () => request<AccountInfo>('/account'),
-  getPositions: () => request<Position[]>('/positions'),
-  getRounds: (offset, limit) => request<RoundSummary[]>(`/rounds?offset=${offset}&limit=${limit}`),
+  getAccount: async () => adaptAccount(await request<RawAccount>('/account')),
+  getPositions: async () =>
+    (await request<RawPosition[]>('/positions')).map(adaptPosition),
+  getRounds: async (offset, limit) =>
+    adaptRounds(await request<RawRounds>(`/rounds?offset=${offset}&limit=${limit}`)),
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
+  // 响应契约即最终形态（args/result 已解析、started_at 为 Unix 秒），无需适配
+  getAgentLive: () => request<AgentLiveState>('/agent/live'),
   getTrades: fetchTrades,
   getCandles: fetchCandles,
   closePosition: (contract) =>
@@ -128,17 +216,19 @@ export const httpApi: ApiClient = {
     request<PaperResetResult>('/paper/reset', { method: 'POST', body: JSON.stringify({ equity }) }),
   startAgent: () => request<AgentStateResult>('/agent/start', { method: 'POST' }),
   stopAgent: () => request<AgentStateResult>('/agent/stop', { method: 'POST' }),
-  getEquity: () => request<EquityPoint[]>('/equity'),
-  getNotes: () => request<Note[]>('/notes'),
+  getEquity: async () => adaptEquity(await request<RawEquity>('/equity')),
+  getNotes: async () => adaptNotes(await request<RawNotes>('/notes')),
   getConfig: () => request<AppConfig>('/config'),
   putConfig: (config) =>
-    request<AppConfig>('/config', { method: 'PUT', body: JSON.stringify(config) }),
+    request<PutConfigResult>('/config', { method: 'PUT', body: JSON.stringify(config) }),
   getStrategy: () => requestText('/strategy'),
   putStrategy: (content) => requestText('/strategy', { method: 'PUT', body: content }),
   getWatchlist: () => request<Watchlist>('/watchlist'),
   putWatchlist: (list) =>
     request<Watchlist>('/watchlist', { method: 'PUT', body: JSON.stringify(list) }),
   getSecretsStatus: () => request<SecretsStatus>('/secrets/status'),
+  setSecrets: (body: SetSecretsBody) =>
+    request<SetSecretsResult>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
   setKillSwitch: (enabled) =>
     request<KillSwitchResult>('/kill_switch', {
       method: 'POST',

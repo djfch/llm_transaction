@@ -13,10 +13,11 @@ npm run test       # Vitest 组件测试
 npm run build      # 类型检查 + 产出 dist/
 ```
 
-## Mock 开关（后端未就绪时可独立预览）
+## Mock 开关（默认走真实后端）
 
-默认使用 `src/api/mock.ts` 的假数据，无需后端即可 `npm run dev` 预览全部页面。
-接真实后端：创建 `.env.development`，写入 `VITE_USE_MOCK=false`（见 `.env.example`）。
+默认走真实后端 `/api`（`npm run dev` 经 vite proxy 转发到 127.0.0.1:8080，需先启动后端）。
+仅后端未就绪需独立预览时：创建 `.env.development`，写入 `VITE_USE_MOCK=true`（见 `.env.example`）。
+注意：mock 下所有修改只存在于浏览器内存，刷新即复原。
 
 ## 目录结构
 

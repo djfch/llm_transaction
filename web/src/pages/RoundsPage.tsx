@@ -41,8 +41,12 @@ export default function RoundsPage() {
                   <Badge text={r.wake_source} tone={r.wake_source === '价格触发' ? 'warn' : 'neutral'} />
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm text-slate-300">{r.summary}</span>
-                <span className={`w-24 shrink-0 text-right text-sm tabular-nums ${pnlClass(r.pnl_after)}`}>
-                  {fmtSigned(r.pnl_after)}
+                <span
+                  className={`w-24 shrink-0 text-right text-sm tabular-nums ${
+                    r.pnl_after == null ? 'text-slate-500' : pnlClass(r.pnl_after)
+                  }`}
+                >
+                  {r.pnl_after == null ? '-' : fmtSigned(r.pnl_after)}
                 </span>
               </Link>
             </li>
