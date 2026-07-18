@@ -1,0 +1,32 @@
+# pre-commit 钩子：每次 git commit 自动检查前后端
+# 安装：uvx pre-commit install
+repos:
+  - repo: local
+    hooks:
+      # 后端：ruff lint
+      - id: ruff-check
+        name: ruff check（后端 lint）
+        entry: uv run ruff check
+        language: system
+        types: [python]
+        pass_filenames: false
+      # 后端：ruff format 检查
+      - id: ruff-format
+        name: ruff format --check（后端格式）
+        entry: uv run ruff format --check
+        language: system
+        types: [python]
+        pass_filenames: false
+      # 后端：pytest 快速集
+      - id: pytest
+        name: pytest（后端测试）
+        entry: uv run pytest tests/ -q -x
+        language: system
+        pass_filenames: false
+      # 前端：lint + 类型检查 + 构建（web/ 有变更时）
+      - id: web-check
+        name: 前端 lint+tsc+build
+        entry: bash scripts/check_web.sh
+        language: system
+        files: ^web/
+        pass_filenames: false

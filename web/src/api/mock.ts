@@ -1,0 +1,242 @@
+/**
+ * Mock 实现：与 ApiClient 同接口的假数据，供后端未就绪时前端独立开发预览。
+ * 数据为内存态，PUT/POST 会修改内存副本（刷新页面后复原）。
+ */
+import type {
+  ApiClient,
+  AppConfig,
+  EquityPoint,
+  Note,
+  Position,
+  RoundDetail,
+  RoundSummary,
+  Trade,
+} from './types'
+
+/** 测试环境零延迟，开发环境模拟网络延迟 */
+const LATENCY = import.meta.env.MODE === 'test' ? 0 : 120
+
+function reply<T>(value: T): Promise<T> {
+  return new Promise((resolve) => setTimeout(() => resolve(value), LATENCY))
+}
+
+/** 生成过去 n 个小时的时间序列（升序，ISO 字符串） */
+function hoursAgoSeries(n: number): Date[] {
+  const now = Date.now()
+  return Array.from({ length: n }, (_, i) => new Date(now - (n - 1 - i) * 3600_000))
+}
+
+// ---------- 内存态假数据 ----------
+
+let killSwitch = false
+const bootTime = Date.now() - 26 * 3600_000 // 假设已运行 26 小时
+
+const positions: Position[] = [
+  {
+    contract: 'BTC_USDT',
+    size: 12,
+    entry_price: 118_320,
+    mark_price: 119_650,
+    leverage: 3,
+    unrealised_pnl: 159.6,
+    liq_price: 82_400,
+  },
+  {
+    contract: 'ETH_USDT',
+    size: -30,
+    entry_price: 3_420,
+    mark_price: 3_388,
+    leverage: 2,
+    unrealised_pnl: 96,
+    liq_price: 5_120,
+  },
+]
+
+const config: AppConfig = {
+  mode: 'paper',
+  llm: {
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    max_tokens: 4096,
+    openai_base_url: '',
+    max_consecutive_failures: 3,
+  },
+  risk: {
+    max_position_pct: 0.3,
+    max_total_position_pct: 0.8,
+    max_leverage: 5,
+    daily_loss_limit: 0.1,
+    max_orders_per_day: 20,
+    max_deviation: 0.02,
+    kill_switch: false,
+  },
+  scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
+  notify: { telegram_enabled: false },
+}
+
+let strategy = `# 系统提示词（system_prompt.md）\n\n你是 Gate.io USDT 永续合约的自主交易 Agent。\n\n## 原则\n\n1. 保本优先，单笔风险不超过权益的 2%。\n2. 只交易白名单合约，遵守风控参数。\n3. 每次决策说明理由，并给出下次唤醒时间。\n`
+
+const watchlist = { settle: 'usdt', contracts: ['BTC_USDT', 'ETH_USDT'] }
+
+const WAKE_SOURCES = ['定时唤醒', '价格触发', '启动']
+
+/** 生成 37 轮决策摘要（倒序：最新在前），用于演示分页 */
+function buildRounds(): RoundSummary[] {
+  return Array.from({ length: 37 }, (_, i) => {
+    const seq = 37 - i
+    const started = new Date(Date.now() - i * 3600_000)
+    const pnl = Math.round((seq * 12.5 - 180 + (seq % 5) * 30) * 100) / 100
+    return {
+      round_id: `round-${String(seq).padStart(4, '0')}`,
+      started_at: started.toISOString(),
+      wake_source: WAKE_SOURCES[seq % WAKE_SOURCES.length],
+      summary:
+        seq % 4 === 0
+          ? 'BTC 突破阻力位，小幅加多；ETH 维持空仓对冲。'
+          : '波动率不足，维持现有持仓，继续观察。',
+      pnl_after: pnl,
+    }
+  })
+}
+const rounds = buildRounds()
+
+const trades: Trade[] = Array.from({ length: 42 }, (_, i) => {
+  const contract = i % 3 === 0 ? 'ETH_USDT' : 'BTC_USDT'
+  const long = i % 2 === 0
+  const price = contract === 'BTC_USDT' ? 115_000 + i * 96 : 3_350 + i * 4
+  return {
+    time: new Date(Date.now() - (42 - i) * 2700_000).toISOString(),
+    contract,
+    size: long ? 4 + (i % 5) : -(4 + (i % 5)),
+    price: Math.round(price * 100) / 100,
+    fee: Math.round(price * 0.0005 * 100) / 100,
+    pnl: Math.round(((i % 7) * 18 - 54) * 100) / 100,
+  }
+})
+
+const equity: EquityPoint[] = hoursAgoSeries(200).map((t, i) => ({
+  time: t.toISOString(),
+  equity: Math.round((10_000 + i * 4.2 + Math.sin(i / 6) * 120) * 100) / 100,
+}))
+
+const notes: Note[] = [
+  { time: new Date(Date.now() - 3600_000).toISOString(), content: 'BTC 4h 级别仍处上升通道，回调即加多机会。' },
+  { time: new Date(Date.now() - 7200_000).toISOString(), content: '资金费率偏高，注意多头持仓成本。' },
+  { time: new Date(Date.now() - 10_800_000).toISOString(), content: 'ETH/BTC 汇率走弱，空 ETH 对冲仓位继续持有。' },
+]
+
+// ---------- 接口实现 ----------
+
+export const mockApi: ApiClient = {
+  getStatus: () =>
+    reply({
+      mode: config.mode,
+      uptime_seconds: Math.floor((Date.now() - bootTime) / 1000),
+      kill_switch: killSwitch,
+      llm_provider: config.llm.provider,
+      llm_model: config.llm.model,
+    }),
+  getAccount: () =>
+    reply({ equity: 10_842.36, available: 7_315.2, unrealised_pnl: 255.6 }),
+  getPositions: () => reply(positions.map((p) => ({ ...p }))),
+  getRounds: (offset, limit) => reply(rounds.slice(offset, offset + limit)),
+  getRound: (roundId) => {
+    const meta = rounds.find((r) => r.round_id === roundId)
+    if (!meta) return Promise.reject(new Error(`决策轮不存在: ${roundId}`))
+    return reply(buildRoundDetail(meta))
+  },
+  getTrades: () => reply([...trades].reverse()),
+  getEquity: () => reply(equity),
+  getNotes: () => reply(notes),
+  getConfig: () => reply(structuredClone(config)),
+  putConfig: (next) => {
+    Object.assign(config, next)
+    return reply(structuredClone(config))
+  },
+  getStrategy: () => reply(strategy),
+  putStrategy: (content) => {
+    strategy = content
+    return reply(strategy)
+  },
+  getWatchlist: () => reply(structuredClone(watchlist)),
+  putWatchlist: (list) => {
+    watchlist.contracts = list.contracts
+    watchlist.settle = list.settle
+    return reply(structuredClone(watchlist))
+  },
+  getSecretsStatus: () => reply({ gate_key: true, llm_key: true, telegram: false }),
+  setKillSwitch: (enabled) => {
+    killSwitch = enabled
+    return reply({ kill_switch: killSwitch })
+  },
+}
+
+/** 构造一轮审计详情（prompt 快照 / LLM 原始输出 / 工具调用链） */
+function buildRoundDetail(meta: RoundSummary): RoundDetail {
+  return {
+    round_id: meta.round_id,
+    prompt_snapshot: [
+      '# System Prompt（md5: 9f2c…a1）',
+      '',
+      strategy.trim(),
+      '',
+      '# 上下文',
+      `唤醒来源: ${meta.wake_source}`,
+      '账户权益: 10842.36 USDT，可用: 7315.20 USDT',
+      '持仓: BTC_USDT +12 张（浮盈 +159.60），ETH_USDT -30 张（浮盈 +96.00）',
+      'BTC_USDT 1h 近 20 根 K 线摘要: 震荡上行，收于均线上方。',
+    ].join('\n'),
+    llm_raw: JSON.stringify(
+      {
+        thoughts: 'BTC 突破 118000 阻力位，量能配合；ETH 汇率走弱，维持空仓对冲。',
+        tool_calls: [
+          { tool: 'get_account', args: {} },
+          { tool: 'get_candlesticks', args: { contract: 'BTC_USDT', interval: '1h', limit: 20 } },
+          { tool: 'place_order', args: { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' } },
+          { tool: 'set_note', args: { content: '突破有效性待确认，下次 30 分钟后唤醒。' } },
+        ],
+        next_wake_minutes: 30,
+      },
+      null,
+      2,
+    ),
+    tool_calls: [
+      {
+        seq: 1,
+        tool: 'get_account',
+        args: {},
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: 'equity=10842.36, available=7315.20',
+        duration_ms: 42,
+      },
+      {
+        seq: 2,
+        tool: 'get_candlesticks',
+        args: { contract: 'BTC_USDT', interval: '1h', limit: 20 },
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: '返回 20 根 K 线',
+        duration_ms: 88,
+      },
+      {
+        seq: 3,
+        tool: 'place_order',
+        args: { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' },
+        risk_verdict: 'deny',
+        risk_reason: '下单后单仓名义价值占权益 36% > max_position_pct(单仓上限) 30%',
+        result: '风控拒绝，未下单',
+        duration_ms: 3,
+      },
+      {
+        seq: 4,
+        tool: 'set_note',
+        args: { content: '突破有效性待确认，下次 30 分钟后唤醒。' },
+        risk_verdict: 'allow',
+        risk_reason: '',
+        result: '已保存笔记',
+        duration_ms: 5,
+      },
+    ],
+  }
+}

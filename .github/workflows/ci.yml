@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: uv sync --frozen
+      - name: ruff check
+        run: uv run ruff check src tests scripts
+      - name: ruff format --check
+        run: uv run ruff format --check src tests scripts
+      - name: pytest（风控覆盖率 100% 门槛）
+        run: uv run pytest tests/ --cov=src/risk --cov-fail-under=100 -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: 类型检查
+        run: npx tsc --noEmit
+      - name: Vitest
+        run: npm run test
+      - name: 构建
+        run: npm run build

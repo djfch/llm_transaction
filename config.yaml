@@ -1,0 +1,48 @@
+# 运行模式：paper（模拟盘，默认）/ testnet（Gate 沙盒）/ live（实盘，禁止 agent 自行开启）
+mode: paper
+
+gate:
+  settle: usdt
+  # testnet 主用域名，不通时回退 fx-api-testnet.gateio.ws
+  testnet_host: https://api-testnet.gateapi.io/api/v4
+  live_host: https://api.gateio.ws/api/v4
+
+llm:
+  provider: anthropic        # anthropic / openai_compat
+  model: claude-sonnet-4-5
+  max_tokens: 4096
+  # openai_compat 时使用的 base_url（国产模型兼容接口）
+  openai_base_url: ""
+  # 连续 LLM 失败次数达到该值触发风控锁
+  max_consecutive_failures: 3
+
+risk:
+  max_position_pct: 0.30        # 单仓名义价值/账户权益 上限
+  max_total_position_pct: 0.80  # 总仓位名义价值/账户权益 上限
+  max_leverage: 5               # 杠杆上限
+  daily_loss_limit: 0.10        # 日亏损达到权益该比例 → 锁仓只平不开
+  max_orders_per_day: 20        # 日下单上限（平仓豁免）
+  max_deviation: 0.02           # 委托价偏离标记价上限
+  kill_switch: false            # 总开关：true 时拒绝一切交易
+
+scheduler:
+  default_wake_minutes: 60      # LLM 未设置时的默认唤醒间隔
+  min_wake_minutes: 5           # 唤醒下限
+  max_wake_minutes: 720         # 唤醒上限（12 小时）
+
+paper:
+  initial_equity: 10000.0       # 模拟盘初始权益（USDT）
+  slippage: 0.0005              # 市价单模拟滑点
+
+notify:
+  telegram_enabled: false
+
+server:
+  host: 127.0.0.1
+  port: 8080
+
+audit:
+  dir: logs/audit               # 审计 JSON 快照目录
+log:
+  dir: logs
+  level: INFO

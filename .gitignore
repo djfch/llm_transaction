@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# 密钥与本地数据（禁止入库）
+.env
+logs/
+data/
+*.db
+
+# Node
+node_modules/
+web/dist/

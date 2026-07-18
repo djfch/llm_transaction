@@ -1,0 +1,104 @@
+"""持久化层的记录模型（与表结构一一对应）。
+
+金额/数量字段为 Decimal（落库时是 TEXT，pydantic 读取时自动从字符串还原）。
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from pydantic import BaseModel
+
+
+class Decision(BaseModel):
+    """一轮 LLM 决策记录。"""
+
+    id: int
+    round_id: str
+    mode: str
+    strategy_version: str
+    wake_source: str
+    context_summary: str
+    llm_raw: str
+    created_at: float
+
+
+class OrderRecord(BaseModel):
+    """订单记录。price 为 None 表示市价单。"""
+
+    id: str
+    round_id: str
+    mode: str
+    contract: str
+    side_size: Decimal
+    price: Decimal | None
+    tif: str
+    text: str
+    status: str
+    finish_as: str
+    created_at: float
+
+
+class Trade(BaseModel):
+    """成交记录。size 正多负空；pnl 为已实现盈亏。"""
+
+    id: int
+    round_id: str
+    mode: str
+    contract: str
+    size: Decimal
+    price: Decimal
+    fee: Decimal
+    pnl: Decimal
+    created_at: float
+
+
+class Note(BaseModel):
+    """Agent 自述笔记（跨轮传递上下文）。"""
+
+    id: int
+    round_id: str
+    content: str
+    created_at: float
+
+
+class Alert(BaseModel):
+    """价格告警。direction: above / below。"""
+
+    id: int
+    round_id: str
+    contract: str
+    direction: str
+    price: Decimal
+    active: bool
+    created_at: float
+
+
+class AuditRound(BaseModel):
+    """审计：一轮决策全过程。ended_at 为 None 表示该轮未结束。"""
+
+    round_id: str
+    mode: str
+    wake_source: str
+    prompt_md5: str
+    prompt_snapshot: str
+    context_snapshot: str
+    llm_raw: str
+    started_at: float
+    ended_at: float | None
+    error: str
+
+
+class AuditToolCall(BaseModel):
+    """审计：一轮中的一次工具调用（含风控判定与耗时）。"""
+
+    id: int
+    round_id: str
+    seq: int
+    tool: str
+    args_json: str
+    risk_verdict: str
+    risk_reason: str
+    result_json: str
+    duration_ms: int
+    created_at: float

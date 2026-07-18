@@ -1,0 +1,5 @@
+# 交易对白名单：风控层硬校验，非白名单合约一律拒绝
+settle: usdt
+contracts:
+  - BTC_USDT
+  - ETH_USDT

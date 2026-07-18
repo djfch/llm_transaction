@@ -1,0 +1,56 @@
+"""server 层依赖注入容器：运行时依赖全部由构造参数注入。
+
+server 不 import agent/scheduler/market 的具体实现；gateway/repo/audit_trail、
+运行时状态、kill_switch 回调、ws 事件源都由主程序（Step 13）接线，测试用 fake 注入。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from src.audit.trail import AuditTrail
+from src.config import ROOT, Settings
+from src.gateway.base import Gateway
+from src.memory.repo import Repo
+
+
+@dataclass
+class ServerDeps:
+    """create_app 的全部运行时依赖与文件路径。
+
+    gateway 为 None 时账户/持仓端点返回 503；各 path 默认指向项目根目录下的文件，
+    测试中用 tmp_path 覆盖以隔离真实配置。
+
+    runtime_settings / runtime_watchlist 是与 agent 循环共享的运行时对象：
+    配置端点写回文件后把可变字段原地写入它们，使变更下轮决策即生效
+    （须与 DecisionLoop/WakeupScheduler 持有的是同一实例，由主程序接线保证）；
+    未接线（None）时配置端点把相应变更诚实标注 needs_restart。
+    """
+
+    repo: Repo
+    audit_trail: AuditTrail | None = None
+    gateway: Gateway | None = None
+    status_provider: Callable[[], dict[str, Any]] | None = None
+    on_kill_switch: Callable[[bool], None] | None = None
+    event_queue: asyncio.Queue[dict[str, Any]] | None = None
+    runtime_settings: Settings | None = None
+    runtime_watchlist: list[str] | None = None
+    config_path: Path = field(default_factory=lambda: ROOT / "config.yaml")
+    watchlist_path: Path = field(default_factory=lambda: ROOT / "watchlist.yaml")
+    prompt_path: Path = field(default_factory=lambda: ROOT / "system_prompt.md")
+    web_dist: Path = field(default_factory=lambda: ROOT / "web" / "dist")
+
+    def runtime_status(self) -> dict[str, Any]:
+        """读取运行时状态（uptime 等）；未注入时返回空 dict。"""
+        if self.status_provider is None:
+            return {}
+        return self.status_provider()
+
+    def notify_kill_switch(self, enabled: bool) -> None:
+        """kill_switch 写回配置后回调主程序；未注入时静默跳过。"""
+        if self.on_kill_switch is not None:
+            self.on_kill_switch(enabled)
