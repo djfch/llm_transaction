@@ -171,3 +171,37 @@ async def test_alerts_rebuilt_from_db_on_startup(tmp_path: Path, build_ctx):
     assert triggers[0].contract == BTC
     assert triggers[0].direction == ">="  # above → >=
     assert triggers[0].price == Decimal("60000")
+
+
+# ---------- server 写操作接线（监控界面改进） ----------
+
+
+async def test_server_deps_wires_trading_callbacks(build_ctx):
+    """manual_close / agent_start / agent_stop 已注入；paper 模式注入 paper_reset。"""
+    ctx = await build_ctx()
+    deps = ctx.server_deps
+    assert deps is not None
+    assert callable(deps.manual_close)
+    assert deps.agent_start is not None and deps.agent_stop is not None
+    assert deps.paper_reset is not None  # paper 模式接 PaperGateway.reset_account
+
+
+async def test_server_deps_no_paper_reset_in_testnet(build_ctx):
+    """testnet（真实网关）不注入 paper_reset，/api/paper/reset 将 409。"""
+    ctx = await build_ctx(Settings(mode="testnet"))
+    assert ctx.server_deps is not None
+    assert ctx.server_deps.paper_reset is None
+
+
+async def test_agent_start_stop_callbacks_drive_scheduler(build_ctx):
+    """agent_start/stop 回调真实启停调度器，status_provider 反映 agent_running。"""
+    ctx = await build_ctx()
+    deps = ctx.server_deps
+    assert deps is not None and deps.status_provider is not None
+    assert deps.status_provider()["agent_running"] is False  # 调度器未启动
+    await deps.agent_start()
+    assert ctx.scheduler.is_running
+    assert deps.status_provider()["agent_running"] is True
+    await deps.agent_stop()
+    assert not ctx.scheduler.is_running
+    assert deps.status_provider()["agent_running"] is False

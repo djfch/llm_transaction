@@ -111,6 +111,17 @@ class PaperGateway:
         self.account.fills = []
         return fills
 
+    def reset_account(self, equity: Decimal) -> None:
+        """重置模拟账户：按新权益新建账本（重置即清空模拟仓位与挂单）。
+
+        清空：全部持仓、未成交挂单（_open 及其在 _results 中的 open 记录）、
+        成交缓冲 fills、强平事件记录；已完成订单历史、杠杆设置与行情快照保留。
+        """
+        self.account = PaperAccount(equity)
+        self._open.clear()
+        self._results = {k: r for k, r in self._results.items() if r.status != "open"}
+        self.liquidations.clear()
+
     def get_contract(self, contract: str) -> Contract:
         if contract not in self._contracts:
             raise ContractNotFound(f"合约不存在: {contract}", label="CONTRACT_NOT_FOUND")

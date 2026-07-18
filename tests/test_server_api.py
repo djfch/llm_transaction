@@ -122,6 +122,7 @@ async def test_status(client: AsyncClient):
         "mode": "paper",
         "uptime_seconds": 12,
         "kill_switch": False,
+        "agent_running": False,  # status_provider 未提供时缺省 False
         "llm_provider": "anthropic",
         "llm_model": "claude-sonnet-4-5",
     }
@@ -161,11 +162,24 @@ async def test_round_detail_and_404(client: AsyncClient):
 
 
 async def test_trades_filter(client: AsyncClient):
-    all_items = (await client.get("/api/trades")).json()["items"]
-    assert len(all_items) == 2
-    assert all_items[0]["contract"] == "ETH_USDT"  # 最新在前
+    body = (await client.get("/api/trades")).json()
+    assert len(body["items"]) == 2
+    assert body["total"] == 2 and body["offset"] == 0 and body["limit"] == 50
+    assert body["items"][0]["contract"] == "ETH_USDT"  # 最新在前
     filtered = (await client.get("/api/trades", params={"contract": "BTC_USDT"})).json()
     assert [t["contract"] for t in filtered["items"]] == ["BTC_USDT"]
+    assert filtered["total"] == 1  # total 同样按合约过滤
+
+
+async def test_trades_pagination(client: AsyncClient):
+    r = await client.get("/api/trades", params={"limit": 1, "offset": 1})
+    body = r.json()
+    assert [t["contract"] for t in body["items"]] == ["BTC_USDT"]  # 第 2 页只余较旧那笔
+    assert body["total"] == 2 and body["offset"] == 1 and body["limit"] == 1
+    # 非法分页参数：offset<0 / limit 越界 → 422
+    assert (await client.get("/api/trades", params={"offset": -1})).status_code == 422
+    assert (await client.get("/api/trades", params={"limit": 0})).status_code == 422
+    assert (await client.get("/api/trades", params={"limit": 201})).status_code == 422
 
 
 async def test_equity_series(client: AsyncClient):

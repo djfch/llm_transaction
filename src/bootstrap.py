@@ -6,6 +6,7 @@ main.py 只负责解析入口与生命周期；组件创建全部在这里，便
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -271,12 +272,27 @@ def _build_server(ctx: AppContext, audit: AuditTrail) -> tuple[uvicorn.Server, S
             "mode": settings.mode,
             "uptime_seconds": int(time.time() - ctx.started_at),
             "kill_switch": settings.risk.kill_switch,
+            "agent_running": ctx.scheduler.is_running,
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
         }
 
     def on_kill_switch(enabled: bool) -> None:
         settings.risk.kill_switch = enabled
+
+    async def manual_close(contract: str) -> dict:
+        """手动平仓适配：调用时解析 loop.manual_close（接口冻结，与 LLM 平仓同一风控路径）。
+
+        同步/异步实现均可（isawaitable 消化），server 层统一按异步回调注入。
+        """
+        result = ctx.loop.manual_close(contract)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def paper_reset(equity: Decimal) -> None:
+        """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。"""
+        ctx.gateway.reset_account(equity)  # type: ignore[attr-defined]
 
     deps = ServerDeps(
         repo=ctx.repo,
@@ -285,6 +301,10 @@ def _build_server(ctx: AppContext, audit: AuditTrail) -> tuple[uvicorn.Server, S
         event_queue=ctx.event_queue,
         status_provider=status_provider,
         on_kill_switch=on_kill_switch,
+        manual_close=manual_close,
+        paper_reset=paper_reset if isinstance(ctx.gateway, PaperGateway) else None,
+        agent_start=ctx.scheduler.start,
+        agent_stop=ctx.scheduler.stop,
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
     )

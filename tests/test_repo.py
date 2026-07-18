@@ -237,7 +237,61 @@ async def test_daily_stats_empty_day(repo: Repo):
     assert stats.realized_pnl == Decimal(0)
 
 
-# ---------- 成交列表（SQL 层 LIMIT） ----------
+# ---------- 成交来源（trades.source） ----------
+
+
+async def test_save_trade_source_roundtrip(repo: Repo):
+    """save_trade 透传 source 并落库读回；不传时默认 ''（历史/未知）。"""
+    t1 = await repo.save_trade(
+        "r1",
+        "paper",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("50000"),
+        Decimal("1"),
+        Decimal(0),
+        source="llm_open",
+    )
+    t2 = await repo.save_trade(
+        "r1", "paper", "BTC_USDT", Decimal(-1), Decimal("51000"), Decimal("1"), Decimal(100)
+    )
+    assert t1.source == "llm_open"
+    assert t2.source == ""
+    got = await repo.list_trades()
+    assert [t.source for t in got] == ["", "llm_open"]  # 最新在前
+
+
+async def test_trades_source_migration_adds_column(tmp_path):
+    """旧库迁移：已存在的 trades 表（无 source 列）幂等补列，历史行保持 '' 不回填。"""
+    import aiosqlite
+
+    path = tmp_path / "old.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(
+        "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, round_id TEXT NOT NULL,"
+        " mode TEXT NOT NULL, contract TEXT NOT NULL, size TEXT NOT NULL, price TEXT NOT NULL,"
+        " fee TEXT NOT NULL, pnl TEXT NOT NULL, created_at REAL NOT NULL)"
+    )
+    await conn.execute(
+        "INSERT INTO trades(round_id,mode,contract,size,price,fee,pnl,created_at)"
+        " VALUES('r0','paper','BTC_USDT','1','50000','1','0',1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)  # 迁移应补 source 列；重复 open 幂等
+    await db.close()
+    db2 = Database()
+    await db2.open(path)
+    repo = Repo(db2)
+    rows = await repo.list_trades()
+    assert len(rows) == 1
+    assert rows[0].source == ""  # 历史行无法可靠推断来源，保持 '' 不回填
+    await db2.close()
+
+
+# ---------- 成交列表（SQL 层 LIMIT/OFFSET 分页） ----------
 
 
 async def test_list_trades_limit_and_contract(repo: Repo):
@@ -257,6 +311,45 @@ async def test_list_trades_limit_and_contract(repo: Repo):
     assert [t.pnl for t in recent] == [Decimal(4), Decimal(3), Decimal(2)]  # 最新在前
     btc = await repo.list_trades(limit=200, contract="BTC_USDT")
     assert [t.pnl for t in btc] == [Decimal(4), Decimal(2), Decimal(0)]
+
+
+async def test_list_trades_offset_pagination(repo: Repo):
+    """list_trades：offset 分页遍历全量，页间不重复不遗漏。"""
+    for i in range(5):
+        await repo.save_trade(
+            "r1",
+            "paper",
+            "BTC_USDT",
+            Decimal(1),
+            Decimal("50000"),
+            Decimal("1"),
+            Decimal(i),
+            created_at=float(i),
+        )
+    page1 = await repo.list_trades(limit=2, offset=0)
+    page2 = await repo.list_trades(limit=2, offset=2)
+    page3 = await repo.list_trades(limit=2, offset=4)
+    assert [t.pnl for t in page1] == [Decimal(4), Decimal(3)]
+    assert [t.pnl for t in page2] == [Decimal(2), Decimal(1)]
+    assert [t.pnl for t in page3] == [Decimal(0)]
+
+
+async def test_count_trades(repo: Repo):
+    """count_trades：总数与 list_trades 分页口径一致，支持 contract 过滤。"""
+    for i in range(5):
+        await repo.save_trade(
+            "r1",
+            "paper",
+            "BTC_USDT" if i % 2 == 0 else "ETH_USDT",
+            Decimal(1),
+            Decimal("50000"),
+            Decimal("1"),
+            Decimal(i),
+            created_at=float(i),
+        )
+    assert await repo.count_trades() == 5
+    assert await repo.count_trades(contract="BTC_USDT") == 3
+    assert await repo.count_trades(contract="ETH_USDT") == 2
 
 
 # ---------- notes ----------

@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from src.server.deps import ServerDeps
 from src.server.routes_config import create_config_router
 from src.server.routes_status import create_status_router
+from src.server.routes_trading import create_trading_router
 from src.server.ws import ConnectionManager, pump_events, register_ws_route
 
 # 前端 Vite dev server 来源
@@ -47,6 +48,7 @@ def create_app(deps: ServerDeps) -> FastAPI:
     )
     app.include_router(create_status_router(deps))
     app.include_router(create_config_router(deps))
+    app.include_router(create_trading_router(deps))
     register_ws_route(app, manager)
     app.state.ws_manager = manager  # 供主程序直接推送事件
     if deps.web_dist.is_dir():

@@ -155,3 +155,45 @@ def test_drain_fills_returns_and_clears_buffer():
     assert fills[1].size == D("-5") and fills[1].realized_pnl == D("0")
     assert fills[0].order_id and fills[0].contract == BTC
     assert gw.drain_fills() == []
+
+
+def test_reset_account_clears_positions_orders_fills():
+    """账户重置：有持仓+挂单+成交缓冲时重置 → 权益为新值，仓位/挂单/fills/强平记录全清。"""
+    gw = make_gateway()
+    buy(gw, 10)  # 持仓 + 成交缓冲
+    result = buy(gw, 5, price=D("99"))  # 未成交挂单
+    assert result.status == "open"
+    assert gw.list_positions() and gw.list_orders(BTC) and gw.account.fills
+    gw.reset_account(D("5000"))
+    assert gw.equity() == D("5000")  # 新权益（含保证金/浮盈口径，空仓即余额）
+    assert gw.account.available == D("5000")
+    assert gw.list_positions() == []
+    assert gw.list_orders(BTC) == []  # 未成交挂单一并清空
+    assert gw.drain_fills() == []
+    assert gw.liquidations == []  # 与账户联动的强平记录一并重置
+    buy(gw, 1)  # 重置后仍可正常交易
+    assert gw.list_positions()[0].size == D("1")
+
+
+def test_fill_is_close_flags():
+    """FillRecord.is_close：开仓 False；减仓/平仓/翻仓（含平仓部分）True。"""
+    gw = make_gateway()
+    buy(gw, 10)
+    buy(gw, 5)  # 加仓仍属开仓
+    buy(gw, -3)  # 减仓
+    buy(gw, -20)  # 平 12 并翻空 8：含平仓部分记 True
+    fills = gw.drain_fills()
+    assert [f.is_close for f in fills] == [False, False, True, True]
+    close_all(gw)  # 全平
+    assert gw.drain_fills()[0].is_close is True
+
+
+def test_liquidation_fill_is_close():
+    """强平成交的 FillRecord.is_close=True（供落库 trades.source=liquidation 判定）。"""
+    gw = make_gateway(taker="0")
+    gw.set_leverage(BTC, 10)
+    buy(gw, 10)
+    gw.on_price(BTC, D("90"), D("89.9"), D("90.1"))  # 触发强平
+    fills = [f for f in gw.drain_fills() if f.order_id == "liquidation"]
+    assert len(fills) == 1
+    assert fills[0].is_close is True

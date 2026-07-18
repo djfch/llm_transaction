@@ -107,11 +107,14 @@ async def _record_order(
     result: OrderResult,
     req: OrderRequest,
     positions: list[Position],
+    *,
+    trade_source: str = "",
 ) -> str:
     """落 orders 表（必要时直接落 trades）；本地落库失败返回告警文本，成功返回空串。
 
     订单已提交到交易所：本地记录失败绝不向上抛异常（LLM 看到"内部错误"会重试，
     重试即重单），返回文本明确"禁止重试"。
+    trade_source 非空时覆盖 inline 落库的 trades.source（manual_close 传 user_close）。
     """
     try:
         await deps.repo.save_order(
@@ -128,7 +131,7 @@ async def _record_order(
             is_close=req.close or req.reduce_only,
         )
         if deps.save_fills_inline and result.status == "finished":
-            await _save_inline_trade(deps, result, req, positions)
+            await _save_inline_trade(deps, result, req, positions, trade_source=trade_source)
     except Exception as e:
         logger.exception("订单 %s 本地落库失败", result.id)
         return (
@@ -143,16 +146,21 @@ async def _save_inline_trade(
     result: OrderResult,
     req: OrderRequest,
     positions: list[Position],
+    *,
+    trade_source: str = "",
 ) -> None:
     """真实网关路径：已成交单按下单回报直接落 trade。
 
     Gate 下单响应不含手续费与已实现盈亏：fee/pnl 先落 0（精确口径以交易所账单为准，
-    待成交回报对账补齐）；close 单请求 size=0，实际成交张数取下单前持仓的反向。
+    待成交回报对账补齐）；close 单请求 size=0，实际成交张数取下单前持仓的反向
+    （无持仓为 0 即无成交：跳过落库，同 #21）；source：close/reduce_only→llm_close，否则 llm_open，trade_source 可覆盖。
     """
     size = req.size
     if req.close:
         prev = next((p for p in positions if p.contract == req.contract), None)
         size = -prev.size if prev is not None else Decimal(0)
+        if size == 0:
+            return  # 无持仓 close 单：无成交不落 trades 行
     await deps.repo.save_trade(
         round_id=deps.round_id,
         mode=deps.mode,
@@ -161,6 +169,7 @@ async def _save_inline_trade(
         price=result.fill_price,
         fee=Decimal(0),
         pnl=Decimal(0),
+        source=trade_source or ("llm_close" if req.close or req.reduce_only else "llm_open"),
     )
 
 

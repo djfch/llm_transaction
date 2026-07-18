@@ -2,9 +2,11 @@
  * Mock 实现：与 ApiClient 同接口的假数据，供后端未就绪时前端独立开发预览。
  * 数据为内存态，PUT/POST 会修改内存副本（刷新页面后复原）。
  */
+import { ApiError } from './http'
 import type {
   ApiClient,
   AppConfig,
+  Candle,
   EquityPoint,
   Note,
   Position,
@@ -29,6 +31,8 @@ function hoursAgoSeries(n: number): Date[] {
 // ---------- 内存态假数据 ----------
 
 let killSwitch = false
+let agentRunning = true // 交易 Agent 运行状态（内存态）
+let paperEquity = 10_842.36 // paper 模式权益（resetPaperEquity 可改）
 const bootTime = Date.now() - 26 * 3600_000 // 假设已运行 26 小时
 
 const positions: Position[] = [
@@ -100,17 +104,21 @@ function buildRounds(): RoundSummary[] {
 }
 const rounds = buildRounds()
 
+const TRADE_SOURCES = ['llm_open', 'llm_close', 'user_close', 'liquidation', 'tpsl_close', '']
+
 const trades: Trade[] = Array.from({ length: 42 }, (_, i) => {
   const contract = i % 3 === 0 ? 'ETH_USDT' : 'BTC_USDT'
   const long = i % 2 === 0
   const price = contract === 'BTC_USDT' ? 115_000 + i * 96 : 3_350 + i * 4
   return {
+    id: i + 1,
     time: new Date(Date.now() - (42 - i) * 2700_000).toISOString(),
     contract,
     size: long ? 4 + (i % 5) : -(4 + (i % 5)),
     price: Math.round(price * 100) / 100,
     fee: Math.round(price * 0.0005 * 100) / 100,
     pnl: Math.round(((i % 7) * 18 - 54) * 100) / 100,
+    source: TRADE_SOURCES[i % TRADE_SOURCES.length],
   }
 })
 
@@ -125,6 +133,39 @@ const notes: Note[] = [
   { time: new Date(Date.now() - 10_800_000).toISOString(), content: 'ETH/BTC 汇率走弱，空 ETH 对冲仓位继续持有。' },
 ]
 
+/** K 线周期间隔（秒），用于 mock 时间轴 */
+const INTERVAL_SECONDS: Record<string, number> = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '1h': 3600,
+  '4h': 14400,
+  '1d': 86400,
+}
+
+/** 确定性伪随机 K 线：以合约为种子的简单 LCG，固定生成 limit 根（同一合约多次请求结果一致） */
+function buildCandles(contract: string, interval: string, limit: number): Candle[] {
+  let seed = 42
+  for (const ch of contract + interval) seed = (seed * 31 + ch.charCodeAt(0)) % 2_147_483_647
+  const rand = () => {
+    seed = (seed * 1_664_525 + 1_013_904_223) % 2_147_483_647
+    return seed / 2_147_483_647
+  }
+  const step = INTERVAL_SECONDS[interval] ?? 3600
+  const base = contract.startsWith('BTC') ? 115_000 : contract.startsWith('ETH') ? 3_350 : 100
+  const end = Math.floor(Date.now() / 1000 / step) * step
+  let prev = base
+  return Array.from({ length: limit }, (_, i) => {
+    const o = prev
+    const c = o * (1 + (rand() - 0.5) * 0.02)
+    const h = Math.max(o, c) * (1 + rand() * 0.005)
+    const l = Math.min(o, c) * (1 - rand() * 0.005)
+    prev = c
+    const r = (n: number) => Math.round(n * 100) / 100
+    return { t: end - (limit - 1 - i) * step, o: r(o), h: r(h), l: r(l), c: r(c), v: Math.round(rand() * 500) }
+  })
+}
+
 // ---------- 接口实现 ----------
 
 export const mockApi: ApiClient = {
@@ -135,9 +176,11 @@ export const mockApi: ApiClient = {
       kill_switch: killSwitch,
       llm_provider: config.llm.provider,
       llm_model: config.llm.model,
+      agent_running: agentRunning,
     }),
   getAccount: () =>
-    reply({ equity: 10_842.36, available: 7_315.2, unrealised_pnl: 255.6 }),
+    // available 由 paperEquity 派生，避免设置金额后账户概览自相矛盾
+    reply({ equity: paperEquity, available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100), unrealised_pnl: 255.6 }),
   getPositions: () => reply(positions.map((p) => ({ ...p }))),
   getRounds: (offset, limit) => reply(rounds.slice(offset, offset + limit)),
   getRound: (roundId) => {
@@ -145,7 +188,35 @@ export const mockApi: ApiClient = {
     if (!meta) return Promise.reject(new Error(`决策轮不存在: ${roundId}`))
     return reply(buildRoundDetail(meta))
   },
-  getTrades: () => reply([...trades].reverse()),
+  getTrades: (offset, limit, contract) => {
+    const list = [...trades].reverse().filter((t) => !contract || t.contract === contract)
+    return reply({ items: list.slice(offset, offset + limit), total: list.length, offset, limit })
+  },
+  getCandles: (contract, interval, limit = 200) => reply(buildCandles(contract, interval, limit)),
+  closePosition: (contract) => {
+    const idx = positions.findIndex((p) => p.contract === contract)
+    if (idx < 0) return Promise.reject(new ApiError(404, `无持仓: ${contract}`))
+    const [closed] = positions.splice(idx, 1)
+    return reply({
+      contract,
+      status: 'closed',
+      fill_price: closed.mark_price,
+      text: `已按标记价 ${closed.mark_price} 市价平仓`,
+    })
+  },
+  resetPaperEquity: (equity) => {
+    if (config.mode !== 'paper') return Promise.reject(new ApiError(409, '当前非 paper 模式，无法重置权益'))
+    paperEquity = equity
+    return reply({ equity })
+  },
+  startAgent: () => {
+    agentRunning = true
+    return reply({ agent_running: agentRunning })
+  },
+  stopAgent: () => {
+    agentRunning = false
+    return reply({ agent_running: agentRunning })
+  },
   getEquity: () => reply(equity),
   getNotes: () => reply(notes),
   getConfig: () => reply(structuredClone(config)),

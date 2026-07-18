@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS trades (
     price TEXT NOT NULL,
     fee TEXT NOT NULL,
     pnl TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS notes (
@@ -122,18 +123,23 @@ class Database:
         await self._conn.commit()
 
     async def _migrate(self) -> None:
-        """轻量迁移：为已存在的 orders 表补 is_close 列并回填历史平仓单（幂等）。
+        """轻量迁移（均幂等，用 PRAGMA table_info 判列存在性）：
 
-        历史 close 单落库时 side_size 恒为 '0'，据此回填 is_close=1；
-        历史 reduce_only 单无法事后识别，保持 0（只会多计下单数，影响有界）。
+        - orders.is_close：历史 close 单落库时 side_size 恒为 '0'，据此回填 is_close=1；
+          历史 reduce_only 单无法事后识别，保持 0（只会多计下单数，影响有界）。
+        - trades.source：历史成交无法可靠推断来源，保持默认 ''（历史/未知），不回填。
         """
         cur = await self._conn.execute("PRAGMA table_info(orders)")
-        if "is_close" in {row["name"] for row in await cur.fetchall()}:
-            return
-        await self._conn.execute(
-            "ALTER TABLE orders ADD COLUMN is_close INTEGER NOT NULL DEFAULT 0"
-        )
-        await self._conn.execute("UPDATE orders SET is_close=1 WHERE side_size='0'")
+        if "is_close" not in {row["name"] for row in await cur.fetchall()}:
+            await self._conn.execute(
+                "ALTER TABLE orders ADD COLUMN is_close INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._conn.execute("UPDATE orders SET is_close=1 WHERE side_size='0'")
+        cur = await self._conn.execute("PRAGMA table_info(trades)")
+        if "source" not in {row["name"] for row in await cur.fetchall()}:
+            await self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+            )
 
     async def close(self) -> None:
         """关闭连接；重复调用安全。"""

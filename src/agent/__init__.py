@@ -2,6 +2,7 @@
 
 from src.agent.context import AgentContext, ContextBuilder
 from src.agent.loop import DecisionLoop, RoundResult
+from src.agent.manual_close import ManualCloseRiskDenied
 from src.agent.prompts import PromptLoader
 from src.agent.providers import (
     AnthropicProvider,
@@ -24,6 +25,7 @@ __all__ = [
     "LLMParseError",
     "LLMProvider",
     "LLMResponse",
+    "ManualCloseRiskDenied",
     "OpenAICompatProvider",
     "PromptLoader",
     "RoundResult",

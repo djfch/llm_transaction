@@ -1,19 +1,20 @@
 /**
- * 仪表盘：权益曲线、账户概览、持仓卡片、运行状态、kill_switch、最近笔记。
+ * 仪表盘：权益曲线、K 线、账户概览、持仓卡片、运行状态（含 kill_switch 与 agent 启停）、最近笔记。
  * WS 推送 position/trade/round 时自动刷新对应数据。
  */
 import { useEffect } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { useWs } from '../hooks/useWs'
-import Badge from '../components/Badge'
+import CandleCard from '../components/CandleCard'
 import Card from '../components/Card'
 import EquityChart from '../components/EquityChart'
-import KillSwitchButton from '../components/KillSwitchButton'
 import MetricCard from '../components/MetricCard'
+import PaperEquitySetter from '../components/PaperEquitySetter'
 import PositionCard from '../components/PositionCard'
 import StateHint from '../components/StateHint'
-import { fmtNum, fmtSigned, fmtTime, fmtUptime, pnlClass } from '../utils/format'
+import StatusCard from '../components/StatusCard'
+import { fmtNum, fmtSigned, fmtTime, pnlClass } from '../utils/format'
 
 export default function DashboardPage() {
   const statusQ = useApiData(() => api.getStatus(), [])
@@ -23,33 +24,47 @@ export default function DashboardPage() {
   const notesQ = useApiData(() => api.getNotes(), [])
   const { lastMessage } = useWs()
 
-  // WS 推送驱动增量刷新
+  // WS 推送驱动增量刷新；round(决策轮)可能伴随自动成交，持仓/账户/曲线一并刷新
   useEffect(() => {
     if (!lastMessage) return
     if (lastMessage.type === 'position' || lastMessage.type === 'trade') {
       positionsQ.reload()
       accountQ.reload()
     }
-    if (lastMessage.type === 'round') statusQ.reload()
+    if (lastMessage.type === 'round') {
+      statusQ.reload()
+      positionsQ.reload()
+      accountQ.reload()
+      equityQ.reload()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟随消息变化
   }, [lastMessage])
 
   const status = statusQ.data
   const account = accountQ.data
+  // 平仓/设置金额后刷新持仓、账户与权益曲线
+  const refreshAccount = () => {
+    positionsQ.reload()
+    accountQ.reload()
+    equityQ.reload()
+  }
 
   return (
     <div className="space-y-6">
-      {/* 账户概览 */}
+      {/* 账户概览（paper 模式下可设置金额） */}
       <StateHint loading={accountQ.loading} error={accountQ.error}>
         {account && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <MetricCard label="equity(账户权益 USDT)" value={fmtNum(account.equity)} />
-            <MetricCard label="available(可用余额 USDT)" value={fmtNum(account.available)} />
-            <MetricCard
-              label="unrealised_pnl(未实现盈亏 USDT)"
-              value={fmtSigned(account.unrealised_pnl)}
-              tone={account.unrealised_pnl > 0 ? 'up' : account.unrealised_pnl < 0 ? 'down' : 'default'}
-            />
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <MetricCard label="equity(账户权益 USDT)" value={fmtNum(account.equity)} />
+              <MetricCard label="available(可用余额 USDT)" value={fmtNum(account.available)} />
+              <MetricCard
+                label="unrealised_pnl(未实现盈亏 USDT)"
+                value={fmtSigned(account.unrealised_pnl)}
+                tone={account.unrealised_pnl > 0 ? 'up' : account.unrealised_pnl < 0 ? 'down' : 'default'}
+              />
+            </div>
+            {status?.mode === 'paper' && <PaperEquitySetter onReset={refreshAccount} />}
           </div>
         )}
       </StateHint>
@@ -60,6 +75,9 @@ export default function DashboardPage() {
           {equityQ.data && <EquityChart data={equityQ.data} />}
         </StateHint>
       </Card>
+
+      {/* K 线（合约/周期可切换） */}
+      <CandleCard />
 
       {/* 持仓 + 运行状态 */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -72,63 +90,19 @@ export default function DashboardPage() {
           >
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {(positionsQ.data ?? []).map((p) => (
-                <PositionCard key={p.contract} position={p} />
+                <PositionCard key={p.contract} position={p} onClosed={refreshAccount} />
               ))}
             </div>
           </StateHint>
         </div>
 
         <div className="space-y-4">
-          <Card title="运行状态 status">
-            <StateHint loading={statusQ.loading} error={statusQ.error}>
-              {status && (
-                <dl className="space-y-3 text-sm">
-                  <div className="flex items-center justify-between">
-                    <dt className="text-slate-500">mode(运行模式)</dt>
-                    <dd>
-                      <Badge
-                        text={status.mode}
-                        tone={status.mode === 'live' ? 'danger' : status.mode === 'testnet' ? 'warn' : 'info'}
-                      />
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-slate-500">uptime(运行时长)</dt>
-                    <dd className="tabular-nums">{fmtUptime(status.uptime_seconds)}</dd>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-slate-500">llm_provider(LLM 提供商)</dt>
-                    <dd>{status.llm_provider}</dd>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-slate-500">llm_model(模型)</dt>
-                    <dd className="text-xs">{status.llm_model}</dd>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-slate-500">kill_switch(紧急停止)</dt>
-                    <dd>
-                      <Badge
-                        text={status.kill_switch ? '已触发' : '未触发'}
-                        tone={status.kill_switch ? 'danger' : 'ok'}
-                      />
-                    </dd>
-                  </div>
-                </dl>
-              )}
-            </StateHint>
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <KillSwitchButton
-                enabled={status?.kill_switch ?? false}
-                onToggle={async (next) => {
-                  await api.setKillSwitch(next)
-                  statusQ.reload()
-                }}
-              />
-              <p className="mt-2 text-xs text-slate-500">
-                开启后风控拒绝一切新开仓，仅允许平仓；需点击两次确认。
-              </p>
-            </div>
-          </Card>
+          <StatusCard
+            status={status}
+            loading={statusQ.loading}
+            error={statusQ.error}
+            onChanged={statusQ.reload}
+          />
         </div>
       </div>
 

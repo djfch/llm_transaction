@@ -1,13 +1,16 @@
 /**
  * 仪表盘测试：数据渲染（mock API）+ kill_switch 两段确认切换流程。
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import DashboardPage from '../pages/DashboardPage'
 
 // jsdom 无法运行 lightweight-charts（依赖 canvas），替换为占位组件
 vi.mock('../components/EquityChart', () => ({
   default: () => <div data-testid="equity-chart-stub" />,
+}))
+vi.mock('../components/CandleChart', () => ({
+  default: () => <div data-testid="candle-chart-stub" />,
 }))
 
 // 隔离 WS：测试中不需要真实推送
@@ -27,20 +30,25 @@ describe('仪表盘 DashboardPage', () => {
     expect(screen.getByText('10,842.36')).toBeInTheDocument()
 
     // 持仓卡片（两个持仓各有一张，字段标签重复出现属预期）
-    expect(await screen.findByText('BTC_USDT')).toBeInTheDocument()
-    expect(screen.getByText('ETH_USDT')).toBeInTheDocument()
+    // 注：K 线卡的合约下拉也会出现 BTC_USDT/ETH_USDT 文本，故用 getAllByText
+    expect((await screen.findAllByText('BTC_USDT')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ETH_USDT').length).toBeGreaterThan(0)
     expect(screen.getAllByText('entry_price(开仓均价)')).toHaveLength(2)
 
-    // 运行状态
+    // 运行状态（含 agent_running(运行状态) 徽标）
     expect(await screen.findByText('mode(运行模式)')).toBeInTheDocument()
     expect(screen.getByText('paper')).toBeInTheDocument()
     expect(screen.getByText('未触发')).toBeInTheDocument()
+    expect(screen.getByText('agent_running(运行状态)')).toBeInTheDocument()
+    expect(screen.getByText('运行中')).toBeInTheDocument()
   })
 
   it('kill_switch 需两次点击确认，切换后状态刷新', async () => {
     render(<DashboardPage />)
 
     const openBtn = await screen.findByRole('button', { name: /开启 kill_switch/ })
+    // status 未加载完成时按钮禁用（防止按错误初始状态操作），先等其可用
+    await waitFor(() => expect(openBtn).toBeEnabled())
     // 第一次点击：进入待确认状态，尚未真正开启
     fireEvent.click(openBtn)
     const confirmBtn = await screen.findByRole('button', { name: /再次点击确认开启/ })

@@ -13,12 +13,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from src.agent.context import AgentContext, ContextBuilder
+from src.agent.manual_close import execute_manual_close, persist_fills
 from src.agent.prompts import PromptLoader
 from src.agent.providers.base import LLMProvider, ToolCall
 from src.agent.tool_handlers import DailyStatsFn, ToolDeps, ToolOutcome
@@ -97,6 +99,7 @@ class DecisionLoop:
         self._consecutive_failures = 0
         self._risk_locked = False
         self._drain_fills = drain_fills
+        self._persist_fills_lock = asyncio.Lock()  # drain 与 manual_close 的落库临界区
         self._persist_kill_switch = persist_kill_switch
         self._audit = audit or AuditTrail(repo, settings.audit)
         self._deps = ToolDeps(
@@ -233,24 +236,27 @@ class DecisionLoop:
     async def _drain_round_fills(self, round_id: str) -> None:
         """paper 网关成交缓冲落 trades 表（真实网关无此钩子，由工具层直接落库）。
 
-        单笔落库失败不中断：剩余成交继续落，失败落日志（成交已在网关账本，
-        缺失可事后对账，重试反而可能双计）。
+        与 manual_close 共用 _persist_fills_lock：用户平仓直接消费缓冲落库，
+        轮末 drain 不会重复落库（双计防护见 manual_close.execute_manual_close）。
+        source 标注：强平 → liquidation，fill.is_close → llm_close，其余 → llm_open。
         """
         if self._drain_fills is None:
             return
-        for fill in self._drain_fills():
-            try:
-                await self._repo.save_trade(
-                    round_id=round_id,
-                    mode=self._settings.mode,
-                    contract=fill.contract,
-                    size=fill.size,
-                    price=fill.price,
-                    fee=fill.fee,
-                    pnl=fill.realized_pnl,
-                )
-            except Exception:
-                logger.exception("成交落库失败 round=%s order=%s", round_id[:8], fill.order_id)
+        async with self._persist_fills_lock:
+            await persist_fills(self._repo, self._settings.mode, round_id, self._drain_fills())
+
+    async def manual_close(self, contract: str) -> dict:
+        """用户手动平仓（监控界面）：与 LLM 平仓同一风控路径，成交标注 source=user_close。
+
+        - 风控拒绝抛 ManualCloseRiskDenied（消息为风控理由，server 层映射 HTTP 422）；
+          网关错误（如合约不存在）以 GatewayError 原样上抛
+        - 决策轮进行中也可调用（用户操作优先）：与轮末 drain 共用 _persist_fills_lock，
+          paper 成交缓冲由本方法直接消费落库，drain 不再重复落库
+        - 返回 {"contract", "status", "fill_price", "text"} 供 API 响应
+          （fill_price 为 Decimal，序列化由 server 层处理）
+        """
+        async with self._persist_fills_lock:
+            return await execute_manual_close(self._deps, contract, drain_fills=self._drain_fills)
 
     async def _engage_lock(self) -> None:
         """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。"""

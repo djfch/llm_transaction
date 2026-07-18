@@ -83,6 +83,7 @@ def liquidate(
             fee=Decimal(0),
             realized_pnl=realized,
             maker=False,
+            is_close=True,  # 强平属平仓成交
         )
     )
     pos.size = Decimal(0)

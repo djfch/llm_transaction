@@ -2,17 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 
 /**
- * kill_switch(紧急停止) 开关按钮：两段确认防误触。
- * 第一次点击进入"待确认"状态（3 秒内有效），第二次点击才真正切换。
+ * agent(交易代理) 启停按钮：启动单击即生效；停止需两段确认（3 秒内第二次点击才执行）。
  * 失败时在按钮下方展示原因。
  */
-export default function KillSwitchButton({
-  enabled,
+export default function AgentControl({
+  running,
   disabled = false,
   onToggle,
 }: {
-  enabled: boolean
-  /** status 未加载完成时禁用，避免按错误的初始文案操作 */
+  running: boolean
+  /** status 未加载完成时禁用，避免展示与真实状态相反的文案 */
   disabled?: boolean
   onToggle: (next: boolean) => Promise<void>
 }) {
@@ -29,19 +28,11 @@ export default function KillSwitchButton({
     [],
   )
 
-  const handleClick = async () => {
-    if (pending) return
-    if (!armed) {
-      setArmed(true)
-      timer.current = setTimeout(() => setArmed(false), 3000)
-      return
-    }
-    if (timer.current) clearTimeout(timer.current)
-    setArmed(false)
+  const execute = async () => {
     setPending(true)
     setMessage(null)
     try {
-      await onToggle(!enabled)
+      await onToggle(!running)
     } catch (e) {
       setMessage(e instanceof ApiError ? e.detail : String(e))
     } finally {
@@ -49,19 +40,32 @@ export default function KillSwitchButton({
     }
   }
 
+  const handleClick = async () => {
+    if (pending) return
+    if (!running) return execute() // 启动：单击直接生效
+    if (!armed) {
+      setArmed(true)
+      timer.current = setTimeout(() => setArmed(false), 3000)
+      return
+    }
+    if (timer.current) clearTimeout(timer.current)
+    setArmed(false)
+    await execute()
+  }
+
   const base = 'rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50'
-  const color = enabled
-    ? 'bg-rose-600 hover:bg-rose-500 text-white'
-    : armed
+  const color = running
+    ? armed
       ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
       : 'bg-slate-700 hover:bg-slate-600 text-slate-100'
+    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
   const text = pending
     ? '执行中…'
-    : armed
-      ? `再次点击确认${enabled ? '关闭' : '开启'}`
-      : enabled
-        ? '关闭 kill_switch(紧急停止)'
-        : '开启 kill_switch(紧急停止)'
+    : running
+      ? armed
+        ? '再次点击确认停止'
+        : '停止 agent(交易代理)'
+      : '启动 agent(交易代理)'
 
   return (
     <div>

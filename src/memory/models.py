@@ -40,7 +40,12 @@ class OrderRecord(BaseModel):
 
 
 class Trade(BaseModel):
-    """成交记录。size 正多负空；pnl 为已实现盈亏。"""
+    """成交记录。size 正多负空；pnl 为已实现盈亏。
+
+    source 成交来源（全项目统一枚举）：
+    - 'llm_open': LLM 开仓；'llm_close': LLM 决策平仓；'user_close': 用户手动平仓
+    - 'liquidation': 强平；'tpsl_close': 止盈止损（一期预留）；'': 历史/未知
+    """
 
     id: int
     round_id: str
@@ -50,6 +55,7 @@ class Trade(BaseModel):
     price: Decimal
     fee: Decimal
     pnl: Decimal
+    source: str
     created_at: float
 
 

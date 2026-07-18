@@ -28,7 +28,7 @@ src/
   pages/        DashboardPage / RoundsPage / RoundDetailPage / TradesPage / ConfigPage
   pages/config/ 配置中心子组件（RiskForm、GeneralForm、WatchlistEditor、StrategyEditor、SecretsBadges、validate）
   utils/        format.ts（数字/时间格式化）
-  test/         Vitest 测试（dashboard、config）
+  test/         Vitest 测试（dashboard、config、trades、position、candlecard、agentcontrol）
 ```
 
 约定：字段展示使用 `变量名(含义)` 格式（如 `unrealised_pnl(未实现盈亏)`）；单文件 ≤300 行；中文 UI 与注释。

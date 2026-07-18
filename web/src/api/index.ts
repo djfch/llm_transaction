@@ -11,4 +11,5 @@ export const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 
 export const api: ApiClient = USE_MOCK ? mockApi : httpApi
 
+export { ApiError } from './http'
 export type { ApiClient } from './types'

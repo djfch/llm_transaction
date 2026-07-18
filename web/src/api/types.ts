@@ -10,6 +10,7 @@ export interface StatusInfo {
   kill_switch: boolean // 紧急停止开关（true 时拒绝一切交易）
   llm_provider: string // LLM 提供商
   llm_model: string // LLM 模型名
+  agent_running: boolean // 交易 Agent 是否在运行
 }
 
 /** 账户概览：GET /api/account */
@@ -58,14 +59,52 @@ export interface RoundDetail {
   tool_calls: ToolCall[] // 工具调用链
 }
 
-/** 成交记录：GET /api/trades */
+/** 成交记录：GET /api/trades（created_at 已在 http 层适配为 time） */
 export interface Trade {
-  time: string // 成交时间（ISO 字符串）
+  id: number // 成交 ID
+  time: string // 成交时间（ISO 字符串，由后端 created_at(Unix秒) 适配而来）
   contract: string // 合约名
   size: number // 成交张数，正买负卖
   price: number // 成交价
   fee: number // 手续费
   pnl: number // 已实现盈亏
+  source: string // 来源：llm_open / llm_close / user_close / liquidation / tpsl_close / ''
+}
+
+/** 成交记录分页结果：GET /api/trades */
+export interface TradesPageResult {
+  items: Trade[]
+  total: number // 符合筛选条件的总笔数
+  offset: number
+  limit: number
+}
+
+/** K 线数据点：GET /api/candles（t 为 Unix 秒，价格字段为数字） */
+export interface Candle {
+  t: number // 开盘时间（Unix 秒）
+  o: number // 开盘价
+  h: number // 最高价
+  l: number // 最低价
+  c: number // 收盘价
+  v: number // 成交量
+}
+
+/** 手动平仓结果：POST /api/positions/{contract}/close */
+export interface ClosePositionResult {
+  contract: string
+  status: string // 平仓状态
+  fill_price: number // 成交均价
+  text: string // 结果描述文本
+}
+
+/** paper 模式权益设置结果：POST /api/paper/reset */
+export interface PaperResetResult {
+  equity: number
+}
+
+/** Agent 启停结果：POST /api/agent/start、POST /api/agent/stop */
+export interface AgentStateResult {
+  agent_running: boolean
 }
 
 /** 权益曲线点：GET /api/equity */
@@ -130,7 +169,11 @@ export interface KillSwitchResult {
   kill_switch: boolean
 }
 
-/** WS 推送消息：/ws → {type, data} */
+/**
+ * WS 推送消息：/ws → {type, data}
+ * 注意（一期实际契约）：后端当前只广播 {type:'round'} 与 hello；trade/position/ticker 为预留类型，
+ * 后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
+ */
 export type WsMessage =
   | { type: 'round'; data: RoundSummary }
   | { type: 'trade'; data: Trade }
@@ -144,7 +187,12 @@ export interface ApiClient {
   getPositions(): Promise<Position[]>
   getRounds(offset: number, limit: number): Promise<RoundSummary[]>
   getRound(roundId: string): Promise<RoundDetail>
-  getTrades(): Promise<Trade[]>
+  getTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult>
+  getCandles(contract: string, interval: string, limit?: number): Promise<Candle[]>
+  closePosition(contract: string): Promise<ClosePositionResult>
+  resetPaperEquity(equity: number): Promise<PaperResetResult>
+  startAgent(): Promise<AgentStateResult>
+  stopAgent(): Promise<AgentStateResult>
   getEquity(): Promise<EquityPoint[]>
   getNotes(): Promise<Note[]>
   getConfig(): Promise<AppConfig>

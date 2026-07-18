@@ -183,13 +183,16 @@ class Repo:
         price: Decimal,
         fee: Decimal,
         pnl: Decimal,
+        source: str = "",
         created_at: float | None = None,
     ) -> Trade:
+        """落库一笔成交。source 取值见 models.Trade（llm_open/llm_close/user_close/
+        liquidation/tpsl_close/''），默认 '' 表示历史/未知。"""
         ts = created_at if created_at is not None else _now()
         cur = await self._conn.execute(
-            "INSERT INTO trades(round_id,mode,contract,size,price,fee,pnl,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (round_id, mode, contract, str(size), str(price), str(fee), str(pnl), ts),
+            "INSERT INTO trades(round_id,mode,contract,size,price,fee,pnl,source,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (round_id, mode, contract, str(size), str(price), str(fee), str(pnl), source, ts),
         )
         await self._conn.commit()
         return Trade(
@@ -201,6 +204,7 @@ class Repo:
             price=price,
             fee=fee,
             pnl=pnl,
+            source=source,
             created_at=ts,
         )
 
@@ -216,16 +220,29 @@ class Repo:
         cur = await self._conn.execute(sql + " ORDER BY id", params)
         return [Trade(**dict(r)) for r in await cur.fetchall()]
 
-    async def list_trades(self, limit: int = 200, contract: str | None = None) -> list[Trade]:
-        """最近 N 笔成交（最新在前）；LIMIT 在 SQL 层生效，contract 可选过滤。"""
+    async def list_trades(
+        self, limit: int = 50, offset: int = 0, contract: str | None = None
+    ) -> list[Trade]:
+        """成交分页查询（最新在前）；LIMIT/OFFSET 与 contract 过滤均在 SQL 层生效。"""
         sql = "SELECT * FROM trades"
         params: list = []
         if contract is not None:
             sql += " WHERE contract=?"
             params.append(contract)
-        params.append(limit)
-        cur = await self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", params)
+        params += [limit, offset]
+        cur = await self._conn.execute(sql + " ORDER BY id DESC LIMIT ? OFFSET ?", params)
         return [Trade(**dict(r)) for r in await cur.fetchall()]
+
+    async def count_trades(self, contract: str | None = None) -> int:
+        """成交总数（contract 可选过滤）；与 list_trades 同过滤口径，供分页取总页数。"""
+        sql = "SELECT COUNT(*) FROM trades"
+        params: list = []
+        if contract is not None:
+            sql += " WHERE contract=?"
+            params.append(contract)
+        cur = await self._conn.execute(sql, params)
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     async def daily_stats(self, mode: str, day_start_ts: float) -> DailyStats:
         """当日统计：realized_pnl=当日已实现盈亏合计；orders_today=当日开仓单数。

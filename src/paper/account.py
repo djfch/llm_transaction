@@ -27,7 +27,11 @@ class PaperPosition(BaseModel):
 
 
 class FillRecord(BaseModel):
-    """一笔成交的账本记录，供审计与测试断言。"""
+    """一笔成交的账本记录，供审计与测试断言。
+
+    is_close：平仓/减仓成交为 True（翻仓含平仓部分亦记 True），开仓为 False，
+    强平成交恒 True；供落库 trades.source（llm_open/llm_close/liquidation）判定。
+    """
 
     order_id: str
     contract: str
@@ -36,6 +40,7 @@ class FillRecord(BaseModel):
     fee: Decimal
     realized_pnl: Decimal  # 本笔成交结算的已实现盈亏（开仓为 0）
     maker: bool
+    is_close: bool
 
 
 class PaperAccount:
@@ -99,6 +104,7 @@ class PaperAccount:
         """
         fee = self.notional(size, price, quanto) * fee_rate
         realized = Decimal(0)
+        closed = Decimal(0)  # 本笔成交中平仓/减仓的张数（0 = 纯开仓）
         pos = self.ensure_position(contract, leverage)
         remaining = size
         if pos.size != 0 and (pos.size > 0) != (size > 0):
@@ -120,6 +126,7 @@ class PaperAccount:
             fee=fee,
             realized_pnl=realized,
             maker=maker,
+            is_close=closed > 0,  # 含平仓/减仓部分即记 True（翻仓亦然）
         )
         self.fills.append(record)
         return record

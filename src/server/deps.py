@@ -7,8 +7,9 @@ server 不 import agent/scheduler/market 的具体实现；gateway/repo/audit_tr
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,13 @@ class ServerDeps:
     gateway: Gateway | None = None
     status_provider: Callable[[], dict[str, Any]] | None = None
     on_kill_switch: Callable[[bool], None] | None = None
+    # 写操作回调（主程序接线；None 时对应端点 503/409，见 routes_trading）：
+    # manual_close 与 LLM 平仓同一风控路径；paper_reset 仅 paper 模式注入；
+    # agent_start/agent_stop 启停决策调度器（运行态经 status_provider 读取）
+    manual_close: Callable[[str], Awaitable[dict]] | None = None
+    paper_reset: Callable[[Decimal], None] | None = None
+    agent_start: Callable[[], Awaitable[None]] | None = None
+    agent_stop: Callable[[], Awaitable[None]] | None = None
     event_queue: asyncio.Queue[dict[str, Any]] | None = None
     runtime_settings: Settings | None = None
     runtime_watchlist: list[str] | None = None

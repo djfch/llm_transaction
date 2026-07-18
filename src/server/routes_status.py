@@ -84,6 +84,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             "mode": settings.mode,
             "uptime_seconds": runtime.get("uptime_seconds", 0),
             "kill_switch": runtime.get("kill_switch", settings.risk.kill_switch),
+            "agent_running": runtime.get("agent_running", False),
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
         }
@@ -122,10 +123,20 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         return data
 
     @router.get("/trades")
-    async def list_trades(contract: str | None = None) -> dict[str, Any]:
-        # 近 200 条（最新在前），LIMIT 与合约过滤都在 SQL 层完成
-        trades = await deps.repo.list_trades(limit=200, contract=contract)
-        return {"items": [t.model_dump() for t in trades]}
+    async def list_trades(
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=200),
+        contract: str | None = None,
+    ) -> dict[str, Any]:
+        # 分页与合约过滤都在 SQL 层完成；total 为同过滤条件下的总条数（前端分页器用）
+        trades = await deps.repo.list_trades(limit=limit, offset=offset, contract=contract)
+        total = await deps.repo.count_trades(contract=contract)
+        return {
+            "items": [t.model_dump() for t in trades],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @router.get("/equity")
     async def get_equity() -> dict[str, Any]:

@@ -41,3 +41,24 @@ export function pnlClass(n: number): string {
   if (n < 0) return 'text-rose-400'
   return 'text-slate-400'
 }
+
+/** source(成交来源) → 徽标文案与色调（与 Badge 的 tone 对齐） */
+export function sourceBadge(source: string): {
+  text: string
+  tone: 'ok' | 'danger' | 'warn' | 'neutral' | 'info'
+} {
+  switch (source) {
+    case 'llm_open':
+      return { text: 'LLM开仓', tone: 'info' }
+    case 'llm_close':
+      return { text: 'LLM平仓', tone: 'warn' }
+    case 'user_close':
+      return { text: '用户平仓', tone: 'danger' }
+    case 'liquidation':
+      return { text: '强平', tone: 'danger' }
+    case 'tpsl_close':
+      return { text: '止盈止损', tone: 'warn' }
+    default:
+      return { text: '-', tone: 'neutral' }
+  }
+}

@@ -1,28 +1,28 @@
 /**
- * 权益曲线图：lightweight-charts v5 面积图封装（深色主题，自适应宽度）。
+ * K 线图：lightweight-charts v5 CandlestickSeries 封装（深色主题与 EquityChart 一致，自适应宽度）。
  */
 import { useEffect, useRef } from 'react'
 import {
-  AreaSeries,
+  CandlestickSeries,
   ColorType,
   createChart,
   type IChartApi,
   type ISeriesApi,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { EquityPoint } from '../api/types'
+import type { Candle } from '../api/types'
 
-export default function EquityChart({ data }: { data: EquityPoint[] }) {
+export default function CandleChart({ data }: { data: Candle[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<ISeriesApi<'Area'> | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
 
   // 挂载时创建图表，卸载时销毁
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const chart = createChart(el, {
-      height: 160,
+      height: 280,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
         textColor: '#94a3b8',
@@ -35,12 +35,12 @@ export default function EquityChart({ data }: { data: EquityPoint[] }) {
       rightPriceScale: { borderColor: '#334155' },
       timeScale: { borderColor: '#334155', timeVisible: true, secondsVisible: false },
     })
-    const series = chart.addSeries(AreaSeries, {
-      lineColor: '#38bdf8',
-      topColor: 'rgba(56, 189, 248, 0.25)',
-      bottomColor: 'rgba(56, 189, 248, 0.02)',
-      lineWidth: 2,
-      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: '#10b981',
+      downColor: '#f43f5e',
+      wickUpColor: '#10b981',
+      wickDownColor: '#f43f5e',
+      borderVisible: false,
     })
     chartRef.current = chart
     seriesRef.current = series
@@ -64,17 +64,20 @@ export default function EquityChart({ data }: { data: EquityPoint[] }) {
   useEffect(() => {
     const series = seriesRef.current
     if (!series || data.length === 0) return
-    const points = data
-      .map((p) => ({
-        time: Math.floor(new Date(p.time).getTime() / 1000) as UTCTimestamp,
-        value: p.equity,
+    const bars = data
+      .map((k) => ({
+        time: k.t as UTCTimestamp,
+        open: k.o,
+        high: k.h,
+        low: k.l,
+        close: k.c,
       }))
       .sort((a, b) => (a.time as number) - (b.time as number))
       // 防御：重复 time 会让 setData 抛异常
-      .filter((p, i, arr) => i === 0 || p.time !== arr[i - 1].time)
-    series.setData(points)
+      .filter((b, i, arr) => i === 0 || b.time !== arr[i - 1].time)
+    series.setData(bars)
     chartRef.current?.timeScale().fitContent()
   }, [data])
 
-  return <div ref={containerRef} className="w-full" data-testid="equity-chart" />
+  return <div ref={containerRef} className="w-full" data-testid="candle-chart" />
 }
