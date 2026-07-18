@@ -207,6 +207,20 @@ async def test_agent_start_stop_callbacks_drive_scheduler(build_ctx):
     assert deps.status_provider()["agent_running"] is False
 
 
+async def test_agent_start_fires_first_round_immediately(build_ctx):
+    """手动启动立即抢醒首轮（而非干等 default_wake_minutes 后的首个定时唤醒）。"""
+    ctx = await build_ctx()
+    deps = ctx.server_deps
+    assert deps is not None
+    await deps.agent_start()
+    try:
+        first = await asyncio.wait_for(ctx.event_queue.get(), timeout=5)
+    finally:
+        await deps.agent_stop()
+    assert first["type"] == "round_start"
+    assert first["data"]["wake_source"] == "manual_start"
+
+
 async def test_status_provider_includes_in_round(build_ctx):
     """status_provider 暴露 in_round 键（未运行时为 False），供 /api/agent/live 实时展示。"""
     ctx = await build_ctx()

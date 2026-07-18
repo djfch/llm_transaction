@@ -338,6 +338,12 @@ def _build_server(
         """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。"""
         ctx.gateway.reset_account(equity)  # type: ignore[attr-defined]
 
+    async def agent_start() -> None:
+        """手动启动 agent：启动调度器并立即抢醒第一轮（用户点击"启动"的合理预期是
+        马上开始决策，而非干等 default_wake_minutes 后的首个定时唤醒）。"""
+        await ctx.scheduler.start()
+        ctx.scheduler.wake_now("manual_start")
+
     deps = ServerDeps(
         repo=ctx.repo,
         audit_trail=audit,
@@ -347,7 +353,7 @@ def _build_server(
         on_kill_switch=on_kill_switch,
         manual_close=manual_close,
         paper_reset=paper_reset if isinstance(ctx.gateway, PaperGateway) else None,
-        agent_start=ctx.scheduler.start,
+        agent_start=agent_start,
         agent_stop=ctx.scheduler.stop,
         llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
         runtime_settings=settings,
