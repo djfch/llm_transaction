@@ -19,6 +19,7 @@ from src.agent.context import compute_equity, summarize_candles
 from src.config import RiskConfig
 from src.gateway.base import Gateway, GatewayError
 from src.market.candles import CandleCache
+from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.market.triggers import TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
@@ -130,8 +131,7 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 
 async def get_market_data(deps: ToolDeps, args: dict) -> ToolOutcome:
     contract = _need_str(args, "contract")
-    intervals = {"10s", "1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "7d"}
-    interval = _opt_enum(args, "interval", intervals) or "1h"
+    interval = _opt_enum(args, "interval", set(GATE_CANDLE_INTERVALS)) or "1h"
     limit = _clamp(_opt_int(args, "limit", 24), 1, 100)
     candles = deps.candles.get_recent(contract, interval, limit)
     lines = [summarize_candles(contract, interval, candles)]

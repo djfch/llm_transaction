@@ -10,8 +10,11 @@ from __future__ import annotations
 from collections import deque
 from typing import Protocol
 
+from ..audit.logger import get_logger
 from ..gateway.base import Candle, Gateway, Ticker
 from .feed import CandleHandler, TickerHandler, maybe_await
+
+logger = get_logger(__name__)
 
 # Gate REST candlesticks 单次上限（实现计划附录，已核实）
 REST_CANDLE_LIMIT = 2000
@@ -80,12 +83,22 @@ class CandleCache:
         source.set_handlers(on_candle=self.on_candle)
 
     def backfill(self, contracts: list[str], intervals: list[str], limit: int = 200) -> None:
-        """REST 补历史。只用 limit（与 from/to 互斥），limit≤2000。"""
+        """REST 补历史。只用 limit（与 from/to 互斥），limit≤2000。
+
+        单个 (contract, interval) 失败只记 warning 并跳过：15 周期 × N 合约下
+        任一周期被 REST 拒绝都不能拖垮其余周期（含 1h）的回补。
+        """
         if limit > REST_CANDLE_LIMIT:
             raise ValueError(f"limit 不能超过 {REST_CANDLE_LIMIT}")
         for contract in contracts:
             for interval in intervals:
-                candles = self._gateway.get_candlesticks(contract, interval, limit=limit)
+                try:
+                    candles = self._gateway.get_candlesticks(contract, interval, limit=limit)
+                except Exception:
+                    logger.warning(
+                        "K 线回补失败（%s %s），跳过该周期", contract, interval, exc_info=True
+                    )
+                    continue
                 candles = sorted(candles, key=lambda c: c.t)
                 self._bars[(contract, interval)] = deque(
                     candles[-self._maxlen :], maxlen=self._maxlen

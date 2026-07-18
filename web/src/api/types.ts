@@ -46,7 +46,7 @@ export interface ToolCall {
   seq: number // 调用序号
   tool: string // 工具名
   args: Record<string, unknown> | string // 调用入参（已解析为对象，也可能是字符串）
-  risk_verdict: string // 风控判定：allow / deny
+  risk_verdict: string // 风控判定：allow / deny / 空串(未入风控：非交易工具，或交易工具参数校验失败)
   risk_reason: string // 风控理由（deny 时给出）
   result: string | Record<string, unknown> // 执行结果（已解析为对象，也可能是字符串）
   duration_ms: number // 耗时（毫秒）
@@ -214,8 +214,8 @@ export interface KillSwitchResult {
 
 /**
  * WS 推送消息：/ws → {type, data}
- * 注意（一期实际契约）：后端当前只广播 {type:'round'} 与 hello；trade/position/ticker 为预留类型，
- * 后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
+ * 一期实际契约：后端广播 hello / round_start / round / ticker（按合约节流，data={contract,last}）；
+ * trade/position 为预留类型，后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
  */
 export type WsMessage =
   | { type: 'round_start'; data: { wake_source: string } }

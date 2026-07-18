@@ -15,10 +15,11 @@ from pydantic import BaseModel, Field
 from src.config import load_watchlist
 from src.config_io import read_settings_raw, write_settings
 from src.gateway.base import GatewayError
+from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.server.deps import ServerDeps
 
-# K 线周期白名单（与 Gate 支持的粒度对齐）
-_CANDLE_INTERVALS = frozenset({"1m", "5m", "15m", "1h", "4h", "1d"})
+# K 线周期白名单（单一数据源：Gate 全周期，REST 实时查询天然支持）
+_CANDLE_INTERVALS = frozenset(GATE_CANDLE_INTERVALS)
 
 
 class PaperResetBody(BaseModel):

@@ -11,17 +11,21 @@ function resultText(result: ToolCall['result']): string {
 }
 
 export default function ToolCallItem({ call }: { call: ToolCall }) {
-  const denied = call.risk_verdict !== 'allow'
+  // 风控判定三态：deny=拒绝 / allow=放行 / 空串=未入风控（非交易工具，或交易工具参数校验失败）
+  const denied = call.risk_verdict === 'deny'
+  const badge =
+    call.risk_verdict === 'deny'
+      ? { text: 'deny(风控拒绝)', tone: 'danger' as const }
+      : call.risk_verdict === 'allow'
+        ? { text: 'allow(风控放行)', tone: 'ok' as const }
+        : { text: '免判(未入风控)', tone: 'neutral' as const }
   return (
     <details className="group rounded-lg border border-slate-800 bg-slate-900/60" open={denied}>
       <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm">
         <span className="text-slate-500 transition-transform group-open:rotate-90">▸</span>
         <span className="font-mono text-xs text-slate-500">#{call.seq}</span>
         <span className="font-medium text-slate-200">{call.tool}</span>
-        <Badge
-          text={denied ? 'deny(风控拒绝)' : 'allow(风控放行)'}
-          tone={denied ? 'danger' : 'ok'}
-        />
+        <Badge text={badge.text} tone={badge.tone} />
         <span className="ml-auto text-xs tabular-nums text-slate-500">
           duration_ms(耗时)={call.duration_ms}ms
         </span>

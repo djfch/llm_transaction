@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-# Gate K 线 interval 合法枚举（实现计划附录，已核实）
-_INTERVALS = ["10s", "1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "7d"]
+from src.market.intervals import GATE_CANDLE_INTERVALS
+
+# Gate K 线 interval 合法枚举（单一数据源：src/market/intervals.py，覆盖 Gate 全周期）
+_INTERVALS = list(GATE_CANDLE_INTERVALS)
 
 SCHEMAS: dict[str, dict[str, Any]] = {
     "get_market_data": {

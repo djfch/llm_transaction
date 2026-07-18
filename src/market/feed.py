@@ -147,6 +147,8 @@ class MarketFeed:
 
     async def _handle_ticker(self, conn: Connection, response: WebSocketResponse) -> None:
         if response.error or response.event != "update":
+            if response.error:
+                logger.warning("ticker 频道异常 ACK（订阅可能被拒）：%s", response.error)
             return
         for raw in response.result or []:
             try:
@@ -162,6 +164,8 @@ class MarketFeed:
 
     async def _handle_candle(self, conn: Connection, response: WebSocketResponse) -> None:
         if response.error or response.event != "update":
+            if response.error:
+                logger.warning("K 线频道异常 ACK（订阅可能被拒）：%s", response.error)
             return
         for raw in response.result or []:
             try:

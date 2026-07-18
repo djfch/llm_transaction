@@ -1,9 +1,12 @@
 /**
  * K 线卡片：合约下拉（来自 watchlist）+ 周期下拉，切换即重新取数渲染 CandleChart。
+ * 头部显示 WS 实时最新价（ticker 推送，仅当前选中合约）。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { useWs } from '../hooks/useWs'
+import { fmtPrice } from '../utils/format'
 import CandleChart from './CandleChart'
 import Card from './Card'
 import StateHint from './StateHint'
@@ -31,6 +34,16 @@ export default function CandleCard() {
     [contract, interval],
   )
 
+  // WS ticker 推送 → 实时最新价（只收当前选中合约：多合约交替推送时旧值不被覆盖闪烁；
+  // 渲染守卫 live.contract === contract 兜底，切合约后等新合约首条推送再上屏）
+  const { lastMessage } = useWs()
+  const [live, setLive] = useState<{ contract: string; last: number } | null>(null)
+  useEffect(() => {
+    if (lastMessage?.type === 'ticker' && lastMessage.data.contract === contract) {
+      setLive(lastMessage.data)
+    }
+  }, [lastMessage, contract])
+
   // watchlist 失败要透出错误（否则 contract 永远为空、卡片永久"加载中"）
   const loading = watchlistQ.loading || (contract !== '' && candlesQ.loading)
   const error = watchlistQ.error ?? candlesQ.error
@@ -41,6 +54,12 @@ export default function CandleCard() {
       title="K线 candles"
       extra={
         <div className="flex items-center gap-3 text-xs text-slate-400">
+          {live && live.contract === contract && (
+            <span data-testid="live-price" className="tabular-nums text-sky-400">
+              last(最新价) {fmtPrice(live.last)}
+              <span className="ml-1 text-slate-500">· WS实时</span>
+            </span>
+          )}
           <label className="flex items-center gap-2">
             contract(合约)
             <select value={contract} onChange={(e) => setContract(e.target.value)} className={selectClass}>

@@ -56,6 +56,6 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 ```bash
 uv run python scripts/smoke_paper.py 300      # paper + mock LLM 冒烟（参数为秒数），断言审计落库
 uv run python scripts/check_gateway_public.py # Gate 公共 REST 连通性（无签名）
-uv run python scripts/check_feed.py           # WS 行情实连打印 30 秒 ticker
+uv run python scripts/check_feed.py           # WS 行情实连：30 秒 ticker + 全周期 K 线订阅核对
 uv run python scripts/testnet_roundtrip.py    # testnet 开平仓+调杠杆闭环（需 .env 配 testnet key）
 ```

@@ -30,6 +30,7 @@ from src.gateway.base import Candle, Contract, Gateway, Ticker
 from src.gateway.gate_rest import GateRestGateway
 from src.market.candles import CandleCache, ManualPriceSource, PriceSource
 from src.market.feed import MarketFeed
+from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.market.triggers import TriggerManager, make_fire_callback, rebuild_from_repo
 from src.memory.db import Database
 from src.memory.repo import Repo
@@ -42,7 +43,9 @@ from src.server.deps import ServerDeps
 
 logger = get_logger(__name__)
 
-CANDLE_INTERVALS = ["1h"]  # 订阅的 K 线周期（上下文组装用）
+# 订阅+回补的 K 线周期：Gate 全周期（单一数据源在 src/market/intervals.py），
+# LLM get_market_data 可查任意周期；WS 逐根滚动、启动时 REST 回补均遍历此列表
+CANDLE_INTERVALS: list[str] = list(GATE_CANDLE_INTERVALS)
 
 
 @dataclass
@@ -171,7 +174,8 @@ def _build_source(settings: Settings, watchlist: Watchlist, mock_market: bool) -
 
 
 def _backfill_candles(candles: CandleCache, contracts: list[str], *, skip: bool) -> None:
-    """启动时 REST 回补历史 K 线；失败降级为告警（WS 仍会逐根积累），不阻断启动。"""
+    """启动时 REST 回补历史 K 线。单个周期失败由 backfill 内部隔离记 warning；
+    本层 try 仅兜底非周期性异常（WS 仍会逐根积累），不阻断启动。"""
     if skip:  # mock 行情且无注入 provider：不做真实 REST 回补（可无网运行）
         return
     try:
@@ -180,8 +184,19 @@ def _backfill_candles(candles: CandleCache, contracts: list[str], *, skip: bool)
         logger.warning("K 线历史回补失败，WS 将逐根积累", exc_info=True)
 
 
-def _make_on_ticker(gateway: Gateway, triggers: TriggerManager) -> Callable[[Ticker], None]:
-    """ticker 总闸：paper 撮合与触发器检查各自捕获异常记日志，不外抛（护住 WS 任务）。"""
+def _make_on_ticker(
+    gateway: Gateway,
+    triggers: TriggerManager,
+    broadcast: Callable[[dict], None] | None = None,
+    *,
+    broadcast_interval: float = 1.0,
+) -> Callable[[Ticker], None]:
+    """ticker 总闸：paper 撮合、触发器检查、WS 行情广播各自捕获异常记日志，不外抛（护住 WS 任务）。
+
+    broadcast：每合约按 broadcast_interval 秒节流后推 {"type":"ticker",...}（前端实时价）；
+    last 转 float（Decimal 无法被 ws send_json 序列化）。
+    """
+    last_sent: dict[str, float] = {}
 
     def on_ticker(ticker: Ticker) -> None:
         if isinstance(gateway, PaperGateway):
@@ -193,6 +208,19 @@ def _make_on_ticker(gateway: Gateway, triggers: TriggerManager) -> Callable[[Tic
             triggers.check(ticker.contract, ticker.last)
         except Exception:
             logger.exception("触发器检查异常（%s）", ticker.contract)
+        if broadcast is not None:
+            now = time.monotonic()
+            if now - last_sent.get(ticker.contract, float("-inf")) >= broadcast_interval:
+                last_sent[ticker.contract] = now
+                try:
+                    broadcast(
+                        {
+                            "type": "ticker",
+                            "data": {"contract": ticker.contract, "last": float(ticker.last)},
+                        }
+                    )
+                except Exception:
+                    logger.exception("ticker 广播异常（%s）", ticker.contract)
 
     return on_ticker
 
@@ -272,8 +300,11 @@ async def build_app(
     scheduler = WakeupScheduler(settings.scheduler, on_wake)
     triggers = TriggerManager(make_fire_callback(repo, scheduler.wake_now))
     await rebuild_from_repo(repo, triggers)  # 重启后从 active 告警行重建预警线
-    source.set_handlers(on_ticker=_make_on_ticker(gateway, triggers))
     event_queue: asyncio.Queue = asyncio.Queue()
+    # ticker 广播进 WS 事件流：on_ticker 经 maybe_await 在事件循环线程同步调用，put_nowait 安全
+    source.set_handlers(
+        on_ticker=_make_on_ticker(gateway, triggers, lambda msg: event_queue.put_nowait(msg))
+    )
     loop = _build_loop(
         settings,
         watchlist,

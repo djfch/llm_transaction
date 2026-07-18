@@ -1,6 +1,8 @@
 """WebSocket /ws：连接管理器与事件广播。
 
-当前广播事件：新决策轮（{"type": "round", ...}，由主程序经注入的 event_queue 放入）。
+当前广播事件（均由主程序经注入的 event_queue 放入）：
+- {"type": "round_start", ...} 决策轮开始、{"type": "round", ...} 决策轮结束
+- {"type": "ticker", "data": {"contract", "last"}} 行情推送（bootstrap 按合约节流）
 成交/持仓变化推送为一期未实现的扩展位：主程序往队列放任意 JSON 字典，
 pump_events 都会广播给全部连接。连接建立时先回一条 hello 握手消息。
 """

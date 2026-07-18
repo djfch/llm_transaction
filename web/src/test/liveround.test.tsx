@@ -143,6 +143,31 @@ describe('实时决策卡 LiveRoundCard', () => {
     expect(screen.getByText(/equity=10842\.36/)).toBeInTheDocument()
   })
 
+  // ---------- 风控徽标三态（回归：空串曾被误判为 deny） ----------
+  // 非交易工具不过风控引擎，落库 risk_verdict 为空串，此前 !=='allow' 被判成 deny
+
+  it('徽标三态：空串（未入风控）显示"免判(未入风控)"，默认收起', () => {
+    const { container } = render(<ToolCallItem call={{ ...sampleCall, risk_verdict: '' }} />)
+    expect(screen.getByText('免判(未入风控)')).toBeInTheDocument()
+    expect(screen.queryByText('deny(风控拒绝)')).not.toBeInTheDocument()
+    expect(container.querySelector('details')!).not.toHaveAttribute('open')
+  })
+
+  it('徽标三态：deny 显示"deny(风控拒绝)"，默认展开并露出风控理由', () => {
+    const { container } = render(
+      <ToolCallItem call={{ ...sampleCall, risk_verdict: 'deny', risk_reason: '单仓超限' }} />,
+    )
+    expect(screen.getByText('deny(风控拒绝)')).toBeInTheDocument()
+    expect(container.querySelector('details')!).toHaveAttribute('open')
+    expect(screen.getByText('单仓超限')).toBeInTheDocument()
+  })
+
+  it('徽标三态：allow 显示"allow(风控放行)"，默认收起', () => {
+    const { container } = render(<ToolCallItem call={sampleCall} />)
+    expect(screen.getByText('allow(风控放行)')).toBeInTheDocument()
+    expect(container.querySelector('details')!).not.toHaveAttribute('open')
+  })
+
   it('WS round_start(轮开始) 消息触发即时刷新（回归：此前只监听 round，稳态看不到"决策中"）', async () => {
     getAgentLive.mockResolvedValue(doneState)
     const { rerender } = render(<LiveRoundCard />)

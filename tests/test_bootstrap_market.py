@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from decimal import Decimal
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from src.bootstrap import AppContext, build_app
+from src.bootstrap import AppContext, _make_on_ticker, build_app
 from src.config import Settings, Watchlist
 from src.gateway.base import Candle, Ticker
 from src.market.feed import MarketFeed
@@ -157,6 +158,17 @@ async def test_feed_candle_callback_error_logged_not_raised(caplog):
     assert any("K 线回调异常" in r.message for r in caplog.records)
 
 
+async def test_feed_error_ack_logged_not_silent(caplog):
+    """订阅/推送 ACK 报错：记 warning 不静默（此前直接 return，订阅被拒不可见）。"""
+    feed = MarketFeed([BTC], ["1h"])
+    resp = _Response([])
+    resp.error = {"message": "invalid interval"}  # type: ignore[assignment]
+    with caplog.at_level(logging.WARNING, logger="src.market.feed"):
+        await feed._handle_ticker(None, resp)  # type: ignore[arg-type]
+        await feed._handle_candle(None, resp)  # type: ignore[arg-type]
+    assert sum("ACK" in r.message for r in caplog.records) == 2
+
+
 # ---------- K 线启动回补（P1-#10） ----------
 
 
@@ -174,6 +186,25 @@ async def test_build_app_backfills_candles_with_injected_provider(build_ctx):
     recent = ctx.candles.get_recent(BTC, "1h", 200)
     assert [c.t for c in recent] == [3600 * i for i in range(1, 11)]
     assert len(ctx.gateway.get_candlesticks(BTC, "1h", 5)) == 10  # provider 已注入 paper 网关
+    # 全周期回补：LLM 可查任意周期（回归：此前只有 1h，4h/15m 查得"无 K 线数据"）
+    assert ctx.candles.get_recent(BTC, "4h", 5)
+    assert ctx.candles.get_recent(BTC, "1w", 5)
+
+
+async def test_backfill_single_interval_failure_isolated(build_ctx, caplog):
+    """单个周期回补失败不影响其他周期（回归：15 周期下一败全停，1h 都会被拖没）。"""
+
+    def only_10s_fails(contract, interval, limit, from_ts, to_ts):
+        if interval == "10s":
+            raise RuntimeError("10s 不可用")
+        return _fake_provider(contract, interval, limit, from_ts, to_ts)
+
+    with caplog.at_level(logging.WARNING, logger="src.market.candles"):
+        ctx = await build_ctx(candle_provider=only_10s_fails)
+    assert ctx.candles.get_recent(BTC, "10s", 5) == []  # 失败周期为空
+    assert ctx.candles.get_recent(BTC, "1h", 5)  # 其余周期照常回补
+    assert ctx.candles.get_recent(BTC, "4h", 5)
+    assert any("回补失败" in r.message for r in caplog.records)
 
 
 async def test_build_app_backfill_failure_degrades_to_warning(build_ctx, caplog):
@@ -193,3 +224,56 @@ async def test_mock_market_without_provider_skips_backfill(build_ctx):
     ctx = await build_ctx()
     assert ctx.candles.get_recent(BTC, "1h", 5) == []
     assert ctx.gateway.get_candlesticks(BTC, "1h", 5) == []  # 未注入 provider
+
+
+# ---------- ticker WS 广播（前端实时价） ----------
+
+
+async def test_on_ticker_broadcast_throttled_per_contract(build_ctx):
+    """同合约节流窗口内连推两条：只广播首条；载荷对齐前端契约且 last 为 float。"""
+    ctx = await build_ctx()
+    await ctx.source.push_ticker(_ticker(Decimal("60000")))  # type: ignore[attr-defined]
+    await ctx.source.push_ticker(_ticker(Decimal("60001")))  # type: ignore[attr-defined]
+
+    evt = ctx.event_queue.get_nowait()
+    assert evt == {"type": "ticker", "data": {"contract": BTC, "last": 60000.0}}
+    assert isinstance(evt["data"]["last"], float)  # Decimal 会让 ws send_json 序列化崩
+    with pytest.raises(asyncio.QueueEmpty):
+        ctx.event_queue.get_nowait()  # 第二条被节流，队列无残余
+
+
+async def test_on_ticker_broadcast_interval_zero_sends_all(build_ctx):
+    """broadcast_interval=0 关闭节流：逐条广播（验证节流窗口语义本身生效）。"""
+    ctx = await build_ctx()
+    sent: list[dict] = []
+    handler = _make_on_ticker(ctx.gateway, ctx.triggers, sent.append, broadcast_interval=0)
+    handler(_ticker(Decimal("1")))
+    handler(_ticker(Decimal("2")))
+    assert [e["data"]["last"] for e in sent] == [1.0, 2.0]
+
+
+async def test_on_ticker_broadcast_error_logged_not_raised(build_ctx, caplog):
+    """广播异常：记日志不外抛（与撮合/触发器防护同级，护住 WS 任务）。"""
+    ctx = await build_ctx()
+
+    def boom(msg: dict) -> None:
+        raise RuntimeError("广播故障")
+
+    handler = _make_on_ticker(ctx.gateway, ctx.triggers, boom)
+    with caplog.at_level(logging.ERROR, logger="src.bootstrap"):
+        handler(_ticker(Decimal("60000")))
+    assert any("广播异常" in r.message for r in caplog.records)
+
+
+# ---------- K 线周期单一数据源（回归：LLM 查 4h/15m 曾"无 K 线数据"） ----------
+
+
+def test_candle_intervals_single_source():
+    """LLM 工具可请求周期 ⊆ 缓存订阅回补周期，且三处引用同一常量（防漂移）。"""
+    from src.agent import tool_schemas
+    from src.bootstrap import CANDLE_INTERVALS
+    from src.market.intervals import GATE_CANDLE_INTERVALS
+
+    assert CANDLE_INTERVALS == list(GATE_CANDLE_INTERVALS)
+    assert tool_schemas._INTERVALS == list(GATE_CANDLE_INTERVALS)
+    assert set(tool_schemas._INTERVALS) <= set(CANDLE_INTERVALS)
