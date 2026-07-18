@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { useWs } from '../hooks/useWs'
+import { intervalToSec } from '../utils/candleLive'
 import { fmtPrice } from '../utils/format'
 import CandleChart from './CandleChart'
 import Card from './Card'
@@ -84,7 +85,13 @@ export default function CandleCard() {
       }
     >
       <StateHint loading={loading} error={error} empty={empty}>
-        {candlesQ.data && <CandleChart data={candlesQ.data} />}
+        {candlesQ.data && (
+          <CandleChart
+            data={candlesQ.data}
+            livePrice={live && live.contract === contract ? live.last : null}
+            intervalSec={intervalToSec(interval)}
+          />
+        )}
       </StateHint>
     </Card>
   )
