@@ -33,6 +33,8 @@ tests/                       # pytest
 scripts/                     # 手动验证脚本（不进测试套件）
 ```
 
+运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `system_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。
+
 ## 硬性规范
 
 1. **风控安全**：`src/risk/` 覆盖率必须 100%；任何交易类工具必须先过风控；交易所 key 只读 `.env`，永不进 API 响应/日志/前端

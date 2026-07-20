@@ -67,5 +67,7 @@ jobs:
       - name: 构建前端
         working-directory: web
         run: npm run build
+      - name: 准备运行时配置（模板复制，文件不入库）
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
       - name: 整机冒烟（真实端口 + dist 静态托管 + 操作链）
         run: uv run python scripts/e2e_web_smoke.py
