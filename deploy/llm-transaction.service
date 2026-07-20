@@ -1,0 +1,19 @@
+# systemd --user 服务模板：部署机首次配置时复制到 ~/.config/systemd/user/llm-transaction.service
+# 并替换两个占位符：{{DEPLOY_USER}}（登录用户名）、{{DEPLOY_PATH}}（仓库路径，如 /opt/llm_transaction）
+# 然后：systemctl --user daemon-reload && systemctl --user enable --now llm-transaction
+# 开机自启需：sudo loginctl enable-linger {{DEPLOY_USER}}
+[Unit]
+Description=LLM 交易 Agent（Gate.io 永续）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{DEPLOY_PATH}}
+ExecStart=/home/{{DEPLOY_USER}}/.local/bin/uv run python -m src.main
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
