@@ -16,6 +16,8 @@ jobs:
           python-version: "3.11"
       - name: 安装依赖
         run: uv sync --frozen
+      - name: 准备运行时配置（模板复制，部分测试用 build_app 默认路径读取）
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
       - name: ruff check
         run: uv run ruff check src tests scripts
       - name: ruff format --check
