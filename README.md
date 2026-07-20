@@ -48,6 +48,30 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 - 契约测试：`tests/test_contract.py`（进常规 pytest 套件），冻结前端消费的全部端点响应键/类型（与 `web/src/api/types.ts` 对齐），含密钥泄漏递归扫描护栏
 - 整机冒烟：`scripts/e2e_web_smoke.py`，真实端口 + dist 静态托管 + paper reset 操作链；CI e2e job 自动运行，本地运行需先 `cd web && npm run build`
 
+## CD 持续部署（Linux 服务器，手动触发）
+
+GitHub Actions → CD → Run workflow → 输入 `deploy`。流程：云端构建前端 dist → SSH 上传 → 服务器执行 `scripts/deploy.sh`（拉代码 → uv sync → 优雅停 agent 并等决策轮结束 → 重启 → 健康检查 → 失败自动回滚）。
+
+**一次性服务器准备**（Ubuntu/Debian 示例）：
+
+```bash
+# 依赖：git + uv（前端 dist 由云端构建，服务器无需 Node）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone https://github.com/djfch/llm_transaction.git /opt/llm_transaction && cd /opt/llm_transaction
+cp .env.example .env && $EDITOR .env   # 填交易所/LLM key
+cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
+uv sync
+
+# systemd --user 服务（占位符见文件头注释）
+mkdir -p ~/.config/systemd/user
+cp deploy/llm-transaction.service ~/.config/systemd/user/ && $EDITOR ~/.config/systemd/user/llm-transaction.service
+systemctl --user daemon-reload && systemctl --user enable --now llm-transaction
+sudo loginctl enable-linger "$USER"      # 注销后服务保活
+curl http://127.0.0.1:17577/api/status   # 首启健康检查
+```
+
+**GitHub 仓库配置**：Secrets 加 `SSH_PRIVATE_KEY`（部署用私钥，公钥已放服务器 `~/.ssh/authorized_keys`）、`SERVER_HOST`、`SERVER_USER`；Variables 加 `DEPLOY_PATH`（如 `/opt/llm_transaction`）、`SERVER_PORT`（非 22 时）。
+
 ## 配置说明
 
 - `config.yaml`、`watchlist.yaml`、`system_prompt.md` 为运行时文件（会被 API/程序写回），**不入库**；仓库只存 `.example` 模板，克隆后需复制（见快速开始）

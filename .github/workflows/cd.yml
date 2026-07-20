@@ -1,0 +1,69 @@
+name: CD
+
+# 持续部署：手动触发（workflow_dispatch），构建前端 dist → SSH 到 Linux 服务器执行 scripts/deploy.sh。
+# 需要的仓库配置：
+#   secrets: SSH_PRIVATE_KEY / SERVER_HOST / SERVER_USER
+#   vars:    DEPLOY_PATH（服务器上仓库路径）/ SERVER_PORT（可选，默认 22）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "输入 deploy 确认部署（交易进程将被优雅重启）"
+        required: true
+        default: ""
+
+# 同一时刻只允许一个部署在进行，避免并发重启交易进程
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  build-dist:
+    if: github.event.inputs.confirm == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 构建前端
+        working-directory: web
+        run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7
+
+  deploy:
+    needs: build-dist
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      SERVER_PORT: ${{ vars.SERVER_PORT || '22' }}
+    steps:
+      - uses: actions/checkout@v4 # 仅需仓库里的 scripts/deploy.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: 打包 dist
+        run: tar -czf dist.tgz -C web dist
+      - name: 配置 SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SERVER_PORT" "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+      - name: 上传 dist 到服务器
+        run: |
+          scp -i ~/.ssh/deploy_key -P "$SERVER_PORT" dist.tgz \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${DEPLOY_PATH}/dist.tgz"
+      - name: 服务器执行部署脚本
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SERVER_PORT" \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "cd ${DEPLOY_PATH} && bash scripts/deploy.sh"
