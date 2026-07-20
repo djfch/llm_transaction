@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gate·LLM Desk — 方案 A 专业交易终端（静态预览）</title>
+<!-- 等宽数字字体（离线时回退系统等宽字体，不影响预览） -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- Tailwind 3 CDN，仅用于原型，无构建步骤 -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // 终端风配色：近黑底 + 细边框 + 绿涨红跌 + 琥珀告警
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:   '#0a0e14', // 页面底色
+          panel: '#0c1118', // 面板底
+          panel2:'#0e141d', // 面板头底
+          line:  '#1b2430', // 细边框
+          line2: '#28344a', // 高亮边框
+          txt:   '#c7d2e0', // 主文字
+          dim:   '#66778c', // 次级文字
+          up:    '#45d093', // 涨 / ALLOW
+          down:  '#ef6355', // 跌 / DENY
+          amber: '#e0a83e', // 告警 / 进行中
+          accent:'#5aa9e6', // 信息蓝
+        },
+        fontFamily: {
+          mono: ['"JetBrains Mono"','ui-monospace','SFMono-Regular','Menlo','Consolas','monospace'],
+        }
+      }
+    }
+  }
+</script>
+<style>
+  /* ========== 基础：高密度终端 ========== */
+  html,body{background:#0a0e14;color:#c7d2e0;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;}
+  .num{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;}
+  /* 面板：细边框分割，直角，拒绝大圆角卡片 */
+  .panel{border:1px solid #1b2430;background:#0c1118;display:flex;flex-direction:column;min-height:0;}
+  .panel-h{display:flex;align-items:center;gap:8px;padding:4px 10px;border-bottom:1px solid #1b2430;background:#0e141d;
+           font-size:11px;color:#7d8da3;letter-spacing:.06em;flex-shrink:0;}
+  .panel-b{flex:1;min-height:0;overflow:auto;}
+  /* 徽标 / 按钮 / 圆点 */
+  .badge{border:1px solid;padding:0 5px;font-size:10px;line-height:16px;border-radius:2px;white-space:nowrap;font-family:"JetBrains Mono",monospace;}
+  .btn{border:1px solid #28344a;background:transparent;color:#c7d2e0;font-size:11px;padding:2px 9px;border-radius:2px;cursor:pointer;white-space:nowrap;transition:all .15s;}
+  .btn:hover{border-color:#5aa9e6;color:#5aa9e6;}
+  .btn-danger{border-color:rgba(239,99,85,.5);color:#ef6355;}
+  .btn-danger:hover{background:rgba(239,99,85,.12);border-color:#ef6355;color:#ef6355;}
+  .btn-amber{border-color:rgba(224,168,62,.5);color:#e0a83e;}
+  .btn-amber:hover{background:rgba(224,168,62,.1);border-color:#e0a83e;color:#e0a83e;}
+  .dot{width:6px;height:6px;border-radius:9999px;display:inline-block;}
+  /* 表格：紧凑行 + 细横线 */
+  table.term{width:100%;border-collapse:collapse;font-size:11px;}
+  table.term th{position:sticky;top:0;background:#0e141d;color:#66778c;font-weight:500;text-align:right;padding:4px 10px;border-bottom:1px solid #1b2430;white-space:nowrap;z-index:1;}
+  table.term th:first-child,table.term td:first-child{text-align:left;}
+  table.term th.l,table.term td.l{text-align:left;}
+  table.term td{padding:4px 10px;border-bottom:1px solid #141b25;text-align:right;white-space:nowrap;}
+  table.term tbody tr:hover{background:#101826;}
+  /* 终端日志行 */
+  .log{font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.65;}
+  .log .t{color:#4d5f76;margin-right:8px;}
+  .log .sub{padding-left:118px;color:#66778c;}
+  /* 闪烁光标：模拟流式输出 */
+  .cursor{display:inline-block;width:7px;height:13px;background:#e0a83e;vertical-align:-2px;animation:blink 1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+  /* 顶部 Tab 切换 */
+  .tabbtn{font-size:12px;padding:4px 14px;border:1px solid transparent;border-bottom:none;color:#66778c;cursor:pointer;border-radius:2px 2px 0 0;}
+  .tabbtn:hover{color:#c7d2e0;}
+  .tabbtn.active{color:#c7d2e0;background:#0c1118;border-color:#1b2430;position:relative;}
+  .tabbtn.active::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:#0c1118;}
+  /* 细滚动条 */
+  ::-webkit-scrollbar{width:8px;height:8px;}
+  ::-webkit-scrollbar-thumb{background:#1e2a3a;border-radius:0;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  /* 配置输入框 */
+  .cfg-input{background:#0a0e14;border:1px solid #28344a;color:#c7d2e0;font-family:"JetBrains Mono",monospace;font-size:11px;padding:3px 8px;border-radius:2px;width:110px;text-align:right;}
+  .cfg-input:focus{outline:none;border-color:#5aa9e6;}
+  details>summary{cursor:pointer;color:#66778c;list-style:none;}
+  details>summary::before{content:"▸ ";color:#4d5f76;}
+  details[open]>summary::before{content:"▾ ";}
+  details>summary:hover{color:#c7d2e0;}
+</style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden text-[13px]">
+
+<!-- ================= 1. 顶部状态栏 ================= -->
+<header class="flex items-center gap-3 px-3 h-10 border-b border-line bg-panel shrink-0 text-[12px]">
+  <div class="pr-3 border-r border-line font-mono font-bold tracking-widest text-txt">GATE·LLM <span class="text-dim font-medium">DESK</span></div>
+  <!-- 运行模式 -->
+  <span class="badge border-amber/60 text-amber">PAPER · 模拟盘</span>
+  <!-- Agent 状态 -->
+  <span class="flex items-center gap-1.5 text-up"><i class="dot bg-up"></i>Agent 运行中</span>
+  <span class="flex items-center gap-1.5 text-amber"><i class="dot bg-amber animate-pulse"></i>决策轮 <span class="num">#1044</span> 进行中</span>
+  <!-- 手动干预 -->
+  <button class="btn">■ 停止 Agent</button>
+  <button class="btn btn-danger" title="熔断：立即撤单并市价全平">⏻ KILL SWITCH</button>
+  <!-- 右侧：LLM / WS / 时钟 /  uptime -->
+  <div class="ml-auto flex items-center gap-4 num text-[11px] text-dim">
+    <span>LLM <b class="text-txt font-medium">Moonshot / kimi-k2</b> <span class="text-up">● 已配置</span></span>
+    <span>WS <span class="text-up">●</span> 已连接 <span class="text-txt">12ms</span></span>
+    <span>本地 <span id="clock" class="text-txt">--:--:--</span></span>
+    <span>UPTIME <span id="uptime" class="text-txt">6d 04:17:33</span></span>
+  </div>
+</header>
+
+<!-- ================= 视图 Tab + 方案标注 ================= -->
+<nav class="flex items-end gap-1 px-2 pt-1.5 border-b border-line bg-ink shrink-0">
+  <button class="tabbtn active" data-view="monitor">监控大屏</button>
+  <button class="tabbtn" data-view="config">配置中心</button>
+  <span class="ml-auto mb-1 badge border-amber/50 text-amber tracking-wider">设计方案 A · 专业交易终端风 · 静态预览（模拟数据）</span>
+</nav>
+
+<!-- ================= 视图一：监控大屏 ================= -->
+<main id="view-monitor" class="flex-1 flex flex-col gap-1.5 p-1.5 min-h-0">
+
+  <!-- 2. 账户指标条：三指标 + 当日统计 + 权益小曲线 -->
+  <section class="grid grid-cols-12 gap-1.5 shrink-0">
+    <div class="panel col-span-2 px-3 py-2">
+      <div class="text-[10px] text-dim tracking-widest">账户权益 EQUITY · USDT</div>
+      <div class="num text-[22px] leading-7 text-txt font-medium">10,243.76</div>
+      <div class="num text-[10px] text-up">24h +243.76 (+2.44%)</div>
+    </div>
+    <div class="panel col-span-2 px-3 py-2">
+      <div class="text-[10px] text-dim tracking-widest">可用余额 AVAILABLE</div>
+      <div class="num text-[22px] leading-7 text-txt font-medium">8,187.01</div>
+      <div class="num text-[10px] text-dim">占权益 79.9%</div>
+    </div>
+    <div class="panel col-span-2 px-3 py-2">
+      <div class="text-[10px] text-dim tracking-widest">未实现盈亏 UNREALISED</div>
+      <div class="num text-[22px] leading-7 text-up font-medium">+50.92</div>
+      <div class="num text-[10px] text-dim">BTC <span class="text-up">+14.68</span> · ETH <span class="text-up">+36.24</span></div>
+    </div>
+    <div class="panel col-span-3 px-3 py-2">
+      <div class="text-[10px] text-dim tracking-widest">当日统计 SESSION</div>
+      <div class="num text-[11px] leading-5 text-dim">已实现盈亏 <span class="text-down">-5.38</span> · 成交 <span class="text-txt">8</span> 笔</div>
+      <div class="num text-[11px] leading-5 text-dim">决策轮 <span class="text-txt">44</span> · 风控拒绝 <span class="text-down">2</span> · 熔断 <span class="text-txt">未触发</span></div>
+    </div>
+    <div class="panel col-span-3 px-3 py-1">
+      <div class="flex justify-between items-center text-[10px] text-dim tracking-widest"><span>权益曲线 · 7D</span><span class="num text-up">+4.9%</span></div>
+      <svg id="spark" viewBox="0 0 260 46" class="w-full h-[46px]" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
+
+  <!-- 主区域：左（K线/持仓/成交） 右（实时决策轮/时间线/笔记） -->
+  <section class="flex-1 grid grid-cols-12 gap-1.5 min-h-0">
+
+    <!-- 左列 -->
+    <div class="col-span-7 grid grid-rows-[minmax(0,1.2fr)_auto_minmax(0,0.95fr)] gap-1.5 min-h-0">
+
+      <!-- K线图（SVG 静态示意，JS 以固定种子生成） -->
+      <div class="panel">
+        <div class="panel-h">
+          <b class="text-txt font-medium">BTC_USDT</b><span>永续 · 1h</span>
+          <span class="num text-txt">118,032.00</span><span class="num text-up">+1.42%</span>
+          <span class="ml-auto num">资金费率 0.008% · OI 4.21B · MA10/30</span>
+        </div>
+        <div class="panel-b p-1">
+          <svg id="kline" viewBox="0 0 760 360" class="w-full h-full" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+
+      <!-- 持仓表（表格而非卡片，行内含手动平仓） -->
+      <div class="panel shrink-0">
+        <div class="panel-h">
+          持仓 POSITIONS <span class="num text-txt">2</span>
+          <span class="ml-auto num">总保证金 2,005.83 · 名义仓位占权益 27.7% / 上限 60%</span>
+        </div>
+        <table class="term num">
+          <thead><tr>
+            <th class="l">合约</th><th>方向 / 张数</th><th>开仓价</th><th>标记价</th><th>强平价</th><th>杠杆</th><th>保证金</th><th>未实现盈亏</th><th>ROI</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td class="l text-txt">BTC_USDT</td>
+              <td><span class="text-up">多 +240</span></td>
+              <td>117,420.50</td><td>118,032.00</td>
+              <td class="text-amber">109,864.00</td>
+              <td>5x</td><td>566.55</td>
+              <td class="text-up">+14.68</td><td class="text-up">+2.59%</td>
+              <td><button class="btn btn-danger !py-0 !px-2 !text-[10px]">手动平仓</button></td>
+            </tr>
+            <tr>
+              <td class="l text-txt">ETH_USDT</td>
+              <td><span class="text-down">空 -120</span></td>
+              <td>3,628.40</td><td>3,598.20</td>
+              <td class="text-amber">4,012.60</td>
+              <td>3x</td><td>1,439.28</td>
+              <td class="text-up">+36.24</td><td class="text-up">+2.52%</td>
+              <td><button class="btn btn-danger !py-0 !px-2 !text-[10px]">手动平仓</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 5. 成交记录表：七列 + source 徽标 -->
+      <div class="panel">
+        <div class="panel-h">成交记录 TRADES <span class="num text-txt">今日 8 笔</span>
+          <span class="ml-auto num text-dim">手续费合计 8.29 USDT</span></div>
+        <div class="panel-b">
+        <table class="term num">
+          <thead><tr>
+            <th class="l">时间</th><th class="l">合约</th><th>方向 / 张数</th><th>价格</th><th>手续费</th><th>已实现盈亏</th><th class="l">来源</th>
+          </tr></thead>
+          <tbody>
+            <tr><td class="l text-dim">08:44:10</td><td class="l">ETH_USDT</td><td class="text-up">买入 +80</td><td>3,601.00</td><td>0.58</td><td class="text-dim">—</td><td class="l"><span class="badge border-up/50 text-up">llm_open</span></td></tr>
+            <tr><td class="l text-dim">09:12:44</td><td class="l">BTC_USDT</td><td class="text-up">买入 +320</td><td>117,420.50</td><td>3.76</td><td class="text-dim">—</td><td class="l"><span class="badge border-up/50 text-up">llm_open</span></td></tr>
+            <tr><td class="l text-dim">10:05:37</td><td class="l">ETH_USDT</td><td class="text-down">卖出 -80</td><td>3,554.20</td><td>0.57</td><td class="text-down">-37.44</td><td class="l"><span class="badge border-accent/50 text-accent">tpsl_close</span></td></tr>
+            <tr><td class="l text-dim">10:48:02</td><td class="l">ETH_USDT</td><td class="text-down">卖出 -150</td><td>3,628.40</td><td>1.09</td><td class="text-dim">—</td><td class="l"><span class="badge border-up/50 text-up">llm_open</span></td></tr>
+            <tr><td class="l text-dim">11:20:17</td><td class="l">SOL_USDT</td><td class="text-up">买入 +40</td><td>161.20</td><td>0.32</td><td class="text-dim">—</td><td class="l"><span class="badge border-up/50 text-up">llm_open</span></td></tr>
+            <tr><td class="l text-dim">12:05:33</td><td class="l">SOL_USDT</td><td class="text-down">卖出 -40</td><td>165.88</td><td>0.33</td><td class="text-up">+18.72</td><td class="l"><span class="badge border-accent/50 text-accent">llm_close</span></td></tr>
+            <tr><td class="l text-dim">12:41:09</td><td class="l">BTC_USDT</td><td class="text-down">卖出 -80</td><td>118,210.00</td><td>0.95</td><td class="text-up">+6.32</td><td class="l"><span class="badge border-accent/50 text-accent">llm_close</span></td></tr>
+            <tr><td class="l text-dim">13:58:20</td><td class="l">ETH_USDT</td><td class="text-up">买入 +30</td><td>3,605.00</td><td>0.54</td><td class="text-up">+7.02</td><td class="l"><span class="badge border-amber/50 text-amber">user_close</span></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右列 -->
+    <div class="col-span-5 grid grid-rows-[minmax(0,1.25fr)_minmax(0,1fr)_auto] gap-1.5 min-h-0">
+
+      <!-- 3. 实时决策轮：终端日志式逐行输出工具调用 -->
+      <div class="panel">
+        <div class="panel-h">
+          <i class="dot bg-amber animate-pulse"></i>实时决策轮 LIVE ROUND <span class="num text-txt">#1044</span>
+          <span class="badge border-amber/50 text-amber">price_alert</span>
+          <span class="ml-auto num text-dim">已进行 00:41 · ended_at = null</span>
+        </div>
+        <div class="panel-b log px-2.5 py-1.5">
+          <div><span class="t">14:32:08.214</span><span class="text-amber">⚡ WAKE</span> <span class="text-dim">source=price_alert · BTC_USDT ≥ 118,000.00 触发</span></div>
+          <div><span class="t">14:32:08.402</span><span class="text-txt">[01]</span> get_market_data(contract="BTC_USDT", interval="1h", limit=48)</div>
+          <div class="sub">└─ <span class="text-up">ALLOW</span> · 182ms · mark=118,032.00 · 1h +0.51% · 量能 1.8x 均量</div>
+          <div><span class="t">14:32:08.517</span><span class="text-txt">[02]</span> get_account()</div>
+          <div class="sub">└─ <span class="text-up">ALLOW</span> · 96ms · equity=10,243.76 · available=8,187.01</div>
+          <div><span class="t">14:32:08.622</span><span class="text-txt">[03]</span> get_history(limit=20)</div>
+          <div class="sub">└─ <span class="text-up">ALLOW</span> · 88ms · 近20轮胜率 62% · 日均换手 3.2 次</div>
+          <div><span class="t">14:32:09.031</span><span class="text-txt">[04]</span> place_order(contract="BTC_USDT", side="buy", size=600, type="limit", price="118,050.00")</div>
+          <div class="sub bg-down/10 border-l-2 border-down pl-2">└─ <span class="text-down">DENY</span> · 风控拒绝 · 加仓后单仓名义价值占权益 69.9% &gt; max_position_pct=20% · 41ms</div>
+          <div><span class="t">14:32:09.104</span><span class="text-txt">[05]</span> set_price_alert(contract="BTC_USDT", above="119,500.00", below="116,800.00")</div>
+          <div class="sub">└─ <span class="text-up">ALLOW</span> · 74ms · 双向告警已挂</div>
+          <div><span class="t">14:32:09.166</span><span class="text-txt">[06]</span> set_next_wakeup(after_seconds=900, reason="等待突破确认或回踩")</div>
+          <div class="sub">└─ <span class="text-up">ALLOW</span> · 45ms · 下次唤醒 14:47:08</div>
+          <div><span class="t">14:32:09.201</span><span class="text-dim">◈ LLM 输出完毕 · tokens in 4,812 / out 326 · Moonshot kimi-k2</span></div>
+          <!-- llm_raw：LLM 原始输出，折叠查看 -->
+          <details class="mt-1">
+            <summary class="text-[11px]">llm_raw · LLM 原始输出</summary>
+            <pre class="num text-[10.5px] leading-4 text-dim bg-ink border border-line p-2 mt-1 overflow-x-auto">{
+  "analysis": "BTC 1h 放量突破 118,000 整数关口，OI 同步上行，资金费率 0.008% 仍属健康区间。",
+  "plan": "加仓 600 张被风控拒绝（超单仓上限），保持现有 240 张多单；挂 119,500 / 116,800 双向告警。",
+  "actions": ["set_price_alert", "set_next_wakeup"],
+  "next_wakeup_seconds": 900
+}</pre>
+          </details>
+          <details class="mt-0.5">
+            <summary class="text-[11px]">prompt_snapshot · 策略 prompt v23 快照</summary>
+            <pre class="num text-[10.5px] leading-4 text-dim bg-ink border border-line p-2 mt-1 overflow-x-auto">system: 你是 Gate.io USDT 永续合约自主交易 Agent……（与配置中心 v23 一致，共 1,204 tokens）</pre>
+          </details>
+          <div class="mt-1"><span class="t">14:32:09.240</span><span class="text-amber">writing notes</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+
+      <!-- 4. 决策时间线：紧凑表格行 -->
+      <div class="panel">
+        <div class="panel-h">决策时间线 ROUNDS <span class="num text-txt">今日 9</span>
+          <span class="ml-auto num text-dim">完成 8 · 进行中 1</span></div>
+        <div class="panel-b">
+        <table class="term">
+          <thead><tr>
+            <th class="l">开始</th><th class="l">ID</th><th class="l">唤醒源</th><th class="l">决策摘要</th><th>工具</th><th>耗时</th><th>决策后权益</th><th class="l">状态</th>
+          </tr></thead>
+          <tbody class="num">
+            <tr><td class="l text-dim">14:32</td><td class="l text-txt">#1044</td><td class="l"><span class="badge border-amber/50 text-amber">price_alert</span></td><td class="l text-dim" style="white-space:normal">评估突破加仓，风控拒绝超仓，改挂双向告警</td><td>6</td><td>—</td><td>—</td><td class="l text-amber">进行中</td></tr>
+            <tr><td class="l text-dim">13:58</td><td class="l text-txt">#1043</td><td class="l"><span class="badge border-line2 text-txt">manual</span></td><td class="l text-dim" style="white-space:normal">用户手动平 ETH 空 30 张，归档并校准敞口</td><td>2</td><td>640ms</td><td>10,034.36</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">12:41</td><td class="l text-txt">#1042</td><td class="l"><span class="badge border-accent/50 text-accent">scheduled</span></td><td class="l text-dim" style="white-space:normal">BTC 部分止盈 80 张，止损上移至 115,200</td><td>6</td><td>2,110ms</td><td>10,027.34</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">12:05</td><td class="l text-txt">#1041</td><td class="l"><span class="badge border-amber/50 text-amber">price_alert</span></td><td class="l text-dim" style="white-space:normal">SOL 达目标价 165.88，止盈离场</td><td>5</td><td>1,754ms</td><td>10,021.02</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">11:20</td><td class="l text-txt">#1040</td><td class="l"><span class="badge border-accent/50 text-accent">scheduled</span></td><td class="l text-dim" style="white-space:normal">SOL 4h 放量突破，轻仓试多 40 张</td><td>6</td><td>1,988ms</td><td>10,002.30</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">10:47</td><td class="l text-txt">#1039</td><td class="l"><span class="badge border-amber/50 text-amber">price_alert</span></td><td class="l text-dim" style="white-space:normal">ETH 反弹至压力位 3,628，反手做空 150 张</td><td>8</td><td>2,502ms</td><td>9,990.44</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">10:05</td><td class="l text-txt">#1038</td><td class="l"><span class="badge border-accent/50 text-accent">scheduled</span></td><td class="l text-dim" style="white-space:normal">ETH 多单触发止损 3,554.2，执行平仓</td><td>5</td><td>1,876ms</td><td>9,978.16</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">09:12</td><td class="l text-txt">#1037</td><td class="l"><span class="badge border-amber/50 text-amber">price_alert</span></td><td class="l text-dim" style="white-space:normal">BTC 突破 117,400，开多 320 张（5x）</td><td>7</td><td>2,340ms</td><td>10,015.60</td><td class="l text-up">完成</td></tr>
+            <tr><td class="l text-dim">08:44</td><td class="l text-txt">#1036</td><td class="l"><span class="badge border-accent/50 text-accent">scheduled</span></td><td class="l text-dim" style="white-space:normal">多周期扫描，ETH 开多 80 张（3x）</td><td>6</td><td>2,148ms</td><td>9,998.12</td><td class="l text-up">完成</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <!-- 7. Agent 笔记 -->
+      <div class="panel shrink-0">
+        <div class="panel-h">AGENT 笔记 NOTES <span class="num text-txt">3</span><span class="ml-auto text-dim">Agent 自述，只读</span></div>
+        <div class="px-3 py-1.5 text-[11px] leading-5 max-h-[104px] overflow-auto">
+          <p class="mb-1.5"><span class="num text-dim">14:10</span> 资金费率 0.008% 中性偏暖，但永续-现货基差扩大，杠杆自定上限 5x 不追重仓；BTC 放量站稳 119,500 再考虑加到 15% 仓。</p>
+          <p class="mb-1.5"><span class="num text-dim">11:35</span> SOL 试多复盘：4h 突破逻辑成立但止盈偏早，下次趋势单分批止盈，保留 1/3 仓位跟移动止损。</p>
+          <p><span class="num text-dim">07-19 22:14</span> 用户要求降低夜间频率：scheduled 10m→15m、夜间 30m，已更新调度并同步策略 prompt v23。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 底部行情条 -->
+  <footer class="flex items-center gap-5 px-3 h-7 border border-line bg-panel num text-[11px] shrink-0 overflow-hidden whitespace-nowrap">
+    <span class="text-dim">行情 Gate.io WS v4</span>
+    <span>BTC_USDT <b class="text-txt font-medium">118,032.00</b> <span class="text-up">+1.42%</span></span>
+    <span>ETH_USDT <b class="text-txt font-medium">3,598.20</b> <span class="text-down">-0.86%</span></span>
+    <span>SOL_USDT <b class="text-txt font-medium">168.44</b> <span class="text-up">+2.31%</span></span>
+    <span class="ml-auto text-dim">下次唤醒 <span class="text-amber">14:47:08</span>（scheduled · 倒计时 <span id="cd" class="text-txt">08:12</span>）</span>
+  </footer>
+</main>
+
+<!-- ================= 6. 视图二：配置中心 ================= -->
+<main id="view-config" class="flex-1 min-h-0 overflow-auto p-1.5 hidden">
+  <div class="grid grid-cols-2 gap-1.5">
+
+    <!-- 风控参数：代码强制，LLM 仅建议 -->
+    <div class="panel">
+      <div class="panel-h">风控参数 RISK LIMITS
+        <span class="badge border-down/50 text-down ml-1">代码强制执行 · LLM 仅建议</span>
+        <span class="ml-auto num text-dim">今日拒绝 2 次</span></div>
+      <table class="term">
+        <thead><tr><th class="l">参数（含义）</th><th>当前值</th><th class="l">说明</th></tr></thead>
+        <tbody>
+          <tr><td class="l num text-txt">max_position_pct<span class="text-dim">（单仓上限）</span></td><td><input class="cfg-input" value="20%"></td><td class="l text-dim">单合约名义价值 / 权益</td></tr>
+          <tr><td class="l num text-txt">max_total_position_pct<span class="text-dim">（总仓上限）</span></td><td><input class="cfg-input" value="60%"></td><td class="l text-dim">全部持仓名义价值 / 权益</td></tr>
+          <tr><td class="l num text-txt">max_leverage<span class="text-dim">（杠杆上限）</span></td><td><input class="cfg-input" value="10x"></td><td class="l text-dim">开仓杠杆硬顶</td></tr>
+          <tr><td class="l num text-txt">daily_loss_limit<span class="text-dim">（日亏锁仓）</span></td><td><input class="cfg-input" value="500 USDT"></td><td class="l text-dim">触发后当日禁止开新仓</td></tr>
+          <tr><td class="l num text-txt">max_orders_per_day<span class="text-dim">（日下单上限）</span></td><td><input class="cfg-input" value="30"></td><td class="l text-dim">超出后仅允许平仓</td></tr>
+          <tr><td class="l num text-txt">max_deviation<span class="text-dim">（价格偏离）</span></td><td><input class="cfg-input" value="0.5%"></td><td class="l text-dim">委托价偏离标记价上限</td></tr>
+        </tbody>
+      </table>
+      <div class="px-3 py-2 border-t border-line flex items-center gap-2">
+        <button class="btn">保存修改</button>
+        <span class="text-[10px] text-dim">静态预览：修改不会提交后端</span>
+      </div>
+    </div>
+
+    <!-- 合约白名单 + 调度 -->
+    <div class="grid grid-rows-2 gap-1.5 min-h-0">
+      <div class="panel">
+        <div class="panel-h">合约白名单 WATCHLIST <span class="num text-txt">3</span></div>
+        <div class="panel-b px-3 py-2">
+          <div class="flex flex-wrap gap-2 mb-2">
+            <span class="badge border-up/50 text-txt !py-1 !px-2">● BTC_USDT <span class="text-dim">≤5x</span> <i class="text-dim not-italic cursor-pointer hover:text-down">×</i></span>
+            <span class="badge border-up/50 text-txt !py-1 !px-2">● ETH_USDT <span class="text-dim">≤3x</span> <i class="text-dim not-italic cursor-pointer hover:text-down">×</i></span>
+            <span class="badge border-up/50 text-txt !py-1 !px-2">● SOL_USDT <span class="text-dim">≤3x</span> <i class="text-dim not-italic cursor-pointer hover:text-down">×</i></span>
+          </div>
+          <div class="flex gap-2">
+            <input class="cfg-input !w-40 !text-left" placeholder="如 DOGE_USDT">
+            <button class="btn">＋ 添加</button>
+            <span class="text-[10px] text-dim self-center">白名单外合约 LLM 下单将被风控直接拒绝</span>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">调度 SCHEDULER</div>
+        <table class="term">
+          <tbody>
+            <tr><td class="l text-dim">常规唤醒间隔</td><td class="num text-txt">15 分钟</td><td class="l num text-dim">scheduled</td></tr>
+            <tr><td class="l text-dim">夜间降频（00:00–07:00）</td><td class="num text-txt">30 分钟</td><td class="l num text-dim">scheduled</td></tr>
+            <tr><td class="l text-dim">价格告警唤醒</td><td class="num text-txt">即时 · 挂起 2 条</td><td class="l num text-dim">price_alert</td></tr>
+            <tr><td class="l text-dim">下次唤醒</td><td class="num text-amber">14:47:08</td><td class="l"><button class="btn !py-0 !px-2 !text-[10px]">立即唤醒一轮</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- API 密钥状态：只显示布尔，永不回显明文 -->
+    <div class="panel">
+      <div class="panel-h">API 密钥状态 KEYS
+        <span class="ml-auto text-[10px] text-dim">安全设计：仅显示配置布尔位，明文永不回显</span></div>
+      <table class="term">
+        <thead><tr><th class="l">密钥</th><th>状态</th><th class="l">更新时间</th><th class="l">操作</th></tr></thead>
+        <tbody class="num">
+          <tr><td class="l text-txt">gate_api_key</td><td class="text-up">✓ 已配置</td><td class="l text-dim">2026-07-12 20:41</td><td class="l"><button class="btn !py-0 !px-2 !text-[10px]">重新录入</button></td></tr>
+          <tr><td class="l text-txt">gate_api_secret</td><td class="text-up">✓ 已配置</td><td class="l text-dim">2026-07-12 20:41</td><td class="l"><button class="btn !py-0 !px-2 !text-[10px]">重新录入</button></td></tr>
+          <tr><td class="l text-txt">llm_api_key</td><td class="text-up">✓ 已配置</td><td class="l text-dim">2026-07-15 09:02</td><td class="l"><button class="btn !py-0 !px-2 !text-[10px]">重新录入</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 手动干预 -->
+    <div class="panel">
+      <div class="panel-h">手动干预 MANUAL OVERRIDE</div>
+      <div class="panel-b px-3 py-2.5 space-y-2 text-[11px]">
+        <div class="flex items-center gap-3"><button class="btn w-28">■ 停止 Agent</button><span class="text-dim">停止后不再自动唤醒，持仓保留</span></div>
+        <div class="flex items-center gap-3"><button class="btn btn-danger w-28">⏻ Kill Switch</button><span class="text-dim">熔断：立即撤销全部挂单并市价全平（当前未触发）</span></div>
+        <div class="flex items-center gap-3"><button class="btn btn-amber w-28">↺ 重置权益</button><span class="text-dim">paper 模式专用：权益恢复 10,000 USDT，清空持仓与历史</span></div>
+      </div>
+    </div>
+
+    <!-- 策略 Prompt 在线编辑 -->
+    <div class="panel col-span-2">
+      <div class="panel-h">策略 PROMPT 在线编辑
+        <span class="badge border-accent/50 text-accent">v23</span>
+        <span class="ml-auto num text-dim">最近保存 2026-07-19 22:14 · 由用户 · 共 1,204 tokens</span></div>
+      <textarea class="panel-b w-full bg-ink text-txt num text-[11px] leading-5 p-3 resize-none focus:outline-none" rows="9" spellcheck="false">你是 Gate.io USDT 永续合约自主交易 Agent，目标是在严格风控内实现稳健复利。
+
+【纪律】
+1. 单笔仓位 ≤ 权益 15%（代码硬顶 20%），总仓位 ≤ 50%。
+2. 杠杆 ≤ 5x；资金费率 > 0.05% 时不开同向新仓。
+3. 无高置信信号不开仓，允许连续多轮 HOLD。
+4. 每笔订单必须给出止损价；趋势单分批止盈。
+5. 每日复盘已平仓交易并写入笔记；prompt 只有用户可改。
+
+【风格】趋势跟随为主，突破确认后入场，不抄底摸顶。</textarea>
+      <div class="px-3 py-2 border-t border-line flex items-center gap-2">
+        <button class="btn">保存为新版本 v24</button>
+        <button class="btn">回滚到 v22</button>
+        <span class="text-[10px] text-dim">保存后对下一轮决策立即生效，历史轮次保留 prompt 快照</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+/* ================= 微交互：Tab 切换 ================= */
+document.querySelectorAll('.tabbtn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('.tabbtn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('view-monitor').classList.toggle('hidden', btn.dataset.view !== 'monitor');
+    document.getElementById('view-config').classList.toggle('hidden', btn.dataset.view !== 'config');
+  });
+});
+
+/* ================= 时钟 / Uptime / 倒计时 ================= */
+var upSec = 6 * 86400 + 4 * 3600 + 17 * 60 + 33;  // 模拟已运行时长
+var cdSec = 8 * 60 + 12;                          // 距下次唤醒
+setInterval(function () {
+  var d = new Date();
+  document.getElementById('clock').textContent =
+    ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+  upSec++; var ud = Math.floor(upSec / 86400), h = Math.floor(upSec % 86400 / 3600), m = Math.floor(upSec % 3600 / 60), s = upSec % 60;
+  document.getElementById('uptime').textContent = ud + 'd ' + ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2) + ':' + ('0' + s).slice(-2);
+  if (cdSec > 0) cdSec--;
+  document.getElementById('cd').textContent = ('0' + Math.floor(cdSec / 60)).slice(-2) + ':' + ('0' + cdSec % 60).slice(-2);
+}, 1000);
+
+/* ================= K线示意（固定种子伪随机，每次打开一致） ================= */
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var seed = 20260720;
+  function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+
+  // 生成 56 根 1h K线：围绕 118,000 的轻微上行随机游走，最后一根收在标记价 118,032
+  var N = 56, candles = [], price = 116420;
+  for (var i = 0; i < N; i++) {
+    var o = price;
+    var c = i === N - 1 ? 118032 : o * (1 + (rnd() - 0.465) * 0.0062);
+    var h = Math.max(o, c) * (1 + rnd() * 0.0022);
+    var l = Math.min(o, c) * (1 - rnd() * 0.0022);
+    var v = 0.3 + rnd() * 0.7 + (i === N - 1 ? 0.9 : 0); // 最后一根放量突破
+    candles.push({ o: o, c: c, h: h, l: l, v: v });
+    price = c;
+  }
+
+  var svg = document.getElementById('kline');
+  var W = 760, H = 360, PL = 6, PR = 704, PT = 10, PB = 292, VT = 302, VB = 344;
+  var hi = -Infinity, lo = Infinity, vmax = 0;
+  candles.forEach(function (k) { hi = Math.max(hi, k.h); lo = Math.min(lo, k.l); vmax = Math.max(vmax, k.v); });
+  var pad = (hi - lo) * 0.06; hi += pad; lo -= pad;
+  var sx = function (i) { return PL + (i + 0.5) * (PR - PL) / N; };
+  var sy = function (p) { return PT + (hi - p) / (hi - lo) * (PB - PT); };
+
+  function el(tag, attrs) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); svg.appendChild(e); return e; }
+  function text(x, y, str, fill, anchor) { var t = el('text', { x: x, y: y, fill: fill, 'font-size': 9.5, 'font-family': 'JetBrains Mono, monospace', 'text-anchor': anchor || 'start' }); t.textContent = str; return t; }
+
+  // 水平网格线 + 右侧价格刻度
+  for (var g = 0; g <= 4; g++) {
+    var gp = lo + (hi - lo) * g / 4, gy = sy(gp);
+    el('line', { x1: PL, y1: gy, x2: PR, y2: gy, stroke: '#141c27', 'stroke-width': 1 });
+    text(710, gy + 3, gp.toLocaleString('en-US', { maximumFractionDigits: 0 }), '#4d5f76');
+  }
+  // 底部时间刻度（今日 14:00 往前推，每 8 根一格）
+  var marks = ['20:00', '00:00', '04:00', '08:00', '14:00'];
+  for (var mi = 0; mi < marks.length; mi++) text(sx(mi * 12 + 4), 356, marks[mi], '#4d5f76', 'middle');
+
+  // K线实体 + 影线 + 成交量
+  var bw = Math.max(2, (PR - PL) / N * 0.62);
+  candles.forEach(function (k, i) {
+    var up = k.c >= k.o, col = up ? '#45d093' : '#ef6355', x = sx(i);
+    el('line', { x1: x, y1: sy(k.h), x2: x, y2: sy(k.l), stroke: col, 'stroke-width': 1 });
+    el('rect', { x: x - bw / 2, y: sy(Math.max(k.o, k.c)), width: bw, height: Math.max(1, Math.abs(sy(k.o) - sy(k.c))), fill: col });
+    var vh = k.v / vmax * (VB - VT);
+    el('rect', { x: x - bw / 2, y: VB - vh, width: bw, height: vh, fill: col, opacity: 0.35 });
+  });
+
+  // MA10 / MA30 均线
+  function ma(n) {
+    var pts = '';
+    for (var i = n - 1; i < N; i++) {
+      var s = 0; for (var j = 0; j < n; j++) s += candles[i - j].c;
+      pts += sx(i) + ',' + sy(s / n) + ' ';
+    }
+    return pts;
+  }
+  el('polyline', { points: ma(10), fill: 'none', stroke: '#e0a83e', 'stroke-width': 1, opacity: 0.85 });
+  el('polyline', { points: ma(30), fill: 'none', stroke: '#5aa9e6', 'stroke-width': 1, opacity: 0.7 });
+
+  // 最新价虚线 + 价格标签
+  var lastY = sy(118032);
+  el('line', { x1: PL, y1: lastY, x2: PR, y2: lastY, stroke: '#e0a83e', 'stroke-width': 1, 'stroke-dasharray': '4 3', opacity: 0.7 });
+  el('rect', { x: 706, y: lastY - 7, width: 52, height: 14, fill: '#e0a83e' });
+  text(711, lastY + 3, '118,032', '#0a0e14');
+})();
+
+/* ================= 权益小曲线（7D，收于当前权益 10,243.76） ================= */
+(function () {
+  var pts = [9862, 9904, 9881, 9936, 9971, 9958, 9992, 10018, 10005, 10031, 10024, 10102, 10158, 10121, 10196, 10243.76];
+  var svg = document.getElementById('spark'), NS = 'http://www.w3.org/2000/svg';
+  var W = 260, H = 46, min = Math.min.apply(null, pts), max = Math.max.apply(null, pts), pad = (max - min) * 0.15 || 1;
+  min -= pad; max += pad;
+  var xy = pts.map(function (v, i) { return [(i * W / (pts.length - 1)).toFixed(1), ((max - v) / (max - min) * (H - 6) + 3).toFixed(1)]; });
+  var line = xy.map(function (p) { return p.join(','); }).join(' ');
+  var area = '0,' + H + ' ' + line + ' ' + W + ',' + H;
+  var grad = document.createElementNS(NS, 'linearGradient');
+  grad.setAttribute('id', 'sg'); grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+  [['0%', '#45d093', 0.35], ['100%', '#45d093', 0]].forEach(function (s) {
+    var st = document.createElementNS(NS, 'stop');
+    st.setAttribute('offset', s[0]); st.setAttribute('stop-color', s[1]); st.setAttribute('stop-opacity', s[2]);
+    grad.appendChild(st);
+  });
+  svg.appendChild(grad);
+  function el(tag, attrs) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); svg.appendChild(e); return e; }
+  el('polygon', { points: area, fill: 'url(#sg)' });
+  el('polyline', { points: line, fill: 'none', stroke: '#45d093', 'stroke-width': 1.5 });
+  var last = xy[xy.length - 1];
+  el('circle', { cx: last[0], cy: last[1], r: 2.5, fill: '#45d093' });
+})();
+</script>
+</body>
+</html>

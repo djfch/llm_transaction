@@ -11,7 +11,7 @@ describe('AgentControl(agent 启停)', () => {
     const onToggle = vi.fn().mockResolvedValue(undefined)
     render(<AgentControl running={false} onToggle={onToggle} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '启动 agent(交易代理)' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
     expect(onToggle).toHaveBeenCalledTimes(1)
     expect(onToggle).toHaveBeenCalledWith(true)
     // 不存在确认中间态
@@ -22,11 +22,11 @@ describe('AgentControl(agent 启停)', () => {
     const onToggle = vi.fn().mockResolvedValue(undefined)
     render(<AgentControl running={true} onToggle={onToggle} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '停止 agent(交易代理)' }))
-    expect(await screen.findByRole('button', { name: '再次点击确认停止' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(await screen.findByRole('button', { name: '确认停止？' })).toBeInTheDocument()
     expect(onToggle).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: '再次点击确认停止' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认停止？' }))
     expect(onToggle).toHaveBeenCalledTimes(1)
     expect(onToggle).toHaveBeenCalledWith(false)
   })
@@ -35,16 +35,16 @@ describe('AgentControl(agent 启停)', () => {
     const onToggle = vi.fn().mockRejectedValue(new Error('后端不可用'))
     render(<AgentControl running={false} onToggle={onToggle} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '启动 agent(交易代理)' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
     expect(await screen.findByText(/后端不可用/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '启动 agent(交易代理)' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '启动' })).toBeEnabled()
   })
 
   it('disabled：status 未加载时按钮禁用', () => {
     const onToggle = vi.fn().mockResolvedValue(undefined)
     render(<AgentControl running={false} disabled onToggle={onToggle} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '启动 agent(交易代理)' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
     expect(onToggle).not.toHaveBeenCalled()
   })
 })

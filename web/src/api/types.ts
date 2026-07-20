@@ -28,6 +28,7 @@ export interface Position {
   entry_price: number // 开仓均价
   mark_price: number // 标记价格
   leverage: number // 杠杆倍数
+  margin: number // 持仓保证金（USDT）
   unrealised_pnl: number // 未实现盈亏
   liq_price: number // 预估强平价
 }
@@ -83,6 +84,7 @@ export interface AgentLiveState {
 /** 成交记录：GET /api/trades（created_at 已在 http 层适配为 time） */
 export interface Trade {
   id: number // 成交 ID
+  round_id: string // 产生该成交的决策轮 ID（空串=无归属，如历史/未知来源）
   time: string // 成交时间（ISO 字符串，由后端 created_at(Unix秒) 适配而来）
   contract: string // 合约名
   size: number // 成交张数，正买负卖
@@ -138,6 +140,14 @@ export interface EquityPoint {
 export interface Note {
   time: string
   content: string
+  round_id: string // 归属决策轮 ID（空串 = 无归属，如历史/手动记录）
+}
+
+/** 当日统计：GET /api/daily_stats（风控同一口径：服务器时区自然日、按 mode 过滤、仅开仓单计数） */
+export interface DailyStats {
+  realized_pnl: number // 当日已实现盈亏合计（USDT，未扣费）
+  orders_today: number // 当日开仓单数（平仓/减仓单不计）
+  max_orders_per_day: number // 日下单上限（risk.max_orders_per_day 回显）
 }
 
 /** 风控参数（AppConfig.risk 子集，与 config.yaml 对齐） */
@@ -214,12 +224,15 @@ export interface KillSwitchResult {
 
 /**
  * WS 推送消息：/ws → {type, data}
- * 一期实际契约：后端广播 hello / round_start / round / ticker（按合约节流，data={contract,last}）；
+ * 一期实际契约：后端广播 hello / round_start(data={wake_source}) /
+ * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}）；
+ * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），只作失效信号——
+ * 消费方应据事件重拉 REST，勿把 payload 当摘要直接渲染；
  * trade/position 为预留类型，后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
  */
 export type WsMessage =
   | { type: 'round_start'; data: { wake_source: string } }
-  | { type: 'round'; data: RoundSummary }
+  | { type: 'round'; data: { round_id: string; ok: boolean; wake_source: string } }
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'ticker'; data: { contract: string; last: number } }
@@ -240,6 +253,7 @@ export interface ApiClient {
   stopAgent(): Promise<AgentStateResult>
   getEquity(): Promise<EquityPoint[]>
   getNotes(): Promise<Note[]>
+  getDailyStats(): Promise<DailyStats>
   getConfig(): Promise<AppConfig>
   putConfig(config: AppConfig): Promise<PutConfigResult>
   getStrategy(): Promise<string>

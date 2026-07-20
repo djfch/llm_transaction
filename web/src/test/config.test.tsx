@@ -52,7 +52,7 @@ describe('RiskForm(风控参数表单)', () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<RiskForm initial={baseRisk} onSave={onSave} />)
 
-    const leverageInput = screen.getByLabelText('max_leverage(杠杆上限)')
+    const leverageInput = screen.getByLabelText('max_leverage')
     const saveBtn = screen.getByRole('button', { name: /保存风控参数/ })
 
     // 非法值：0 → 报错 + 禁用保存

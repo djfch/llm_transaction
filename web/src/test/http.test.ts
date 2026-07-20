@@ -43,6 +43,7 @@ describe('http 适配层（数字字符串 → number）', () => {
             entry_price: '118320',
             mark_price: '119650.5',
             leverage: '3',
+            margin: '47.86',
             unrealised_pnl: '159.6',
             liq_price: '82400',
           },
@@ -73,17 +74,55 @@ describe('http 适配层（数字字符串 → number）', () => {
     expect(new Date(points[0].time).getTime()).toBe(1784381252000)
   })
 
-  it('getNotes：items[].created_at 映射为 time', async () => {
+  it('getNotes：items[].created_at 映射为 time，round_id 透传（缺省空串）', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
-        '/api/notes': { items: [{ id: 1, round_id: 'r1', content: '笔记', created_at: 1784367449 }] },
+        '/api/notes': {
+          items: [
+            { id: 1, round_id: 'r1', content: '笔记', created_at: 1784367450 },
+            { id: 2, content: '无归属笔记', created_at: 1784367449 },
+          ],
+        },
       }),
     )
     const notes = await httpApi.getNotes()
-    expect(notes).toHaveLength(1)
+    expect(notes).toHaveLength(2)
     expect(notes[0].content).toBe('笔记')
-    expect(new Date(notes[0].time).getTime()).toBe(1784367449000)
+    expect(notes[0].round_id).toBe('r1')
+    expect(new Date(notes[0].time).getTime()).toBe(1784367450000)
+    expect(notes[1].round_id).toBe('') // 后端缺省 → 空串（无归属）
+  })
+
+  it('getNotes：乱序输入按 created_at 降序输出（回归：后端 recent_notes 最旧在前，消费侧契约=最新在前）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        // 后端 /api/notes 原样透传 recent_notes 的正序（最旧在前）
+        '/api/notes': {
+          items: [
+            { id: 1, round_id: 'r1', content: '最旧', created_at: 100 },
+            { id: 2, round_id: 'r2', content: '最新', created_at: 300 },
+            { id: 3, round_id: 'r3', content: '中间', created_at: 200 },
+          ],
+        },
+      }),
+    )
+    const notes = await httpApi.getNotes()
+    expect(notes.map((n) => n.content)).toEqual(['最新', '中间', '最旧'])
+  })
+
+  it('getDailyStats：当日统计三键数字字符串 → number（风控口径：realized_pnl/orders_today/max_orders_per_day）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        '/api/daily_stats': { realized_pnl: '41.37', orders_today: '7', max_orders_per_day: '20' },
+      }),
+    )
+    const stats = await httpApi.getDailyStats()
+    expect(stats).toEqual({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 })
+    expect(typeof stats.realized_pnl).toBe('number')
+    expect(typeof stats.orders_today).toBe('number')
   })
 
   it('getRounds：context_summary→summary、created_at→started_at、pnl_after 留空', async () => {

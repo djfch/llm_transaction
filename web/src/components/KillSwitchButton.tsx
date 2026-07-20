@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 
 /**
- * kill_switch(紧急停止) 开关按钮：两段确认防误触。
- * 第一次点击进入"待确认"状态（3 秒内有效），第二次点击才真正切换。
- * 失败时在按钮下方展示原因。
+ * kill_switch(紧急停止) 熔断按钮（方案 C 顶栏样式）：紧凑的 ⏻ 熔断 KILL。
+ * 两段确认防误触：第一次点击进入"待确认"状态（3 秒内有效），第二次点击才真正切换。
+ * 熔断已触发时以实心红色呈现，点击可复位（同样两段确认）。失败时展示原因。
  */
 export default function KillSwitchButton({
   enabled,
@@ -49,22 +49,26 @@ export default function KillSwitchButton({
     }
   }
 
-  const base = 'rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50'
-  const color = enabled
-    ? 'bg-rose-600 hover:bg-rose-500 text-white'
-    : armed
-      ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-      : 'bg-slate-700 hover:bg-slate-600 text-slate-100'
+  const base =
+    'rounded-md border px-2.5 py-1 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed'
+  // 常态玫瑰描边；已触发实心玫瑰；待确认琥珀警示
+  const color = armed
+    ? 'border-amber-400/50 bg-amber-400/10 text-amber-300'
+    : enabled
+      ? 'border-rose-500 bg-rose-600/80 text-white hover:bg-rose-500/80'
+      : 'border-rose-500/50 text-rose-400 hover:bg-rose-500/15'
   const text = pending
     ? '执行中…'
     : armed
-      ? `再次点击确认${enabled ? '关闭' : '开启'}`
+      ? enabled
+        ? '确认复位？'
+        : '确认触发熔断？'
       : enabled
-        ? '关闭 kill_switch(紧急停止)'
-        : '开启 kill_switch(紧急停止)'
+        ? '⏻ KILL 已触发'
+        : '⏻ 熔断 KILL'
 
   return (
-    <div>
+    <div className="flex items-center gap-2">
       <button
         type="button"
         className={`${base} ${color}`}
@@ -73,7 +77,7 @@ export default function KillSwitchButton({
       >
         {text}
       </button>
-      {message && <p className="mt-2 text-xs text-rose-400">{message}</p>}
+      {message && <p className="text-xs text-rose-400">{message}</p>}
     </div>
   )
 }

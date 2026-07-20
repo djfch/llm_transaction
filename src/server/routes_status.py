@@ -76,6 +76,12 @@ def _account_equity(deps: ServerDeps) -> Decimal | None:
     return account.available + margin + account.unrealised_pnl
 
 
+def _day_start_ts() -> float:
+    """服务器本地时区当日 0 点（与 agent 侧 default_daily_stats 同一自然日口径）。"""
+    now = time.localtime()
+    return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
 def _equity_baseline(
     deps: ServerDeps, settings: Settings, pnl_fee_sum: Decimal
 ) -> tuple[Decimal, str]:
@@ -153,6 +159,20 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     @router.get("/positions")
     async def get_positions() -> list[dict[str, Any]]:
         return [p.model_dump() for p in _require_gateway(deps).list_positions()]
+
+    @router.get("/daily_stats")
+    async def get_daily_stats() -> dict[str, Any]:
+        """当日统计（风控同一口径的只读暴露）：服务器时区自然日、按当前 mode 过滤、
+        orders_today 仅开仓单（is_close 排除）；realized_pnl 为当日已实现盈亏合计（未扣费）。
+        前端账户面板据此替代本地成交口径估算，上限取 risk.max_orders_per_day。
+        """
+        settings = deps.runtime_settings or load_settings(deps.config_path)
+        stats = await deps.repo.daily_stats(settings.mode, _day_start_ts())
+        return {
+            "realized_pnl": _cents(stats.realized_pnl),
+            "orders_today": stats.orders_today,
+            "max_orders_per_day": settings.risk.max_orders_per_day,
+        }
 
     @router.get("/rounds")
     async def list_rounds(

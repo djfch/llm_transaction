@@ -1,5 +1,6 @@
 /**
  * 交易对白名单编辑：chips 展示 + 添加/删除，保存整体 PUT。
+ * 方案 C 抽屉样式：紫色 chips + 虚线添加按钮。
  */
 import { useState } from 'react'
 import type { Watchlist } from '../../api/types'
@@ -52,20 +53,20 @@ export default function WatchlistEditor({
         {contracts.map((c) => (
           <span
             key={c}
-            className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-sm text-slate-200"
+            className="flex items-center gap-1 rounded-lg border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 font-mono text-xs text-violet-200"
           >
             {c}
             <button
               type="button"
               aria-label={`移除 ${c}`}
               onClick={() => setContracts(contracts.filter((x) => x !== c))}
-              className="ml-1 text-slate-500 hover:text-rose-400"
+              className="ml-1 text-violet-300/50 transition hover:text-rose-400"
             >
               ×
             </button>
           </span>
         ))}
-        {contracts.length === 0 && <span className="text-sm text-slate-500">白名单为空</span>}
+        {contracts.length === 0 && <span className="text-xs text-zinc-500">白名单为空</span>}
       </div>
 
       <div className="mt-3 flex items-center gap-2">
@@ -75,27 +76,27 @@ export default function WatchlistEditor({
           onKeyDown={(e) => e.key === 'Enter' && add()}
           placeholder="输入合约名，如 SOL_USDT"
           aria-label="新合约名"
-          className="w-56 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+          className="w-44 rounded-lg border border-white/10 bg-zinc-900 px-3 py-1.5 font-mono text-xs text-zinc-100 focus:border-violet-400/60 focus:outline-none"
         />
         <button
           type="button"
           onClick={add}
-          className="rounded-lg bg-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-600"
+          className="rounded-lg border border-dashed border-white/15 px-3 py-1.5 text-xs text-zinc-500 transition hover:border-violet-400/40 hover:text-violet-300"
         >
-          添加
+          + 添加合约
         </button>
         <button
           type="button"
           disabled={pending}
           onClick={handleSave}
-          className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+          className="rounded-lg border border-violet-400/50 bg-violet-400/10 px-3 py-1.5 text-xs text-violet-300 transition hover:bg-violet-400/20 disabled:opacity-40"
         >
           {pending ? '保存中…' : '保存白名单'}
         </button>
       </div>
       {hint && <p className="mt-2 text-xs text-rose-400">{hint}</p>}
-      <p className="mt-2 text-xs text-slate-500">
-        watchlist(交易对白名单)：风控硬校验，非白名单合约一律拒绝开仓。settle={initial.settle}
+      <p className="mt-2 text-[10px] text-zinc-600">
+        watchlist：风控硬校验，非白名单合约一律拒绝开仓。settle={initial.settle}
       </p>
     </div>
   )

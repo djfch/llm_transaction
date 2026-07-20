@@ -3,10 +3,11 @@
 契约表（与 web/src/api/types.ts 对齐，前端类型变更必须同步本表）：
 - GET  /api/status → mode/uptime_seconds/kill_switch/agent_running/llm_provider/llm_model/llm_configured
 - GET  /api/account → available/unrealised_pnl/equity（equity 必在，前端 AccountInfo 契约）
-- GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/unrealised_pnl/liq_price
-- GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source；顶层 total/offset/limit
+- GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price
+- GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
-- GET  /api/notes → items[] 含 content/created_at
+- GET  /api/notes → items[] 含 content/created_at/round_id
+- GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
 - GET  /api/rounds → items[] 含 round_id 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
@@ -207,7 +208,7 @@ async def test_status_account_positions_contract(client: AsyncClient):
     assert items, "/api/positions 应非空"
     _typed(
         items[0],
-        "contract:s size:n entry_price:n mark_price:n leverage:n unrealised_pnl:n liq_price:n",
+        "contract:s size:n entry_price:n mark_price:n leverage:n margin:n unrealised_pnl:n liq_price:n",
         "/api/positions[0]",
     )
 
@@ -217,7 +218,9 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
     _typed(body, "total:i offset:i limit:i", "/api/trades")
     assert body["items"], "/api/trades items 应非空"
     _typed(
-        body["items"][0], "contract:s size:n price:n fee:n pnl:n source:s", "/api/trades items[0]"
+        body["items"][0],
+        "contract:s size:n price:n fee:n pnl:n source:s round_id:s",
+        "/api/trades items[0]",
     )
     body = await _get(client, "/api/equity")
     _typed(body, "initial_equity:n baseline_source:s", "/api/equity")
@@ -225,7 +228,9 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
     _typed(body["points"][0], "t:n equity:n", "/api/equity points[0]")
     notes = await _get(client, "/api/notes")
     assert notes["items"], "/api/notes items 应非空"
-    _typed(notes["items"][0], "content:s created_at:n", "/api/notes items[0]")
+    _typed(notes["items"][0], "content:s created_at:n round_id:s", "/api/notes items[0]")
+    daily = await _get(client, "/api/daily_stats")
+    _typed(daily, "realized_pnl:n orders_today:i max_orders_per_day:i", "/api/daily_stats")
 
 
 async def test_rounds_contract(client: AsyncClient):

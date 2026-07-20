@@ -45,6 +45,39 @@ export function pnlClass(n: number): string {
   return 'text-slate-400'
 }
 
+/** 0-1 比例 → 紧凑百分比（去掉多余 0）：0.3 → "30%"、0.005 → "0.5%"；空值显示 '-' */
+export function fmtPct(ratio: number): string {
+  if (ratio == null || Number.isNaN(ratio)) return '-'
+  return `${(ratio * 100).toFixed(2).replace(/\.?0+$/, '')}%`
+}
+
+/** 0-1 比例 → 固定两位小数百分比：0.10351 → "10.35%"；空值显示 '-' */
+export function fmtPct2(ratio: number): string {
+  if (ratio == null || Number.isNaN(ratio)) return '-'
+  return `${(ratio * 100).toFixed(2)}%`
+}
+
+/** 带正负号的百分比（收益率类）：0.1108 → "+11.08%"；空值显示 '-' */
+export function fmtSignedPct(ratio: number): string {
+  if (ratio == null || Number.isNaN(ratio)) return '-'
+  const sign = ratio > 0 ? '+' : ''
+  return `${sign}${(ratio * 100).toFixed(2)}%`
+}
+
+/** ISO 时间 → 本地 HH:MM（笔记引文等小尺寸场景）；不可解析时原样返回 */
+export function fmtClock(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+/** round_id → 展示用短号：uuid 取前 8 位；含分隔符的 id（如 mock 的 round-0037）取末段，避免截断雷同 */
+export function shortRoundId(roundId: string): string {
+  if (!roundId) return ''
+  const seg = roundId.includes('-') ? (roundId.split('-').pop() ?? roundId) : roundId
+  return seg.length > 8 ? seg.slice(0, 8) : seg
+}
+
 /** source(成交来源) → 徽标文案与色调（与 Badge 的 tone 对齐） */
 export function sourceBadge(source: string): {
   text: string

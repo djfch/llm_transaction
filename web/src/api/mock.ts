@@ -13,6 +13,7 @@ import type {
   Position,
   RoundDetail,
   RoundSummary,
+  ToolCall,
   Trade,
 } from './types'
 
@@ -44,6 +45,7 @@ const positions: Position[] = [
     entry_price: 118_320,
     mark_price: 119_650,
     leverage: 3,
+    margin: 47.86, // 12 张 × 0.0001 × 119650 / 3（quanto 面值推算）
     unrealised_pnl: 159.6,
     liq_price: 82_400,
   },
@@ -53,6 +55,7 @@ const positions: Position[] = [
     entry_price: 3_420,
     mark_price: 3_388,
     leverage: 2,
+    margin: 50.82, // 30 张 × 0.001 × 3388 / 2（quanto 面值推算）
     unrealised_pnl: 96,
     liq_price: 5_120,
   },
@@ -98,7 +101,7 @@ function buildRounds(): RoundSummary[] {
       wake_source: WAKE_SOURCES[seq % WAKE_SOURCES.length],
       summary:
         seq % 4 === 0
-          ? 'BTC 突破阻力位，小幅加多；ETH 维持空仓对冲。'
+          ? 'BTC 突破阻力位，尝试加多被风控拒绝；维持现有持仓。'
           : '波动率不足，维持现有持仓，继续观察。',
       pnl_after: pnl,
     }
@@ -108,31 +111,49 @@ const rounds = buildRounds()
 
 const TRADE_SOURCES = ['llm_open', 'llm_close', 'user_close', 'liquidation', 'tpsl_close', '']
 
+/** llm 开/平仓成交归属的决策轮 ID：按成交时间映射到每小时一轮的 rounds 下标（其余来源无归属，空串） */
+function llmTradeRoundId(i: number, source: string): string {
+  if (source !== 'llm_open' && source !== 'llm_close') return ''
+  return rounds[Math.floor(((42 - i) * 2700_000) / 3_600_000)]?.round_id ?? ''
+}
+
 const trades: Trade[] = Array.from({ length: 42 }, (_, i) => {
   const contract = i % 3 === 0 ? 'ETH_USDT' : 'BTC_USDT'
   const long = i % 2 === 0
   const price = contract === 'BTC_USDT' ? 115_000 + i * 96 : 3_350 + i * 4
+  const source = TRADE_SOURCES[i % TRADE_SOURCES.length]
   return {
     id: i + 1,
+    round_id: llmTradeRoundId(i, source),
     time: new Date(Date.now() - (42 - i) * 2700_000).toISOString(),
     contract,
     size: long ? 4 + (i % 5) : -(4 + (i % 5)),
     price: Math.round(price * 100) / 100,
     fee: Math.round(price * 0.0005 * 100) / 100,
     pnl: Math.round(((i % 7) * 18 - 54) * 100) / 100,
-    source: TRADE_SOURCES[i % TRADE_SOURCES.length],
+    source,
   }
 })
+
+// 归属成交的轮：摘要改写为与成交一致，保证「成交记录 → 决策轮卡片」链接演示叙事自洽
+for (const t of trades) {
+  const meta = rounds.find((r) => r.round_id === t.round_id)
+  if (t.round_id && meta) {
+    const action = t.source === 'llm_open' ? (t.size > 0 ? '开多' : '开空') : '平仓'
+    meta.summary = `${t.contract} ${action} ${Math.abs(t.size)} 张 @ ${t.price}。`
+  }
+}
 
 const equity: EquityPoint[] = hoursAgoSeries(200).map((t, i) => ({
   time: t.toISOString(),
   equity: Math.round((10_000 + i * 4.2 + Math.sin(i / 6) * 120) * 100) / 100,
 }))
 
+// round_id：部分归属 mock 决策轮（时间线卡片嵌引文演示），部分空串（无归属）
 const notes: Note[] = [
-  { time: new Date(Date.now() - 3600_000).toISOString(), content: 'BTC 4h 级别仍处上升通道，回调即加多机会。' },
-  { time: new Date(Date.now() - 7200_000).toISOString(), content: '资金费率偏高，注意多头持仓成本。' },
-  { time: new Date(Date.now() - 10_800_000).toISOString(), content: 'ETH/BTC 汇率走弱，空 ETH 对冲仓位继续持有。' },
+  { time: new Date(Date.now() - 3600_000).toISOString(), content: 'BTC 4h 级别仍处上升通道，回调即加多机会。', round_id: rounds[0].round_id },
+  { time: new Date(Date.now() - 7200_000).toISOString(), content: '资金费率偏高，注意多头持仓成本。', round_id: '' },
+  { time: new Date(Date.now() - 10_800_000).toISOString(), content: 'ETH/BTC 汇率走弱，空 ETH 对冲仓位继续持有。', round_id: rounds[2].round_id },
 ]
 
 /** K 线周期间隔（秒），用于 mock 时间轴 */
@@ -224,6 +245,9 @@ export const mockApi: ApiClient = {
   },
   getEquity: () => reply(equity),
   getNotes: () => reply(notes),
+  // 固定值：与 mock 成交叙事自洽（当日若干笔已实现合计），上限随风控配置联动
+  getDailyStats: () =>
+    reply({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: config.risk.max_orders_per_day }),
   getConfig: () => reply(structuredClone(config)),
   putConfig: (next) => {
     Object.assign(config, next)
@@ -255,74 +279,112 @@ export const mockApi: ApiClient = {
   },
 }
 
-/** 构造一轮审计详情（prompt 快照 / LLM 原始输出 / 工具调用链） */
+/** prompt 快照（各叙事共用，与 buildAgentLive 的上下文口径一致） */
+function promptSnapshot(meta: RoundSummary): string {
+  return [
+    '# System Prompt（md5: 9f2c…a1）',
+    '',
+    strategy.trim(),
+    '',
+    '# 上下文',
+    `唤醒来源: ${meta.wake_source}`,
+    '账户权益: 10842.36 USDT，可用: 7315.20 USDT',
+    '持仓: BTC_USDT +12 张（浮盈 +159.60），ETH_USDT -30 张（浮盈 +96.00）',
+    'BTC_USDT 1h 近 20 根 K 线摘要: 震荡上行，收于均线上方。',
+  ].join('\n')
+}
+
+/** Anthropic 原生响应单行 JSON：一个 assistant 回合（text + 若干 tool_use），多回合按 \n 连接成 llm_raw */
+function anthropicTurn(
+  text: string,
+  toolUses: Array<{ name: string; input: Record<string, unknown> }> = [],
+): string {
+  const content: Array<Record<string, unknown>> = [{ type: 'text', text }]
+  toolUses.forEach((tu, k) =>
+    content.push({ type: 'tool_use', id: `toolu_mock_${k + 1}`, name: tu.name, input: tu.input }),
+  )
+  return JSON.stringify({ role: 'assistant', content })
+}
+
+/** 审计工具调用简写：风控默认空串（未入风控），duration_ms 按 seq 递增 */
+function mockCall(
+  seq: number,
+  tool: string,
+  args: Record<string, unknown>,
+  result: string,
+  verdict = '',
+  reason = '',
+): ToolCall {
+  return { seq, tool, args, risk_verdict: verdict, risk_reason: reason, result, duration_ms: 3 + seq * 7 }
+}
+
+/** 有归属成交的轮：分析 → 下单(allow) → 成交结论；llm_raw 的 tool_use 与审计链逐条对应 */
+function fillNarrative(fill: Trade): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
+  const action = fill.source === 'llm_open' ? (fill.size > 0 ? '开多' : '开空') : '平仓'
+  const qty = Math.abs(fill.size)
+  const klineArgs = { contract: fill.contract, interval: '1h', limit: 20 }
+  const orderArgs = { contract: fill.contract, size: fill.size, price: '0', tif: 'ioc' }
+  const llm_raw = [
+    anthropicTurn(`例行检查账户状态与 ${fill.contract} 走势。`, [
+      { name: 'get_account', input: {} },
+      { name: 'get_candlesticks', input: klineArgs },
+    ]),
+    anthropicTurn(`${fill.contract} 信号符合策略，${action} ${qty} 张。`, [
+      { name: 'place_order', input: orderArgs },
+    ]),
+    anthropicTurn(`已${action} ${qty} 张 ${fill.contract}（成交价 ${fill.price}），30 分钟后复查。`),
+  ].join('\n')
+  const toolCalls: ToolCall[] = [
+    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
+    mockCall(2, 'get_candlesticks', klineArgs, '返回 20 根 K 线'),
+    mockCall(3, 'place_order', orderArgs, `已成交 ${fill.size} 张 @ ${fill.price}（成交ID ${fill.id}）`, 'allow'),
+  ]
+  return { llm_raw, tool_calls: toolCalls }
+}
+
+/** 突破语境但无成交的轮：加仓被风控拒绝(deny)，与「无成交」自洽 */
+function denyNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
+  const klineArgs = { contract: 'BTC_USDT', interval: '1h', limit: 20 }
+  const orderArgs = { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' }
+  const noteArgs = { content: '突破有效性待确认，下次 30 分钟后唤醒。' }
+  const reason = '下单后单仓名义价值占权益 36% > max_position_pct(单仓上限) 30%'
+  const llm_raw = [
+    anthropicTurn('BTC 突破 118000 阻力位，先确认账户与 K 线形态。', [
+      { name: 'get_account', input: {} },
+      { name: 'get_candlesticks', input: klineArgs },
+    ]),
+    anthropicTurn('量能配合，尝试加仓 20 张 BTC。', [{ name: 'place_order', input: orderArgs }]),
+    anthropicTurn('加仓被风控拒绝，维持现有持仓，记录观察结论。', [{ name: 'set_note', input: noteArgs }]),
+  ].join('\n')
+  const toolCalls: ToolCall[] = [
+    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
+    mockCall(2, 'get_candlesticks', klineArgs, '返回 20 根 K 线'),
+    mockCall(3, 'place_order', orderArgs, '风控拒绝，未下单', 'deny', reason),
+    mockCall(4, 'set_note', noteArgs, '已保存笔记'),
+  ]
+  return { llm_raw, tool_calls: toolCalls }
+}
+
+/** 观望轮：无交易动作，只查账户并记笔记 */
+function idleNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
+  const noteArgs = { content: '波动率不足，维持现有持仓，继续观察。' }
+  const llm_raw = [
+    anthropicTurn('例行检查账户状态。', [{ name: 'get_account', input: {} }]),
+    anthropicTurn('波动率不足，维持现有持仓，记录观察结论。', [{ name: 'set_note', input: noteArgs }]),
+    anthropicTurn('本轮无交易动作，60 分钟后定时唤醒。'),
+  ].join('\n')
+  const toolCalls: ToolCall[] = [
+    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
+    mockCall(2, 'set_note', noteArgs, '已保存笔记'),
+  ]
+  return { llm_raw, tool_calls: toolCalls }
+}
+
+/** 构造一轮审计详情：按「归属成交 / 突破语境 / 观望」选择自洽叙事（llm_raw 为 Anthropic 原生格式） */
 function buildRoundDetail(meta: RoundSummary): RoundDetail {
-  return {
-    round_id: meta.round_id,
-    prompt_snapshot: [
-      '# System Prompt（md5: 9f2c…a1）',
-      '',
-      strategy.trim(),
-      '',
-      '# 上下文',
-      `唤醒来源: ${meta.wake_source}`,
-      '账户权益: 10842.36 USDT，可用: 7315.20 USDT',
-      '持仓: BTC_USDT +12 张（浮盈 +159.60），ETH_USDT -30 张（浮盈 +96.00）',
-      'BTC_USDT 1h 近 20 根 K 线摘要: 震荡上行，收于均线上方。',
-    ].join('\n'),
-    llm_raw: JSON.stringify(
-      {
-        thoughts: 'BTC 突破 118000 阻力位，量能配合；ETH 汇率走弱，维持空仓对冲。',
-        tool_calls: [
-          { tool: 'get_account', args: {} },
-          { tool: 'get_candlesticks', args: { contract: 'BTC_USDT', interval: '1h', limit: 20 } },
-          { tool: 'place_order', args: { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' } },
-          { tool: 'set_note', args: { content: '突破有效性待确认，下次 30 分钟后唤醒。' } },
-        ],
-        next_wake_minutes: 30,
-      },
-      null,
-      2,
-    ),
-    tool_calls: [
-      {
-        seq: 1,
-        tool: 'get_account',
-        args: {},
-        risk_verdict: '',
-        risk_reason: '',
-        result: 'equity=10842.36, available=7315.20',
-        duration_ms: 42,
-      },
-      {
-        seq: 2,
-        tool: 'get_candlesticks',
-        args: { contract: 'BTC_USDT', interval: '1h', limit: 20 },
-        risk_verdict: '',
-        risk_reason: '',
-        result: '返回 20 根 K 线',
-        duration_ms: 88,
-      },
-      {
-        seq: 3,
-        tool: 'place_order',
-        args: { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' },
-        risk_verdict: 'deny',
-        risk_reason: '下单后单仓名义价值占权益 36% > max_position_pct(单仓上限) 30%',
-        result: '风控拒绝，未下单',
-        duration_ms: 3,
-      },
-      {
-        seq: 4,
-        tool: 'set_note',
-        args: { content: '突破有效性待确认，下次 30 分钟后唤醒。' },
-        risk_verdict: '',
-        risk_reason: '',
-        result: '已保存笔记',
-        duration_ms: 5,
-      },
-    ],
-  }
+  const fill = trades.find((t) => t.round_id === meta.round_id)
+  const body = fill ? fillNarrative(fill) : meta.summary.includes('突破') ? denyNarrative() : idleNarrative()
+  return { round_id: meta.round_id, prompt_snapshot: promptSnapshot(meta), ...body }
 }
 
 /** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮（get_account/write_note/set_next_wakeup） */

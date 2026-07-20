@@ -19,10 +19,10 @@ uv sync
 # 配置（真实 key 填 .env，禁止提交）
 cp .env.example .env
 
-# 运行（默认 paper 模式 + 监控后台 http://127.0.0.1:8080）
+# 运行（默认 paper 模式 + 监控后台 http://127.0.0.1:17577）
 uv run python -m src.main
 
-# 前端开发（默认经 proxy 连本地 8080 真实后端，需先启动后端；
+# 前端开发（dev server 端口 17576，默认经 proxy 连本地 17577 真实后端，需先启动后端；
 # 无后端独立预览：web/.env.development 设 VITE_USE_MOCK=true）
 cd web && npm ci && npm run dev
 ```

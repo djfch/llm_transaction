@@ -1,7 +1,7 @@
 """FastAPI 监控后端入口：create_app(deps) 组装路由、CORS、WebSocket 与静态托管。
 
 server 与 agent 同进程 asyncio 运行；web/dist 存在时挂载到 /（不存在不报错），
-前后端单端口运行（默认 8080，见 ServerConfig）。
+前后端单端口运行（默认 17577，见 ServerConfig）。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from src.server.routes_trading import create_trading_router
 from src.server.ws import ConnectionManager, pump_events, register_ws_route
 
 # 前端 Vite dev server 来源
-_DEV_ORIGINS = ["http://localhost:5173"]
+_DEV_ORIGINS = ["http://localhost:17576"]
 
 
 def create_app(deps: ServerDeps) -> FastAPI:

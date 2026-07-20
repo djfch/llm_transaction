@@ -2,13 +2,21 @@
 @tailwind components;
 @tailwind utilities;
 
-/* 深色金融仪表盘全局基调 */
+/* ===== AI 大脑观察舱 · 深色基底（对齐 design_proposals/scheme-c-agent.html） ===== */
 :root {
   color-scheme: dark;
 }
 
 body {
-  @apply bg-slate-950 text-slate-200 antialiased;
+  /* zinc-950 基底 + 微弱紫/青 aurora 氛围光（极低透明度，克制；fixed 使长页面下光晕常驻视口） */
+  @apply text-zinc-100 antialiased;
+  min-height: 100vh;
+  background:
+    radial-gradient(900px 480px at 12% -8%, rgba(167, 139, 250, 0.08), transparent 60%),
+    radial-gradient(800px 420px at 88% -6%, rgba(34, 211, 238, 0.06), transparent 60%),
+    radial-gradient(700px 600px at 50% 115%, rgba(167, 139, 250, 0.05), transparent 60%),
+    #09090b;
+  background-attachment: fixed;
 }
 
 /* 细滚动条，贴合深色风格 */
@@ -20,5 +28,27 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  @apply rounded bg-slate-700;
+  @apply rounded bg-zinc-700;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-zinc-600;
+}
+
+/* details 摘要隐藏默认三角（组件自绘 ▸ 箭头） */
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 尊重减少动效偏好：关闭呼吸/扫描线/光标闪烁/滑入等装饰动画 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

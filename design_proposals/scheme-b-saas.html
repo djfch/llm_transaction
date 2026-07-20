@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gate LLM Trader 控制台 · 设计方案 B</title>
+<!--
+  设计方案 B：现代 SaaS 控制台风（Linear / Vercel / Stripe Dashboard 风格）
+  - 浅色主题（白底 + slate 灰阶），品牌色为克制的 indigo
+  - 左侧细导航（图标 + 文字）：概览 / 决策 / 成交 / 配置，点击切换模拟路由
+  - 单文件静态原型：Tailwind 3 CDN + 少量原生 JS，内嵌模拟数据，不请求任何后端
+-->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Tailwind 主题扩展：中文字体栈、等宽数字、柔和卡片阴影
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'system-ui', 'sans-serif'],
+          mono: ['JetBrains Mono', 'SFMono-Regular', 'Consolas', 'monospace'],
+        },
+        boxShadow: {
+          card: '0 1px 2px rgba(15,23,42,.04), 0 6px 24px -6px rgba(15,23,42,.08)',
+        },
+      },
+    },
+  };
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /* ===== 基础 ===== */
+  body { -webkit-font-smoothing: antialiased; }
+  /* 数字等宽，避免刷新时横向跳动 */
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+  /* 左侧导航项 */
+  .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px;
+    border-radius: 10px; font-size: 13.5px; color: #475569; border: 1px solid transparent; transition: all .15s; }
+  .nav-item:hover { background: #f8fafc; color: #0f172a; }
+  .nav-item.active { background: #eef2ff; color: #4338ca; border-color: #e0e7ff; font-weight: 500; }
+  .nav-item svg { width: 16px; height: 16px; flex: none; }
+  /* 详情展开（纯 details/summary，无 JS） */
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+  details[open] .chev { transform: rotate(90deg); }
+  .chev { transition: transform .15s; }
+  /* Agent 启停开关（iOS 风格） */
+  .switch { width: 36px; height: 20px; border-radius: 9999px; background: #10b981; position: relative;
+    transition: .2s; cursor: pointer; flex: none; border: none; padding: 0; }
+  .switch::after { content: ''; position: absolute; top: 2px; left: 18px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: .2s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  .switch.off { background: #cbd5e1; }
+  .switch.off::after { left: 2px; }
+  /* 运行状态呼吸点 */
+  .pulse-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: #10b981; flex: none; }
+  .pulse-dot::before { content: ''; position: absolute; inset: -4px; border-radius: 50%;
+    background: #10b981; opacity: .35; animation: pp 1.8s ease-out infinite; }
+  @keyframes pp { 0% { transform: scale(.6); opacity: .5 } 70% { transform: scale(1.7); opacity: 0 } 100% { opacity: 0 } }
+  /* 进行中的工具调用转圈 */
+  .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c7d2fe;
+    border-top-color: #4f46e5; animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  /* 页面切换淡入 */
+  .page { animation: fadeIn .25s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }
+  /* 操作提示浮层（设计稿中代替真实后端动作） */
+  #toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(16px);
+    opacity: 0; transition: all .25s; z-index: 60; pointer-events: none; }
+  #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  /* 表格行 hover */
+  tbody tr { transition: background .12s; }
+  /* 细滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 8px; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<!-- ==================== 左侧导航（固定，模拟四个页面的路由） ==================== -->
+<aside class="fixed inset-y-0 left-0 w-60 bg-white border-r border-slate-200 flex flex-col z-30">
+  <!-- 品牌区 -->
+  <div class="h-16 flex items-center gap-3 px-5 border-b border-slate-100">
+    <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 text-white grid place-items-center font-extrabold text-sm shadow-sm">G</div>
+    <div class="leading-tight">
+      <div class="text-[13.5px] font-semibold text-slate-900">Gate LLM Trader</div>
+      <div class="text-[11px] text-slate-400">永续合约自主交易 Agent</div>
+    </div>
+  </div>
+  <!-- 页面导航 -->
+  <nav class="flex-1 px-3 py-4 space-y-1">
+    <div class="px-3 pb-2 text-[11px] font-medium tracking-wider text-slate-400">工作台</div>
+    <button class="nav-item active" data-page="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      概览
+    </button>
+    <button class="nav-item" data-page="rounds">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      决策
+      <!-- 进行中决策轮的呼吸提示 -->
+      <span class="ml-auto w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+    </button>
+    <button class="nav-item" data-page="trades">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>
+      成交
+    </button>
+    <button class="nav-item" data-page="config">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="white"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="white"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="7" cy="18" r="2" fill="white"/></svg>
+      配置
+    </button>
+  </nav>
+  <!-- 侧栏底部：运行模式卡 + 版本 -->
+  <div class="p-3 border-t border-slate-100">
+    <div class="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5">
+      <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-700">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>PAPER · 模拟盘
+      </div>
+      <div class="mt-1 text-[11px] leading-snug text-amber-600/80">成交为本地撮合模拟，不涉及真实资金</div>
+    </div>
+    <div class="mt-2 px-1 text-[11px] text-slate-400 flex justify-between"><span>v0.9.2</span><span class="num">build 20260719</span></div>
+  </div>
+</aside>
+
+<!-- ==================== 右侧主区域 ==================== -->
+<div class="ml-60 flex flex-col min-h-screen">
+
+  <!-- ===== 顶部状态栏（所有页面常驻） ===== -->
+  <header class="sticky top-0 z-20 bg-white/85 backdrop-blur border-b border-slate-200">
+    <div class="px-6 py-2.5 flex items-center gap-x-4 gap-y-2 flex-wrap text-[12.5px]">
+      <!-- 运行模式 mode -->
+      <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 px-2.5 py-1 font-medium">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>PAPER · 模拟盘
+      </span>
+      <span class="w-px h-5 bg-slate-200"></span>
+      <!-- Agent 启停 agent_running -->
+      <div class="flex items-center gap-2">
+        <span class="pulse-dot" id="agentDot"></span>
+        <span id="agentStatusText" class="font-medium text-slate-700">Agent 运行中</span>
+        <button class="switch" id="agentSwitch" title="启动 / 停止 Agent"></button>
+      </div>
+      <!-- 熔断开关 kill_switch -->
+      <button onclick="toast('设计稿预览：熔断不会真实触发，生产环境将立即撤销全部订单并平仓')"
+        class="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-600 px-2.5 py-1 font-medium hover:bg-rose-100 transition">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        Kill Switch 熔断
+      </button>
+      <span class="w-px h-5 bg-slate-200"></span>
+      <!-- LLM 配置状态 llm_configured / llm_provider / llm_model -->
+      <div class="flex items-center gap-1.5 text-slate-500">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+        <span class="font-mono text-[12px]">deepseek · deepseek-reasoner</span>
+        <span class="inline-flex items-center gap-1 text-emerald-600 font-medium">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>已配置
+        </span>
+      </div>
+      <!-- WS 连接指示 -->
+      <div class="flex items-center gap-1.5 text-slate-500">
+        <span class="w-2 h-2 rounded-full bg-emerald-500"></span>WS 已连接
+        <span class="text-slate-300">·</span><span class="num text-slate-400">12ms</span>
+      </div>
+      <!-- 运行时长 uptime -->
+      <div class="flex items-center gap-1.5 text-slate-500">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span class="num">运行 3天 04:12:55</span>
+      </div>
+      <!-- 设计稿标注 -->
+      <span class="ml-auto inline-flex items-center gap-1.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-3 py-1 font-medium">
+        设计方案 B · 静态预览（模拟数据）
+      </span>
+    </div>
+  </header>
+
+  <main class="flex-1 w-full max-w-[1440px] mx-auto px-6 py-6">
+
+    <!-- ================================================== -->
+    <!-- 页面一：概览                                        -->
+    <!-- ================================================== -->
+    <section id="page-overview" class="page space-y-5">
+      <!-- 页面标题 + 唤醒节奏 -->
+      <div class="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="text-xl font-bold text-slate-900">概览</h1>
+          <p class="mt-1 text-[13px] text-slate-500">账户、持仓与 Agent 运行状态的实时快照</p>
+        </div>
+        <div class="flex items-center gap-2 text-[12px] text-slate-500">
+          <span class="rounded-lg bg-white border border-slate-200 px-2.5 py-1.5">上次唤醒 <span class="num font-medium text-slate-700">01:12:38</span> <span class="text-slate-400">（价格预警）</span></span>
+          <span class="rounded-lg bg-white border border-slate-200 px-2.5 py-1.5">下次唤醒 <span class="num font-medium text-indigo-600">01:27:38</span> <span class="text-slate-400">（定时）</span></span>
+        </div>
+      </div>
+
+      <!-- 账户三指标 + 风控用量卡 -->
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <!-- 账户权益 equity -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="flex items-center justify-between">
+            <div class="text-[12px] text-slate-500">账户权益 <span class="text-slate-300 font-mono text-[11px]">equity</span></div>
+            <span class="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 text-[11px] font-medium num">+3.05% / 7D</span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-1.5">
+            <span class="num text-[26px] font-bold text-slate-900 tracking-tight">10,284.56</span>
+            <span class="text-[12px] text-slate-400">USDT</span>
+          </div>
+          <div class="mt-1 text-[12px] num text-emerald-600">今日 +121.09（+1.19%）</div>
+          <!-- 权益迷你曲线（近 48h，由 JS 绘制） -->
+          <svg id="sparkEquity" class="mt-3 w-full h-10" viewBox="0 0 200 40" preserveAspectRatio="none"></svg>
+        </div>
+        <!-- 可用余额 available -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="text-[12px] text-slate-500">可用余额 <span class="text-slate-300 font-mono text-[11px]">available</span></div>
+          <div class="mt-2 flex items-baseline gap-1.5">
+            <span class="num text-[26px] font-bold text-slate-900 tracking-tight">5,900.08</span>
+            <span class="text-[12px] text-slate-400">USDT</span>
+          </div>
+          <div class="mt-1 text-[12px] text-slate-500">保证金占用 <span class="num text-slate-700">4,276.18</span>（41.6%）</div>
+          <!-- 占用比例条 -->
+          <div class="mt-3.5 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+            <div class="h-full rounded-full bg-indigo-400" style="width:41.6%"></div>
+          </div>
+          <div class="mt-1.5 flex justify-between text-[11px] text-slate-400"><span>占用 41.6%</span><span>上限 60%</span></div>
+        </div>
+        <!-- 未实现盈亏 unrealised_pnl -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="text-[12px] text-slate-500">未实现盈亏 <span class="text-slate-300 font-mono text-[11px]">unrealised_pnl</span></div>
+          <div class="mt-2 flex items-baseline gap-1.5">
+            <span class="num text-[26px] font-bold text-emerald-600 tracking-tight">+108.30</span>
+            <span class="text-[12px] text-slate-400">USDT</span>
+          </div>
+          <div class="mt-2 space-y-1 text-[12px] num">
+            <div class="flex justify-between"><span class="text-slate-400 font-sans">BTC_USDT 多</span><span class="text-emerald-600">+163.26</span></div>
+            <div class="flex justify-between"><span class="text-slate-400 font-sans">ETH_USDT 空</span><span class="text-rose-500">-54.96</span></div>
+          </div>
+        </div>
+        <!-- 风控用量（硬风控，代码强制） -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="flex items-center gap-1.5 text-[12px] text-slate-500">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5 text-indigo-500"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+            风控用量 <span class="text-slate-300">（代码强制）</span>
+          </div>
+          <div class="mt-3 space-y-3 text-[12px]">
+            <div>
+              <div class="flex justify-between num"><span class="text-slate-500 font-sans">今日下单</span><span class="text-slate-700">4 / 12</span></div>
+              <div class="mt-1 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full bg-indigo-400" style="width:33%"></div></div>
+            </div>
+            <div>
+              <div class="flex justify-between num"><span class="text-slate-500 font-sans">日亏损锁仓线</span><span class="text-slate-700">0.00 / 500.00</span></div>
+              <div class="mt-1 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full bg-emerald-400" style="width:0.5%"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 第二行：K线图 + Agent 笔记 -->
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <!-- K线图（SVG 蜡烛图由 JS 用模拟数据绘制） -->
+        <div class="xl:col-span-2 rounded-2xl bg-white border border-slate-200 shadow-card">
+          <div class="px-5 pt-4 pb-3 flex items-center gap-3 flex-wrap border-b border-slate-100">
+            <div class="flex items-center gap-2">
+              <span class="font-semibold text-slate-900 text-[14px]">BTC_USDT</span>
+              <span class="text-[11px] text-slate-400">永续 · 标记价</span>
+            </div>
+            <span class="num text-[15px] font-bold text-slate-900">118,203.0</span>
+            <span class="num text-[12px] font-medium text-emerald-600">+1.16% / 24h</span>
+            <!-- 周期切换（静态示意） -->
+            <div class="ml-auto flex items-center gap-1 text-[11.5px]">
+              <button class="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-100 transition">15m</button>
+              <button class="rounded-md px-2 py-1 bg-indigo-50 text-indigo-600 font-medium border border-indigo-100">1H</button>
+              <button class="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-100 transition">4H</button>
+              <button class="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-100 transition">1D</button>
+            </div>
+          </div>
+          <div class="px-3 py-2">
+            <svg id="klineChart" viewBox="0 0 760 300" class="w-full"></svg>
+          </div>
+          <div class="px-5 pb-3 flex items-center gap-4 text-[11px] text-slate-400">
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-emerald-500"></span>上涨</span>
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-rose-500"></span>下跌</span>
+            <span class="flex items-center gap-1"><span class="w-4 border-t border-dashed border-indigo-400"></span>最新标记价</span>
+            <span class="ml-auto">数据源：Gate.io WebSocket（模拟渲染）</span>
+          </div>
+        </div>
+
+        <!-- Agent 笔记 notes -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card flex flex-col overflow-hidden">
+          <div class="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 text-indigo-500"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span class="font-semibold text-slate-900 text-[13.5px]">Agent 笔记</span>
+            <span class="text-slate-300 font-mono text-[11px]">notes</span>
+            <span class="ml-auto rounded-full bg-slate-100 text-slate-500 px-2 py-0.5 text-[11px] num">4</span>
+          </div>
+          <div class="flex-1 divide-y divide-slate-100 overflow-auto max-h-[336px]">
+            <div class="px-5 py-3.5">
+              <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span><span class="num">07-20 01:15</span>
+                <span class="ml-auto rounded bg-indigo-50 text-indigo-500 px-1.5 py-px text-[10px]">Round #47</span>
+              </div>
+              <p class="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">BTC 放量突破 118,000，顺势加仓 600 张（5x），加仓后单仓占比 27.6%，仍保留充足可用余额。已在 119,500 挂预警，15 分钟后定时复核。</p>
+            </div>
+            <div class="px-5 py-3.5">
+              <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                <span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span><span class="num">07-19 22:50</span>
+                <span class="ml-auto rounded bg-slate-100 text-slate-500 px-1.5 py-px text-[10px]">Round #46</span>
+              </div>
+              <p class="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">ETH 空单小幅浮亏，4H 结构未破坏前继续持空；若 4H 收盘站上 3,680 将主动止损。白天 15x 杠杆申请被风控拒绝，后续严格在上限内执行。</p>
+            </div>
+            <div class="px-5 py-3.5">
+              <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                <span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span><span class="num">07-19 09:40</span>
+                <span class="ml-auto rounded bg-slate-100 text-slate-500 px-1.5 py-px text-[10px]">复盘</span>
+              </div>
+              <p class="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">SOL 强平事件复盘：单笔亏损 96.30 USDT（-0.96%），原因为隔夜低流动性插针。已将 SOL 杠杆降至 3x，并缩小非主力时段仓位。</p>
+            </div>
+            <div class="px-5 py-3.5">
+              <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                <span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span><span class="num">07-18 16:45</span>
+                <span class="ml-auto rounded bg-slate-100 text-slate-500 px-1.5 py-px text-[10px]">Round #42</span>
+              </div>
+              <p class="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">检测到用户手动平仓 BTC 300 张，尊重人工决策，本轮不做反向追单，仅同步仓位状态。</p>
+            </div>
+          </div>
+          <div class="px-5 py-2.5 border-t border-slate-100 text-[12px]">
+            <button onclick="toast('设计稿预览：笔记列表页未纳入本方案')" class="text-indigo-600 hover:text-indigo-700 font-medium">查看全部笔记 →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 第三行：持仓卡片网格 + 权益曲线 -->
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <!-- 持仓 positions -->
+        <div class="xl:col-span-2 space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-slate-900 text-[14px]">当前持仓 <span class="text-slate-300 font-mono text-[11px] font-normal">positions</span> <span class="ml-1 rounded-full bg-indigo-50 text-indigo-600 px-2 py-0.5 text-[11px] num">2</span></h2>
+            <span class="text-[11.5px] text-slate-400">逐仓模式 · 按标记价计价</span>
+          </div>
+          <div class="grid md:grid-cols-2 gap-4">
+            <!-- BTC 多单 -->
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-slate-900">BTC_USDT</span>
+                <span class="text-[11px] text-slate-400">永续</span>
+                <span class="rounded-md bg-emerald-50 text-emerald-600 px-1.5 py-0.5 text-[11px] font-semibold">多 5x</span>
+                <span class="ml-auto text-[11px] text-slate-400">逐仓</span>
+              </div>
+              <div class="mt-3 flex items-end justify-between">
+                <div>
+                  <div class="text-[11px] text-slate-400">标记价 <span class="font-mono">mark_price</span></div>
+                  <div class="num text-[22px] font-bold text-slate-900 tracking-tight">118,203.0</div>
+                </div>
+                <div class="text-right">
+                  <div class="text-[11px] text-slate-400">未实现盈亏</div>
+                  <div class="num text-[15px] font-semibold text-emerald-600">+163.26 <span class="text-[11px]">（+5.75%）</span></div>
+                </div>
+              </div>
+              <dl class="mt-4 grid grid-cols-3 gap-y-3 gap-x-2 text-[12px]">
+                <div><dt class="text-slate-400">持仓数量</dt><dd class="num font-medium text-slate-800 mt-0.5">1,200 张</dd></div>
+                <div><dt class="text-slate-400">开仓均价</dt><dd class="num font-medium text-slate-800 mt-0.5">116,842.5</dd></div>
+                <div><dt class="text-slate-400">强平价</dt><dd class="num font-medium text-rose-500 mt-0.5">96,318.5</dd></div>
+                <div><dt class="text-slate-400">保证金</dt><dd class="num font-medium text-slate-800 mt-0.5">2,836.90</dd></div>
+                <div><dt class="text-slate-400">仓位价值</dt><dd class="num font-medium text-slate-800 mt-0.5">14,184.4</dd></div>
+                <div><dt class="text-slate-400">距强平</dt><dd class="num font-medium text-emerald-600 mt-0.5">18.5%</dd></div>
+              </dl>
+              <div class="mt-4 flex gap-2">
+                <button onclick="toast('设计稿预览：BTC_USDT 市价平仓指令不会真实发送')" class="flex-1 rounded-lg border border-rose-200 bg-rose-50 text-rose-600 text-[12.5px] font-medium py-1.5 hover:bg-rose-100 transition">市价平仓</button>
+                <button onclick="toast('设计稿预览：止盈止损设置不生效')" class="rounded-lg border border-slate-200 text-slate-600 text-[12.5px] font-medium px-3 py-1.5 hover:bg-slate-50 transition">止盈止损</button>
+                <button onclick="toast('设计稿预览：杠杆调整不生效')" class="rounded-lg border border-slate-200 text-slate-600 text-[12.5px] font-medium px-3 py-1.5 hover:bg-slate-50 transition">调杠杆</button>
+              </div>
+            </div>
+            <!-- ETH 空单 -->
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-slate-900">ETH_USDT</span>
+                <span class="text-[11px] text-slate-400">永续</span>
+                <span class="rounded-md bg-rose-50 text-rose-600 px-1.5 py-0.5 text-[11px] font-semibold">空 3x</span>
+                <span class="ml-auto text-[11px] text-slate-400">逐仓</span>
+              </div>
+              <div class="mt-3 flex items-end justify-between">
+                <div>
+                  <div class="text-[11px] text-slate-400">标记价 <span class="font-mono">mark_price</span></div>
+                  <div class="num text-[22px] font-bold text-slate-900 tracking-tight">3,598.2</div>
+                </div>
+                <div class="text-right">
+                  <div class="text-[11px] text-slate-400">未实现盈亏</div>
+                  <div class="num text-[15px] font-semibold text-rose-500">-54.96 <span class="text-[11px]">（-3.82%）</span></div>
+                </div>
+              </div>
+              <dl class="mt-4 grid grid-cols-3 gap-y-3 gap-x-2 text-[12px]">
+                <div><dt class="text-slate-400">持仓数量</dt><dd class="num font-medium text-slate-800 mt-0.5">-120 张</dd></div>
+                <div><dt class="text-slate-400">开仓均价</dt><dd class="num font-medium text-slate-800 mt-0.5">3,552.4</dd></div>
+                <div><dt class="text-slate-400">强平价</dt><dd class="num font-medium text-rose-500 mt-0.5">4,286.4</dd></div>
+                <div><dt class="text-slate-400">保证金</dt><dd class="num font-medium text-slate-800 mt-0.5">1,439.28</dd></div>
+                <div><dt class="text-slate-400">仓位价值</dt><dd class="num font-medium text-slate-800 mt-0.5">4,317.8</dd></div>
+                <div><dt class="text-slate-400">距强平</dt><dd class="num font-medium text-emerald-600 mt-0.5">19.1%</dd></div>
+              </dl>
+              <div class="mt-4 flex gap-2">
+                <button onclick="toast('设计稿预览：ETH_USDT 市价平仓指令不会真实发送')" class="flex-1 rounded-lg border border-rose-200 bg-rose-50 text-rose-600 text-[12.5px] font-medium py-1.5 hover:bg-rose-100 transition">市价平仓</button>
+                <button onclick="toast('设计稿预览：止盈止损设置不生效')" class="rounded-lg border border-slate-200 text-slate-600 text-[12.5px] font-medium px-3 py-1.5 hover:bg-slate-50 transition">止盈止损</button>
+                <button onclick="toast('设计稿预览：杠杆调整不生效')" class="rounded-lg border border-slate-200 text-slate-600 text-[12.5px] font-medium px-3 py-1.5 hover:bg-slate-50 transition">调杠杆</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 权益曲线（7 天，points[{t,equity}] 由 JS 绘制） -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5 flex flex-col">
+          <div class="flex items-center justify-between">
+            <div class="font-semibold text-slate-900 text-[13.5px]">权益曲线 <span class="text-slate-300 font-mono text-[11px] font-normal">equity · 7D</span></div>
+            <span class="num text-[12px] font-medium text-emerald-600">+3.05%</span>
+          </div>
+          <svg id="equityChart" viewBox="0 0 380 230" class="mt-3 w-full"></svg>
+          <div class="mt-auto pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-[11px]">
+            <div><div class="text-slate-400">最高</div><div class="num font-medium text-slate-700 mt-0.5" id="eqHigh">—</div></div>
+            <div><div class="text-slate-400">最低</div><div class="num font-medium text-slate-700 mt-0.5" id="eqLow">—</div></div>
+            <div><div class="text-slate-400">最大回撤</div><div class="num font-medium text-rose-500 mt-0.5" id="eqMdd">—</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================== -->
+    <!-- 页面二：决策（实时决策轮 + 历史时间线）              -->
+    <!-- ================================================== -->
+    <section id="page-rounds" class="page hidden space-y-5">
+      <div>
+        <h1 class="text-xl font-bold text-slate-900">决策轮</h1>
+        <p class="mt-1 text-[13px] text-slate-500">LLM 自主决策的完整审计链：每次唤醒、每个工具调用、每条风控判定</p>
+      </div>
+
+      <!-- ===== 进行中的决策轮 round（in_round = true） ===== -->
+      <div class="rounded-2xl border border-indigo-200 bg-white shadow-card overflow-hidden">
+        <!-- 轮次头部 -->
+        <div class="px-5 py-4 bg-gradient-to-r from-indigo-50/80 to-white border-b border-indigo-100 flex items-center gap-3 flex-wrap">
+          <span class="pulse-dot" style="background:#6366f1"></span>
+          <span class="font-semibold text-slate-900 text-[14px]">Round #47</span>
+          <span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">进行中</span>
+          <span class="rounded-full bg-sky-50 border border-sky-200 text-sky-600 px-2 py-0.5 text-[11px] font-medium">价格预警唤醒</span>
+          <span class="rounded-md bg-white border border-indigo-100 text-indigo-600 px-2 py-0.5 text-[11px] font-mono">触发：BTC_USDT ≥ 118,000</span>
+          <span class="ml-auto text-[12px] text-slate-500">started_at <span class="num font-medium text-slate-700">2026-07-20 01:12:38</span> · 已进行 <span class="num text-indigo-600 font-medium">42s</span></span>
+        </div>
+        <div class="p-5">
+          <!-- 决策摘要 context_summary -->
+          <div class="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-[13px] leading-relaxed text-slate-600">
+            <span class="font-semibold text-slate-800 font-mono text-[12px]">context_summary｜</span>
+            BTC 15m 级别放量突破 118,000 整数关口，1H MACD 金叉延续，趋势延续概率高。账户权益 10,284.56，可用 5,900.08。计划：顺势小幅加仓 BTC 多单 600 张（5x），在 119,500 设置价格预警，15 分钟后定时复核。
+          </div>
+
+          <!-- 工具调用链 tool_calls（步骤条样式） -->
+          <div class="mt-5">
+            <div class="flex items-center gap-2 text-[12px] font-medium text-slate-500">
+              <span>工具调用链 <span class="font-mono text-slate-400">tool_calls</span></span>
+              <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] num">5 通过</span>
+              <span class="rounded-full bg-rose-50 text-rose-600 px-2 py-0.5 text-[11px] num">1 拒绝</span>
+            </div>
+            <ol class="mt-3">
+              <!-- 步骤 1：取行情 -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center text-[11px] font-semibold num">1</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 hover:border-slate-300 transition">
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">get_market_data</code>
+                  <code class="font-mono text-[11px] text-slate-400 truncate max-w-[340px]">{contract:"BTC_USDT", interval:"15m", limit:120}</code>
+                  <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>ALLOW · 风控通过
+                  </span>
+                  <span class="num text-[11px] text-slate-400">84ms</span>
+                </div>
+                <p class="mt-1.5 pl-1 text-[12px] text-slate-500">返回 15m K 线 120 根：放量阳线突破 118,000，MACD 金叉延续，RSI 61 未超买</p>
+              </li>
+              <!-- 步骤 2：取账户 -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center text-[11px] font-semibold num">2</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 hover:border-slate-300 transition">
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">get_account</code>
+                  <code class="font-mono text-[11px] text-slate-400">{}</code>
+                  <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>ALLOW · 风控通过
+                  </span>
+                  <span class="num text-[11px] text-slate-400">41ms</span>
+                </div>
+                <p class="mt-1.5 pl-1 text-[12px] text-slate-500">权益 10,284.56 · 可用 5,900.08 · 持仓 2 个</p>
+              </li>
+              <!-- 步骤 3：调杠杆被拒（DENY 的视觉区分） -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-rose-50 border border-rose-200 text-rose-600 grid place-items-center text-[11px] font-semibold num">3</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="rounded-xl border border-rose-200 bg-rose-50/60 px-3.5 py-2.5">
+                  <div class="flex items-center gap-2.5 flex-wrap">
+                    <code class="font-mono text-[12.5px] font-semibold text-slate-800">set_leverage</code>
+                    <code class="font-mono text-[11px] text-slate-400">{contract:"BTC_USDT", leverage:20}</code>
+                    <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-rose-100 border border-rose-300 text-rose-700 px-2 py-0.5 text-[11px] font-semibold">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>DENY · 风控拒绝
+                    </span>
+                    <span class="num text-[11px] text-slate-400">9ms</span>
+                  </div>
+                  <p class="mt-1.5 text-[12px] text-rose-600 font-medium">risk_reason：申请杠杆 20x 超过硬上限 max_leverage = 10x，已拦截</p>
+                  <p class="mt-0.5 text-[12px] text-slate-500">LLM 已收到拒绝回执，改用 5x 重新提交（见步骤 4）</p>
+                </div>
+              </li>
+              <!-- 步骤 4：调杠杆通过 -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center text-[11px] font-semibold num">4</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 hover:border-slate-300 transition">
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">set_leverage</code>
+                  <code class="font-mono text-[11px] text-slate-400">{contract:"BTC_USDT", leverage:5}</code>
+                  <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>ALLOW · 风控通过
+                  </span>
+                  <span class="num text-[11px] text-slate-400">28ms</span>
+                </div>
+              </li>
+              <!-- 步骤 5：下单 -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center text-[11px] font-semibold num">5</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 hover:border-slate-300 transition">
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">place_order</code>
+                  <code class="font-mono text-[11px] text-slate-400 truncate max-w-[340px]">{contract:"BTC_USDT", size:600, price:118200, tif:"ioc"}</code>
+                  <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>ALLOW · 风控通过
+                  </span>
+                  <span class="num text-[11px] text-slate-400">206ms</span>
+                </div>
+                <p class="mt-1.5 pl-1 text-[12px] text-slate-500">校验：加仓后单仓占比 27.6% ≤ 40% · 总仓 41.6% ≤ 60% · 今日下单 4/12 · 价格偏离 0.002% ≤ 0.5% → 已成交 600 张 @ 118,203.0</p>
+              </li>
+              <!-- 步骤 6：挂预警 -->
+              <li class="relative pl-10 pb-4">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center text-[11px] font-semibold num">6</span>
+                <span class="absolute left-[11px] top-7 bottom-0 w-px bg-slate-200"></span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 hover:border-slate-300 transition">
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">set_price_alert</code>
+                  <code class="font-mono text-[11px] text-slate-400 truncate max-w-[340px]">{contract:"BTC_USDT", price:119500, side:"above"}</code>
+                  <span class="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>ALLOW · 风控通过
+                  </span>
+                  <span class="num text-[11px] text-slate-400">47ms</span>
+                </div>
+              </li>
+              <!-- 步骤 7：设置下次唤醒（进行中） -->
+              <li class="relative pl-10">
+                <span class="absolute left-0 top-0.5 w-6 h-6 rounded-full bg-indigo-50 border border-indigo-300 text-indigo-600 grid place-items-center text-[11px] font-semibold num">7</span>
+                <div class="flex items-center gap-2.5 flex-wrap rounded-xl border border-dashed border-indigo-300 bg-indigo-50/50 px-3.5 py-2.5">
+                  <span class="spinner"></span>
+                  <code class="font-mono text-[12.5px] font-semibold text-slate-800">set_next_wakeup</code>
+                  <code class="font-mono text-[11px] text-slate-400">{after_minutes:15, reason:"突破后复核"}</code>
+                  <span class="ml-auto text-[11px] text-indigo-500 font-medium">等待 LLM 输出…</span>
+                </div>
+              </li>
+            </ol>
+          </div>
+
+          <!-- LLM 原始输出（可展开） -->
+          <details class="mt-5">
+            <summary class="flex items-center gap-2 text-[12.5px] font-medium text-slate-500 hover:text-slate-700 select-none">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chev w-3.5 h-3.5"><path d="m9 18 6-6-6-6"/></svg>
+              LLM 原始输出 <span class="font-mono text-slate-400">llm_raw</span>
+              <span class="text-slate-400 font-normal">（含 prompt_snapshot，共 4,812 tokens）</span>
+            </summary>
+            <pre class="mt-3 rounded-xl bg-slate-900 text-slate-200 text-[12px] leading-relaxed p-4 overflow-auto font-mono">【决策摘要】BTC 放量突破 118,000，1H 级别趋势延续概率高。
+【执行计划】
+  1) set_leverage(BTC_USDT, 20)   ← 已被风控拒绝，修正为 5
+  2) place_order(BTC_USDT, +600 张, ioc)
+  3) set_price_alert(BTC_USDT, 119500, above)
+  4) set_next_wakeup(15min, "突破后复核")
+【风险自检】加仓后单仓占比 27.6%（上限 40%）、总仓 41.6%（上限 60%）、
+  今日下单 4/12、距日亏锁仓线充裕。若 1H 收盘跌回 117,400 下方，
+  下一轮将减仓 50%。
+【不确定性】突破发生在低流动性时段（UTC+8 凌晨），量能确认偏弱，
+  故仅按标准仓位的 60% 加仓。</pre>
+          </details>
+        </div>
+      </div>
+
+      <!-- ===== 历史决策时间线 ===== -->
+      <div>
+        <h2 class="font-semibold text-slate-900 text-[14px]">决策时间线</h2>
+        <div class="relative mt-3 pl-6">
+          <!-- 时间线竖轨 -->
+          <div class="absolute left-[9px] top-3 bottom-3 w-px bg-slate-200"></div>
+
+          <!-- Round #46 -->
+          <div class="relative mb-4">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-slate-300"></span>
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card">
+              <div class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap">
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #46</span>
+                <span class="rounded-full bg-slate-100 text-slate-500 px-2 py-0.5 text-[11px] font-medium">定时唤醒</span>
+                <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">已完成</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-19 22:45:02 → 22:45:19 · 17s</span>
+              </div>
+              <div class="px-5 pb-3.5">
+                <p class="text-[13px] text-slate-600">例行巡检：ETH 空单浮亏收窄，BTC 趋势完好，无操作，维持 15 分钟唤醒节奏。</p>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">5</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 5</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">10,176.26</b> <span class="num text-emerald-600">+0.52%</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Round #45（含一次风控拒绝，可展开工具链） -->
+          <div class="relative mb-4">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-rose-400"></span>
+            <details class="rounded-2xl bg-white border border-slate-200 shadow-card overflow-hidden">
+              <summary class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap hover:bg-slate-50/60 transition select-none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chev w-3.5 h-3.5 text-slate-400"><path d="m9 18 6-6-6-6"/></svg>
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #45</span>
+                <span class="rounded-full bg-sky-50 border border-sky-200 text-sky-600 px-2 py-0.5 text-[11px] font-medium">价格预警</span>
+                <span class="rounded-full bg-rose-50 text-rose-600 px-2 py-0.5 text-[11px] font-medium num">1 拒绝</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-19 18:02:11 → 18:02:34 · 23s</span>
+              </summary>
+              <div class="px-5 pb-4">
+                <p class="text-[13px] text-slate-600">BTC 触及 118,000 预警：减持 400 张锁定利润（+53.44 USDT）；15x 杠杆申请被风控拒绝。</p>
+                <!-- 展开的迷你工具链 -->
+                <ol class="mt-3 space-y-1.5 text-[12px]">
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">1</span><code class="font-mono font-medium text-slate-700">get_market_data</code><span class="text-emerald-600 ml-auto num">ALLOW · 91ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">2</span><code class="font-mono font-medium text-slate-700">get_account</code><span class="text-emerald-600 ml-auto num">ALLOW · 38ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap rounded-lg bg-rose-50/70 border border-rose-100 px-2 py-1"><span class="num w-4 text-slate-400">3</span><code class="font-mono font-medium text-slate-700">set_leverage</code><code class="font-mono text-[11px] text-slate-400">{leverage:15}</code><span class="text-rose-600 ml-auto font-medium">DENY · 超过 max_leverage 10x</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">4</span><code class="font-mono font-medium text-slate-700">place_order</code><code class="font-mono text-[11px] text-slate-400">{size:-400}</code><span class="text-emerald-600 ml-auto num">ALLOW · 188ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">5</span><code class="font-mono font-medium text-slate-700">set_next_wakeup</code><span class="text-emerald-600 ml-auto num">ALLOW · 41ms</span></li>
+                </ol>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">5</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 4</span><span class="text-rose-500 num">拒绝 1</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">10,122.82</b> <span class="num text-emerald-600">+0.53%</span></span>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <!-- Round #44 -->
+          <div class="relative mb-4">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-slate-300"></span>
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card">
+              <div class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap">
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #44</span>
+                <span class="rounded-full bg-violet-50 border border-violet-200 text-violet-600 px-2 py-0.5 text-[11px] font-medium">手动唤醒</span>
+                <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">已完成</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-19 14:20:55 → 14:21:20 · 25s</span>
+              </div>
+              <div class="px-5 pb-3.5">
+                <p class="text-[13px] text-slate-600">用户手动唤醒并提示「BTC 回踩不破」：分析后开多 400 张（5x），同步设置 117,200 下方减仓预警。</p>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">6</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 6</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">10,069.38</b> <span class="num text-emerald-600">+0.53%</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Round #43 -->
+          <div class="relative mb-4">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-slate-300"></span>
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card">
+              <div class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap">
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #43</span>
+                <span class="rounded-full bg-slate-100 text-slate-500 px-2 py-0.5 text-[11px] font-medium">定时唤醒</span>
+                <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">已完成</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-19 09:36:40 → 09:37:02 · 22s</span>
+              </div>
+              <div class="px-5 pb-3.5">
+                <p class="text-[13px] text-slate-600">ETH 空单触发移动止盈：平仓 90 张（+41.26 USDT），剩余仓位止损上移至成本价。</p>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">5</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 5</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">10,016.12</b> <span class="num text-emerald-600">+0.41%</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Round #42 -->
+          <div class="relative mb-4">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-slate-300"></span>
+            <div class="rounded-2xl bg-white border border-slate-200 shadow-card">
+              <div class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap">
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #42</span>
+                <span class="rounded-full bg-slate-100 text-slate-500 px-2 py-0.5 text-[11px] font-medium">定时唤醒</span>
+                <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">已完成</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-18 16:45:03 → 16:45:22 · 19s</span>
+              </div>
+              <div class="px-5 pb-3.5">
+                <p class="text-[13px] text-slate-600">检测到用户手动平仓 BTC 300 张（-28.15 USDT）：同步仓位状态，尊重人工决策，不做反向追单。</p>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">4</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 4</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">9,974.86</b> <span class="num text-emerald-600">+0.72%</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Round #41（强平事件轮，可展开） -->
+          <div class="relative">
+            <span class="absolute -left-6 top-5 w-[9px] h-[9px] rounded-full bg-white border-2 border-rose-400"></span>
+            <details class="rounded-2xl bg-white border border-slate-200 shadow-card overflow-hidden">
+              <summary class="px-5 py-3.5 flex items-center gap-2.5 flex-wrap hover:bg-slate-50/60 transition select-none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chev w-3.5 h-3.5 text-slate-400"><path d="m9 18 6-6-6-6"/></svg>
+                <span class="font-semibold text-slate-900 text-[13.5px]">Round #41</span>
+                <span class="rounded-full bg-sky-50 border border-sky-200 text-sky-600 px-2 py-0.5 text-[11px] font-medium">价格预警</span>
+                <span class="rounded-full bg-rose-50 text-rose-600 px-2 py-0.5 text-[11px] font-medium">强平事件</span>
+                <span class="ml-auto text-[12px] text-slate-400 num">07-17 03:19:02 → 03:19:26 · 24s</span>
+              </summary>
+              <div class="px-5 pb-4">
+                <p class="text-[13px] text-slate-600">SOL_USDT 隔夜插针触及强平（-96.30 USDT）：确认强平结果，下调 SOL 杠杆至 3x，写入复盘笔记。插针期间的补仓单被风控按价格偏离规则拦截。</p>
+                <ol class="mt-3 space-y-1.5 text-[12px]">
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">1</span><code class="font-mono font-medium text-slate-700">get_market_data</code><code class="font-mono text-[11px] text-slate-400">{contract:"SOL_USDT"}</code><span class="text-emerald-600 ml-auto num">ALLOW · 77ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">2</span><code class="font-mono font-medium text-slate-700">get_account</code><span class="text-emerald-600 ml-auto num">ALLOW · 35ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap rounded-lg bg-rose-50/70 border border-rose-100 px-2 py-1"><span class="num w-4 text-slate-400">3</span><code class="font-mono font-medium text-slate-700">place_order</code><code class="font-mono text-[11px] text-slate-400">{contract:"SOL_USDT", size:1500}</code><span class="text-rose-600 ml-auto font-medium">DENY · 价格偏离 1.8% ＞ max_deviation 0.5%（插针保护）</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">4</span><code class="font-mono font-medium text-slate-700">get_history</code><span class="text-emerald-600 ml-auto num">ALLOW · 52ms</span></li>
+                  <li class="flex items-center gap-2 flex-wrap"><span class="num w-4 text-slate-400">5</span><code class="font-mono font-medium text-slate-700">set_leverage</code><code class="font-mono text-[11px] text-slate-400">{contract:"SOL_USDT", leverage:3}</code><span class="text-emerald-600 ml-auto num">ALLOW · 31ms</span></li>
+                </ol>
+                <div class="mt-2.5 flex items-center gap-3 text-[12px] text-slate-500 flex-wrap">
+                  <span>工具调用 <b class="num text-slate-700">8</b></span><span class="text-slate-300">·</span>
+                  <span class="text-emerald-600 num">通过 7</span><span class="text-rose-500 num">拒绝 1</span><span class="text-slate-300">·</span>
+                  <span>决策后权益 <b class="num text-slate-700">9,903.71</b> <span class="num text-rose-500">-0.96%</span></span>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================== -->
+    <!-- 页面三：成交记录                                     -->
+    <!-- ================================================== -->
+    <section id="page-trades" class="page hidden space-y-5">
+      <div class="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="text-xl font-bold text-slate-900">成交记录</h1>
+          <p class="mt-1 text-[13px] text-slate-500">全部成交流水，按来源区分 LLM 自主交易、人工操作与系统强平</p>
+        </div>
+        <!-- 来源筛选（静态示意） -->
+        <div class="flex items-center gap-1.5 text-[12px]">
+          <button class="rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-600 px-2.5 py-1 font-medium">全部</button>
+          <button class="rounded-lg border border-slate-200 text-slate-500 px-2.5 py-1 hover:bg-slate-50 transition">LLM 开仓</button>
+          <button class="rounded-lg border border-slate-200 text-slate-500 px-2.5 py-1 hover:bg-slate-50 transition">LLM 平仓</button>
+          <button class="rounded-lg border border-slate-200 text-slate-500 px-2.5 py-1 hover:bg-slate-50 transition">人工</button>
+          <button class="rounded-lg border border-slate-200 text-slate-500 px-2.5 py-1 hover:bg-slate-50 transition">强平</button>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white border border-slate-200 shadow-card overflow-hidden">
+        <table class="w-full text-[12.5px]">
+          <thead>
+            <tr class="bg-slate-50 text-slate-400 text-[11px]">
+              <th class="text-left font-medium px-5 py-3">时间 <span class="font-mono">time</span></th>
+              <th class="text-left font-medium px-3 py-3">合约 <span class="font-mono">contract</span></th>
+              <th class="text-right font-medium px-3 py-3">数量 <span class="font-mono">size</span></th>
+              <th class="text-right font-medium px-3 py-3">价格 <span class="font-mono">price</span></th>
+              <th class="text-right font-medium px-3 py-3">手续费 <span class="font-mono">fee</span></th>
+              <th class="text-right font-medium px-3 py-3">已实现盈亏 <span class="font-mono">pnl</span></th>
+              <th class="text-left font-medium px-5 py-3">来源 <span class="font-mono">source</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-20 01:12:44</td>
+              <td class="px-3 py-3 font-medium text-slate-800">BTC_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+600 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">118,203.00</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-3.55</td>
+              <td class="px-3 py-3 text-right num text-slate-300">—</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">LLM 开仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-19 22:47:10</td>
+              <td class="px-3 py-3 font-medium text-slate-800">ETH_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-120 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">3,552.40</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-2.13</td>
+              <td class="px-3 py-3 text-right num text-slate-300">—</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">LLM 开仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-19 18:05:31</td>
+              <td class="px-3 py-3 font-medium text-slate-800">BTC_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-400 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">117,986.20</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-2.36</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+53.44</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">LLM 平仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-19 14:22:08</td>
+              <td class="px-3 py-3 font-medium text-slate-800">BTC_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+400 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">116,650.00</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-2.33</td>
+              <td class="px-3 py-3 text-right num text-slate-300">—</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">LLM 开仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-19 09:38:52</td>
+              <td class="px-3 py-3 font-medium text-slate-800">ETH_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+90 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">3,604.10</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-1.62</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+41.26</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-sky-50 border border-sky-200 text-sky-600 px-2 py-0.5 text-[11px] font-medium">止盈止损</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-18 21:14:37</td>
+              <td class="px-3 py-3 font-medium text-slate-800">ETH_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-90 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">3,588.00</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-1.62</td>
+              <td class="px-3 py-3 text-right num text-slate-300">—</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">LLM 开仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-18 16:42:19</td>
+              <td class="px-3 py-3 font-medium text-slate-800">BTC_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-300 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">115,920.50</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-1.74</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-28.15</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-amber-50 border border-amber-200 text-amber-600 px-2 py-0.5 text-[11px] font-medium">用户平仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-18 11:03:26</td>
+              <td class="px-3 py-3 font-medium text-slate-800">BTC_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-emerald-600">+300 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">116,420.00</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-1.75</td>
+              <td class="px-3 py-3 text-right num text-slate-300">—</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600 px-2 py-0.5 text-[11px] font-medium">LLM 开仓</span></td>
+            </tr>
+            <tr class="hover:bg-slate-50/70 bg-rose-50/30">
+              <td class="px-5 py-3 font-mono text-[12px] text-slate-500">07-17 03:18:55</td>
+              <td class="px-3 py-3 font-medium text-slate-800">SOL_USDT</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-1,500 张</td>
+              <td class="px-3 py-3 text-right num text-slate-700">158.42</td>
+              <td class="px-3 py-3 text-right num text-slate-500">-1.19</td>
+              <td class="px-3 py-3 text-right num font-medium text-rose-500">-96.30</td>
+              <td class="px-5 py-3"><span class="rounded-full bg-rose-100 border border-rose-300 text-rose-700 px-2 py-0.5 text-[11px] font-semibold">强平</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <!-- 表尾：分页（静态示意） -->
+        <div class="px-5 py-3 border-t border-slate-100 flex items-center gap-3 text-[12px] text-slate-500">
+          <span>显示最近 9 条 · 共 <span class="num">214</span> 条</span>
+          <div class="ml-auto flex items-center gap-1">
+            <button class="rounded-lg border border-slate-200 px-2.5 py-1 text-slate-300 cursor-not-allowed">上一页</button>
+            <button class="rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-600 px-2.5 py-1 font-medium num">1</button>
+            <button class="rounded-lg border border-slate-200 px-2.5 py-1 num hover:bg-slate-50 transition">2</button>
+            <button class="rounded-lg border border-slate-200 px-2.5 py-1 num hover:bg-slate-50 transition">3</button>
+            <span class="text-slate-300 px-1">…</span>
+            <button class="rounded-lg border border-slate-200 px-2.5 py-1 num hover:bg-slate-50 transition">24</button>
+            <button class="rounded-lg border border-slate-200 px-2.5 py-1 hover:bg-slate-50 transition">下一页</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================== -->
+    <!-- 页面四：配置中心                                     -->
+    <!-- ================================================== -->
+    <section id="page-config" class="page hidden space-y-5">
+      <div>
+        <h1 class="text-xl font-bold text-slate-900">配置中心</h1>
+        <p class="mt-1 text-[13px] text-slate-500">风控参数、交易白名单、调度与密钥状态。风控由代码强制执行，LLM 仅有建议权</p>
+      </div>
+
+      <!-- 风控原则提示条 -->
+      <div class="rounded-xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 flex items-start gap-2.5 text-[12.5px] text-indigo-700">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 mt-px flex-none"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span>以下风控参数为<b>硬限制</b>：每次下单前由代码逐条校验，任何一条不满足即拒绝（DENY）并回执 LLM，不受模型输出影响。</span>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <!-- 风控参数 -->
+        <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-slate-900 text-[13.5px]">风控参数 <span class="text-slate-300 font-mono text-[11px] font-normal">risk</span></h2>
+            <button onclick="toast('设计稿预览：风控参数不会真实保存')" class="rounded-lg bg-indigo-600 text-white text-[12px] font-medium px-3 py-1.5 hover:bg-indigo-700 transition">保存修改</button>
+          </div>
+          <div class="mt-4 grid md:grid-cols-2 gap-x-4 gap-y-4">
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">单仓上限 <code class="text-slate-400 font-mono text-[11px]">max_position_pct</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="40" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">%</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">单个合约保证金占权益上限</p>
+            </label>
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">总仓上限 <code class="text-slate-400 font-mono text-[11px]">max_total_position_pct</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="60" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">%</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">全部持仓保证金合计占比上限</p>
+            </label>
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">杠杆上限 <code class="text-slate-400 font-mono text-[11px]">max_leverage</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="10" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">x</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">超过即拒绝（如本轮拒绝 20x）</p>
+            </label>
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">日亏锁仓线 <code class="text-slate-400 font-mono text-[11px]">daily_loss_limit</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="500" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">$</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">当日实现亏损达到后锁定开仓</p>
+            </label>
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">日下单上限 <code class="text-slate-400 font-mono text-[11px]">max_orders_per_day</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="12" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">笔</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">防过度交易，今日已用 4 笔</p>
+            </label>
+            <label class="block">
+              <span class="text-[12px] font-medium text-slate-600">价格偏离保护 <code class="text-slate-400 font-mono text-[11px]">max_deviation</code></span>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input type="text" value="0.5" class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] num focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <span class="text-[12px] text-slate-400 w-6">%</span>
+              </div>
+              <p class="mt-1 text-[11px] text-slate-400">委托价偏离标记价超过即拒绝</p>
+            </label>
+          </div>
+        </div>
+
+        <div class="space-y-4">
+          <!-- 交易白名单 watchlist -->
+          <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+            <h2 class="font-semibold text-slate-900 text-[13.5px]">交易白名单 <span class="text-slate-300 font-mono text-[11px] font-normal">watchlist</span></h2>
+            <div class="mt-3 flex items-center gap-2 flex-wrap">
+              <span class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-700 px-2.5 py-1 text-[12px] font-medium">BTC_USDT<button class="text-indigo-300 hover:text-indigo-500 transition">✕</button></span>
+              <span class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-700 px-2.5 py-1 text-[12px] font-medium">ETH_USDT<button class="text-indigo-300 hover:text-indigo-500 transition">✕</button></span>
+              <span class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-700 px-2.5 py-1 text-[12px] font-medium">SOL_USDT<button class="text-indigo-300 hover:text-indigo-500 transition">✕</button></span>
+              <div class="flex items-center gap-1.5">
+                <input type="text" placeholder="DOGE_USDT" class="w-28 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[12px] focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                <button onclick="toast('设计稿预览：白名单不会真实更新')" class="rounded-lg border border-slate-200 text-slate-600 text-[12px] px-2.5 py-1 hover:bg-slate-50 transition">添加</button>
+              </div>
+            </div>
+            <p class="mt-2.5 text-[11.5px] text-slate-400">仅白名单内合约允许 LLM 交易；LLM 提议白名单外合约将被直接拒绝。</p>
+          </div>
+
+          <!-- 调度 scheduler -->
+          <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+            <h2 class="font-semibold text-slate-900 text-[13.5px]">唤醒调度 <span class="text-slate-300 font-mono text-[11px] font-normal">scheduler</span></h2>
+            <div class="mt-3 space-y-3 text-[12.5px]">
+              <div class="flex items-center gap-3">
+                <span class="text-slate-600">定时唤醒间隔</span>
+                <span class="ml-auto flex items-center gap-2">
+                  <input type="text" value="15" class="w-16 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[12.5px] num text-right focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                  <span class="text-slate-400 text-[12px]">分钟</span>
+                </span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-slate-600">最长休眠（LLM 自设唤醒上限）</span>
+                <span class="ml-auto flex items-center gap-2">
+                  <input type="text" value="240" class="w-16 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[12.5px] num text-right focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+                  <span class="text-slate-400 text-[12px]">分钟</span>
+                </span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-slate-600">价格预警触发唤醒</span>
+                <button class="switch ml-auto" onclick="toast('设计稿预览：开关状态不会真实保存')"></button>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-slate-600">低波动时允许延长休眠</span>
+                <button class="switch ml-auto" onclick="toast('设计稿预览：开关状态不会真实保存')"></button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 密钥状态（只显示布尔，永不显示明文） -->
+          <div class="rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+            <h2 class="font-semibold text-slate-900 text-[13.5px]">密钥状态 <span class="text-slate-300 font-mono text-[11px] font-normal">keys</span></h2>
+            <div class="mt-3 space-y-2">
+              <div class="flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/60 px-3.5 py-2.5">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 text-slate-400 flex-none"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                <div class="min-w-0">
+                  <div class="text-[12.5px] font-medium text-slate-700">Gate.io API Key</div>
+                  <div class="text-[11px] text-slate-400">合约只读 + 交易权限 · 无提币权限</div>
+                </div>
+                <span class="ml-auto inline-flex items-center gap-1 text-emerald-600 text-[12px] font-medium flex-none">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>已配置
+                </span>
+              </div>
+              <div class="flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/60 px-3.5 py-2.5">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 text-slate-400 flex-none"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                <div class="min-w-0">
+                  <div class="text-[12.5px] font-medium text-slate-700">Gate.io API Secret</div>
+                  <div class="text-[11px] text-slate-400">仅本地加密存储</div>
+                </div>
+                <span class="ml-auto inline-flex items-center gap-1 text-emerald-600 text-[12px] font-medium flex-none">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>已配置
+                </span>
+              </div>
+              <div class="flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/60 px-3.5 py-2.5">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 text-slate-400 flex-none"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                <div class="min-w-0">
+                  <div class="text-[12.5px] font-medium text-slate-700">LLM API Key <span class="text-slate-400 font-normal">（deepseek）</span></div>
+                  <div class="text-[11px] text-slate-400">deepseek-reasoner · 余额充足</div>
+                </div>
+                <span class="ml-auto inline-flex items-center gap-1 text-emerald-600 text-[12px] font-medium flex-none">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3 h-3"><path d="M20 6 9 17l-5-5"/></svg>已配置
+                </span>
+              </div>
+            </div>
+            <p class="mt-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 px-3 py-2 text-[11.5px] leading-snug">密钥仅以「是否已配置」的布尔状态展示，界面永不显示明文；更换密钥需重启服务后生效。</p>
+          </div>
+        </div>
+
+        <!-- 策略 Prompt 在线编辑（通栏） -->
+        <div class="xl:col-span-2 rounded-2xl bg-white border border-slate-200 shadow-card p-5">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h2 class="font-semibold text-slate-900 text-[13.5px]">策略 Prompt <span class="text-slate-300 font-mono text-[11px] font-normal">strategy_prompt</span></h2>
+            <span class="rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[11px] font-medium">已生效 · v12</span>
+            <span class="ml-auto text-[11.5px] text-slate-400">最近保存 <span class="num">07-18 20:14</span> · <span class="num">286</span> 字符</span>
+          </div>
+          <textarea rows="9" class="mt-3 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[12.5px] leading-relaxed font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300">你是 Gate.io 永续合约交易 Agent，目标是在严格控制回撤的前提下稳健增值。
+1. 优先交易 BTC/ETH；SOL 仅限趋势明确时小仓位参与。
+2. 单笔仓位不超过权益 30%，以趋势单为主，不做逆势抄底。
+3. 每次下单前必须自检：单仓 / 总仓占比、当日剩余下单额度、价格偏离。
+4. 浮亏超过权益 2% 时减仓而非加仓；连续两笔亏损后休眠 2 小时。
+5. 低流动性时段（UTC+8 00:00–07:00）仓位减半。
+6. 每轮结束用中文记录决策理由与不确定性，便于人工审计。</textarea>
+          <div class="mt-3 flex items-center gap-2">
+            <button onclick="toast('设计稿预览：策略 Prompt 不会真实保存')" class="rounded-lg bg-indigo-600 text-white text-[12.5px] font-medium px-4 py-1.5 hover:bg-indigo-700 transition">保存并热更新</button>
+            <button onclick="toast('设计稿预览：版本回滚不生效')" class="rounded-lg border border-slate-200 text-slate-600 text-[12.5px] font-medium px-4 py-1.5 hover:bg-slate-50 transition">回滚到 v11</button>
+            <span class="ml-auto text-[11.5px] text-slate-400">保存后下一轮决策即生效，历史轮次仍记录当时的 prompt_snapshot</span>
+          </div>
+        </div>
+
+        <!-- 危险操作（通栏） -->
+        <div class="xl:col-span-2 rounded-2xl border border-rose-200 bg-rose-50/40 p-5">
+          <h2 class="font-semibold text-rose-700 text-[13.5px] flex items-center gap-2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+            危险操作
+          </h2>
+          <div class="mt-3 flex items-center gap-3 flex-wrap">
+            <div class="flex-1 min-w-[240px] rounded-xl bg-white border border-rose-100 px-4 py-3 flex items-center gap-3">
+              <div class="min-w-0">
+                <div class="text-[12.5px] font-medium text-slate-700">重置 Paper 账户权益</div>
+                <div class="text-[11.5px] text-slate-400">权益恢复为 10,000 USDT，清空持仓与成交记录（仅模拟盘）</div>
+              </div>
+              <button onclick="toast('设计稿预览：权益不会真实重置')" class="ml-auto rounded-lg border border-rose-300 bg-rose-50 text-rose-600 text-[12px] font-medium px-3 py-1.5 hover:bg-rose-100 transition flex-none">重置权益</button>
+            </div>
+            <div class="flex-1 min-w-[240px] rounded-xl bg-white border border-rose-100 px-4 py-3 flex items-center gap-3">
+              <div class="min-w-0">
+                <div class="text-[12.5px] font-medium text-slate-700">停止 Agent 并撤单</div>
+                <div class="text-[11.5px] text-slate-400">停止决策循环，撤销全部挂单（持仓保留）</div>
+              </div>
+              <button onclick="toast('设计稿预览：停止操作不会真实执行')" class="ml-auto rounded-lg border border-rose-300 bg-rose-50 text-rose-600 text-[12px] font-medium px-3 py-1.5 hover:bg-rose-100 transition flex-none">停止 Agent</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 页脚 -->
+    <footer class="mt-10 pb-6 text-center text-[11.5px] text-slate-400">
+      设计方案 B（现代 SaaS 控制台风）· 所有数据均为内嵌模拟数据 · 不连接任何后端服务
+    </footer>
+  </main>
+</div>
+
+<!-- 操作提示浮层 -->
+<div id="toast" class="rounded-xl bg-slate-900 text-white text-[12.5px] px-4 py-2.5 shadow-lg"></div>
+
+<script>
+/* ============================================================
+   交互与图表脚本
+   - 所有图形均由「确定性伪随机」生成的模拟数据绘制，刷新后图形一致
+   - 真实环境中数据来自后端 API / WebSocket，字段与下方结构一一对应
+   ============================================================ */
+
+// 确定性伪随机数（种子固定，保证每次打开页面图形一致）
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+// 千分位数字格式化
+const fmt = (n, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+/* ---------- Tab 切换（模拟前端路由） ---------- */
+const navBtns = document.querySelectorAll('.nav-item');
+navBtns.forEach(b => b.addEventListener('click', () => {
+  navBtns.forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  document.getElementById('page-' + b.dataset.page).classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}));
+
+/* ---------- Agent 启停开关（仅视觉状态，不请求后端） ---------- */
+const agentSw = document.getElementById('agentSwitch');
+agentSw.addEventListener('click', () => {
+  const off = agentSw.classList.toggle('off');
+  document.getElementById('agentStatusText').textContent = off ? 'Agent 已停止' : 'Agent 运行中';
+  document.getElementById('agentDot').className = off
+    ? 'w-2 h-2 rounded-full bg-slate-300 flex-none'
+    : 'pulse-dot';
+  toast(off ? '设计稿预览：Agent 停止指令不会真实发送' : '设计稿预览：Agent 启动指令不会真实发送');
+});
+
+/* ---------- 操作提示浮层 ---------- */
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+}
+
+/* ---------- K线蜡烛图（BTC_USDT · 1H，48 根） ---------- */
+(function renderKline() {
+  const svg = document.getElementById('klineChart');
+  const W = 760, H = 300, padL = 10, padR = 64, padT = 14, volH = 44, padB = 22;
+  const plotH = H - padT - padB - volH - 8;
+  const rnd = mulberry32(20260720);
+  // 生成 48 根 1H K线，整体缓慢上行（116,880 → 约 118,203）
+  const N = 48, candles = [];
+  let price = 116880;
+  for (let i = 0; i < N; i++) {
+    const open = price;
+    const close = open + 26 + (rnd() - 0.46) * 150;
+    const high = Math.max(open, close) + rnd() * 55;
+    const low = Math.min(open, close) - rnd() * 55;
+    const vol = 60 + rnd() * 220;
+    candles.push({ open, close, high, low, vol });
+    price = close;
+  }
+  // 最后一根对齐当前标记价 118,203.0
+  const last = candles[N - 1];
+  last.close = 118203.0;
+  if (last.high < 118260) last.high = 118260;
+  if (last.low > 118150) last.low = 118150;
+  // 计算价格与成交量量程
+  let min = Infinity, max = -Infinity, volMax = 0;
+  candles.forEach(c => { min = Math.min(min, c.low); max = Math.max(max, c.high); volMax = Math.max(volMax, c.vol); });
+  const pad = (max - min) * 0.06; min -= pad; max += pad;
+  const y = v => padT + (max - v) / (max - min) * plotH;
+  const slot = (W - padL - padR) / N;
+  let s = '';
+  // 水平网格 + 右侧价格刻度
+  for (let i = 0; i <= 4; i++) {
+    const v = min + (max - min) * i / 4, yy = y(v);
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (W - padR) + '" y2="' + yy + '" stroke="#f1f5f9"/>';
+    s += '<text x="' + (W - padR + 8) + '" y="' + (yy + 3) + '" font-size="10" fill="#94a3b8" class="num">' + fmt(v, 0) + '</text>';
+  }
+  // 蜡烛 + 成交量柱
+  candles.forEach((c, i) => {
+    const x = padL + slot * i + slot / 2;
+    const up = c.close >= c.open;
+    const col = up ? '#10b981' : '#f43f5e';
+    const bw = Math.max(3, slot * 0.55);
+    const top = y(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(y(c.open) - y(c.close)));
+    s += '<line x1="' + x + '" y1="' + y(c.high) + '" x2="' + x + '" y2="' + y(c.low) + '" stroke="' + col + '" stroke-width="1"/>';
+    s += '<rect x="' + (x - bw / 2) + '" y="' + top + '" width="' + bw + '" height="' + h + '" fill="' + col + '" rx="1"/>';
+    const vh = c.vol / volMax * volH;
+    s += '<rect x="' + (x - bw / 2) + '" y="' + (H - padB - vh) + '" width="' + bw + '" height="' + vh + '" fill="' + col + '" opacity="0.25" rx="1"/>';
+  });
+  // 最新标记价虚线 + 标签
+  const lp = 118203.0, ly = y(lp);
+  s += '<line x1="' + padL + '" y1="' + ly + '" x2="' + (W - padR) + '" y2="' + ly + '" stroke="#6366f1" stroke-dasharray="4 3" stroke-width="1"/>';
+  s += '<rect x="' + (W - padR + 2) + '" y="' + (ly - 9) + '" width="58" height="18" rx="4" fill="#6366f1"/>';
+  s += '<text x="' + (W - padR + 31) + '" y="' + (ly + 3.5) + '" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">118,203</text>';
+  svg.innerHTML = s;
+})();
+
+/* ---------- 权益曲线（points[{t,equity}]，近 7 天逐小时） ---------- */
+(function renderEquity() {
+  const svg = document.getElementById('equityChart');
+  const W = 380, H = 230, padL = 6, padR = 52, padT = 12, padB = 20;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const rnd = mulberry32(47);
+  // 从 07-13 00:00 起逐小时生成 169 个点：缓涨 → 07-17 凌晨强平回撤 → 修复上行
+  const pts = [];
+  let e = 9980;
+  const N = 169;
+  for (let i = 0; i < N; i++) {
+    let d = (rnd() - 0.42) * 20;
+    if (i >= 97 && i < 104) d -= 30;  // 07-17 凌晨：SOL 插针 + 强平回撤段
+    if (i >= 104 && i < 116) d += 14; // 随后修复段
+    e = Math.max(9860, e + d);
+    pts.push(e);
+  }
+  pts.push(10284.56); // 当前权益
+  const min = Math.min(...pts), max = Math.max(...pts);
+  // 最大回撤（与图形数据同源，保证叙事一致）
+  let peak = -Infinity, mdd = 0;
+  pts.forEach(v => { peak = Math.max(peak, v); mdd = Math.min(mdd, (v - peak) / peak); });
+  const pad = (max - min) * 0.08;
+  const y = v => padT + (max + pad - v) / (max - min + pad * 2) * plotH;
+  const x = i => padL + i / (pts.length - 1) * plotW;
+  // 面积路径 + 折线路径
+  let line = 'M' + x(0) + ',' + y(pts[0]);
+  pts.forEach((v, i) => { if (i > 0) line += ' L' + x(i) + ',' + y(v); });
+  const base = H - padB;
+  const area = line + ' L' + x(pts.length - 1) + ',' + base + ' L' + x(0) + ',' + base + ' Z';
+  let s = '<defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">'
+    + '<stop offset="0" stop-color="#6366f1" stop-opacity=".18"/>'
+    + '<stop offset="1" stop-color="#6366f1" stop-opacity="0"/></linearGradient></defs>';
+  // 网格 + 右侧刻度（高 / 中 / 低）
+  [min, (min + max) / 2, max].forEach(v => {
+    const yy = y(v);
+    s += '<line x1="' + padL + '" y1="' + yy + '" x2="' + (W - padR) + '" y2="' + yy + '" stroke="#f1f5f9"/>';
+    s += '<text x="' + (W - padR + 6) + '" y="' + (yy + 3) + '" font-size="9.5" fill="#94a3b8" class="num">' + fmt(v, 0) + '</text>';
+  });
+  // 底部日期刻度（每 24 小时一个，07-13 ~ 07-20）
+  for (let i = 0; i <= 168; i += 24) {
+    const d = new Date(2026, 6, 13 + i / 24);
+    const label = String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    s += '<text x="' + x(i) + '" y="' + (H - 6) + '" font-size="9.5" fill="#94a3b8" text-anchor="middle" class="num">' + label + '</text>';
+  }
+  s += '<path d="' + area + '" fill="url(#eqGrad)"/>';
+  s += '<path d="' + line + '" fill="none" stroke="#6366f1" stroke-width="1.5"/>';
+  // 当前权益端点
+  const ex = x(pts.length - 1), ey = y(pts[pts.length - 1]);
+  s += '<circle cx="' + ex + '" cy="' + ey + '" r="3.5" fill="#4f46e5" stroke="#ffffff" stroke-width="1.5"/>';
+  svg.innerHTML = s;
+  // 同步卡片底部统计（与图形数据保持一致）
+  document.getElementById('eqHigh').textContent = fmt(max);
+  document.getElementById('eqLow').textContent = fmt(min);
+  document.getElementById('eqMdd').textContent = (mdd * 100).toFixed(1) + '%';
+
+  /* ---------- 指标卡迷你曲线（近 48 小时） ---------- */
+  const spark = document.getElementById('sparkEquity');
+  const sub = pts.slice(-49);
+  const smin = Math.min(...sub), smax = Math.max(...sub);
+  const sy = v => 34 - (v - smin) / (smax - smin || 1) * 28;
+  const sx = i => i / (sub.length - 1) * 200;
+  let sp = 'M0,' + sy(sub[0]);
+  sub.forEach((v, i) => { if (i > 0) sp += ' L' + sx(i) + ',' + sy(v); });
+  spark.innerHTML = '<path d="' + sp + ' L200,40 L0,40 Z" fill="#6366f1" opacity="0.08"/>'
+    + '<path d="' + sp + '" fill="none" stroke="#6366f1" stroke-width="1.5"/>';
+})();
+</script>
+</body>
+</html>

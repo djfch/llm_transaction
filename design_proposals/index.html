@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LLM 交易 Agent 前端重设计 · 方案预览</title>
+
+<!-- Tailwind 3 CDN（静态设计稿，无构建工具） -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- 等宽数字字体：用于所有价格/盈亏/时间等数字 -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<script>
+  // Tailwind 运行时配置：统一数字字体与中性深色基调
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        },
+        colors: {
+          ink: {
+            950: '#0B0D12', // 页面底色（中性深黑，不偏任何方案）
+            900: '#11141B',
+            800: '#171B24',
+            700: '#1F2430',
+          },
+        },
+      },
+    },
+  };
+</script>
+
+<style>
+  /* 页面背景：细网格纹理，营造"工程图纸"中性质感 */
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+  /* 状态呼吸灯：agent_running / WS 连接指示用 */
+  @keyframes breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
+    50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
+  }
+  .dot-breathe { animation: breathe 2.2s ease-in-out infinite; }
+  /* 方案 C 缩略块中的 LLM 光晕节点 */
+  @keyframes glow {
+    0%, 100% { box-shadow: 0 0 6px 1px rgba(167, 139, 250, 0.7); }
+    50% { box-shadow: 0 0 14px 4px rgba(167, 139, 250, 0.25); }
+  }
+  .node-glow { animation: glow 2.8s ease-in-out infinite; }
+  /* 方案卡片 hover 上浮 */
+  .scheme-card { transition: transform .25s ease, border-color .25s ease, box-shadow .25s ease; }
+  .scheme-card:hover { transform: translateY(-4px); }
+  /* 数字统一等宽 + tabular-nums */
+  .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+
+<body class="bg-ink-950 text-slate-300 antialiased min-h-screen bg-grid">
+
+<!-- ============ 顶部栏：标题 + 静态预览标注 ============ -->
+<header class="border-b border-white/5 bg-ink-950/80 backdrop-blur sticky top-0 z-10">
+  <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <!-- 产品标识 -->
+      <div class="w-7 h-7 rounded-md bg-gradient-to-br from-slate-600 to-slate-800 border border-white/10 flex items-center justify-center">
+        <span class="num text-[11px] font-bold text-white">G</span>
+      </div>
+      <div class="leading-tight">
+        <p class="text-sm font-semibold text-slate-100">Gate.io 永续合约 · LLM 自主交易 Agent</p>
+        <p class="text-[11px] text-slate-500">前端重设计工作区</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <!-- 右上角标注：静态预览（模拟数据） -->
+      <span class="text-[11px] px-2.5 py-1 rounded-full border border-amber-400/30 text-amber-300/90 bg-amber-400/5">
+        方案对比 · 静态预览（模拟数据）
+      </span>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-6 pb-16">
+
+  <!-- ============ Hero：主标题 + 说明 ============ -->
+  <section class="pt-12 pb-8 text-center">
+    <h1 class="text-3xl md:text-4xl font-bold text-slate-50 tracking-tight">
+      LLM 交易 Agent 前端重设计 · 方案预览
+    </h1>
+    <p class="mt-4 text-sm md:text-[15px] text-slate-400 max-w-2xl mx-auto leading-relaxed">
+      同一套系统能力、同一份数据模型，三个截然不同的视觉与交互方向。
+      点击下方卡片进入完整静态稿，选定方向后将落实到 React 前端。
+    </p>
+    <p class="mt-3 text-xs text-slate-600">
+      提示：按键盘 <kbd class="num px-1.5 py-0.5 rounded bg-ink-800 border border-white/10 text-slate-400">1</kbd>
+      <kbd class="num px-1.5 py-0.5 rounded bg-ink-800 border border-white/10 text-slate-400">2</kbd>
+      <kbd class="num px-1.5 py-0.5 rounded bg-ink-800 border border-white/10 text-slate-400">3</kbd>
+      可快速打开对应方案
+    </p>
+  </section>
+
+  <!-- ============ 模拟行情快照条：展示数字规范（等宽 / 正绿负红） ============ -->
+  <section class="rounded-xl border border-white/5 bg-ink-900/70 px-5 py-3.5 flex flex-wrap items-center gap-x-8 gap-y-2">
+    <div class="flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 dot-breathe"></span>
+      <span class="text-xs text-slate-400">agent_running(运行中) · mode(paper 模拟盘) · WS 已连接</span>
+    </div>
+    <div class="text-xs text-slate-500">
+      BTC_USDT <span class="num text-slate-200 ml-1">118,234.00</span>
+      <span class="num text-emerald-400 ml-1">+1.86%</span>
+    </div>
+    <div class="text-xs text-slate-500">
+      ETH_USDT <span class="num text-slate-200 ml-1">3,612.40</span>
+      <span class="num text-emerald-400 ml-1">+2.41%</span>
+    </div>
+    <div class="text-xs text-slate-500">
+      equity(账户权益) <span class="num text-slate-200 ml-1">10,284.51 USDT</span>
+      <span class="num text-rose-400 ml-1">unrealised_pnl -36.20</span>
+    </div>
+    <span class="ml-auto text-[10px] text-slate-600">以上为设计稿内嵌模拟行情，仅用于校准数字样式</span>
+  </section>
+
+  <!-- ============ 模块覆盖清单：三个方案共用同一套信息架构 ============ -->
+  <section class="mt-6 flex flex-wrap items-center gap-2">
+    <span class="text-xs text-slate-500 mr-1">三个方案均覆盖：</span>
+    <!-- 模块标签 -->
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">① 顶部状态栏</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">② 监控大屏</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">③ 实时决策轮</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">④ 决策时间线</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">⑤ 成交记录</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">⑥ 配置中心</span>
+    <span class="text-[11px] px-2.5 py-1 rounded-md bg-ink-800 border border-white/5 text-slate-400">⑦ Agent 笔记</span>
+  </section>
+
+  <!-- ============ 三方案卡片 ============ -->
+  <section class="mt-10 grid gap-6 lg:grid-cols-3">
+
+    <!-- ======== 方案 A：专业交易终端风 ======== -->
+    <article class="scheme-card rounded-2xl border border-white/8 bg-ink-900/80 overflow-hidden hover:border-emerald-400/25 hover:shadow-[0_12px_40px_-12px_rgba(16,185,129,0.15)]">
+      <div class="p-6 pb-4">
+        <div class="flex items-center gap-3">
+          <span class="num w-9 h-9 rounded-lg bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 flex items-center justify-center font-bold">A</span>
+          <div>
+            <h2 class="text-base font-semibold text-slate-100">专业交易终端风</h2>
+            <p class="text-[11px] text-slate-500">Trading Terminal</p>
+          </div>
+        </div>
+        <p class="mt-3 text-[13px] text-slate-400 leading-relaxed">
+          把 Bloomberg 终端的信息密度搬进浏览器，让专业交易员一屏读完行情、仓位、风险与决策流。
+        </p>
+      </div>
+
+      <!-- 风格示意缩略块：纯 CSS 绘制的终端界面 -->
+      <div class="px-6">
+        <div class="rounded-lg border border-emerald-900/60 bg-[#060A08] p-2 overflow-hidden">
+          <!-- 终端顶栏 -->
+          <div class="flex items-center justify-between border-b border-emerald-900/50 pb-1 mb-1.5">
+            <span class="num text-[8px] text-emerald-400/90 tracking-wider">GATE.IO PERP · BTC_USDT</span>
+            <span class="num text-[8px] text-emerald-300">118,234.0 <span class="text-emerald-500">▲</span></span>
+          </div>
+          <!-- 高密度数据网格 -->
+          <div class="grid grid-cols-3 gap-x-2 gap-y-0.5 num text-[7.5px] leading-[1.5]">
+            <span class="text-slate-500">EQUITY <span class="text-slate-200">10284.51</span></span>
+            <span class="text-slate-500">AVAIL <span class="text-slate-200">7612.03</span></span>
+            <span class="text-slate-500">UPNL <span class="text-rose-400">-36.20</span></span>
+            <span class="text-slate-500">LONG <span class="text-emerald-400">BTC 12张</span></span>
+            <span class="text-slate-500">LEV <span class="text-amber-300">3.0x</span></span>
+            <span class="text-slate-500">LIQ <span class="text-rose-300">104,882</span></span>
+            <span class="text-slate-500">RISK <span class="text-emerald-400">ALLOW</span></span>
+            <span class="text-slate-500">WAKE <span class="text-sky-300">00:14:52</span></span>
+            <span class="text-slate-500">KILL <span class="text-slate-400">OFF</span></span>
+          </div>
+          <!-- 终端风迷你权益柱状图 -->
+          <div class="mt-1.5 flex items-end gap-[2px] h-6">
+            <div class="flex-1 bg-emerald-500/70 h-[35%]"></div><div class="flex-1 bg-emerald-500/70 h-[45%]"></div>
+            <div class="flex-1 bg-rose-500/70 h-[30%]"></div><div class="flex-1 bg-emerald-500/70 h-[55%]"></div>
+            <div class="flex-1 bg-emerald-500/70 h-[70%]"></div><div class="flex-1 bg-rose-500/70 h-[52%]"></div>
+            <div class="flex-1 bg-emerald-500/70 h-[66%]"></div><div class="flex-1 bg-emerald-500/70 h-[82%]"></div>
+            <div class="flex-1 bg-rose-500/70 h-[60%]"></div><div class="flex-1 bg-emerald-500/70 h-[88%]"></div>
+            <div class="flex-1 bg-emerald-500/70 h-[95%]"></div><div class="flex-1 bg-amber-400/80 h-[78%]"></div>
+          </div>
+        </div>
+        <!-- 风格关键词 -->
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">深黑</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">高密度</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">终端感</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">等宽数字</span>
+        </div>
+      </div>
+
+      <!-- 特点列表 -->
+      <ul class="p-6 pt-4 space-y-2 text-[13px] text-slate-400">
+        <li class="flex gap-2"><span class="text-emerald-400 mt-0.5">▸</span>全屏网格布局：K线、持仓、决策轮、成交同屏并列，零滚动盯盘</li>
+        <li class="flex gap-2"><span class="text-emerald-400 mt-0.5">▸</span>价格变动红绿瞬时闪烁，风控判定以硬边框色块强提示</li>
+        <li class="flex gap-2"><span class="text-emerald-400 mt-0.5">▸</span>键盘快捷键驱动手动干预（熔断 / 平仓 / 启停），操作零鼠标</li>
+        <li class="flex gap-2"><span class="text-emerald-400 mt-0.5">▸</span>tool_calls 链以日志流样式逐行滚动，allow/deny 一瞥可辨</li>
+      </ul>
+
+      <div class="px-6 pb-6">
+        <a href="scheme-a-terminal.html"
+           class="block text-center text-sm font-medium rounded-lg py-2.5 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10 transition-colors">
+          打开方案 A →
+        </a>
+      </div>
+    </article>
+
+    <!-- ======== 方案 B：现代 SaaS 控制台风 ======== -->
+    <article class="scheme-card rounded-2xl border border-white/8 bg-ink-900/80 overflow-hidden hover:border-indigo-400/25 hover:shadow-[0_12px_40px_-12px_rgba(99,102,241,0.18)]">
+      <div class="p-6 pb-4">
+        <div class="flex items-center gap-3">
+          <span class="num w-9 h-9 rounded-lg bg-indigo-400/10 border border-indigo-400/30 text-indigo-300 flex items-center justify-center font-bold">B</span>
+          <div>
+            <h2 class="text-base font-semibold text-slate-100">现代 SaaS 控制台风</h2>
+            <p class="text-[11px] text-slate-500">SaaS Console</p>
+          </div>
+        </div>
+        <p class="mt-3 text-[13px] text-slate-400 leading-relaxed">
+          像 Datadog 一样清晰克制：卡片与留白把监控成本降到最低，适合日常巡检与对外演示。
+        </p>
+      </div>
+
+      <!-- 风格示意缩略块：纯 CSS 绘制的浅色控制台 -->
+      <div class="px-6">
+        <div class="rounded-lg bg-[#EEF0F6] p-1.5 overflow-hidden flex gap-1.5">
+          <!-- 侧边导航条 -->
+          <div class="w-7 rounded-md bg-white shadow-sm flex flex-col items-center gap-1.5 py-1.5">
+            <div class="w-3.5 h-3.5 rounded bg-indigo-500"></div>
+            <div class="w-3 h-1 rounded-full bg-slate-200"></div>
+            <div class="w-3 h-1 rounded-full bg-slate-200"></div>
+            <div class="w-3 h-1 rounded-full bg-slate-200"></div>
+          </div>
+          <!-- 主区域 -->
+          <div class="flex-1 space-y-1.5">
+            <!-- 顶部指标卡 -->
+            <div class="grid grid-cols-3 gap-1">
+              <div class="rounded bg-white shadow-sm px-1 py-1">
+                <p class="text-[6px] text-slate-400">equity</p>
+                <p class="num text-[8px] font-semibold text-slate-700">10,284.51</p>
+              </div>
+              <div class="rounded bg-white shadow-sm px-1 py-1">
+                <p class="text-[6px] text-slate-400">available</p>
+                <p class="num text-[8px] font-semibold text-slate-700">7,612.03</p>
+              </div>
+              <div class="rounded bg-white shadow-sm px-1 py-1">
+                <p class="text-[6px] text-slate-400">uPnL</p>
+                <p class="num text-[8px] font-semibold text-rose-500">-36.20</p>
+              </div>
+            </div>
+            <!-- 图表卡 -->
+            <div class="rounded bg-white shadow-sm p-1.5">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[6px] text-slate-400">权益曲线</span>
+                <span class="text-[5.5px] px-1 rounded-full bg-indigo-100 text-indigo-600">7D</span>
+              </div>
+              <div class="flex items-end gap-[3px] h-7">
+                <div class="flex-1 rounded-sm bg-indigo-200 h-[30%]"></div><div class="flex-1 rounded-sm bg-indigo-300 h-[45%]"></div>
+                <div class="flex-1 rounded-sm bg-indigo-300 h-[40%]"></div><div class="flex-1 rounded-sm bg-indigo-400 h-[60%]"></div>
+                <div class="flex-1 rounded-sm bg-indigo-400 h-[55%]"></div><div class="flex-1 rounded-sm bg-indigo-500 h-[75%]"></div>
+                <div class="flex-1 rounded-sm bg-indigo-500 h-[70%]"></div><div class="flex-1 rounded-sm bg-emerald-400 h-[90%]"></div>
+              </div>
+            </div>
+            <!-- 折叠面板示意 -->
+            <div class="rounded bg-white shadow-sm px-1.5 py-1 flex items-center justify-between">
+              <span class="text-[6px] text-slate-500">决策轮 #42 · wake: scheduled</span>
+              <span class="text-[6px] text-indigo-500">展开 ▾</span>
+            </div>
+          </div>
+        </div>
+        <!-- 风格关键词 -->
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">浅色清爽</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">卡片化</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">留白</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">低门槛</span>
+        </div>
+      </div>
+
+      <!-- 特点列表 -->
+      <ul class="p-6 pt-4 space-y-2 text-[13px] text-slate-400">
+        <li class="flex gap-2"><span class="text-indigo-400 mt-0.5">▸</span>侧边导航 + 卡片分区，七大模块边界清晰，新成员零学习成本</li>
+        <li class="flex gap-2"><span class="text-indigo-400 mt-0.5">▸</span>核心指标大字号呈现，权益曲线与盈亏图表为视觉主角</li>
+        <li class="flex gap-2"><span class="text-indigo-400 mt-0.5">▸</span>决策轮默认折叠，点开才展开 tool_calls 与 llm_raw 细节</li>
+        <li class="flex gap-2"><span class="text-indigo-400 mt-0.5">▸</span>配置中心表单化：风控参数、白名单、密钥状态所见即所得</li>
+      </ul>
+
+      <div class="px-6 pb-6">
+        <a href="scheme-b-saas.html"
+           class="block text-center text-sm font-medium rounded-lg py-2.5 border border-indigo-400/40 text-indigo-300 hover:bg-indigo-400/10 transition-colors">
+          打开方案 B →
+        </a>
+      </div>
+    </article>
+
+    <!-- ======== 方案 C：AI Agent 叙事风 ======== -->
+    <article class="scheme-card rounded-2xl border border-white/8 bg-ink-900/80 overflow-hidden hover:border-violet-400/25 hover:shadow-[0_12px_40px_-12px_rgba(139,92,246,0.2)]">
+      <div class="p-6 pb-4">
+        <div class="flex items-center gap-3">
+          <span class="num w-9 h-9 rounded-lg bg-violet-400/10 border border-violet-400/30 text-violet-300 flex items-center justify-center font-bold">C</span>
+          <div>
+            <h2 class="text-base font-semibold text-slate-100">AI Agent 叙事风</h2>
+            <p class="text-[11px] text-slate-500">Agent Narrative</p>
+          </div>
+        </div>
+        <p class="mt-3 text-[13px] text-slate-400 leading-relaxed">
+          把 Agent 当成一位同事：以时间线讲述它每次醒来、思考、被风控拦下或成功下单的完整故事。
+        </p>
+      </div>
+
+      <!-- 风格示意缩略块：纯 CSS 绘制的叙事时间线 -->
+      <div class="px-6">
+        <div class="rounded-lg bg-gradient-to-br from-[#171226] via-[#12101C] to-[#0C0A13] p-2.5 overflow-hidden relative">
+          <!-- 时间线主轴 -->
+          <div class="absolute left-[15px] top-3 bottom-3 w-px bg-gradient-to-b from-violet-400/60 via-violet-400/20 to-transparent"></div>
+          <!-- 节点 1：Agent 醒来 -->
+          <div class="relative pl-6 mb-2">
+            <div class="absolute left-[3px] top-1 w-2.5 h-2.5 rounded-full bg-violet-400 node-glow"></div>
+            <div class="rounded-lg rounded-tl-sm bg-white/[0.06] border border-violet-300/15 px-2 py-1">
+              <p class="text-[7px] text-violet-300/90">round #43 · price_alert 唤醒</p>
+              <p class="text-[7px] text-slate-400 mt-0.5">「BTC 突破 118k，检查趋势延续性…」</p>
+            </div>
+          </div>
+          <!-- 节点 2：风控判定 -->
+          <div class="relative pl-6 mb-2">
+            <div class="absolute left-[3px] top-1 w-2.5 h-2.5 rounded-full bg-emerald-400/90"></div>
+            <div class="rounded-lg rounded-tl-sm bg-white/[0.04] border border-white/8 px-2 py-1 flex items-center justify-between">
+              <p class="text-[7px] text-slate-400">place_order → BTC_USDT 多 2 张</p>
+              <span class="text-[6px] px-1 rounded bg-emerald-400/15 text-emerald-300 border border-emerald-400/25">ALLOW</span>
+            </div>
+          </div>
+          <!-- 节点 3：下次唤醒 -->
+          <div class="relative pl-6">
+            <div class="absolute left-[3px] top-1 w-2.5 h-2.5 rounded-full bg-slate-500"></div>
+            <div class="rounded-lg rounded-tl-sm bg-white/[0.03] border border-white/5 px-2 py-1">
+              <p class="text-[7px] text-slate-500">set_next_wakeup → 15 分钟后 · 进入休眠</p>
+            </div>
+          </div>
+        </div>
+        <!-- 风格关键词 -->
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">深色渐变</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">叙事流</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">时间线</span>
+          <span class="text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-400">人格化</span>
+        </div>
+      </div>
+
+      <!-- 特点列表 -->
+      <ul class="p-6 pt-4 space-y-2 text-[13px] text-slate-400">
+        <li class="flex gap-2"><span class="text-violet-400 mt-0.5">▸</span>决策时间线为视觉主角，round 像对话记录一样逐条展开</li>
+        <li class="flex gap-2"><span class="text-violet-400 mt-0.5">▸</span>llm_raw 思考过程与 risk_verdict 风控判定并排对照呈现</li>
+        <li class="flex gap-2"><span class="text-violet-400 mt-0.5">▸</span>Agent 笔记与"自述语气"融入叙事流，复盘像读交易日志</li>
+        <li class="flex gap-2"><span class="text-violet-400 mt-0.5">▸</span>呼吸光效表达 in_round / agent_running 状态，休眠与唤醒有节奏感</li>
+      </ul>
+
+      <div class="px-6 pb-6">
+        <a href="scheme-c-agent.html"
+           class="block text-center text-sm font-medium rounded-lg py-2.5 border border-violet-400/40 text-violet-300 hover:bg-violet-400/10 transition-colors">
+          打开方案 C →
+        </a>
+      </div>
+    </article>
+  </section>
+
+  <!-- ============ 横向对比速查表 ============ -->
+  <section class="mt-12">
+    <h3 class="text-sm font-semibold text-slate-300 mb-4">横向速查</h3>
+    <div class="rounded-xl border border-white/5 bg-ink-900/60 overflow-hidden">
+      <!-- 表头 -->
+      <div class="grid grid-cols-4 text-[11px] text-slate-500 border-b border-white/5 bg-ink-800/50">
+        <div class="px-5 py-2.5">维度</div>
+        <div class="px-5 py-2.5 text-emerald-300/80">A · 交易终端</div>
+        <div class="px-5 py-2.5 text-indigo-300/80">B · SaaS 控制台</div>
+        <div class="px-5 py-2.5 text-violet-300/80">C · Agent 叙事</div>
+      </div>
+      <!-- 对比行 -->
+      <div class="grid grid-cols-4 text-[12px] border-b border-white/5">
+        <div class="px-5 py-3 text-slate-500">信息密度</div>
+        <div class="px-5 py-3 text-slate-300">极高，一屏全览</div>
+        <div class="px-5 py-3 text-slate-300">中，折叠按需展开</div>
+        <div class="px-5 py-3 text-slate-300">低-中，聚焦单条叙事</div>
+      </div>
+      <div class="grid grid-cols-4 text-[12px] border-b border-white/5">
+        <div class="px-5 py-3 text-slate-500">上手成本</div>
+        <div class="px-5 py-3 text-slate-300">高，面向专业交易</div>
+        <div class="px-5 py-3 text-slate-300">低，通用 SaaS 直觉</div>
+        <div class="px-5 py-3 text-slate-300">低，读故事即可懂</div>
+      </div>
+      <div class="grid grid-cols-4 text-[12px] border-b border-white/5">
+        <div class="px-5 py-3 text-slate-500">最强场景</div>
+        <div class="px-5 py-3 text-slate-300">实盘盯盘 + 快速手动干预</div>
+        <div class="px-5 py-3 text-slate-300">日常巡检 + 对外演示</div>
+        <div class="px-5 py-3 text-slate-300">复盘 + 理解 LLM 决策逻辑</div>
+      </div>
+      <div class="grid grid-cols-4 text-[12px]">
+        <div class="px-5 py-3 text-slate-500">风险可视化</div>
+        <div class="px-5 py-3 text-slate-300">硬边色块 + 闪烁告警</div>
+        <div class="px-5 py-3 text-slate-300">徽标 + 表单校验提示</div>
+        <div class="px-5 py-3 text-slate-300">叙事内嵌对照 + 光效</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 底部说明 ============ -->
+  <footer class="mt-12 pt-6 border-t border-white/5 flex flex-col md:flex-row items-center justify-between gap-3">
+    <p class="text-xs text-slate-500">
+      本页及三个方案页均为 <span class="text-slate-400">静态设计稿</span>，所有行情、持仓、决策与成交数据均为
+      <span class="text-slate-400">模拟数据</span>，不请求任何后端接口。
+    </p>
+    <p class="text-xs text-slate-600">
+      确认方向后将落实到 React 前端 · 字段与接口以真实数据模型为准
+    </p>
+  </footer>
+</main>
+
+<script>
+  // 键盘快捷键：1 / 2 / 3 快速打开三个方案
+  document.addEventListener('keydown', function (e) {
+    // 输入框聚焦时不响应快捷键（本页无输入框，防御性处理）
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    var map = {
+      '1': 'scheme-a-terminal.html',
+      '2': 'scheme-b-saas.html',
+      '3': 'scheme-c-agent.html',
+    };
+    if (map[e.key]) window.location.href = map[e.key];
+  });
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 /**
- * 真实后端实现：按契约请求 FastAPI（开发环境经 vite proxy 转发到 127.0.0.1:8080）。
+ * 真实后端实现：按契约请求 FastAPI（开发环境经 vite proxy 转发到 127.0.0.1:17577）。
  * 后端原始字段（items/created_at/数字字符串）→ 前端类型的适配集中在在本文件，页面不感知。
  */
 import type {
@@ -10,6 +10,7 @@ import type {
   AppConfig,
   Candle,
   ClosePositionResult,
+  DailyStats,
   EquityPoint,
   KillSwitchResult,
   Note,
@@ -89,6 +90,7 @@ interface RawTrade {
 function adaptTrade(raw: RawTrade): Trade {
   return {
     id: raw.id,
+    round_id: raw.round_id ?? '',
     time: new Date(raw.created_at * 1000).toISOString(),
     contract: raw.contract,
     size: Number(raw.size),
@@ -122,6 +124,7 @@ function adaptPosition(raw: RawPosition): Position {
     entry_price: Number(raw.entry_price),
     mark_price: Number(raw.mark_price),
     leverage: Number(raw.leverage),
+    margin: Number(raw.margin),
     unrealised_pnl: Number(raw.unrealised_pnl),
     liq_price: Number(raw.liq_price),
   }
@@ -142,17 +145,22 @@ function adaptEquity(raw: RawEquity): EquityPoint[] {
   }))
 }
 
-/** 后端 /api/notes：{items:[{created_at(Unix秒), content, ...}]} */
+/** 后端 /api/notes：{items:[{created_at(Unix秒), content, round_id, ...}]} */
 interface RawNotes {
-  items: Array<{ created_at: number; content: string }>
+  items: Array<{ created_at: number; content: string; round_id?: string }>
 }
 
-/** 后端 notes 响应 → 前端 Note[]（created_at 转 ISO time） */
+/** 后端 notes 响应 → 前端 Note[]（created_at 转 ISO time，round_id 透传，缺省空串）。
+ * 后端 recent_notes 为正序（最旧在前，供 agent 拼上下文）；前端消费侧契约=最新在前
+ * （NotesPanel 最新在上 / RoundTimeline 同轮取首条=最新），故适配层统一按 created_at 降序。 */
 function adaptNotes(raw: RawNotes): Note[] {
-  return raw.items.map((n) => ({
-    time: new Date(n.created_at * 1000).toISOString(),
-    content: n.content,
-  }))
+  return [...raw.items]
+    .sort((a, b) => b.created_at - a.created_at)
+    .map((n) => ({
+      time: new Date(n.created_at * 1000).toISOString(),
+      content: n.content,
+      round_id: n.round_id ?? '',
+    }))
 }
 
 /** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 */
@@ -177,6 +185,18 @@ function adaptRounds(raw: RawRounds): RoundSummary[] {
     summary: r.context_summary,
     pnl_after: undefined,
   }))
+}
+
+/** 后端 /api/daily_stats：数值字段可能是数字字符串（Decimal 序列化） */
+type RawDailyStats = { [K in keyof DailyStats]: number | string }
+
+/** 后端 daily_stats 响应 → 前端 DailyStats：数字字符串统一转 number */
+function adaptDailyStats(raw: RawDailyStats): DailyStats {
+  return {
+    realized_pnl: Number(raw.realized_pnl),
+    orders_today: Number(raw.orders_today),
+    max_orders_per_day: Number(raw.max_orders_per_day),
+  }
 }
 
 /** GET /api/trades 适配：{items,total,offset,limit} + items 内字段转换 */
@@ -218,6 +238,7 @@ export const httpApi: ApiClient = {
   stopAgent: () => request<AgentStateResult>('/agent/stop', { method: 'POST' }),
   getEquity: async () => adaptEquity(await request<RawEquity>('/equity')),
   getNotes: async () => adaptNotes(await request<RawNotes>('/notes')),
+  getDailyStats: async () => adaptDailyStats(await request<RawDailyStats>('/daily_stats')),
   getConfig: () => request<AppConfig>('/config'),
   putConfig: (config) =>
     request<PutConfigResult>('/config', { method: 'PUT', body: JSON.stringify(config) }),

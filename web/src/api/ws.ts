@@ -21,6 +21,7 @@ function subscribeMock(handler: WsHandler, onStatus?: WsStatusHandler): () => vo
         entry_price: 118_320,
         mark_price: 119_650 + tick,
         leverage: 3,
+        margin: 47.86,
         unrealised_pnl: 159.6 + tick,
         liq_price: 82_400,
       }

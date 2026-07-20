@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案 C · AI Agent 叙事风 — 永续合约自主交易中枢</title>
+<!-- Tailwind 3 CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- 字体：中文 Noto Sans SC + 等宽 JetBrains Mono（数字统一 tabular-nums） -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<script>
+  // Tailwind 主题扩展：霓虹紫/青点缀 + 字体族
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['"Noto Sans SC"', 'system-ui', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        },
+      }
+    }
+  }
+</script>
+<style>
+  /* ===== 全局基础 ===== */
+  body { background: #09090b; }
+  .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+  /* 背景氛围光：霓虹紫 + 青，极低透明度 */
+  .bg-aurora {
+    background:
+      radial-gradient(900px 480px at 12% -8%, rgba(167,139,250,.10), transparent 60%),
+      radial-gradient(800px 420px at 88% -6%, rgba(34,211,238,.08), transparent 60%),
+      radial-gradient(700px 600px at 50% 115%, rgba(167,139,250,.06), transparent 60%),
+      #09090b;
+  }
+  /* 通用面板 */
+  .panel {
+    background: rgba(24,24,27,.62);
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 0.9rem;
+    backdrop-filter: blur(8px);
+  }
+  /* 进行中的呼吸描边（实时决策轮卡片 / 当前步骤） */
+  @keyframes breathe {
+    0%,100% { box-shadow: 0 0 0 1px rgba(167,139,250,.35), 0 0 24px rgba(167,139,250,.10); }
+    50%     { box-shadow: 0 0 0 1px rgba(167,139,250,.70), 0 0 42px rgba(167,139,250,.22); }
+  }
+  .breathe { animation: breathe 2.6s ease-in-out infinite; }
+  /* 流式打字光标 */
+  .tw-cursor {
+    display: inline-block; width: 8px; height: 1.05em;
+    background: #a78bfa; vertical-align: -0.15em; margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+    box-shadow: 0 0 8px rgba(167,139,250,.8);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  /* 思考面板的光点扫描线 */
+  @keyframes scan { 0% { transform: translateY(-100%);} 100% { transform: translateY(420%);} }
+  .scanline::after {
+    content:""; position:absolute; left:0; right:0; height:34%;
+    background: linear-gradient(to bottom, transparent, rgba(167,139,250,.05), transparent);
+    animation: scan 4.5s linear infinite; pointer-events:none;
+  }
+  /* 时间线连接竖线 */
+  .rail { position:absolute; left:11px; top:26px; bottom:-6px; width:2px;
+    background: linear-gradient(to bottom, rgba(34,211,238,.5), rgba(167,139,250,.25), rgba(255,255,255,.05)); }
+  /* 旋转小圆环（执行中步骤） */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { animation: spin 1s linear infinite; }
+  /* 抽屉过渡 */
+  #configDrawer { transition: transform .32s cubic-bezier(.32,.72,.24,1); }
+  /* 细滚动条 */
+  .nice-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .nice-scroll::-webkit-scrollbar-thumb { background: rgba(167,139,250,.25); border-radius: 3px; }
+  .nice-scroll::-webkit-scrollbar-track { background: transparent; }
+  /* details 展开箭头 */
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+  details[open] .chev { transform: rotate(90deg); }
+  .chev { display:inline-block; transition: transform .18s ease; }
+  /* 决策卡片进入动画 */
+  @keyframes rise { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
+  .rise { animation: rise .5s ease both; }
+  /* 决策轮卡片：买卖点 / 成交记录跳转定位时的描边高亮（约 2 秒后淡出） */
+  .round-card { scroll-margin-top: 76px; transition: box-shadow .35s ease, border-color .35s ease; }
+  @keyframes jumpFlash {
+    0%   { box-shadow: 0 0 0 0 rgba(167,139,250,0); }
+    35%  { box-shadow: 0 0 0 3px rgba(167,139,250,.95), 0 0 46px rgba(167,139,250,.45); }
+    100% { box-shadow: 0 0 0 2px rgba(167,139,250,.75), 0 0 36px rgba(167,139,250,.30); }
+  }
+  .round-card.jump-hl { animation: jumpFlash .45s ease both; border-color: rgba(167,139,250,.65); }
+  /* K线画布：拖拽手感（横向平移，纵向触摸滚动不拦截） */
+  #klineCanvas { cursor: grab; touch-action: pan-y; }
+  #klineCanvas.dragging { cursor: grabbing; }
+  /* 尊重减少动效偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    .breathe, .tw-cursor, .scanline::after, .spinner, .rise { animation: none !important; }
+  }
+</style>
+</head>
+<body class="bg-aurora text-zinc-300 font-sans antialiased min-h-screen">
+
+<!-- ================= 顶部状态栏 ================= -->
+<header class="sticky top-0 z-40 border-b border-white/5 bg-zinc-950/80 backdrop-blur-md">
+  <div class="max-w-[1440px] mx-auto px-5 h-14 flex items-center gap-4 text-sm whitespace-nowrap overflow-x-auto nice-scroll">
+    <!-- 品牌 -->
+    <div class="flex items-center gap-2.5 pr-2">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500/30 to-cyan-400/20 border border-violet-400/40 flex items-center justify-center">
+        <!-- 神经元图标 -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.8">
+          <circle cx="12" cy="12" r="3"/><circle cx="4" cy="6" r="2"/><circle cx="20" cy="6" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/>
+          <path d="M5.5 7.4 9.8 10.3M18.5 7.4l-4.3 2.9M5.5 16.6l4.3-2.9M18.5 16.6l-4.3-2.9"/>
+        </svg>
+      </div>
+      <div class="leading-tight">
+        <div class="font-bold text-zinc-100 tracking-wide">NEURO-DESK <span class="text-violet-300">交易中枢</span></div>
+        <div class="text-[10px] text-zinc-500">Gate.io 永续 · LLM 自主交易 Agent</div>
+      </div>
+    </div>
+
+    <div class="h-6 w-px bg-white/10"></div>
+
+    <!-- 运行模式 -->
+    <span class="px-2.5 py-1 rounded-md border border-amber-300/40 bg-amber-300/10 text-amber-300 text-xs font-mono font-semibold tracking-widest">PAPER · 模拟盘</span>
+
+    <!-- Agent 启停 -->
+    <div class="flex items-center gap-2">
+      <span class="relative flex h-2.5 w-2.5">
+        <span id="agentPing" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60"></span>
+        <span id="agentDot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-400"></span>
+      </span>
+      <span id="agentStateText" class="text-emerald-300 text-xs">Agent 运行中</span>
+      <button id="agentToggle" class="px-2 py-1 rounded-md text-[11px] border border-white/10 text-zinc-400 hover:text-rose-300 hover:border-rose-400/40 transition">停止</button>
+    </div>
+
+    <!-- 熔断开关 -->
+    <button data-toast="静态预览：触发熔断后 Agent 立即停止、撤销全部挂单并锁仓，需人工复位。" class="px-2.5 py-1 rounded-md text-xs border border-rose-500/50 text-rose-400 hover:bg-rose-500/15 transition font-semibold">⏻ 熔断 KILL</button>
+
+    <div class="h-6 w-px bg-white/10"></div>
+
+    <!-- LLM 配置状态 -->
+    <div class="hidden xl:flex items-center gap-1.5 text-xs text-zinc-400">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+      LLM <span class="font-mono text-zinc-200">DeepSeek · deepseek-chat</span>
+      <span class="text-emerald-400/90">已配置</span>
+    </div>
+
+    <!-- WS 连接 -->
+    <div class="hidden md:flex items-center gap-1.5 text-xs text-zinc-400">
+      <span class="relative flex h-2 w-2">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-60"></span>
+        <span class="relative inline-flex rounded-full h-2 w-2 bg-cyan-400"></span>
+      </span>
+      WS 已连接 <span class="font-mono text-cyan-300 tnum">12ms</span>
+    </div>
+
+    <!-- uptime -->
+    <div class="hidden 2xl:block text-xs text-zinc-500">uptime <span class="font-mono text-zinc-300 tnum">3天 07:42:18</span></div>
+
+    <!-- 右侧：方案标签 + 配置入口（收敛到右上角） -->
+    <div class="ml-auto flex items-center gap-3">
+      <span class="hidden 2xl:inline-block px-2.5 py-1 rounded-full text-[11px] border border-violet-400/40 bg-violet-400/10 text-violet-300">设计方案 C · 静态预览（模拟数据）</span>
+      <span class="2xl:hidden px-2 py-1 rounded-full text-[10px] border border-violet-400/40 bg-violet-400/10 text-violet-300">方案 C · 模拟</span>
+      <button id="openConfig" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:border-violet-400/50 hover:text-violet-200 transition text-xs text-zinc-300">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        配置中心
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-[1440px] mx-auto px-5 pb-16">
+
+  <!-- ================= 首屏：实时决策轮（绝对主角） + 两侧辅助面板 ================= -->
+  <section class="grid grid-cols-12 gap-4 pt-5">
+
+    <!-- ---- 左栏：账户三指标 + 权益小曲线 ---- -->
+    <aside class="col-span-12 lg:col-span-3 space-y-4 order-2 lg:order-1">
+      <!-- 账户指标 -->
+      <div class="panel p-4 space-y-4">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs text-zinc-500 tracking-widest">账户 · PAPER</h3>
+          <span class="text-[10px] font-mono text-zinc-600">USDT 本位</span>
+        </div>
+        <div>
+          <div class="text-[11px] text-zinc-500 mb-1">equity（账户权益）</div>
+          <div class="font-mono tnum text-3xl font-bold text-zinc-50">10,284.56</div>
+          <div class="text-[11px] font-mono tnum text-emerald-400 mt-1">▲ +2.85% · paper 累计</div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="rounded-lg bg-white/[.03] border border-white/5 p-2.5">
+            <div class="text-[10px] text-zinc-500">available（可用余额）</div>
+            <div class="font-mono tnum text-sm text-zinc-200 mt-0.5">9,216.36</div>
+          </div>
+          <div class="rounded-lg bg-white/[.03] border border-white/5 p-2.5">
+            <div class="text-[10px] text-zinc-500">unrealised_pnl（浮动盈亏）</div>
+            <div class="font-mono tnum text-sm text-emerald-400 mt-0.5">+133.13</div>
+          </div>
+        </div>
+        <div class="flex justify-between text-[11px] text-zinc-500 border-t border-white/5 pt-3">
+          <span>今日已实现 <span class="font-mono tnum text-emerald-400">+41.37</span></span>
+          <span>当日订单 <span class="font-mono tnum text-zinc-300">7<span class="text-zinc-600">/12</span></span></span>
+        </div>
+      </div>
+
+      <!-- 权益小曲线 -->
+      <div class="panel p-4">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-xs text-zinc-500 tracking-widest">权益曲线 · 近 24h</h3>
+          <span class="font-mono tnum text-[11px] text-emerald-400">+2.31%</span>
+        </div>
+        <svg id="equitySpark" viewBox="0 0 280 84" class="w-full h-[84px]"></svg>
+        <div class="flex justify-between text-[10px] font-mono text-zinc-600 mt-1">
+          <span>07-18 14:00</span><span>09,960.00 → 10,284.56</span><span>现在</span>
+        </div>
+      </div>
+
+      <!-- 风控约束速览（强化「硬性风控」心智） -->
+      <div class="panel p-4">
+        <h3 class="text-xs text-zinc-500 tracking-widest mb-3">硬性风控 · 代码保证</h3>
+        <ul class="space-y-2 text-[11px]">
+          <li class="flex justify-between"><span class="text-zinc-500">单仓上限 max_position_pct</span><span class="font-mono tnum text-zinc-300">20%</span></li>
+          <li class="flex justify-between"><span class="text-zinc-500">总仓上限 max_total_position_pct</span><span class="font-mono tnum text-zinc-300">40%</span></li>
+          <li class="flex justify-between"><span class="text-zinc-500">价格偏离 max_deviation</span><span class="font-mono tnum text-zinc-300">0.50%</span></li>
+          <li class="flex justify-between"><span class="text-zinc-500">日亏锁仓 daily_loss_limit</span><span class="font-mono tnum text-rose-300">-500</span></li>
+        </ul>
+        <p class="mt-3 text-[10px] leading-relaxed text-zinc-600">LLM 仅有建议权，所有订单经风控层裁决，违反约束直接拒绝（deny）。</p>
+      </div>
+    </aside>
+
+    <!-- ---- 中央：实时决策轮可视化 ---- -->
+    <div class="col-span-12 lg:col-span-6 order-1 lg:order-2">
+      <div class="panel breathe relative overflow-hidden round-card" id="round-1042">
+        <!-- 卡片头：轮次信息 -->
+        <div class="px-5 pt-4 pb-3 border-b border-white/5">
+          <div class="flex items-center gap-3 flex-wrap">
+            <span class="relative flex h-3 w-3">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-70"></span>
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-violet-400"></span>
+            </span>
+            <h2 class="text-lg font-bold text-zinc-50">实时决策轮 <span class="font-mono text-violet-300">#1042</span></h2>
+            <!-- 唤醒来源徽标 -->
+            <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-400/10 border border-amber-300/40 text-amber-300">⚡ price_alert 价格预警</span>
+            <span class="ml-auto font-mono tnum text-xs text-zinc-500">已进行 <span id="roundElapsed" class="text-violet-300">00:02:41</span></span>
+          </div>
+          <div class="mt-2 text-xs text-zinc-400 font-mono tnum">
+            wake_source: <span class="text-amber-200">price_alert</span> · 唤醒条件：<span class="text-amber-200">BTC_USDT ≥ 118,000.0</span>（预警单 #A-118k） · started_at 07-19 14:32:07 · ended_at <span class="text-violet-300">null（进行中）</span>
+          </div>
+        </div>
+
+        <!-- LLM 思考流（流式呈现） -->
+        <div class="px-5 pt-4">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="text-[11px] tracking-widest text-violet-300/80">LLM 思考流 · context_summary</span>
+            <span class="text-[10px] font-mono text-zinc-600">streaming…</span>
+          </div>
+          <div class="scanline relative overflow-hidden rounded-lg border border-violet-400/20 bg-zinc-950/70 p-4 min-h-[118px]">
+            <p class="font-mono text-[13px] leading-6 text-zinc-300"><span id="thoughtText"></span><span class="tw-cursor"></span></p>
+          </div>
+        </div>
+
+        <!-- 工具调用链：垂直步骤时间线 -->
+        <div class="px-5 py-4">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-[11px] tracking-widest text-cyan-300/80">工具调用链 · tool_calls</span>
+            <span class="text-[10px] font-mono tnum text-zinc-600">allow <span class="text-emerald-400">5</span> / deny <span class="text-rose-400">1</span> / running <span class="text-violet-300">1</span></span>
+          </div>
+
+          <ol class="relative space-y-1">
+
+            <!-- 步骤 1 -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-cyan-400/15 border border-cyan-300/60 flex items-center justify-center text-[10px] text-cyan-300">✓</span>
+              <div class="rounded-lg border border-white/5 bg-white/[.02] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 1</span>
+                  <span class="font-mono text-[13px] text-cyan-200 font-semibold">get_market_data</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">182ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ contract: "BTC_USDT", interval: "15m", limit: 60 }</div>
+                <div class="mt-0.5 text-[11px] text-zinc-400">→ 返回 60 根 K 线，最新收盘 <span class="font-mono tnum text-zinc-200">118,063.0</span>，成交量放大 2.3σ</div>
+              </div>
+            </li>
+
+            <!-- 步骤 2 -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-cyan-400/15 border border-cyan-300/60 flex items-center justify-center text-[10px] text-cyan-300">✓</span>
+              <div class="rounded-lg border border-white/5 bg-white/[.02] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 2</span>
+                  <span class="font-mono text-[13px] text-cyan-200 font-semibold">get_account</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">96ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500">{ }</div>
+                <div class="mt-0.5 text-[11px] text-zinc-400">→ equity <span class="font-mono tnum text-zinc-200">10,284.56</span> / available <span class="font-mono tnum text-zinc-200">9,216.36</span> / uPnL <span class="font-mono tnum text-emerald-400">+133.13</span></div>
+              </div>
+            </li>
+
+            <!-- 步骤 3 -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-cyan-400/15 border border-cyan-300/60 flex items-center justify-center text-[10px] text-cyan-300">✓</span>
+              <div class="rounded-lg border border-white/5 bg-white/[.02] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 3</span>
+                  <span class="font-mono text-[13px] text-cyan-200 font-semibold">get_history</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">134ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ contract: "BTC_USDT", limit: 20 }</div>
+                <div class="mt-0.5 text-[11px] text-zinc-400">→ 多头分批建仓均价 <span class="font-mono tnum text-zinc-200">115,446.3</span>，当日订单 7/12</div>
+              </div>
+            </li>
+
+            <!-- 步骤 4：被风控拒绝（deny 红色高亮） -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-rose-500/20 border border-rose-400/70 flex items-center justify-center text-[10px] text-rose-300">✕</span>
+              <div class="rounded-lg border border-rose-500/40 bg-rose-500/[.06] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 4</span>
+                  <span class="font-mono text-[13px] text-rose-200 font-semibold">place_order</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border border-rose-400/60 text-rose-200 bg-rose-500/20">deny · 风控拒绝</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">41ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ contract: "BTC_USDT", size: 100, price: 118900.0, reduce_only: false }</div>
+                <div class="mt-1 text-[11px] text-rose-300 flex items-start gap-1.5">
+                  <span>⛔</span>
+                  <span>risk_reason：限价 <span class="font-mono tnum">118,900.0</span> 偏离标记价 <span class="font-mono tnum">0.71%</span>，超过 max_deviation = <span class="font-mono tnum">0.50%</span> 上限，订单未提交。</span>
+                </div>
+              </div>
+            </li>
+
+            <!-- 步骤 5：拒绝后的修正重报 -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-cyan-400/15 border border-cyan-300/60 flex items-center justify-center text-[10px] text-cyan-300">✓</span>
+              <div class="rounded-lg border border-white/5 bg-white/[.02] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 5</span>
+                  <span class="font-mono text-[13px] text-cyan-200 font-semibold">place_order</span>
+                  <span class="text-[10px] text-violet-300">↩ 按风控约束修正</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">88ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ contract: "BTC_USDT", size: 100, price: 118020.0, reduce_only: false }</div>
+                <div class="mt-0.5 text-[11px] text-zinc-400">→ 偏离 <span class="font-mono tnum">0.036%</span> 通过校验，限价买单已提交（挂单中）· 订单 #A7731</div>
+              </div>
+            </li>
+
+            <!-- 步骤 6 -->
+            <li class="relative pl-9 pb-4">
+              <span class="rail"></span>
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-cyan-400/15 border border-cyan-300/60 flex items-center justify-center text-[10px] text-cyan-300">✓</span>
+              <div class="rounded-lg border border-white/5 bg-white/[.02] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 6</span>
+                  <span class="font-mono text-[13px] text-cyan-200 font-semibold">set_price_alert</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500">72ms</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ contract: "BTC_USDT", price: 120000.0, side: "above" }</div>
+                <div class="mt-0.5 text-[11px] text-zinc-400">→ 预警单 #A-120k 已创建</div>
+              </div>
+            </li>
+
+            <!-- 步骤 7：执行中 -->
+            <li class="relative pl-9">
+              <span class="absolute left-1 top-1 w-5 h-5 rounded-full bg-violet-500/20 border border-violet-300/70 flex items-center justify-center">
+                <svg class="spinner" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="3"><path d="M12 2a10 10 0 1 0 10 10" stroke-linecap="round"/></svg>
+              </span>
+              <div class="rounded-lg border border-violet-400/40 bg-violet-400/[.06] px-3 py-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-[10px] text-zinc-600">seq 7</span>
+                  <span class="font-mono text-[13px] text-violet-200 font-semibold">set_next_wakeup</span>
+                  <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border border-violet-400/50 text-violet-300 bg-violet-400/10">执行中…</span>
+                  <span class="font-mono tnum text-[10px] text-zinc-500" id="step7ms">—</span>
+                </div>
+                <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum">{ after: "10m", reason: "跟踪 118k 回踩确认与挂单成交" }</div>
+                <div class="mt-0.5 text-[11px] text-violet-300/80">→ 等待 LLM 输出最终决策结论<span class="tw-cursor" style="height:.8em"></span></div>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <!-- 卡片底：完整对话（agent loop 消息流） + Prompt 快照 -->
+        <div class="px-5 pb-4 space-y-2">
+          <details class="text-xs">
+            <summary class="text-zinc-500 hover:text-violet-300 transition"><span class="chev mr-1">▸</span>完整对话 · agent loop（本轮消息流，进行中）</summary>
+            <div class="mt-2 space-y-2" id="liveChat"><!-- 由 JS 按 ROUNDS 中 #1042 数据渲染 --></div>
+          </details>
+          <details class="text-xs">
+            <summary class="text-zinc-500 hover:text-violet-300 transition"><span class="chev mr-1">▸</span>查看本轮 prompt_snapshot（系统提示 + 上下文装配）</summary>
+            <pre class="mt-2 p-3 rounded-lg bg-zinc-950/80 border border-white/5 font-mono text-[11px] leading-5 text-zinc-400 overflow-x-auto nice-scroll">[system] 你是 Gate.io 永续合约的自主交易员。目标：在严格风控内实现稳定复利……
+[context] equity=10284.56 available=9216.36 positions=[BTC+300@115446.3, ETH-30@3780.3]
+[trigger] price_alert: BTC_USDT ≥ 118000.0 (#A-118k) fired at 14:32:07
+[tools] get_market_data / get_account / get_history / place_order / set_leverage / set_price_alert / set_next_wakeup</pre>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- 右栏：K线图 + 持仓卡片 ---- -->
+    <aside class="col-span-12 lg:col-span-3 space-y-4 order-3">
+      <!-- K线图区域 -->
+      <div class="panel p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <h3 class="text-xs text-zinc-500 tracking-widest">BTC_USDT · 永续</h3>
+          <span class="px-2 py-0.5 rounded text-[10px] font-mono border border-violet-400/50 text-violet-300 bg-violet-400/10">1h</span>
+          <span class="ml-auto text-[10px] font-mono text-zinc-600">近 7 天 · 168 根</span>
+        </div>
+        <div class="flex items-baseline gap-2">
+          <span class="font-mono tnum text-xl font-bold text-zinc-50">118,063.0</span>
+          <span class="font-mono tnum text-[11px] text-emerald-400" id="chg24">—</span>
+        </div>
+        <canvas id="klineCanvas" class="w-full h-[210px] mt-2 block select-none"></canvas>
+        <div class="flex justify-between text-[10px] font-mono text-zinc-600 mt-1">
+          <span>MA20 <span class="text-violet-300" id="ma20Val">—</span></span>
+          <span>预警线 <span class="text-amber-300">118,000.0</span></span>
+        </div>
+        <div class="mt-1.5 flex items-center gap-2 text-[10px] text-zinc-600 flex-wrap">
+          <span><span class="font-mono font-bold text-emerald-400">b</span> 买入/开多 · <span class="font-mono font-bold text-rose-400">s</span> 卖出/平多（仅 BTC 成交，点击标记跳转决策轮）</span>
+          <span class="ml-auto font-mono">⟷ 拖拽 / 滚轮平移</span>
+        </div>
+      </div>
+
+      <!-- 持仓卡片：BTC 多 -->
+      <div class="panel p-4 border-l-2 !border-l-emerald-400/70">
+        <div class="flex items-center gap-2">
+          <span class="font-mono font-bold text-zinc-100">BTC_USDT</span>
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-400/15 text-emerald-300 border border-emerald-400/40">多 LONG</span>
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-white/5 text-zinc-400 border border-white/10">5x</span>
+          <span class="ml-auto font-mono tnum text-sm font-bold text-emerald-400">+78.50</span>
+        </div>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-1.5 mt-3 text-[11px]">
+          <div class="flex justify-between"><span class="text-zinc-500">size（张数）</span><span class="font-mono tnum text-zinc-200">+300（0.03 BTC）</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">margin（保证金）</span><span class="font-mono tnum text-zinc-200">708.38</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">entry_price（开仓价）</span><span class="font-mono tnum text-zinc-200">115,446.3</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">mark_price（标记价）</span><span class="font-mono tnum text-zinc-200">118,063.0</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">liq_price（强平价）</span><span class="font-mono tnum text-zinc-400">105,842.0</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">强平缓冲</span><span class="font-mono tnum text-emerald-300">10.35%</span></div>
+        </div>
+        <div class="flex items-center justify-between mt-3 pt-3 border-t border-white/5">
+          <span class="text-[10px] text-zinc-600 font-mono">来源 llm_open 分批建仓 · 最近操作 <button type="button" onclick="jumpToRound(1036)" class="underline underline-offset-2 hover:text-violet-300 transition">#1036</button> 轮 · 保证金收益率 <span class="text-emerald-400 tnum">+11.08%</span></span>
+          <button data-toast="静态预览：手动平仓演示 —— 真实环境将二次确认后以市价全平 BTC_USDT 300 张。" class="px-2.5 py-1 rounded-md text-[11px] border border-rose-400/40 text-rose-300 hover:bg-rose-500/15 transition">手动平仓</button>
+        </div>
+      </div>
+
+      <!-- 持仓卡片：ETH 空 -->
+      <div class="panel p-4 border-l-2 !border-l-rose-400/70">
+        <div class="flex items-center gap-2">
+          <span class="font-mono font-bold text-zinc-100">ETH_USDT</span>
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-400/15 text-rose-300 border border-rose-400/40">空 SHORT</span>
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-white/5 text-zinc-400 border border-white/10">3x</span>
+          <span class="ml-auto font-mono tnum text-sm font-bold text-emerald-400">+54.63</span>
+        </div>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-1.5 mt-3 text-[11px]">
+          <div class="flex justify-between"><span class="text-zinc-500">size（张数）</span><span class="font-mono tnum text-zinc-200">-30（0.30 ETH）</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">margin（保证金）</span><span class="font-mono tnum text-zinc-200">359.82</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">entry_price（开仓价）</span><span class="font-mono tnum text-zinc-200">3,780.3</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">mark_price（标记价）</span><span class="font-mono tnum text-zinc-200">3,598.2</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">liq_price（强平价）</span><span class="font-mono tnum text-zinc-400">4,652.0</span></div>
+          <div class="flex justify-between"><span class="text-zinc-500">强平缓冲</span><span class="font-mono tnum text-emerald-300">29.29%</span></div>
+        </div>
+        <div class="flex items-center justify-between mt-3 pt-3 border-t border-white/5">
+          <span class="text-[10px] text-zinc-600 font-mono">来源 llm_open · 移动止盈已触发 1 次（<button type="button" onclick="jumpToRound(1031)" class="underline underline-offset-2 hover:text-violet-300 transition">#1031</button> 轮布设） · 收益率 <span class="text-emerald-400 tnum">+15.18%</span></span>
+          <button data-toast="静态预览：手动平仓演示 —— 真实环境将二次确认后以市价全平 ETH_USDT 30 张空单。" class="px-2.5 py-1 rounded-md text-[11px] border border-rose-400/40 text-rose-300 hover:bg-rose-500/15 transition">手动平仓</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ================= 第二屏：决策时间线（叙事日记卡片流） + Agent 笔记 ================= -->
+  <section class="grid grid-cols-12 gap-4 mt-6">
+
+    <!-- 决策时间线 -->
+    <div class="col-span-12 lg:col-span-8">
+      <div class="flex items-center gap-3 mb-4 flex-wrap">
+        <h2 class="text-base font-bold text-zinc-100">决策时间线 <span class="text-zinc-500 text-xs font-normal">— Agent 的每一笔思考都留痕</span></h2>
+        <!-- 唤醒来源过滤 chips -->
+        <div class="ml-auto flex gap-1.5" id="wakeFilter">
+          <button data-filter="all" class="wf-btn px-2.5 py-1 rounded-full text-[11px] border border-violet-400/50 text-violet-300 bg-violet-400/10">全部</button>
+          <button data-filter="scheduled" class="wf-btn px-2.5 py-1 rounded-full text-[11px] border border-white/10 text-zinc-500 hover:text-zinc-300">定时唤醒</button>
+          <button data-filter="price_alert" class="wf-btn px-2.5 py-1 rounded-full text-[11px] border border-white/10 text-zinc-500 hover:text-zinc-300">价格预警</button>
+          <button data-filter="manual" class="wf-btn px-2.5 py-1 rounded-full text-[11px] border border-white/10 text-zinc-500 hover:text-zinc-300">手动唤醒</button>
+        </div>
+      </div>
+
+      <div class="space-y-4" id="roundList"><!-- 决策轮卡片由 JS 按 ROUNDS 数据渲染（含工具调用详情 + 完整对话） --></div>
+    </div>
+
+    <!-- Agent 笔记流 -->
+    <aside class="col-span-12 lg:col-span-4">
+      <div class="flex items-center gap-2 mb-4">
+        <h2 class="text-base font-bold text-zinc-100">Agent 笔记</h2>
+        <span class="text-xs text-zinc-500">— 它写给自己的备忘录</span>
+      </div>
+      <div class="space-y-3">
+        <div class="panel p-4 border-l-2 !border-l-violet-400/60">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[10px] font-mono tnum text-zinc-500">07-19 03:20</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-400/10 text-violet-300 border border-violet-400/30">#1036 轮后</span>
+          </div>
+          <p class="text-[13px] leading-6 text-zinc-300">03:12 的急拉验证了分批止盈的价值：100 张锁定 +23.44，剩余 300 张止损移至 115,900 保本位。这轮交易进入「让利润奔跑」阶段。</p>
+        </div>
+        <div class="panel p-4 border-l-2 !border-l-violet-400/60">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[10px] font-mono tnum text-zinc-500">07-18 22:10</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-zinc-500 border border-white/10">自省</span>
+          </div>
+          <p class="text-[13px] leading-6 text-zinc-300">ETH 与 BTC 相关性走强（30 日 ρ≈0.87），双仓叠加后同向暴露偏大。后续开仓主动把总仓位约束从 40% 收紧到 35% 以内执行。</p>
+        </div>
+        <div class="panel p-4 border-l-2 !border-l-violet-400/60">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[10px] font-mono tnum text-zinc-500">07-18 11:20</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-zinc-500 border border-white/10">纪律</span>
+          </div>
+          <p class="text-[13px] leading-6 text-zinc-300">用户手动唤醒时没有新信号，如实汇报即可。不要为了「显得有用」而强行交易——不操作也是操作。</p>
+        </div>
+        <div class="panel p-4 border-l-2 !border-l-violet-400/60">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[10px] font-mono tnum text-zinc-500">07-16 00:05</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-zinc-500 border border-white/10">复盘</span>
+          </div>
+          <p class="text-[13px] leading-6 text-zinc-300">paper 第 1 日记录：初始权益 10,000.00。策略假设——趋势跟随 + 预警驱动唤醒，先跑满两周再下结论，样本小不做归因。</p>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ================= 成交记录 ================= -->
+  <section class="mt-8">
+    <div class="flex items-center gap-3 mb-4">
+      <h2 class="text-base font-bold text-zinc-100">成交记录</h2>
+      <span class="text-xs text-zinc-500">size 正买负卖 · pnl 为已实现盈亏 · 点击行定位到对应决策轮</span>
+      <span class="ml-auto font-mono tnum text-xs text-zinc-500">近 9 笔 · 累计已实现 <span class="text-emerald-400">+51.19</span></span>
+    </div>
+    <div class="panel overflow-hidden">
+      <div class="overflow-x-auto nice-scroll">
+        <table class="w-full text-sm min-w-[860px]">
+          <thead>
+            <tr class="text-[11px] text-zinc-500 border-b border-white/5">
+              <th class="text-left font-medium px-5 py-3">time（时间）</th>
+              <th class="text-left font-medium px-3 py-3">contract（合约）</th>
+              <th class="text-right font-medium px-3 py-3">size（数量）</th>
+              <th class="text-right font-medium px-3 py-3">price（成交价）</th>
+              <th class="text-right font-medium px-3 py-3">fee（手续费）</th>
+              <th class="text-right font-medium px-3 py-3">pnl（已实现盈亏）</th>
+              <th class="text-left font-medium px-5 py-3">source（来源）· round（决策轮）</th>
+            </tr>
+          </thead>
+          <tbody class="font-mono tnum text-[13px]" id="tradeBody"><!-- 成交行由 JS 按 TRADES 数据渲染，每行可点击跳转 --></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 页脚 -->
+  <footer class="mt-10 pt-5 border-t border-white/5 flex items-center justify-between text-[11px] text-zinc-600 flex-wrap gap-2">
+    <span>设计方案 C · AI Agent 叙事风 — 静态预览，全部数据为内置模拟数据，不发起任何网络请求</span>
+    <span class="font-mono">NEURO-DESK · paper 模式 · 仅供设计评审</span>
+  </footer>
+</main>
+
+<!-- ================= 配置中心抽屉（右上角入口，收敛式设计） ================= -->
+<div id="drawerOverlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 hidden"></div>
+<aside id="configDrawer" class="fixed top-0 right-0 h-full w-full sm:w-[440px] z-50 translate-x-full bg-zinc-950/95 border-l border-white/10 backdrop-blur-xl flex flex-col">
+  <div class="flex items-center gap-3 px-5 h-14 border-b border-white/5 shrink-0">
+    <h2 class="font-bold text-zinc-100">配置中心</h2>
+    <span class="text-[10px] px-2 py-0.5 rounded-full border border-amber-300/40 text-amber-300 bg-amber-300/10">改动即时生效 · paper</span>
+    <button id="closeConfig" class="ml-auto text-zinc-500 hover:text-zinc-200 transition text-lg leading-none">✕</button>
+  </div>
+
+  <div class="flex-1 overflow-y-auto nice-scroll p-5 space-y-6 text-sm">
+
+    <!-- 风控参数 -->
+    <section>
+      <h3 class="text-xs tracking-widest text-zinc-500 mb-3">风控参数 · 代码强制，LLM 不可越权</h3>
+      <div class="grid grid-cols-2 gap-2.5">
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">max_position_pct（单仓上限）</span>
+          <div class="flex items-baseline gap-1"><input value="20" class="w-full bg-transparent font-mono tnum text-zinc-100 outline-none text-right" /><span class="text-zinc-500 text-xs">%</span></div>
+        </label>
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">max_total_position_pct（总仓上限）</span>
+          <div class="flex items-baseline gap-1"><input value="40" class="w-full bg-transparent font-mono tnum text-zinc-100 outline-none text-right" /><span class="text-zinc-500 text-xs">%</span></div>
+        </label>
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">max_leverage（最大杠杆）</span>
+          <div class="flex items-baseline gap-1"><input value="10" class="w-full bg-transparent font-mono tnum text-zinc-100 outline-none text-right" /><span class="text-zinc-500 text-xs">x</span></div>
+        </label>
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">daily_loss_limit（日亏锁仓）</span>
+          <div class="flex items-baseline gap-1"><input value="-500" class="w-full bg-transparent font-mono tnum text-rose-300 outline-none text-right" /><span class="text-zinc-500 text-xs">USDT</span></div>
+        </label>
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">max_orders_per_day（日订单上限）</span>
+          <div class="flex items-baseline gap-1"><input value="12" class="w-full bg-transparent font-mono tnum text-zinc-100 outline-none text-right" /><span class="text-zinc-500 text-xs">笔</span></div>
+        </label>
+        <label class="block rounded-lg border border-white/5 bg-white/[.02] p-3">
+          <span class="text-[10px] text-zinc-500 block mb-1">max_deviation（价格偏离）</span>
+          <div class="flex items-baseline gap-1"><input value="0.50" class="w-full bg-transparent font-mono tnum text-zinc-100 outline-none text-right" /><span class="text-zinc-500 text-xs">%</span></div>
+        </label>
+      </div>
+    </section>
+
+    <!-- 合约白名单 -->
+    <section>
+      <h3 class="text-xs tracking-widest text-zinc-500 mb-3">watchlist（合约白名单）</h3>
+      <div class="flex flex-wrap gap-2">
+        <span class="px-3 py-1.5 rounded-lg text-xs font-mono border border-cyan-300/40 bg-cyan-400/10 text-cyan-200">BTC_USDT ✓</span>
+        <span class="px-3 py-1.5 rounded-lg text-xs font-mono border border-cyan-300/40 bg-cyan-400/10 text-cyan-200">ETH_USDT ✓</span>
+        <span class="px-3 py-1.5 rounded-lg text-xs font-mono border border-cyan-300/40 bg-cyan-400/10 text-cyan-200">SOL_USDT ✓</span>
+        <button data-toast="静态预览：添加白名单演示。" class="px-3 py-1.5 rounded-lg text-xs border border-dashed border-white/15 text-zinc-500 hover:text-violet-300 hover:border-violet-400/40 transition">+ 添加合约</button>
+      </div>
+      <p class="mt-2 text-[10px] text-zinc-600">白名单之外的合约，LLM 下单将被风控直接拒绝。</p>
+    </section>
+
+    <!-- 调度 -->
+    <section>
+      <h3 class="text-xs tracking-widest text-zinc-500 mb-3">scheduler（唤醒调度）</h3>
+      <ul class="space-y-2 text-xs">
+        <li class="flex justify-between rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5"><span class="text-zinc-500">定时唤醒间隔</span><span class="font-mono tnum text-zinc-200">15 分钟</span></li>
+        <li class="flex justify-between rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5"><span class="text-zinc-500">唤醒方式</span><span class="font-mono text-zinc-200">scheduled + price_alert + manual</span></li>
+        <li class="flex justify-between rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5"><span class="text-zinc-500">激活价格预警</span><span class="font-mono tnum text-zinc-200">3 个（#A-118k 已触发）</span></li>
+        <li class="flex justify-between rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5"><span class="text-zinc-500">下次唤醒</span><span class="font-mono tnum text-violet-300">10 分钟后（本轮决策设定）</span></li>
+      </ul>
+    </section>
+
+    <!-- 密钥状态：只显示布尔，永不回显明文 -->
+    <section>
+      <h3 class="text-xs tracking-widest text-zinc-500 mb-3">密钥状态 · 仅显示是否配置，永不回显明文</h3>
+      <ul class="space-y-2 text-xs">
+        <li class="flex items-center gap-2 rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span><span class="text-zinc-300">Gate.io API Key / Secret</span>
+          <span class="ml-auto font-mono text-emerald-400">已配置</span>
+          <button data-toast="静态预览：更换密钥演示 —— 真实环境仅写入，不回读。" class="text-zinc-500 hover:text-zinc-200 text-[10px] underline underline-offset-2">更换</button>
+        </li>
+        <li class="flex items-center gap-2 rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span><span class="text-zinc-300">LLM API Key（DeepSeek）</span>
+          <span class="ml-auto font-mono text-emerald-400">已配置</span>
+          <button data-toast="静态预览：更换密钥演示 —— 真实环境仅写入，不回读。" class="text-zinc-500 hover:text-zinc-200 text-[10px] underline underline-offset-2">更换</button>
+        </li>
+        <li class="flex items-center gap-2 rounded-lg border border-white/5 bg-white/[.02] px-3 py-2.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span><span class="text-zinc-400">Telegram Bot Token（通知）</span>
+          <span class="ml-auto font-mono text-zinc-500">未配置</span>
+          <button data-toast="静态预览：配置通知演示。" class="text-zinc-500 hover:text-zinc-200 text-[10px] underline underline-offset-2">设置</button>
+        </li>
+      </ul>
+    </section>
+
+    <!-- 策略 Prompt 在线编辑 -->
+    <section>
+      <h3 class="text-xs tracking-widest text-zinc-500 mb-3">策略 Prompt · 在线编辑</h3>
+      <textarea rows="7" class="w-full rounded-lg border border-white/10 bg-zinc-950/80 p-3 font-mono text-[12px] leading-5 text-zinc-300 outline-none focus:border-violet-400/50 nice-scroll">你是 Gate.io 永续合约的自主交易员。目标：在严格风控内实现稳定复利。
+
+风格：趋势跟随为主，震荡市空仓观望；分批建仓、分批止盈；任何订单必须给出明确理由；无信号时直接说明并设置下次唤醒，禁止为交易而交易。</textarea>
+      <div class="flex items-center justify-between mt-2">
+        <span class="text-[10px] text-zinc-600">版本 v14 · 07-18 21:02 由 user 更新</span>
+        <button data-toast="静态预览：策略 Prompt 保存演示。" class="px-3 py-1.5 rounded-lg text-xs border border-violet-400/50 text-violet-300 bg-violet-400/10 hover:bg-violet-400/20 transition">保存并热更新</button>
+      </div>
+    </section>
+
+    <!-- 危险区 -->
+    <section class="rounded-xl border border-rose-500/30 bg-rose-500/[.04] p-4">
+      <h3 class="text-xs tracking-widest text-rose-300/80 mb-3">危险操作区</h3>
+      <div class="flex flex-col gap-2">
+        <button data-toast="静态预览：paper 重置演示 —— 权益将恢复为 10,000.00 USDT，持仓与历史清空。" class="w-full px-3 py-2 rounded-lg text-xs border border-amber-300/40 text-amber-300 hover:bg-amber-300/10 transition">↺ 重置 paper 权益为 10,000 USDT</button>
+        <button data-toast="静态预览：熔断演示 —— 触发后 Agent 立即停止、撤单并锁仓，需人工复位。" class="w-full px-3 py-2 rounded-lg text-xs border border-rose-500/50 text-rose-300 hover:bg-rose-500/15 transition font-semibold">⏻ 触发 kill_switch 熔断</button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<!-- 全局 Toast（静态预览操作提示） -->
+<div id="toast" class="fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-4 py-2.5 rounded-lg bg-zinc-900/95 border border-violet-400/40 text-xs text-zinc-200 shadow-lg shadow-violet-500/10 opacity-0 pointer-events-none transition-all duration-300 translate-y-2 max-w-[90vw]"></div>
+
+<script>
+/* ============================================================
+ * 以下为静态预览的前端微交互：全部为本地模拟，不请求任何后端
+ * ============================================================ */
+
+/* ---------- 工具：确定性伪随机（保证每次打开图表一致） ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+/* ============================================================
+ * 模拟数据层：决策轮 ROUNDS / 成交记录 TRADES（对齐真实后端契约）
+ * 时间戳一律 Unix 秒（UTC），展示时格式化为 MM-DD HH:mm:ss
+ * round: round_id / wake_source / started_at / ended_at / context_summary / tool_calls[]
+ * tool_call: seq / tool / args / risk_verdict(allow|deny|'') / risk_reason / result / duration_ms
+ * trade: id / round_id / contract / size(正买负卖) / price / fee / pnl / source / created_at
+ * ============================================================ */
+const U=(m,d,h,mi,s)=>Date.UTC(2025,m-1,d,h,mi,s)/1000;
+const pad2=n=>String(n).padStart(2,'0');
+function fmtDT(ts){const d=new Date(ts*1000);return `${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;}
+function fmtMD(ts){const d=new Date(ts*1000);return `${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`;}
+const fmtPrice=p=>p.toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1});
+/* 对象 → 单行字面量（args / result 展示用），字符串值加引号 */
+function fmtKV(o){
+  if(o==null||o==='') return '—';
+  if(typeof o==='string') return o;
+  const ks=Object.keys(o); if(!ks.length) return '{ }';
+  return '{ '+ks.map(k=>`${k}: ${typeof o[k]==='string'?JSON.stringify(o[k]):o[k]}`).join(', ')+' }';
+}
+
+/* ---------- 决策轮数据（ thoughts[i] 为第 i 步工具调用前的思考，用于重建 agent loop 消息流） ---------- */
+const ROUNDS=[
+  /* 实时轮 #1042：仅用于「完整对话」渲染，不进入历史时间线 */
+  { id:1042, live:true, wake:'price_alert',
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'15m',limit:60},v:'allow',ms:182,res:{candles:60,last_close:'118,063.0',vol_sigma:'2.3'}},
+      {t:'get_account',a:{},v:'allow',ms:96,res:{equity:'10,284.56',available:'9,216.36',unrealised_pnl:'+133.13'}},
+      {t:'get_history',a:{contract:'BTC_USDT',limit:20},v:'allow',ms:134,res:{trades:20,open_avg:'115,446.3',orders_today:'7/12'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:100,price:'118,900.0',reduce_only:false},v:'deny',ms:41,r:'限价 118,900.0 偏离标记价 0.71%，超过 max_deviation = 0.50% 上限，订单未提交。'},
+      {t:'place_order',a:{contract:'BTC_USDT',size:100,price:'118,020.0',reduce_only:false},v:'allow',ms:88,res:{order_id:'A7731',status:'pending',deviation:'0.036%'}},
+      {t:'set_price_alert',a:{contract:'BTC_USDT',price:'120,000.0',side:'above'},v:'allow',ms:72,res:{alert_id:'A-120k'}},
+      {t:'set_next_wakeup',a:{after:'10m',reason:'跟踪 118k 回踩确认与挂单成交'},v:'run',ms:null}
+    ],
+    thoughts:[
+      '价格预警触发：BTC_USDT 站上 118,000。先拉 15m K 线，确认这次突破的量价质量。',
+      '15m 三连阳、成交量放大 2.3σ，结构转强。查账户，确认可用保证金与加仓空间。',
+      '回顾建仓历史：+300 张均价 115,446.3，浮盈 +133.13。计划小幅加仓 100 张，先试单报价。',
+      '首次报价 118,900 提交风控校验。',
+      '被风控拒绝：偏离标记价 0.71% 超 0.50% 上限。尊重约束，改用贴近标记价的 118,020 限价重新挂单。',
+      '挂单已提交。在 120,000 整数关口布设预警，把下一目标位的感知交给触发器。',
+      '本轮结论：突破有效，小幅加仓挂单中，预警布设完毕。设置 10 分钟后唤醒，复核成交与回踩情况。'
+    ]},
+
+  { id:1041, wake:'scheduled', start:'07-19 13:02:11', end:'07-19 13:02:48', dur:'37s',
+    summary:'15m 级别横盘，波动率收缩至周内低位，订单簿买卖均衡，无可识别交易边缘。维持现有持仓观望，不设新订单，15 分钟后例行唤醒。',
+    note:{text:'没有信号时最好的操作就是不操作。忍住手痒，也是策略的一部分。',time:'13:03'},
+    equity:{v:'10,261.20',d:'+5.32'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'15m',limit:60},v:'allow',ms:171,res:{candles:60,last_close:'117,892.5',bb_width:'0.8%',vol_sigma:'0.6'}},
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'15m',limit:60},v:'allow',ms:166,res:{candles:60,last_close:'3,598.2',bb_width:'1.1%',vol_sigma:'0.4'}},
+      {t:'get_market_data',a:{contract:'BTC_USDT',metric:'funding_rate'},v:'allow',ms:142,res:{funding:'0.010%',oi_chg_24h:'+1.2%'}},
+      {t:'get_account',a:{},v:'allow',ms:88,res:{equity:'10,261.20',available:'9,083.20',unrealised_pnl:'+110.05'}},
+      {t:'get_history',a:{contract:'BTC_USDT',limit:20},v:'allow',ms:121,res:{trades:20,win_rate_7d:'63%',orders_today:'5/12'}},
+      {t:'set_next_wakeup',a:{after:'15m',reason:'波动率收缩，例行复查'},v:'allow',ms:54,res:{next_wake:'07-19 13:17:48'}}
+    ],
+    thoughts:[
+      '例行唤醒。先看 BTC 15m 结构：波动率是否回到可交易区间。',
+      'ETH 同步过一遍，双仓都不能漏。',
+      '补一下资金面：费率有没有极端化。',
+      '核对账户权益与保证金占用。',
+      '回顾最近 20 笔成交，确认执行层面没有异常。',
+      '结论：波动率收缩至周内低位，无交易边缘。最好的操作就是不操作，15 分钟后复查。'
+    ]},
+
+  { id:1040, wake:'manual', start:'07-19 11:18:40', end:'07-19 11:19:02', dur:'22s',
+    summary:'用户手动唤醒检查运行状态。复核双仓保证金率与强平缓冲（BTC 10.4% / ETH 28.9%），均处健康区间；向用户如实汇报，无交易操作。',
+    note:{text:'用户手动唤醒时没有新信号，如实汇报即可——不要为了「显得有用」而强行交易。',time:'11:19'},
+    equity:{v:'10,255.88',d:'+7.86'},
+    tools:[
+      {t:'get_account',a:{},v:'allow',ms:92,res:{equity:'10,255.88',available:'9,055.10',unrealised_pnl:'+104.66',liq_buffer:'BTC 10.4% / ETH 28.9%'}},
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:6},v:'allow',ms:118,res:{candles:6,last_close:'3,561.0',mark_price:'3,561.0'}},
+      {t:'set_next_wakeup',a:{after:'scheduled',reason:'手动唤醒汇报完毕，回到例行调度'},v:'allow',ms:47,res:{next_wake:'例行调度'}}
+    ],
+    thoughts:[
+      '用户手动唤醒，无触发事件。先取账户全量状态：权益、保证金、双仓强平缓冲。',
+      '补一眼 ETH 最新标记价，核对汇报口径里的浮动盈亏。',
+      '双仓保证金率与强平缓冲（BTC 10.4% / ETH 28.9%）均健康。如实汇报即可，恢复例行调度。'
+    ]},
+
+  { id:1039, wake:'price_alert', start:'07-19 09:45:02', end:'07-19 09:47:40', dur:'158s',
+    summary:'ETH 跌破 <span class="font-mono tnum">3,610</span> 触发预警，1h 测试 <span class="font-mono tnum">3,600</span> 整数关口。盘中 #1031 轮布设的 10 张移动止盈于 <span class="font-mono tnum">3,601</span> 触发，锁定 <span class="font-mono tnum text-emerald-400">+17.93</span>（成交归属 #1031 轮）；本轮确认成交回报后，将剩余 -30 张空单止盈下移至 <span class="font-mono tnum">3,690</span>，并在 3,550 布设新预警。',
+    note:{text:'整数关口的第一波跌破通常有反抽，先收一部分利润，剩下的交给趋势。',time:'09:48'},
+    equity:{v:'10,248.02',d:'+55.58'},
+    tools:[
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:48},v:'allow',ms:174,res:{candles:48,last_close:'3,604.5',ma20:'3,652.0'}},
+      {t:'get_account',a:{},v:'allow',ms:90,res:{equity:'10,230.09',available:'9,102.44',unrealised_pnl:'+88.20',positions:'BTC+300@115446.3 / ETH-40@3780.3'}},
+      {t:'get_history',a:{contract:'ETH_USDT',limit:20},v:'allow',ms:126,res:{trades:20,last_fill:'T-1015 tpsl_close +10@3601.0 +17.93',from:'#1031 轮止盈单 TP-E41'}},
+      {t:'place_order',a:{contract:'ETH_USDT',size:30,reduce_only:true,order_type:'tpsl',trigger:'3,690',side:'take_profit'},v:'allow',ms:118,res:{order_id:'TP-E42',status:'active'}},
+      {t:'set_price_alert',a:{contract:'ETH_USDT',price:'3,550',side:'below'},v:'allow',ms:68,res:{alert_id:'A-E3550'}},
+      {t:'set_next_wakeup',a:{after:'30m',reason:'跟踪 ETH 反抽与剩余空单止盈'},v:'allow',ms:51,res:{next_wake:'07-19 10:17:40'}}
+    ],
+    thoughts:[
+      'ETH 跌破 3,610 触发预警。拉 1h K 线，确认对 3,600 整数关口的测试是否有效。',
+      '关口承压、空头结构延续。查账户与当前持仓状态。',
+      '成交回报确认：#1031 轮布设的 10 张移动止盈已于 3,601 触发，锁定 +17.93。剩余 -30 张继续持有。',
+      '短线超卖，反抽风险上升。把剩余 -30 张的止盈下移至 3,690，收紧利润保护。',
+      '在 3,550 布下方预警，捕捉下一档加速下跌。',
+      '结论：预设出口的价值再次验证。剩余仓位止盈 3,690 跟随，30 分钟后复查。'
+    ]},
+
+  { id:1038, wake:'scheduled', start:'07-19 08:30:15', end:'07-19 08:30:51', dur:'36s',
+    summary:'早间例行巡检：资金费率中性（BTC 0.010% / ETH 0.008%），多空持仓比无极端值，宏观日历今日无高冲击事件。无新信号，维持持仓。',
+    equity:{v:'10,192.44',d:'+4.54'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:24},v:'allow',ms:168,res:{candles:24,last_close:'117,102.6',funding:'0.010%'}},
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:24},v:'allow',ms:159,res:{candles:24,last_close:'3,620.5',funding:'0.008%'}},
+      {t:'get_account',a:{},v:'allow',ms:86,res:{equity:'10,192.44',available:'9,076.10',unrealised_pnl:'+66.30'}},
+      {t:'get_history',a:{contract:'BTC_USDT',limit:20},v:'allow',ms:112,res:{trades:20,orders_today:'0/12',long_short_ratio:'1.04'}},
+      {t:'set_next_wakeup',a:{after:'30m',reason:'例行巡检完毕'},v:'allow',ms:49,res:{next_wake:'07-19 09:00:51'}}
+    ],
+    thoughts:[
+      '早间例行巡检。先看 BTC 资金面与隔夜结构。',
+      '再看 ETH，费率是否极端化。',
+      '核对账户权益与保证金占用。',
+      '回顾近期成交与多空持仓比，确认无极端值。',
+      '费率中性、持仓比均衡、宏观日历今日无高冲击事件。无新信号，30 分钟后再巡检。'
+    ]},
+
+  { id:1037, wake:'scheduled', start:'07-19 06:00:03', end:'07-19 06:00:29', dur:'26s',
+    summary:'夜间低波动时段。重点检查强平缓冲：BTC 距强平 <span class="font-mono tnum">10.4%</span>、ETH 距强平 <span class="font-mono tnum">28.9%</span>，均远高于警戒线，无需降杠杆。',
+    equity:{v:'10,187.90',d:'+13.55'},
+    tools:[
+      {t:'get_account',a:{},v:'allow',ms:84,res:{equity:'10,187.90',available:'9,052.66',unrealised_pnl:'+61.76'}},
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:12},v:'allow',ms:152,res:{candles:12,last_close:'116,982.0',mark_price:'116,980.1'}},
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:12},v:'allow',ms:147,res:{candles:12,last_close:'3,633.8',mark_price:'3,632.5'}},
+      {t:'set_next_wakeup',a:{after:'1h',reason:'低波动时段，拉长巡检间隔'},v:'allow',ms:47,res:{next_wake:'07-19 07:00:29'}}
+    ],
+    thoughts:[
+      '夜间低波动时段，本轮核心是生存检查。先取账户与保证金占用。',
+      '看 BTC 标记价，复核多头强平缓冲。',
+      '看 ETH 标记价，复核空头强平缓冲。',
+      'BTC 距强平 10.4%、ETH 28.9%，缓冲充足，无需降杠杆。1 小时后再查。'
+    ]},
+
+  { id:1036, wake:'price_alert', start:'07-19 03:12:57', end:'07-19 03:14:33', dur:'96s',
+    summary:'BTC 急拉至 <span class="font-mono tnum">117,800</span> 触发预警。部分止盈多头 100 张，锁定 <span class="font-mono tnum text-emerald-400">+23.44</span>；随后尝试顺势加仓被风控拒绝（加仓后单仓占比将超 <span class="font-mono tnum">max_position_pct=20%</span>），改为将止损上移至 <span class="font-mono tnum">115,900</span> 保本位。',
+    note:{text:'趋势里分批止盈比一次清仓更稳。剩余 300 张止损已移到保本，这轮进入「让利润奔跑」阶段。',time:'03:20'},
+    equity:{v:'10,174.35',d:'+54.27'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'15m',limit:60},v:'allow',ms:176,res:{candles:60,last_close:'117,785.0',vol_sigma:'3.1'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:-100,price:'117,790.0',reduce_only:true},v:'allow',ms:128,res:{order_id:'A7701',status:'filled',fill:'117,790.0',realized_pnl:'+23.44'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:150,price:'117,820.0',reduce_only:false},v:'deny',ms:38,r:'加仓后 BTC 单仓名义占比将达 23.7%，超过 max_position_pct = 20% 上限，订单未提交。'},
+      {t:'place_order',a:{contract:'BTC_USDT',size:300,reduce_only:true,order_type:'tpsl',trigger:'115,900',side:'stop'},v:'allow',ms:122,res:{order_id:'SL-B12',status:'active'}},
+      {t:'set_next_wakeup',a:{after:'20m',reason:'跟踪急拉后的回踩确认'},v:'allow',ms:55,res:{next_wake:'07-19 03:34:33'}}
+    ],
+    thoughts:[
+      'BTC 急拉至 117,800 触发预警。看 15m 量价：真突破还是情绪插针。',
+      '放量 3.1σ，趋势延续概率高。先收 1/4 利润：减 100 张多单，锁定 +23.44。',
+      '趋势很强，想顺势再加 150 张，试算仓位占比后提交。',
+      '风控拒绝：加仓后单仓占比 23.7% 超 20% 上限。尊重风控，不加价不硬闯——改为把剩余 300 张止损上移到 115,900 保本位。',
+      '利润已锁、止损保本，本轮进入「让利润奔跑」阶段。20 分钟后跟踪回踩。'
+    ]},
+
+  { id:1035, wake:'scheduled', start:'07-19 00:00:10', end:'07-19 00:00:47', dur:'37s',
+    summary:'跨日结算检查：重置当日订单计数（0/12），归档当日 4 条笔记，核对 paper 累计收益 <span class="font-mono tnum text-emerald-400">+1.20%</span>，权益曲线落盘。',
+    equity:{v:'10,120.08',d:'—'},
+    tools:[
+      {t:'get_account',a:{},v:'allow',ms:82,res:{equity:'10,120.08',available:'9,010.55',unrealised_pnl:'+42.18'}},
+      {t:'get_history',a:{contract:'BTC_USDT',limit:50},v:'allow',ms:131,res:{trades:50,day_realized:'+0.00',day_opens:3,note:'订单计数复位 0/12，笔记归档 4 条'}},
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:24},v:'allow',ms:149,res:{candles:24,last_close:'116,340.2'}},
+      {t:'set_next_wakeup',a:{after:'scheduled',reason:'跨日维护完成'},v:'allow',ms:46,res:{next_wake:'例行调度'}}
+    ],
+    thoughts:[
+      '跨日结算轮。取账户权益快照，落盘前核对。',
+      '拉全天成交归档：07-18 共 3 笔开仓、无平仓，复位订单计数（0/12）、归档 4 条笔记。',
+      '确认隔夜市场无异常波动。',
+      '维护完成：paper 累计 +1.20%，权益快照已落盘。不交易，回到例行调度。'
+    ]},
+
+  { id:1033, wake:'price_alert', start:'07-18 22:05:14', end:'07-18 22:06:01', dur:'47s',
+    summary:'BTC 放量突破 <span class="font-mono tnum">116,400</span> 预警位，1h 三连阳确认趋势。执行第三档加仓 +200 张多单（总 +450 张），并在 <span class="font-mono tnum">117,800</span> 布设下一档突破预警；自省双仓同向暴露偏大，后续按收紧后的总仓约束执行。',
+    note:{text:'ETH 与 BTC 相关性走强（30 日 ρ≈0.87），双仓叠加后同向暴露偏大。后续开仓主动把总仓位约束从 40% 收紧到 35% 以内执行。',time:'22:10'},
+    equity:{v:'10,089.35',d:'+38.33'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:48},v:'allow',ms:169,res:{candles:48,last_close:'116,455.0',vol_sigma:'2.6'}},
+      {t:'get_account',a:{},v:'allow',ms:87,res:{equity:'10,089.35',available:'9,655.20',unrealised_pnl:'+38.33'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:200,price:'116,420.0',reduce_only:false},v:'allow',ms:119,res:{order_id:'A7655',status:'filled',fill:'116,420.0'}},
+      {t:'set_price_alert',a:{contract:'BTC_USDT',price:'117,800',side:'above'},v:'allow',ms:66,res:{alert_id:'A-117.8k'}},
+      {t:'set_next_wakeup',a:{after:'1h',reason:'加仓后跟踪回踩确认'},v:'allow',ms:52,res:{next_wake:'07-18 23:06:01'}}
+    ],
+    thoughts:[
+      '116,400 预警触发。看 1h 结构：放量突破还是假突破前兆。',
+      '三连阳 + 放量 2.6σ，趋势确认。查账户确认加仓空间——注意双仓同向暴露，主动按收紧后的 35% 总仓约束执行。',
+      '空间足够：加仓 200 张多单，成交 116,420.0。',
+      '下一目标位 117,800，提前布预警，把决策权交给触发器。',
+      '加仓完成，1 小时后跟踪回踩是否站稳。'
+    ]},
+
+  { id:1031, wake:'scheduled', start:'07-18 15:32:48', end:'07-18 15:33:19', dur:'31s',
+    summary:'ETH 反弹至 <span class="font-mono tnum">3,812</span> 触及昨日供给区，1h 收出滞涨上影。按空头计划加仓 -20 张（总 -40 张，均价 <span class="font-mono tnum">3,780.3</span>），并为其中 10 张预设 <span class="font-mono tnum">3,601</span> 移动止盈——提前给利润找好出口（该止盈于 07-19 09:47 触发，成交 T-1015 归属本轮）。',
+    equity:{v:'10,051.02',d:'-7.34'},
+    tools:[
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:48},v:'allow',ms:163,res:{candles:48,last_close:'3,809.5',supply_zone:'3820-3860'}},
+      {t:'get_account',a:{},v:'allow',ms:85,res:{equity:'10,051.02',available:'9,758.40',unrealised_pnl:'-7.34'}},
+      {t:'place_order',a:{contract:'ETH_USDT',size:-20,price:'3,812.0',reduce_only:false},v:'allow',ms:117,res:{order_id:'A7620',status:'filled',fill:'3,812.0'}},
+      {t:'place_order',a:{contract:'ETH_USDT',size:10,reduce_only:true,order_type:'tpsl',trigger:'3,601',side:'take_profit'},v:'allow',ms:124,res:{order_id:'TP-E41',status:'active'}},
+      {t:'set_next_wakeup',a:{after:'scheduled',reason:'加仓完成，回到例行调度'},v:'allow',ms:48,res:{next_wake:'例行调度'}}
+    ],
+    thoughts:[
+      '例行巡检。ETH 反弹到 3,812，正好进入昨日供给区，看 1h 反应。',
+      '滞涨上影出现，供给有效。查账户，评估空单加仓空间。',
+      '按空头计划加仓 -20 张，成交 3,812.0，总仓 -40 张均价 3,780.3。',
+      '给其中 10 张预设 3,601 移动止盈：先给利润找好出口，触发即自动落袋，不依赖我在线。',
+      '加仓完成，回到例行调度。'
+    ]},
+
+  { id:1030, wake:'price_alert', start:'07-18 09:12:03', end:'07-18 09:12:44', dur:'41s',
+    summary:'BTC 突破 <span class="font-mono tnum">115,500</span> 盘整上沿触发预警，量能温和放大。执行第二档加仓 +150 张多单（总 +350 张），下一档预警上移至 <span class="font-mono tnum">116,400</span>。',
+    equity:{v:'10,058.36',d:'+14.64'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:48},v:'allow',ms:161,res:{candles:48,last_close:'115,562.0',vol_sigma:'1.9'}},
+      {t:'get_account',a:{},v:'allow',ms:83,res:{equity:'10,058.36',available:'9,820.10',unrealised_pnl:'+31.20'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:150,price:'115,540.5',reduce_only:false},v:'allow',ms:115,res:{order_id:'A7588',status:'filled',fill:'115,540.5'}},
+      {t:'set_price_alert',a:{contract:'BTC_USDT',price:'116,400',side:'above'},v:'allow',ms:64,res:{alert_id:'A-116.4k'}},
+      {t:'set_next_wakeup',a:{after:'1h',reason:'跟踪突破回踩'},v:'allow',ms:50,res:{next_wake:'07-18 10:12:44'}}
+    ],
+    thoughts:[
+      '115,500 预警触发，先看 1h 突破质量。',
+      '温和放量突破盘整上沿，符合第二档加仓条件。查账户确认保证金空间。',
+      '空间充足：加仓 150 张，成交 115,540.5。',
+      '下一档预警 116,400，交给触发器值守。',
+      '加仓完成，1 小时后跟踪回踩是否站稳。'
+    ]},
+
+  { id:1029, wake:'scheduled', start:'07-17 20:41:55', end:'07-17 20:42:31', dur:'36s',
+    summary:'BTC 反弹至 <span class="font-mono tnum">115,000</span> 附近明显乏力，15m 连续缩量上影。主动减仓 100 张多单锁定 <span class="font-mono tnum text-emerald-400">+5.78</span>，把风险敞口降回舒适区，剩余仓位继续持有观察。',
+    equity:{v:'10,043.72',d:'+6.78'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'15m',limit:60},v:'allow',ms:158,res:{candles:60,last_close:'114,992.0',pattern:'反弹缩量上影'}},
+      {t:'get_account',a:{},v:'allow',ms:81,res:{equity:'10,043.72',available:'9,905.40',unrealised_pnl:'+12.10'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:-100,price:'114,980.0',reduce_only:true},v:'allow',ms:112,res:{order_id:'A7544',status:'filled',fill:'114,980.0',realized_pnl:'+5.78'}},
+      {t:'set_next_wakeup',a:{after:'45m',reason:'减仓后观察方向选择'},v:'allow',ms:49,res:{next_wake:'07-17 21:27:31'}}
+    ],
+    thoughts:[
+      '例行唤醒。BTC 反弹到 115,000 一带，看 15m 量价判断持续性。',
+      '连续缩量上影，反弹乏力。查账户，评估减仓必要性。',
+      '先减 100 张锁定 +5.78——反弹无力时先收一部分，剩余交给结构。',
+      '敞口已降回舒适区，45 分钟后观察方向选择。'
+    ]},
+
+  { id:1028, wake:'manual', start:'07-17 16:20:11', end:'07-17 16:20:47', dur:'36s',
+    summary:'用户手动平仓 50 张 BTC 多单（<span class="font-mono tnum text-emerald-400">+4.04</span>）后唤醒 Agent 复核。确认成交回报与剩余仓位状态，与用户约定后续纪律：保留核心仓，反弹乏力时由 Agent 按计划减仓。',
+    equity:{v:'10,036.94',d:'+8.04'},
+    tools:[
+      {t:'get_account',a:{},v:'allow',ms:80,res:{equity:'10,036.94',available:'9,938.20',unrealised_pnl:'+8.66'}},
+      {t:'get_history',a:{contract:'BTC_USDT',limit:10},v:'allow',ms:108,res:{trades:10,last_fill:'T-1009 user_close -50@115210.0 +4.04'}},
+      {t:'set_next_wakeup',a:{after:'30m',reason:'复核完毕，加密观察'},v:'allow',ms:45,res:{next_wake:'07-17 16:50:47'}}
+    ],
+    thoughts:[
+      '手动唤醒：用户刚手动平了 50 张多单。先取账户，核对成交后的权益与保证金。',
+      '拉成交回报确认细节：-50 张 @115,210.0，已实现 +4.04，与用户操作一致。',
+      '用户已部分落袋，与我的减仓倾向一致。保留核心仓，30 分钟后加密观察。'
+    ]},
+
+  { id:1027, wake:'price_alert', start:'07-17 11:26:39', end:'07-17 11:27:15', dur:'36s',
+    summary:'ETH 跌破 <span class="font-mono tnum">3,750</span> 触发预警，日线头肩顶颈线告破。开空 -20 张试仓验证空头假设，止损 <span class="font-mono tnum">3,880</span> 同步挂出，破位即认错。',
+    equity:{v:'10,028.90',d:'+16.50'},
+    tools:[
+      {t:'get_market_data',a:{contract:'ETH_USDT',interval:'1h',limit:48},v:'allow',ms:164,res:{candles:48,last_close:'3,746.0',pattern:'头肩顶颈线破位'}},
+      {t:'get_account',a:{},v:'allow',ms:82,res:{equity:'10,028.90',available:'9,958.10',unrealised_pnl:'+4.20'}},
+      {t:'place_order',a:{contract:'ETH_USDT',size:-20,price:'3,748.5',reduce_only:false},v:'allow',ms:114,res:{order_id:'A7512',status:'filled',fill:'3,748.5'}},
+      {t:'place_order',a:{contract:'ETH_USDT',size:20,reduce_only:true,order_type:'tpsl',trigger:'3,880',side:'stop'},v:'allow',ms:119,res:{order_id:'SL-E08',status:'active'}},
+      {t:'set_next_wakeup',a:{after:'1h',reason:'试仓后跟踪'},v:'allow',ms:51,res:{next_wake:'07-17 12:27:15'}}
+    ],
+    thoughts:[
+      'ETH 跌破 3,750 预警位。看 1h 结构确认破位性质。',
+      '头肩顶颈线告破，空头假设成立。查账户确认试仓空间。',
+      '小仓试错：开空 20 张，成交 3,748.5。',
+      '假设必须有证伪线：止损挂 3,880，破位认错，不扛单。',
+      '试仓完成，1 小时后跟踪。'
+    ]},
+
+  { id:1026, wake:'scheduled', start:'07-16 14:03:21', end:'07-16 14:04:02', dur:'41s',
+    summary:'BTC 回踩 <span class="font-mono tnum">114,400</span> 一带周线支撑后企稳，1h 连续两根长下影确认承接。趋势跟随计划第一档建仓：开多 +200 张，预警 <span class="font-mono tnum">115,500</span> 作为第二档加仓触发。',
+    equity:{v:'10,012.40',d:'+12.40'},
+    tools:[
+      {t:'get_market_data',a:{contract:'BTC_USDT',interval:'1h',limit:48},v:'allow',ms:167,res:{candles:48,last_close:'114,455.0',support:'114000-114500'}},
+      {t:'get_account',a:{},v:'allow',ms:79,res:{equity:'10,012.40',available:'10,012.40',unrealised_pnl:'0.00'}},
+      {t:'place_order',a:{contract:'BTC_USDT',size:200,price:'114,402.0',reduce_only:false},v:'allow',ms:121,res:{order_id:'A7490',status:'filled',fill:'114,402.0'}},
+      {t:'set_price_alert',a:{contract:'BTC_USDT',price:'115,500',side:'above'},v:'allow',ms:63,res:{alert_id:'A-115.5k'}},
+      {t:'set_next_wakeup',a:{after:'2h',reason:'建仓后跟踪'},v:'allow',ms:53,res:{next_wake:'07-16 16:04:02'}}
+    ],
+    thoughts:[
+      '例行巡检。BTC 回踩到周线支撑区，看 1h 是否有承接。',
+      '连续两根长下影，承接明确。查账户——paper 第 2 日，弹药充足。',
+      '执行第一档建仓：开多 200 张，成交 114,402.0。',
+      '上加仓预警 115,500：突破确认后再加第二档，不追盘中冲动。',
+      '建仓完成，2 小时后跟踪。'
+    ]}
+];
+
+/* ---------- 成交记录数据（每笔成交都归属产生它的决策轮 round_id） ---------- */
+const TRADES=[
+  {id:'T-1015',round:1031,ts:U(7,19, 9,47,31),c:'ETH_USDT',size:  10,price:  3601.0,fee:0.36,pnl:17.93,src:'tpsl_close'},
+  {id:'T-1014',round:1036,ts:U(7,19, 3,14, 2),c:'BTC_USDT',size:-100,price:117790.0,fee:1.18,pnl:23.44,src:'llm_close'},
+  {id:'T-1013',round:1033,ts:U(7,18,22, 5,14),c:'BTC_USDT',size: 200,price:116420.0,fee:2.33,pnl:null ,src:'llm_open'},
+  {id:'T-1012',round:1031,ts:U(7,18,15,32,48),c:'ETH_USDT',size: -20,price:  3812.0,fee:0.76,pnl:null ,src:'llm_open'},
+  {id:'T-1011',round:1030,ts:U(7,18, 9,12, 3),c:'BTC_USDT',size: 150,price:115540.5,fee:1.73,pnl:null ,src:'llm_open'},
+  {id:'T-1010',round:1029,ts:U(7,17,20,41,55),c:'BTC_USDT',size:-100,price:114980.0,fee:1.15,pnl: 5.78,src:'llm_close'},
+  {id:'T-1009',round:1028,ts:U(7,17,16,20,11),c:'BTC_USDT',size: -50,price:115210.0,fee:0.58,pnl: 4.04,src:'user_close'},
+  {id:'T-1008',round:1027,ts:U(7,17,11,26,39),c:'ETH_USDT',size: -20,price:  3748.5,fee:0.75,pnl:null ,src:'llm_open'},
+  {id:'T-1007',round:1026,ts:U(7,16,14, 3,21),c:'BTC_USDT',size: 200,price:114402.0,fee:1.14,pnl:null ,src:'llm_open'}
+];
+
+/* ---------- 公共跳转：买卖点 / 成交记录 / 持仓卡片共用 ---------- */
+let jumpTimer=null;
+function jumpToRound(roundId){
+  const card=document.getElementById('round-'+roundId);
+  if(!card){ showToast('静态预览：未找到决策轮 #'+roundId+'。'); return; }
+  /* 若卡片被唤醒来源过滤器隐藏，先切回「全部」 */
+  if(card.style.display==='none'){
+    const allBtn=document.querySelector('#wakeFilter [data-filter="all"]');
+    if(allBtn) allBtn.click();
+  }
+  /* 自动展开「工具调用详情」折叠区 */
+  const det=card.querySelector('details[data-tools]');
+  if(det) det.open=true;
+  card.scrollIntoView({behavior:'smooth',block:'center'});
+  /* 描边高亮约 2 秒 */
+  card.classList.remove('jump-hl'); void card.offsetWidth;
+  card.classList.add('jump-hl');
+  clearTimeout(jumpTimer);
+  jumpTimer=setTimeout(()=>card.classList.remove('jump-hl'),2000);
+}
+
+/* ---------- agent loop 消息流渲染：assistant 思考+调用 → user 工具返回 ---------- */
+function msgAssistantHTML(text,t,isFinal){
+  return `<div class="rounded-lg border border-violet-400/25 bg-violet-400/[.05] px-3 py-2">
+    <div class="flex items-center gap-2 mb-1">
+      <span class="text-[10px] font-bold tracking-widest text-violet-300/90">ASSISTANT</span>
+      ${isFinal?'<span class="text-[9px] px-1.5 py-px rounded bg-violet-400/15 border border-violet-400/30 text-violet-300">最终结论</span>':''}
+    </div>
+    <p class="text-[12px] leading-5 text-zinc-300">${text}</p>
+    <div class="mt-1.5 font-mono text-[11px] text-cyan-200/80 break-all">→ ${t.t}(${fmtKV(t.a)})</div>
+  </div>`;
+}
+function msgToolRetHTML(t){
+  const deny=t.v==='deny', run=t.v==='run';
+  const body = deny ? `{ risk_verdict: "deny", risk_reason: ${JSON.stringify(t.r)} }`
+             : run  ? '{ status: "executing…" }'
+             : fmtKV(t.res);
+  return `<div class="rounded-lg border ${deny?'border-rose-500/30 bg-rose-500/[.04]':'border-cyan-400/15 bg-cyan-400/[.03]'} px-3 py-2 ml-5">
+    <div class="text-[10px] font-bold tracking-widest ${deny?'text-rose-300/80':'text-cyan-300/70'} mb-1">USER · 工具返回 ${t.t}${deny?'（风控拒绝）':''}</div>
+    <div class="font-mono text-[11px] leading-5 ${deny?'text-rose-200/90':'text-zinc-400'} break-all">${body}</div>
+  </div>`;
+}
+function chatHTML(r){
+  const n=r.tools.length; let out='';
+  r.tools.forEach((t,i)=>{
+    out += msgAssistantHTML(r.thoughts[i],t,(i===n-1)&&!r.live);
+    out += msgToolRetHTML(t);
+  });
+  return out;
+}
+
+/* ---------- 工具调用详情：逐步 seq / tool / args / risk_verdict / result / duration_ms ---------- */
+function toolStepHTML(t,i){
+  const deny=t.v==='deny', run=t.v==='run';
+  const badge = deny ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold border border-rose-400/60 text-rose-200 bg-rose-500/20">deny · 风控拒绝</span>'
+              : run  ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold border border-violet-400/50 text-violet-300 bg-violet-400/10">执行中…</span>'
+              :        '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold border border-emerald-400/40 text-emerald-300 bg-emerald-400/10">allow</span>';
+  return `<li class="rounded-lg border ${deny?'border-rose-500/40 bg-rose-500/[.06]':'border-white/5 bg-white/[.02]'} px-3 py-2">
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="font-mono text-[10px] text-zinc-600">seq ${i+1}</span>
+      <span class="font-mono text-[12px] ${deny?'text-rose-200':'text-cyan-200'} font-semibold">${t.t}</span>
+      <span class="ml-auto">${badge}</span>
+      <span class="font-mono tnum text-[10px] text-zinc-500">${t.ms==null?'—':t.ms+'ms'}</span>
+    </div>
+    <div class="mt-1 font-mono text-[11px] text-zinc-500 tnum break-all">${fmtKV(t.a)}</div>
+    ${deny?`<div class="mt-1 text-[11px] text-rose-300 flex items-start gap-1.5"><span>⛔</span><span>risk_reason：${t.r}</span></div>`:''}
+    ${!deny&&t.res?`<div class="mt-0.5 text-[11px] text-zinc-400">→ <span class="font-mono tnum break-all">${fmtKV(t.res)}</span></div>`:''}
+  </li>`;
+}
+
+/* ---------- 决策时间线渲染 ---------- */
+const WAKE={
+  scheduled:{cls:'bg-cyan-400/10 border-cyan-300/40 text-cyan-300',txt:'🕐 scheduled 定时唤醒'},
+  price_alert:{cls:'bg-amber-400/10 border-amber-300/40 text-amber-300',txt:'⚡ price_alert 价格预警'},
+  manual:{cls:'bg-violet-400/10 border-violet-300/40 text-violet-300',txt:'🖐 manual 手动唤醒'}
+};
+function roundCardHTML(r){
+  const allow=r.tools.filter(t=>t.v==='allow').length, deny=r.tools.filter(t=>t.v==='deny').length;
+  const trs=TRADES.filter(t=>t.round===r.id);
+  const eqCls=r.equity.d.startsWith('+')?'text-emerald-400':(r.equity.d==='—'?'text-zinc-600':'text-rose-400');
+  const w=WAKE[r.wake];
+  return `<article class="round-card panel p-5 rise" id="round-${r.id}" data-wake="${r.wake}">
+    <div class="flex items-center gap-3 flex-wrap">
+      <span class="font-mono text-lg font-bold text-zinc-200">#${r.id}</span>
+      <span class="px-2 py-0.5 rounded text-[10px] font-semibold border ${w.cls}">${w.txt}</span>
+      ${deny?`<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold border border-rose-400/50 text-rose-300 bg-rose-500/10">含 ${deny} 次 deny</span>`:''}
+      <span class="text-[11px] text-zinc-600">已完成</span>
+      <span class="ml-auto font-mono tnum text-[11px] text-zinc-500">${r.start} → ${r.end} · 耗时 ${r.dur}</span>
+    </div>
+    <p class="mt-3 text-sm leading-6 text-zinc-300">${r.summary}</p>
+    ${r.note?`<blockquote class="mt-3 pl-3 border-l-2 border-violet-400/50 text-[13px] leading-6 text-violet-200/80 italic">“${r.note.text}”<span class="not-italic text-[10px] text-zinc-600 ml-2">—— Agent 笔记 · ${r.note.time}</span></blockquote>`:''}
+    <div class="mt-3 flex items-center gap-4 text-[11px] text-zinc-500 flex-wrap">
+      <span>工具调用 <span class="font-mono tnum text-zinc-300">${r.tools.length}</span> 次（allow <span class="text-emerald-400">${allow}</span> / deny <span class="${deny?'text-rose-400':'text-zinc-600'}">${deny}</span>）</span>
+      ${trs.length?`<span>归属成交 ${trs.map(t=>`<span class="font-mono text-zinc-300">${t.id}</span> <span class="text-zinc-600">${t.src}</span>`).join(' · ')}</span>`:''}
+      <span class="ml-auto">决策后权益 <span class="font-mono tnum text-zinc-200">${r.equity.v}</span> <span class="font-mono tnum ${eqCls}">${r.equity.d}</span></span>
+    </div>
+    <details class="mt-2 text-xs" data-tools>
+      <summary class="text-zinc-600 hover:text-violet-300 transition"><span class="chev mr-1">▸</span>工具调用详情 · tool_calls（${r.tools.length} 步）</summary>
+      <ol class="mt-2 space-y-1.5">${r.tools.map(toolStepHTML).join('')}</ol>
+    </details>
+    <details class="mt-2 text-xs">
+      <summary class="text-zinc-600 hover:text-violet-300 transition"><span class="chev mr-1">▸</span>完整对话 · agent loop（${r.tools.length*2} 条消息）</summary>
+      <div class="mt-2 space-y-2">${chatHTML(r)}</div>
+    </details>
+  </article>`;
+}
+document.getElementById('roundList').innerHTML=ROUNDS.filter(r=>!r.live).map(roundCardHTML).join('');
+
+/* ---------- 实时轮「完整对话」渲染（#1042，进行中） ---------- */
+(function(){
+  const live=ROUNDS.find(r=>r.live), box=document.getElementById('liveChat');
+  if(live&&box) box.innerHTML=chatHTML(live);
+})();
+
+/* ---------- 成交记录渲染：来源徽标 + 所属决策轮 + 点击跳转 ---------- */
+const SRC={
+  llm_open:{cls:'bg-cyan-400/10 border-cyan-300/40 text-cyan-300',txt:'llm_open'},
+  llm_close:{cls:'bg-violet-400/10 border-violet-300/40 text-violet-300',txt:'llm_close'},
+  tpsl_close:{cls:'bg-emerald-400/10 border-emerald-300/40 text-emerald-300',txt:'tpsl_close 止盈'},
+  user_close:{cls:'bg-amber-400/10 border-amber-300/40 text-amber-300',txt:'user_close 手动'},
+  liquidation:{cls:'bg-rose-500/15 border-rose-400/50 text-rose-300',txt:'liquidation 强平'}
+};
+(function(){
+  const tb=document.getElementById('tradeBody');
+  tb.innerHTML=TRADES.map((t,i)=>{
+    const s=SRC[t.src];
+    return `<tr class="${i<TRADES.length-1?'border-b border-white/[.04] ':''}hover:bg-white/[.02] transition cursor-pointer" data-round="${t.round}" title="点击定位到决策轮 #${t.round}">
+      <td class="px-5 py-3 text-zinc-400">${fmtDT(t.ts)}<div class="text-[10px] text-zinc-600">${t.id}</div></td>
+      <td class="px-3 py-3 text-zinc-200">${t.c}</td>
+      <td class="px-3 py-3 text-right ${t.size>0?'text-emerald-400':'text-rose-400'}">${t.size>0?'+':''}${t.size}</td>
+      <td class="px-3 py-3 text-right text-zinc-200">${fmtPrice(t.price)}</td>
+      <td class="px-3 py-3 text-right text-zinc-500">${t.fee.toFixed(2)}</td>
+      <td class="px-3 py-3 text-right ${t.pnl==null?'text-zinc-600':(t.pnl>=0?'text-emerald-400':'text-rose-400')}">${t.pnl==null?'—':(t.pnl>0?'+':'')+t.pnl.toFixed(2)}</td>
+      <td class="px-5 py-3 whitespace-nowrap">
+        <span class="px-2 py-0.5 rounded text-[10px] font-sans font-semibold border ${s.cls}">${s.txt}</span>
+        <span class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono border border-white/10 text-zinc-500">#${t.round}</span>
+      </td>
+    </tr>`;
+  }).join('');
+  tb.querySelectorAll('tr').forEach(tr=>tr.addEventListener('click',()=>jumpToRound(+tr.dataset.round)));
+})();
+
+/* ---------- K线图：canvas 全量 168 根 1h + 窗口偏移重绘（拖拽/滚轮平移） + 买卖点标记 ---------- */
+(function(){
+  const cvs=document.getElementById('klineCanvas');
+  const ctx=cvs.getContext('2d');
+  const N=168, VIEW=48;                        // 全量 7 天 1h，可视窗口约 48 根
+  const T_LAST=U(7,19,14,0,0);                 // 最后一根（进行中）K 线开盘时间
+  const T0=T_LAST-(N-1)*3600;                  // 第一根开盘时间（07-12 15:00）
+  const rnd=mulberry32(21);
+  /* 从最新价 118,063 倒推随机游走（种子固定，温和上行趋势，与持仓/成交自洽） */
+  const closes=[118063];
+  for(let i=1;i<N;i++) closes.unshift(closes[0]*(1-(rnd()-0.5+0.03)*2*0.004));
+  /* 成交锚点：BTC 成交所在 K 线的收盘价钉到成交价，保证 b/s 标记与 K 线严格对得上 */
+  const tradeByIdx=new Map();
+  TRADES.filter(t=>t.c==='BTC_USDT').forEach(t=>{
+    const idx=Math.floor((t.ts-T0)/3600);
+    if(idx<0||idx>=N) return;
+    closes[idx]=t.price;
+    if(!tradeByIdx.has(idx)) tradeByIdx.set(idx,[]);
+    tradeByIdx.get(idx).push(t);
+  });
+  const data=closes.map((c,i)=>{
+    const o=i?closes[i-1]:c*0.998;
+    let h=Math.max(o,c)*(1+rnd()*0.0036), l=Math.min(o,c)*(1-rnd()*0.0036);
+    if(tradeByIdx.has(i)){ const p=tradeByIdx.get(i)[0].price; h=Math.max(h,p*1.0006); l=Math.min(l,p*0.9994); }
+    let v=0.25+rnd()*0.75;
+    if(tradeByIdx.has(i)) v*=1.8;              // 成交根放量
+    if(i>=N-6) v*=1.6;                         // 突破前高放量
+    return {o,h,l,c,v,t:T0+i*3600};
+  });
+  /* MA20（全量计算，绘制可视段） */
+  const ma20=data.map((_,i)=>{ const st=Math.max(0,i-19); let s=0; for(let j=st;j<=i;j++) s+=data[j].c; return s/(i-st+1); });
+  document.getElementById('ma20Val').textContent=fmtPrice(ma20[N-1]);
+  /* 24h 涨跌（由 K 线数据反推，与图一致） */
+  const chg=(data[N-1].c/data[N-25].c-1)*100;
+  const chgEl=document.getElementById('chg24');
+  chgEl.textContent=`${chg>=0?'+':''}${chg.toFixed(2)}% / 24h`;
+  if(chg<0){ chgEl.classList.remove('text-emerald-400'); chgEl.classList.add('text-rose-400'); }
+
+  let offset=N-VIEW;                           // 窗口左端（浮点 K线索引），默认看最近约 48 根
+  const clampOff=v=>Math.max(0,Math.min(N-VIEW,v));   // 滑到边缘即止
+  let markers=[];                              // 买卖点点击热区（每次重绘重建）
+  let raf=null;
+  const schedule=()=>{ if(!raf) raf=requestAnimationFrame(()=>{raf=null;draw();}); };  // 重绘节流
+
+  function draw(){
+    const W=cvs.clientWidth, H=cvs.clientHeight;
+    if(!W||!H) return;
+    ctx.clearRect(0,0,W,H);
+    markers=[];
+    const PAD_R=58, priceH=H-60, volTop=H-50, volH=28, labelY=H-4;
+    const plotW=W-PAD_R-4;
+    const step=plotW/VIEW;
+    const i0=Math.max(0,Math.floor(offset)), i1=Math.min(N-1,Math.ceil(offset+VIEW));
+    let min=Infinity,max=-Infinity,vmax=0;
+    for(let i=i0;i<=i1;i++){ min=Math.min(min,data[i].l); max=Math.max(max,data[i].h); vmax=Math.max(vmax,data[i].v); }
+    min=Math.min(min,118000); max=Math.max(max,118000);
+    const pad=(max-min)*0.08||1; min-=pad; max+=pad;
+    const y=p=>6+(max-p)/(max-min)*(priceH-12);
+    const x=i=>4+(i-offset)*step+step/2;
+    ctx.font='9px "JetBrains Mono",monospace';
+    /* 横向网格 + 右侧价格标签 */
+    for(let g=1;g<=3;g++){
+      const gy=6+(priceH-12)*g/4;
+      ctx.strokeStyle='rgba(255,255,255,.05)'; ctx.setLineDash([3,5]);
+      ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W-PAD_R,gy); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='#52525b'; ctx.textAlign='left';
+      ctx.fillText(Math.round(max-(max-min)*g/4).toLocaleString('en-US'),W-PAD_R+4,gy+3);
+    }
+    /* MA20 */
+    ctx.strokeStyle='#a78bfa'; ctx.lineWidth=1.4; ctx.beginPath();
+    for(let i=i0;i<=i1;i++){ const px=x(i),py=y(ma20[i]); if(i===i0) ctx.moveTo(px,py); else ctx.lineTo(px,py); }
+    ctx.stroke(); ctx.lineWidth=1;
+    /* 蜡烛 + 成交量 */
+    const bw=Math.max(2,step*0.6);
+    for(let i=i0;i<=i1;i++){
+      const d=data[i], up=d.c>=d.o, col=up?'#34d399':'#f87171', cx=x(i);
+      ctx.strokeStyle=col;
+      ctx.beginPath(); ctx.moveTo(cx,y(d.h)); ctx.lineTo(cx,y(d.l)); ctx.stroke();
+      ctx.fillStyle=col; ctx.globalAlpha=up?0.9:0.85;
+      const top=y(Math.max(d.o,d.c)), hh=Math.max(1.2,Math.abs(y(d.o)-y(d.c)));
+      ctx.fillRect(cx-bw/2,top,bw,hh);
+      ctx.globalAlpha=0.22;
+      const vh=(d.v/vmax)*volH;
+      ctx.fillRect(cx-bw/2,volTop+volH-vh,bw,vh);
+      ctx.globalAlpha=1;
+    }
+    /* 预警线 118,000（本轮唤醒条件） */
+    const ay=y(118000);
+    ctx.strokeStyle='#fbbf24'; ctx.setLineDash([5,4]); ctx.globalAlpha=.7;
+    ctx.beginPath(); ctx.moveTo(0,ay); ctx.lineTo(W-PAD_R,ay); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle='#fbbf24'; ctx.textAlign='left';
+    ctx.fillText('118,000 预警',6,ay-4);
+    /* 最新价线 + 右侧价签 */
+    const ly=y(data[N-1].c);
+    ctx.strokeStyle='#22d3ee'; ctx.setLineDash([2,3]); ctx.globalAlpha=.8;
+    ctx.beginPath(); ctx.moveTo(0,ly); ctx.lineTo(W-PAD_R,ly); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle='#0e7490';
+    ctx.fillRect(W-PAD_R+2,ly-8,PAD_R-4,15);
+    ctx.fillStyle='#e0f2fe'; ctx.textAlign='center';
+    ctx.fillText('118,063',W-PAD_R/2+1,ly+3);
+    /* 买卖点标记：b=买入/开多（K线下方，绿） s=卖出/平多（K线上方，红），点击跳转决策轮 */
+    ctx.textAlign='center'; ctx.font='bold 9px "JetBrains Mono",monospace';
+    tradeByIdx.forEach((list,idx)=>{
+      if(idx<i0||idx>i1) return;
+      list.forEach((t,k)=>{
+        const buy=t.size>0;
+        const mx=x(idx), my=buy? y(data[idx].l)+14+k*18 : y(data[idx].h)-14-k*18;
+        ctx.fillStyle=buy?'#059669':'#e11d48';
+        ctx.beginPath(); ctx.arc(mx,my,8,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#fff';
+        ctx.fillText(buy?'b':'s',mx,my+3);
+        markers.push({x:mx,y:my,r:11,round:t.round});
+      });
+    });
+    window.__klineMarkers=markers;           // 调试/自动化测试钩子：暴露当前可见标记热区
+    /* 时间轴标签：跨天显示日期，否则每 8 小时显示时刻 */
+    ctx.fillStyle='#52525b'; ctx.font='9px "JetBrains Mono",monospace'; ctx.textAlign='center';
+    for(let i=i0;i<=i1;i++){
+      const d=new Date(data[i].t*1000), hh=d.getUTCHours();
+      if(hh===0) ctx.fillText(fmtMD(data[i].t),x(i),labelY);
+      else if(hh%8===0) ctx.fillText(pad2(hh)+':00',x(i),labelY);
+    }
+  }
+
+  /* —— 鼠标拖拽平移（位移 <3px 视为点击，用于标记跳转） —— */
+  let drag=null, moved=false;
+  const stepPx=()=>(cvs.clientWidth-58-4)/VIEW;
+  function hitMarker(e){
+    const r=cvs.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    return markers.find(m=>(mx-m.x)*(mx-m.x)+(my-m.y)*(my-m.y)<=m.r*m.r);
+  }
+  cvs.addEventListener('mousedown',e=>{
+    drag={x:e.clientX,off:offset}; moved=false;
+    cvs.classList.add('dragging'); e.preventDefault();
+  });
+  window.addEventListener('mousemove',e=>{
+    if(drag){
+      const dx=e.clientX-drag.x;
+      if(Math.abs(dx)>3) moved=true;
+      offset=clampOff(drag.off-dx/stepPx());
+      schedule();
+    } else {
+      hoverCursor(e);
+    }
+  });
+  window.addEventListener('mouseup',e=>{
+    if(drag&&!moved){ const m=hitMarker(e); if(m) jumpToRound(m.round); }
+    drag=null; cvs.classList.remove('dragging');
+  });
+  /* —— 滚轮平移 —— */
+  cvs.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const d=Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY;
+    offset=clampOff(offset+(d>0?2.5:-2.5));
+    schedule();
+  },{passive:false});
+  /* 悬停到标记上时显示手型 */
+  let hoverRaf=null;
+  function hoverCursor(e){
+    if(hoverRaf) return;
+    hoverRaf=requestAnimationFrame(()=>{ hoverRaf=null; cvs.style.cursor=hitMarker(e)?'pointer':''; });
+  }
+  /* —— 尺寸自适应（devicePixelRatio 高清渲染） —— */
+  function resize(){
+    const dpr=window.devicePixelRatio||1, w=cvs.clientWidth, h=cvs.clientHeight;
+    if(!w||!h) return;
+    cvs.width=w*dpr; cvs.height=h*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    draw();
+  }
+  window.addEventListener('resize',resize);
+  resize();
+})();
+
+/* ---------- 权益小曲线：SVG 折线 + 渐变填充 ---------- */
+(function(){
+  const svg=document.getElementById('equitySpark');
+  const W=280,H=84,N=40,rnd=mulberry32(5);
+  // 从 9,960 温和上行到 10,284.56
+  const pts=[]; let v=9960;
+  for(let i=0;i<N-1;i++){ v += (10284.56-9960)/(N-1)*0.7 + (rnd()-0.42)*9; pts.push(v); }
+  pts.push(10284.56);
+  const min=Math.min(...pts)*0.9995, max=Math.max(...pts)*1.0006;
+  const X=i=>i/(N-1)*W, Y=p=>(H-10)-(p-min)/(max-min)*(H-20)+4;
+  const line=pts.map((p,i)=>`${X(i).toFixed(1)},${Y(p).toFixed(1)}`).join(' ');
+  svg.innerHTML = `
+    <defs><linearGradient id="eqg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity=".28"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="0,${H} ${line} ${W},${H}" fill="url(#eqg)"/>
+    <polyline points="${line}" fill="none" stroke="#22d3ee" stroke-width="1.6"/>
+    <circle cx="${W}" cy="${Y(10284.56)}" r="2.6" fill="#22d3ee">
+      <animate attributeName="r" values="2.2;4;2.2" dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="1;.4;1" dur="2s" repeatCount="indefinite"/>
+    </circle>`;
+})();
+
+/* ---------- LLM 思考流：流式打字 ---------- */
+(function(){
+  const text = 'BTC_USDT 放量突破 118,000，15m 三连阳，结构转强，组合浮盈 +133.13。计划小幅加仓 BTC 多单 100 张——首次报价 118,900 被风控拒绝（偏离标记价 0.71%，上限 0.50%），已按约束改用 118,020 限价重新挂单。同时为 120,000 整数关口布好预警，10 分钟后唤醒复核成交情况。';
+  const el = document.getElementById('thoughtText');
+  let i = 0;
+  (function tick(){
+    if(i <= text.length){ el.textContent = text.slice(0, i++); setTimeout(tick, 26); }
+  })();
+})();
+
+/* ---------- 决策轮计时器 ---------- */
+(function(){
+  let sec = 161; // 已进行 00:02:41
+  const el = document.getElementById('roundElapsed');
+  setInterval(()=>{
+    sec++;
+    const h=String(Math.floor(sec/3600)).padStart(2,'0'),
+          m=String(Math.floor(sec%3600/60)).padStart(2,'0'),
+          s=String(sec%60).padStart(2,'0');
+    el.textContent = `${h}:${m}:${s}`;
+  },1000);
+})();
+
+/* ---------- 决策时间线：按唤醒来源过滤 ---------- */
+document.querySelectorAll('#wakeFilter .wf-btn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('#wakeFilter .wf-btn').forEach(b=>{
+      b.className='wf-btn px-2.5 py-1 rounded-full text-[11px] border border-white/10 text-zinc-500 hover:text-zinc-300';
+    });
+    btn.className='wf-btn px-2.5 py-1 rounded-full text-[11px] border border-violet-400/50 text-violet-300 bg-violet-400/10';
+    const f = btn.dataset.filter;
+    document.querySelectorAll('#roundList .round-card').forEach(card=>{
+      card.style.display = (f==='all' || card.dataset.wake===f) ? '' : 'none';
+    });
+  });
+});
+
+/* ---------- Agent 启停切换（纯视觉演示） ---------- */
+(function(){
+  const btn=document.getElementById('agentToggle'),
+        dot=document.getElementById('agentDot'),
+        ping=document.getElementById('agentPing'),
+        txt=document.getElementById('agentStateText');
+  let running=true;
+  btn.addEventListener('click', ()=>{
+    running=!running;
+    dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 ' + (running?'bg-emerald-400':'bg-zinc-600');
+    ping.style.display = running?'':'none';
+    txt.textContent = running?'Agent 运行中':'Agent 已停止';
+    txt.className = 'text-xs ' + (running?'text-emerald-300':'text-zinc-500');
+    btn.textContent = running?'停止':'启动';
+    showToast(running?'静态预览：Agent 已恢复运行。':'静态预览：Agent 已停止 —— 真实环境将保留持仓、暂停决策轮调度。');
+  });
+})();
+
+/* ---------- 配置抽屉 ---------- */
+(function(){
+  const drawer=document.getElementById('configDrawer'),
+        overlay=document.getElementById('drawerOverlay');
+  const open =()=>{ overlay.classList.remove('hidden'); drawer.classList.remove('translate-x-full'); };
+  const close=()=>{ overlay.classList.add('hidden');    drawer.classList.add('translate-x-full'); };
+  document.getElementById('openConfig').addEventListener('click', open);
+  document.getElementById('closeConfig').addEventListener('click', close);
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', e=>{ if(e.key==='Escape') close(); });
+})();
+
+/* ---------- Toast ---------- */
+let toastTimer=null;
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.classList.remove('opacity-0','translate-y-2');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.add('opacity-0','translate-y-2'), 2600);
+}
+document.querySelectorAll('[data-toast]').forEach(el=>{
+  el.addEventListener('click', ()=>showToast(el.dataset.toast));
+});
+</script>
+</body>
+</html>

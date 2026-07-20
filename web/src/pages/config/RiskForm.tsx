@@ -1,18 +1,19 @@
 /**
  * 风控参数表单：字符串录入 + 即时校验，保存时合并回 RiskConfig（保留 kill_switch）。
+ * 方案 C 抽屉样式：微型标签 + 等宽数字输入 + 紫色主按钮。
  */
 import { useMemo, useState } from 'react'
 import type { RiskConfig } from '../../api/types'
 import { parseRisk, validateRisk, type RiskFormValues } from './validate'
 
-/** 字段元数据：key + `变量名(含义)` 标签 */
+/** 字段元数据：标签直接用变量名（方案 C 对齐，不带括号注释） */
 const FIELDS: Array<{ key: keyof RiskFormValues; label: string }> = [
-  { key: 'max_position_pct', label: 'max_position_pct(单仓占比上限)' },
-  { key: 'max_total_position_pct', label: 'max_total_position_pct(总仓占比上限)' },
-  { key: 'max_leverage', label: 'max_leverage(杠杆上限)' },
-  { key: 'daily_loss_limit', label: 'daily_loss_limit(日亏损锁仓阈值)' },
-  { key: 'max_orders_per_day', label: 'max_orders_per_day(日下单上限)' },
-  { key: 'max_deviation', label: 'max_deviation(价格偏离保护)' },
+  { key: 'max_position_pct', label: 'max_position_pct' },
+  { key: 'max_total_position_pct', label: 'max_total_position_pct' },
+  { key: 'max_leverage', label: 'max_leverage' },
+  { key: 'daily_loss_limit', label: 'daily_loss_limit' },
+  { key: 'max_orders_per_day', label: 'max_orders_per_day' },
+  { key: 'max_deviation', label: 'max_deviation' },
 ]
 
 function toValues(risk: RiskConfig): RiskFormValues {
@@ -63,18 +64,18 @@ export default function RiskForm({
 
   return (
     <div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {FIELDS.map(({ key, label }) => (
-          <label key={key} className="block text-xs">
-            <span className="mb-1 block text-slate-400">{label}</span>
+          <label key={key} className="block">
+            <span className="mb-1 block text-[10px] text-zinc-500">{label}</span>
             <input
               value={values[key]}
               onChange={set(key)}
               inputMode="decimal"
               aria-label={label}
               aria-invalid={Boolean(errors[key])}
-              className={`w-full rounded-lg border bg-slate-800 px-3 py-2 text-sm tabular-nums text-slate-100 focus:outline-none ${
-                errors[key] ? 'border-rose-500' : 'border-slate-700 focus:border-sky-500'
+              className={`w-full rounded-lg border bg-zinc-900 px-3 py-2 font-mono text-sm tabular-nums text-zinc-100 focus:outline-none ${
+                errors[key] ? 'border-rose-500' : 'border-white/10 focus:border-violet-400/60'
               }`}
             />
             {errors[key] && <span className="mt-1 block text-xs text-rose-400">{errors[key]}</span>}
@@ -86,15 +87,15 @@ export default function RiskForm({
           type="button"
           disabled={!valid || pending}
           onClick={handleSave}
-          className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+          className="rounded-lg border border-violet-400/50 bg-violet-400/10 px-3 py-1.5 text-xs text-violet-300 transition hover:bg-violet-400/20 disabled:opacity-40"
         >
           {pending ? '保存中…' : '保存风控参数'}
         </button>
         {savedAt && <span className="text-xs text-emerald-400">已保存 {savedAt}</span>}
         {saveError && <span className="text-xs text-rose-400">保存失败：{saveError}</span>}
       </div>
-      <p className="mt-2 text-xs text-slate-500">
-        kill_switch(总开关) 请在仪表盘操作；风控参数保存后下一轮决策生效。
+      <p className="mt-2 text-[10px] text-zinc-600">
+        kill_switch 总开关请在顶栏操作；风控参数保存后下一轮决策生效。
       </p>
     </div>
   )

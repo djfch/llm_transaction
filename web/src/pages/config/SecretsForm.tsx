@@ -1,38 +1,50 @@
 /**
- * 密钥配置：交易所 / Telegram 为只读状态徽标（仅经 .env 配置）；
+ * 密钥配置：交易所 / Telegram 为只读状态行（仅经 .env 配置）；
  * LLM API Key 支持在线表单保存（POST /api/secrets，写入服务器 .env，不进 git，重启后仍有效）。
  * 响应永不包含密钥明文；error 非空（如 provider 重建失败）时展示错误条。
+ * 方案 C 抽屉样式：标签只用变量名，状态等宽字体，紫色主按钮。
  */
 import { useState } from 'react'
 import { api } from '../../api'
 import type { SecretsStatus, SetSecretsBody, SetSecretsResult } from '../../api/types'
-import Badge from '../../components/Badge'
 
 const inputCls =
-  'w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none'
+  'w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-violet-400/60 focus:outline-none'
+const labelCls = 'mb-1 block text-[10px] text-zinc-500'
 
-// 只读徽标：LLM 已改为下方表单在线配置，此处仅剩交易所与 Telegram
+// 只读状态行：LLM 已改为下方表单在线配置，此处仅剩交易所与 Telegram
 const READONLY_ITEMS: Array<{ key: 'gate_key' | 'telegram'; label: string }> = [
-  { key: 'gate_key', label: 'gate_key(交易所 API Key)' },
-  { key: 'telegram', label: 'telegram(Telegram Bot Token)' },
+  { key: 'gate_key', label: 'gate_key' },
+  { key: 'telegram', label: 'telegram' },
 ]
 
-/** 只读状态徽标区：gate_key(交易所 API Key) 与 telegram(Telegram Bot Token) */
-function ReadonlyBadges({ status }: { status: SecretsStatus }) {
+/** 配置状态文字：已配置 emerald / 未配置 zinc，等宽 */
+function StateText({ configured }: { configured: boolean }) {
+  return (
+    <span className={`font-mono text-xs ${configured ? 'text-emerald-400' : 'text-zinc-500'}`}>
+      {configured ? '已配置' : '未配置'}
+    </span>
+  )
+}
+
+/** 只读状态区：gate_key 与 telegram 仅显示是否配置，永不回显明文 */
+function ReadonlyStatus({ status }: { status: SecretsStatus }) {
   return (
     <div>
-      <ul className="flex flex-wrap gap-3">
+      <ul className="space-y-2">
         {READONLY_ITEMS.map(({ key, label }) => (
           <li
             key={key}
-            className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-300"
+            className="flex items-center rounded-lg border border-white/5 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300"
           >
-            {label}
-            <Badge text={status[key] ? '已配置' : '未配置'} tone={status[key] ? 'ok' : 'warn'} />
+            <span className="font-mono text-xs">{label}</span>
+            <span className="ml-auto">
+              <StateText configured={status[key]} />
+            </span>
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-xs text-slate-500">
+      <p className="mt-2 text-[10px] text-zinc-600">
         交易所与 Telegram 密钥仅经服务器 .env 配置，前端不提供修改入口，API 永不返回明文。
       </p>
     </div>
@@ -101,14 +113,14 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
   }
 
   return (
-    <div className="space-y-3 border-t border-slate-800 pt-4">
+    <div className="space-y-3 border-t border-white/5 pt-4">
       <div className="flex items-center gap-2">
-        <h3 className="text-sm font-medium text-slate-300">LLM API Key 在线配置</h3>
-        <Badge text={configured ? '已配置' : '未配置'} tone={configured ? 'ok' : 'warn'} />
+        <h3 className="text-xs text-zinc-300">LLM API Key 在线配置</h3>
+        <StateText configured={configured} />
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <label className="block text-xs">
-          <span className="mb-1 block text-slate-400">ANTHROPIC_API_KEY(Anthropic 密钥)</span>
+      <div className="grid grid-cols-1 gap-3">
+        <label className="block">
+          <span className={labelCls}>ANTHROPIC_API_KEY</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -118,8 +130,8 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
             className={inputCls}
           />
         </label>
-        <label className="block text-xs">
-          <span className="mb-1 block text-slate-400">OPENAI_API_KEY(OpenAI 兼容接口密钥)</span>
+        <label className="block">
+          <span className={labelCls}>OPENAI_API_KEY</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -134,7 +146,7 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
         type="button"
         disabled={pending || (anthropicKey === '' && openaiKey === '')}
         onClick={handleSave}
-        className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+        className="rounded-lg border border-violet-400/50 bg-violet-400/10 px-3 py-1.5 text-xs text-violet-300 transition hover:bg-violet-400/20 disabled:opacity-40"
       >
         {pending ? '保存中…' : '保存 LLM 密钥'}
       </button>
@@ -147,7 +159,7 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
         </p>
       )}
       {result && <SaveFeedback result={result} />}
-      <p className="text-xs text-slate-500">
+      <p className="text-[10px] text-zinc-600">
         LLM key 保存到服务器 .env（不进 git），重启后仍有效；留空的字段不改动。交易所 key 仍需手动编辑 .env。
       </p>
     </div>
@@ -164,7 +176,7 @@ export default function SecretsForm({
 }) {
   return (
     <div className="space-y-5">
-      <ReadonlyBadges status={status} />
+      <ReadonlyStatus status={status} />
       <LlmKeyForm configured={status.llm_key} onSaved={onSaved} />
     </div>
   )

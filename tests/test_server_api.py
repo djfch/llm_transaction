@@ -5,6 +5,7 @@ secrets 响应不含明文、kill_switch 写回 config.yaml、WS 握手与广播
 """
 
 import asyncio
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -200,6 +201,57 @@ async def test_notes(client: AsyncClient):
     assert items[0]["content"] == "第一条笔记"
 
 
+async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):
+    """当日统计端点：与风控同一口径（服务器时区自然日、按 mode 过滤、仅开仓单计数）。
+
+    fixture 自带的两笔成交 created_at=1000/2000（1970 年，非当日）不应计入；
+    本用例追加当日成交与订单后断言三键取值。
+    """
+    now = time.time()
+    # 当日 paper 成交两笔：realized = 10 + (-3) = 7；昨日一笔 99 不计入
+    await deps.repo.save_trade(
+        "r1",
+        "paper",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("50000"),
+        Decimal("0.5"),
+        Decimal("10"),
+        "llm_close",
+        now,
+    )
+    await deps.repo.save_trade(
+        "r1",
+        "paper",
+        "BTC_USDT",
+        Decimal(-1),
+        Decimal("50000"),
+        Decimal("0.5"),
+        Decimal("-3"),
+        "llm_close",
+        now,
+    )
+    await deps.repo.save_trade(
+        "r1",
+        "paper",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("50000"),
+        Decimal("0.5"),
+        Decimal("99"),
+        "llm_close",
+        now - 90000,
+    )
+    # 订单：paper 开仓单 1（计入）；paper 平仓单（is_close 排除）；testnet 开仓单（mode 排除）
+    await deps.repo.save_order("o1", "r1", "paper", "BTC_USDT", Decimal(1))
+    await deps.repo.save_order("o2", "r1", "paper", "BTC_USDT", Decimal(0), is_close=True)
+    await deps.repo.save_order("o3", "r1", "testnet", "BTC_USDT", Decimal(1))
+
+    r = await client.get("/api/daily_stats")
+    assert r.status_code == 200
+    assert r.json() == {"realized_pnl": 7.0, "orders_today": 1, "max_orders_per_day": 20}
+
+
 # ---------- 配置编辑端点 ----------
 
 
@@ -285,8 +337,8 @@ async def test_kill_switch_writes_config_and_callback(client: AsyncClient, deps:
 
 
 async def test_cors_allows_vite_dev_server(client: AsyncClient):
-    r = await client.get("/api/status", headers={"Origin": "http://localhost:5173"})
-    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    r = await client.get("/api/status", headers={"Origin": "http://localhost:17576"})
+    assert r.headers["access-control-allow-origin"] == "http://localhost:17576"
 
 
 async def test_static_mount_when_dist_exists(deps: ServerDeps, tmp_path: Path):

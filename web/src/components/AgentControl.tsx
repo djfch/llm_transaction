@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 
 /**
- * agent(交易代理) 启停按钮：启动单击即生效；停止需两段确认（3 秒内第二次点击才执行）。
- * 失败时在按钮下方展示原因。
+ * agent(交易代理) 启停控件（方案 C 顶栏样式）：状态指示灯 + 文字 + 紧凑切换按钮。
+ * 启动单击即生效；停止需两段确认（3 秒内第二次点击才执行）。
+ * 失败时在控件下方展示原因。
  */
 export default function AgentControl({
   running,
@@ -53,31 +54,39 @@ export default function AgentControl({
     await execute()
   }
 
-  const base = 'rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50'
-  const color = running
-    ? armed
-      ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-      : 'bg-slate-700 hover:bg-slate-600 text-slate-100'
-    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-  const text = pending
-    ? '执行中…'
+  // 切换按钮文案与配色：停止 hover 转红（危险），启动 hover 转绿，待确认琥珀警示
+  const btnBase =
+    'rounded-md border px-2 py-1 text-[11px] transition disabled:opacity-50 disabled:cursor-not-allowed'
+  const btnColor = armed
+    ? 'border-amber-400/50 bg-amber-400/10 text-amber-300'
     : running
-      ? armed
-        ? '再次点击确认停止'
-        : '停止 agent(交易代理)'
-      : '启动 agent(交易代理)'
+      ? 'border-white/10 text-zinc-400 hover:border-rose-400/40 hover:text-rose-300'
+      : 'border-white/10 text-zinc-400 hover:border-emerald-400/40 hover:text-emerald-300'
+  const btnText = pending ? '执行中…' : armed ? '确认停止？' : running ? '停止' : '启动'
 
   return (
-    <div>
+    <div className="flex items-center gap-2">
+      {/* 状态指示灯：运行中绿色脉冲，停止灰色静止 */}
+      <span className="relative flex h-2.5 w-2.5">
+        {running && (
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60 motion-reduce:animate-none" />
+        )}
+        <span
+          className={`relative inline-flex h-2.5 w-2.5 rounded-full ${running ? 'bg-emerald-400' : 'bg-zinc-600'}`}
+        />
+      </span>
+      <span className={`text-xs ${running ? 'text-emerald-300' : 'text-zinc-500'}`}>
+        {running ? 'Agent 运行中' : 'Agent 已停止'}
+      </span>
       <button
         type="button"
-        className={`${base} ${color}`}
+        className={`${btnBase} ${btnColor}`}
         disabled={pending || disabled}
         onClick={handleClick}
       >
-        {text}
+        {btnText}
       </button>
-      {message && <p className="mt-2 text-xs text-rose-400">{message}</p>}
+      {message && <p className="text-xs text-rose-400">{message}</p>}
     </div>
   )
 }
