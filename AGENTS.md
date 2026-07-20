@@ -41,3 +41,11 @@ scripts/                     # 手动验证脚本（不进测试套件）
 4. **金额处理**：一律 Decimal，禁止 float
 5. **注释与文档**：中文
 6. **Gate API 参数**：以实现计划附录的核实结果为准，禁止猜测；"文档未找到"项必须先实测
+
+## Git 提交规范
+
+1. **分支**：禁止直推 main（GitHub 分支保护强制 PR + CI 全绿）。从最新 main 拉分支：`feat/xxx`、`fix/xxx`、`chore/xxx`，一个分支只做一件事，1–3 天内合回
+2. **提交信息**：`type: 中文描述`（首行 ≤72 字），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（`uvx pre-commit install --hook-type commit-msg` 安装）
+3. **提交时机**：一个"可验证的完整小步"一次提交；pre-commit 四钩子（ruff check/format、pytest、前端 lint+tsc+build）必须先过
+4. **合并**：push 后开 PR，CI 三 job（backend/frontend/e2e）全绿后 squash merge，合并即删分支
+5. **大改动**（跨多文件或 >100 行）：按用户全局 AGENTS §6 流程（第一性原理 → 双 subagent 对抗审查 → 回归测试 → 验证证据）
