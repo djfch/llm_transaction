@@ -16,6 +16,8 @@ jobs:
           python-version: "3.11"
       - name: 安装依赖
         run: uv sync --frozen
+      - name: 准备运行时配置（模板复制，部分测试用 build_app 默认路径读取）
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
       - name: ruff check
         run: uv run ruff check src tests scripts
       - name: ruff format --check
@@ -67,5 +69,7 @@ jobs:
       - name: 构建前端
         working-directory: web
         run: npm run build
+      - name: 准备运行时配置（模板复制，文件不入库）
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
       - name: 整机冒烟（真实端口 + dist 静态托管 + 操作链）
         run: uv run python scripts/e2e_web_smoke.py
