@@ -30,3 +30,9 @@ repos:
         language: system
         files: ^web/
         pass_filenames: false
+      # 提交信息格式（commit-msg 阶段，需 pre-commit install --hook-type commit-msg）
+      - id: commit-msg-format
+        name: '提交信息格式（type: 描述）'
+        entry: bash scripts/check_commit_msg.sh
+        language: system
+        stages: [commit-msg]
