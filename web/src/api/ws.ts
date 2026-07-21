@@ -24,6 +24,8 @@ function subscribeMock(handler: WsHandler, onStatus?: WsStatusHandler): () => vo
         margin: 47.86,
         unrealised_pnl: 159.6 + tick,
         liq_price: 82_400,
+        stop_loss_price: 116_800,
+        take_profit_price: 122_400,
       }
       handler({ type: 'position', data: position })
     } else {

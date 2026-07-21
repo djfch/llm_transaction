@@ -115,10 +115,12 @@ function PositionItem({
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
-        <Field label="size(持仓张数)" value={fmtSigned(size, 0)} />
+        <Field label="张数" value={fmtSigned(size, 0)} />
         <Field label="margin(保证金)" value={fmtNum(position.margin)} />
         <Field label="entry_price(开仓价)" value={fmtPrice(position.entry_price)} />
         <Field label="mark_price(标记价)" value={fmtPrice(position.mark_price)} />
+        <Field label="stop_loss_price(止损价)" value={position.stop_loss_price == null ? '未设置' : fmtPrice(position.stop_loss_price)} />
+        <Field label="take_profit_price(止盈价)" value={position.take_profit_price == null ? '未设置' : fmtPrice(position.take_profit_price)} />
         <Field label="liq_price(强平价)" value={fmtPrice(position.liq_price)} cls="text-zinc-400" />
         <Field label="强平缓冲" value={fmtPct2(liqBufferRatio(position))} cls="text-emerald-300" />
         <Field

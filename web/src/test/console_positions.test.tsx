@@ -16,6 +16,8 @@ const longPos: Position = {
   margin: 708.38,
   unrealised_pnl: 78.5,
   liq_price: 105_842,
+  stop_loss_price: 110_000,
+  take_profit_price: 122_000,
 }
 
 const shortPos: Position = {
@@ -27,6 +29,8 @@ const shortPos: Position = {
   margin: 35.98,
   unrealised_pnl: -54.63,
   liq_price: 4_652,
+  stop_loss_price: 3_900,
+  take_profit_price: null,
 }
 
 describe('PositionsPanel(持仓卡片列表)', () => {
@@ -40,7 +44,10 @@ describe('PositionsPanel(持仓卡片列表)', () => {
     expect(screen.getByText('BTC_USDT')).toBeInTheDocument()
     expect(screen.getByText('多 LONG')).toBeInTheDocument()
     expect(screen.getByText('5x')).toBeInTheDocument()
-    expect(screen.getByText('+300')).toBeInTheDocument() // size(持仓张数) 正多带 + 号
+    expect(screen.getByText('+300')).toBeInTheDocument() // 张数正多带 + 号
+    expect(screen.getByText('张数')).toBeInTheDocument()
+    expect(screen.getByText('stop_loss_price(止损价)')).toBeInTheDocument()
+    expect(screen.getByText('take_profit_price(止盈价)')).toBeInTheDocument()
     expect(screen.getByText('entry_price(开仓价)')).toBeInTheDocument()
     expect(screen.getByText('115,446.30')).toBeInTheDocument()
     expect(screen.getByText('mark_price(标记价)')).toBeInTheDocument()
@@ -60,6 +67,7 @@ describe('PositionsPanel(持仓卡片列表)', () => {
     expect(screen.getByText('ETH_USDT')).toBeInTheDocument()
     expect(screen.getByText('空 SHORT')).toBeInTheDocument()
     expect(screen.getByText('-30')).toBeInTheDocument()
+    expect(screen.getByText('未设置')).toBeInTheDocument()
     const pnl = screen.getByText('-54.63')
     expect(pnl.className).toContain('text-rose-400')
     // 强平缓冲 = |3598.2 − 4652| / 3598.2 ≈ 29.29%；保证金收益率 = -54.63/35.98 ≈ -151.83%（负红）

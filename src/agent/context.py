@@ -116,7 +116,8 @@ class ContextBuilder:
             lines.append(
                 f"持仓 {p.contract}: size={p.size}，入场价 {p.entry_price}，"
                 f"标记价 {p.mark_price}，杠杆 {p.leverage}x，保证金 {p.margin}，"
-                f"浮盈 {p.unrealised_pnl}"
+                f"浮盈 {p.unrealised_pnl}，止损 {p.stop_loss_price or '未设置'}，"
+                f"止盈 {p.take_profit_price or '未设置'}"
             )
         return "\n".join(lines)
 

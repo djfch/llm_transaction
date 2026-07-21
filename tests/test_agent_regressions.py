@@ -126,7 +126,14 @@ async def test_paper_fills_persisted_to_trades(tmp_path):
                 "开仓后立即平仓",
                 [
                     ToolCall(
-                        "place_order", {"contract": "BTC_USDT", "size": 1, "leverage": 2}, "c1"
+                        "place_order",
+                        {
+                            "contract": "BTC_USDT",
+                            "size": 1,
+                            "leverage": 2,
+                            "stop_loss_price": 58000,
+                        },
+                        "c1",
                     ),
                     ToolCall("place_order", {"contract": "BTC_USDT", "close": True}, "c2"),
                 ],
@@ -190,7 +197,11 @@ async def test_default_daily_stats_via_repo(tmp_path):
 async def test_round_writes_audit_json_snapshot(tmp_path):
     provider = SeqProvider(
         [
-            _resp("先查账户", [ToolCall("get_account", {}, "c1")], '{"turn":1}'),
+            _resp(
+                "账户上下文已注入",
+                [ToolCall("get_market_data", {"contract": "BTC_USDT"}, "c1")],
+                '{"turn":1}',
+            ),
             _resp("观望", [], '{"turn":2}'),
         ]
     )
@@ -204,7 +215,7 @@ async def test_round_writes_audit_json_snapshot(tmp_path):
         assert "稳健交易" in data["round"]["prompt_snapshot"]
         assert data["round"]["context_snapshot"]  # 上下文构建后回填
         assert data["round"]["llm_raw"] == '{"turn":1}\n{"turn":2}'  # 各轮原始输出拼接
-        assert [c["tool"] for c in data["tool_calls"]] == ["get_account"]
+        assert [c["tool"] for c in data["tool_calls"]] == ["get_market_data"]
         assert "risk_verdict" in data["tool_calls"][0]
     finally:
         await env.db.close()

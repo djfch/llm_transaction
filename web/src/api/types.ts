@@ -31,6 +31,8 @@ export interface Position {
   margin: number // 持仓保证金（USDT）
   unrealised_pnl: number // 未实现盈亏
   liq_price: number // 预估强平价
+  stop_loss_price: number | null // 止损触发价；未设置为 null
+  take_profit_price: number | null // 止盈触发价；未设置为 null
 }
 
 /** 决策轮摘要：GET /api/rounds?offset=&limit= */

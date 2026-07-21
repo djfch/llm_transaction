@@ -19,9 +19,9 @@ class MockProvider:
         self._calls += 1
         if self._calls == 1:
             return LLMResponse(
-                text="首次分析：先查账户状态，记录笔记并设置唤醒",
+                text="首次分析：账户上下文已注入，查询行情、记录笔记并设置唤醒",
                 tool_calls=[
-                    ToolCall("get_account", {}),
+                    ToolCall("get_market_data", {"contract": "BTC_USDT", "interval": "1h"}),
                     ToolCall("write_note", {"content": "mock 首轮：行情不明，保持观望"}),
                     ToolCall("set_next_wakeup", {"minutes": 5}),
                 ],

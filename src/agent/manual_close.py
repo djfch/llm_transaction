@@ -35,6 +35,8 @@ def trade_source_of(fill: FillRecord) -> str:
     """drain 落库时的 source 推导：强平 > LLM 平仓 > LLM 开仓（user_close 由调用方覆盖）。"""
     if fill.order_id == "liquidation":
         return "liquidation"
+    if fill.order_id.startswith("tpsl-"):
+        return "tpsl_close"
     return "llm_close" if fill.is_close else "llm_open"
 
 

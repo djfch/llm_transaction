@@ -3,7 +3,7 @@
 契约表（与 web/src/api/types.ts 对齐，前端类型变更必须同步本表）：
 - GET  /api/status → mode/uptime_seconds/kill_switch/agent_running/llm_provider/llm_model/llm_configured
 - GET  /api/account → available/unrealised_pnl/equity（equity 必在，前端 AccountInfo 契约）
-- GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price
+- GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price/stop_loss_price/take_profit_price
 - GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
 - GET  /api/notes → items[] 含 content/created_at/round_id

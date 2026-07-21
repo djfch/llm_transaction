@@ -27,6 +27,8 @@ class RestingOrder(BaseModel):
     size: Decimal  # 正买负卖
     price: Decimal
     reduce_only: bool = False
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
     text: str = ""
 
 
