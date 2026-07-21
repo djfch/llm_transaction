@@ -366,6 +366,7 @@ def _build_server(
         return result
 
     async def manual_cancel_order(contract: str, order_id: str) -> dict:
+        # 适配决策循环的手动撤单接口，兼容同步和异步实现。
         result = ctx.loop.manual_cancel_order(contract, order_id)
         if inspect.isawaitable(result):
             result = await result

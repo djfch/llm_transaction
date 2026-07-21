@@ -168,6 +168,7 @@ class PaperGateway:
             return self._market_order(req, order_id, text)
         return self._limit_order(req, order_id, text)
 
+    # 改单后将最新委托量和价格写回未成交订单快照。
     def amend_order(
         self,
         contract: str,
@@ -198,6 +199,7 @@ class PaperGateway:
         self._results[order_id] = cancelled
         return cancelled
 
+    # 模拟撮合引擎支持全合约 open 订单的分页读取。
     def list_orders(
         self,
         contract: str | None = None,
@@ -253,6 +255,7 @@ class PaperGateway:
             snap = self._snaps[req.contract]
             fill = snap.ask if req.size > 0 else snap.bid
             return self._execute(order_id, req.contract, req.size, fill, maker=False, text=text)
+        # 挂单卡片依赖原始委托字段，不能只保留 left。
         result = OrderResult(
             id=order_id,
             contract=req.contract,

@@ -195,7 +195,7 @@ async def test_close_position_502_on_gateway_error(client: AsyncClient, deps: Se
     assert "持仓不存在" in r.json()["detail"]
 
 
-# ---------- POST /api/paper/reset ----------
+# ---------- GET /api/open_orders / DELETE /api/orders/{contract}/{order_id} ----------
 async def test_open_orders_lists_all_pages(client: AsyncClient, deps: ServerDeps):
     seed = deps.gateway.orders[0]
     deps.gateway.orders = [seed.model_copy(update={"id": f"o-{index}"}) for index in range(101)]
@@ -266,6 +266,18 @@ async def test_cancel_open_order_409_when_order_is_no_longer_open(
     assert response.json()["detail"] == "order is no longer open"
 
 
+async def test_open_orders_maps_gateway_error_to_502(client: AsyncClient, deps: ServerDeps):
+    def fail_list_orders(*_args, **_kwargs):
+        raise GatewayError("gateway unavailable")
+
+    deps.gateway.list_orders = fail_list_orders
+    response = await client.get("/api/open_orders")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "gateway unavailable"
+
+
+# ---------- POST /api/paper/reset ----------
 async def test_paper_reset_success(client: AsyncClient, deps: ServerDeps):
     r = await client.post("/api/paper/reset", json={"equity": 20000})
     assert r.status_code == 200
@@ -288,17 +300,6 @@ async def test_paper_reset_409_when_reset_not_wired(client: AsyncClient, deps: S
     deps.paper_reset = None
     r = await client.post("/api/paper/reset", json={"equity": 20000})
     assert r.status_code == 409
-
-
-async def test_open_orders_maps_gateway_error_to_502(client: AsyncClient, deps: ServerDeps):
-    def fail_list_orders(*_args, **_kwargs):
-        raise GatewayError("gateway unavailable")
-
-    deps.gateway.list_orders = fail_list_orders
-    response = await client.get("/api/open_orders")
-
-    assert response.status_code == 502
-    assert response.json()["detail"] == "gateway unavailable"
 
 
 async def test_paper_reset_422_on_non_positive_equity(client: AsyncClient, deps: ServerDeps):

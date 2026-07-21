@@ -137,6 +137,7 @@ type RawOpenOrder = Omit<OpenOrder, 'size' | 'left' | 'price'> & {
   price: number | string
 }
 
+/** 将后端 Decimal 字符串订单快照转换为前端可渲染的数字模型。 */
 function adaptOpenOrder(raw: RawOpenOrder): OpenOrder {
   return {
     id: String(raw.id),

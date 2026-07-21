@@ -3,8 +3,8 @@ import { httpApi } from '../api/http'
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe('open_orders HTTP \u9002\u914d', () => {
-  it('\u5c06\u540e\u7aef Decimal \u5b57\u7b26\u4e32\u8f6c\u4e3a\u6570\u5b57', async () => {
+describe('open_orders HTTP 适配', () => {
+  it('将后端 Decimal 字符串转为数字', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -39,7 +39,7 @@ describe('open_orders HTTP \u9002\u914d', () => {
     })
   })
 
-  it('\u64a4\u5355 URL \u5bf9\u5408\u7ea6\u4e0e\u8ba2\u5355 ID \u8fdb\u884c\u7f16\u7801', async () => {
+  it('撤单 URL 对合约与订单 ID 进行编码', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({

@@ -156,6 +156,7 @@ class MockGateway:
         pos = self.positions.get(contract)
         return bool(pos and pos.size > 0)
 
+    # 改单后同步更新展示所需的委托量和委托价快照。
     def amend_order(
         self,
         contract: str,
@@ -187,6 +188,7 @@ class MockGateway:
             raise OrderNotFound(f"订单不存在或非 open: {order_id}", label="ORDER_NOT_FOUND")
         return order
 
+    # 模拟网关按合约、状态和分页规则返回与真实网关一致的订单快照。
     def list_orders(
         self,
         contract: str | None = None,

@@ -8,6 +8,7 @@ logger = get_logger(__name__)
 
 
 def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
+    # 分页核对订单仍是未成交状态，避免重复撤销已成交或已取消订单。
     offset = 0
     while True:
         page = deps.gateway.list_orders(contract, "open", limit=100, offset=offset)
@@ -17,12 +18,13 @@ def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
             break
         offset += len(page)
     raise OrderNotFound(
-        "\u6302\u5355\u4e0d\u5b58\u5728\u6216\u5df2\u4e0d\u5904\u4e8e open \u72b6\u6001",
+        "挂单不存在或已不处于 open 状态",
         label="ORDER_NOT_FOUND",
     )
 
 
 async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) -> dict:
+    # 撤销网关订单并同步本地记录；同步失败时返回不可重试警告。
     _require_open_order(deps, contract, order_id)
     result = deps.gateway.cancel_order(contract, order_id)
     warning = ""
@@ -32,11 +34,7 @@ async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) ->
         )
     except Exception as exc:
         logger.exception("manual cancel local sync failed for %s", order_id)
-        warning = (
-            f"\u4ea4\u6613\u7f51\u5173\u5df2\u64a4\u5355\uff0c"
-            f"\u4f46\u672c\u5730\u8bb0\u5f55\u540c\u6b65\u5931\u8d25 ({type(exc).__name__}: {exc})"
-            "\uff0c\u8bf7\u52ff\u91cd\u8bd5\u64a4\u5355"
-        )
+        warning = f"交易网关已撤单，但本地记录同步失败 ({type(exc).__name__}: {exc})，请勿重试撤单"
     return {
         "id": result.id,
         "contract": result.contract,

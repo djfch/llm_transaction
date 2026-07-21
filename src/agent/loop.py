@@ -278,6 +278,7 @@ class DecisionLoop:
             return await execute_manual_close(self._deps, contract, drain_fills=self._drain_fills)
 
     async def manual_cancel_order(self, contract: str, order_id: str) -> dict:
+        # 将监控 API 的手动撤单请求转交给统一撤单执行器。
         return await execute_manual_cancel(self._deps, contract, order_id)
 
     async def _engage_lock(self) -> None:

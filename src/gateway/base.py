@@ -98,6 +98,7 @@ class OrderResult(BaseModel):
     id: str
     contract: str
     status: str
+    # 挂单快照展示字段：size 保留方向，price/tif/reduce_only 保留委托约束。
     size: Decimal = Decimal(0)
     price: Decimal | None = None
     tif: str = ""
@@ -153,6 +154,7 @@ class Gateway(Protocol):
 
     def cancel_order(self, contract: str, order_id: str) -> OrderResult: ...
 
+    # 分页读取订单快照；contract 为空时返回全部合约。
     def list_orders(
         self,
         contract: str | None = None,

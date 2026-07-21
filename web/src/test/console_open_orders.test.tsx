@@ -45,26 +45,26 @@ beforeEach(() => {
   holder.cancelOpenOrder.mockReset()
 })
 
-describe('OpenOrdersPanel(\u672a\u6210\u4ea4\u6302\u5355)', () => {
-  it('\u7a7a\u6301\u4ed3\u65f6\u4ecd\u663e\u793a\u6302\u5355\u533a\u57df\u548c\u7a7a\u72b6\u6001', () => {
+describe('OpenOrdersPanel(未成交挂单)', () => {
+  it('空持仓时仍显示挂单区域和空状态', () => {
     render(<OpenOrdersPanel orders={[]} />)
-    expect(screen.getByText('\u672a\u6210\u4ea4\u6302\u5355 open_orders')).toBeInTheDocument()
-    expect(screen.getByText('\u5f53\u524d\u65e0\u672a\u6210\u4ea4\u6302\u5355')).toBeInTheDocument()
+    expect(screen.getByText('未成交挂单 open_orders')).toBeInTheDocument()
+    expect(screen.getByText('当前无未成交挂单')).toBeInTheDocument()
   })
 
-  it('\u6e32\u67d3\u591a\u7a7a\u65b9\u5411\u4e0e\u6307\u5b9a\u59d4\u6258\u5b57\u6bb5', () => {
+  it('渲染多空方向与指定委托字段', () => {
     render(<OpenOrdersPanel orders={[longOrder, shortOrder]} />)
-    expect(screen.getByText('\u591a LONG')).toBeInTheDocument()
-    expect(screen.getByText('\u7a7a SHORT')).toBeInTheDocument()
-    expect(screen.getAllByText('size(\u59d4\u6258\u5f20\u6570)')).toHaveLength(2)
-    expect(screen.getAllByText('left(\u672a\u6210\u4ea4\u5f20\u6570)')).toHaveLength(2)
-    expect(screen.getAllByText('price(\u59d4\u6258\u4ef7)')).toHaveLength(2)
-    expect(screen.getAllByText('tif(\u6709\u6548\u65b9\u5f0f)')).toHaveLength(2)
-    expect(screen.getAllByText('reduce_only(\u53ea\u51cf\u4ed3)')).toHaveLength(2)
-    expect(screen.getByText('\u662f')).toBeInTheDocument()
+    expect(screen.getByText('多 LONG')).toBeInTheDocument()
+    expect(screen.getByText('空 SHORT')).toBeInTheDocument()
+    expect(screen.getAllByText('size(委托张数)')).toHaveLength(2)
+    expect(screen.getAllByText('left(未成交张数)')).toHaveLength(2)
+    expect(screen.getAllByText('price(委托价)')).toHaveLength(2)
+    expect(screen.getAllByText('tif(有效方式)')).toHaveLength(2)
+    expect(screen.getAllByText('reduce_only(只减仓)')).toHaveLength(2)
+    expect(screen.getByText('是')).toBeInTheDocument()
   })
 
-  it('\u7b2c\u4e00\u6b21\u70b9\u51fb\u53ea\u8fdb\u5165\u786e\u8ba4\u6001\uff0c\u7b2c\u4e8c\u6b21\u6210\u529f\u540e\u9690\u85cf\u5361\u7247\u5e76\u901a\u77e5\u7236\u7ea7', async () => {
+  it('第一次点击只进入确认态，第二次成功后隐藏卡片并通知父级', async () => {
     const onChanged = vi.fn()
     holder.cancelOpenOrder.mockResolvedValue({
       id: longOrder.id,
@@ -75,33 +75,33 @@ describe('OpenOrdersPanel(\u672a\u6210\u4ea4\u6302\u5355)', () => {
     })
     render(<OpenOrdersPanel orders={[longOrder]} onChanged={onChanged} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
     expect(holder.cancelOpenOrder).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '再次点击确认撤单' })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
     await waitFor(() => expect(holder.cancelOpenOrder).toHaveBeenCalledWith('BTC_USDT', 'order-long'))
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
     expect(screen.queryByText('BTC_USDT')).not.toBeInTheDocument()
-    expect(screen.getByText(/\u5df2\u64a4\u9500\u6302\u5355/)).toBeInTheDocument()
+    expect(screen.getByText(/已撤销挂单/)).toBeInTheDocument()
   })
 
-  it('\u8d85\u8fc7 3 \u79d2\u540e\u786e\u8ba4\u6001\u81ea\u52a8\u5931\u6548\uff0c\u4e0d\u53d1\u8d77\u64a4\u5355', () => {
+  it('超过 3 秒后确认态自动失效，不发起撤单', () => {
     vi.useFakeTimers()
     try {
       render(<OpenOrdersPanel orders={[longOrder]} />)
 
-      fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
+      fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
       act(() => vi.advanceTimersByTime(3000))
 
-      expect(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '手动撤单' })).toBeInTheDocument()
       expect(holder.cancelOpenOrder).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('\u8bf7\u6c42\u4e2d\u7981\u7528\u64a4\u5355\u6309\u94ae\u5e76\u963b\u6b62\u91cd\u590d\u8bf7\u6c42', async () => {
+  it('请求中禁用撤单按钮并阻止重复请求', async () => {
     let resolve!: (value: unknown) => void
     holder.cancelOpenOrder.mockImplementation(
       () =>
@@ -111,10 +111,10 @@ describe('OpenOrdersPanel(\u672a\u6210\u4ea4\u6302\u5355)', () => {
     )
     render(<OpenOrdersPanel orders={[longOrder]} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
-    fireEvent.click(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
 
-    const pendingButton = screen.getByRole('button', { name: '\u64a4\u5355\u4e2d\u2026' })
+    const pendingButton = screen.getByRole('button', { name: '撤单中…' })
     expect(pendingButton).toBeDisabled()
     fireEvent.click(pendingButton)
     expect(holder.cancelOpenOrder).toHaveBeenCalledTimes(1)
@@ -129,29 +129,29 @@ describe('OpenOrdersPanel(\u672a\u6210\u4ea4\u6302\u5355)', () => {
     await waitFor(() => expect(screen.queryByText('BTC_USDT')).not.toBeInTheDocument())
   })
 
-  it('\u8ba2\u5355\u5df2\u7ec8\u6001\u65f6\u79fb\u9664\u65e7\u5361\u7247\u5e76\u89e6\u53d1\u5237\u65b0', async () => {
+  it('订单已终态时移除旧卡片并触发刷新', async () => {
     const onChanged = vi.fn()
     holder.cancelOpenOrder.mockRejectedValue(
-      new holder.PanelApiError(409, '\u6302\u5355\u5df2\u6210\u4ea4\uff0c\u5df2\u5237\u65b0'),
+      new holder.PanelApiError(409, '挂单已成交，已刷新'),
     )
     render(<OpenOrdersPanel orders={[longOrder]} onChanged={onChanged} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
-    fireEvent.click(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
 
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
     expect(screen.queryByText('BTC_USDT')).not.toBeInTheDocument()
-    expect(screen.getByText('\u6302\u5355\u5df2\u6210\u4ea4\uff0c\u5df2\u5237\u65b0')).toBeInTheDocument()
+    expect(screen.getByText('挂单已成交，已刷新')).toBeInTheDocument()
   })
 
-  it('\u64a4\u5355\u5931\u8d25\u4fdd\u7559\u5361\u7247\u5e76\u663e\u793a\u9519\u8bef\u539f\u56e0', async () => {
-    holder.cancelOpenOrder.mockRejectedValue(new Error('\u7f51\u5173\u6682\u65f6\u4e0d\u53ef\u7528'))
+  it('撤单失败保留卡片并显示错误原因', async () => {
+    holder.cancelOpenOrder.mockRejectedValue(new Error('网关暂时不可用'))
     render(<OpenOrdersPanel orders={[shortOrder]} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
-    fireEvent.click(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
 
-    expect(await screen.findByText('\u7f51\u5173\u6682\u65f6\u4e0d\u53ef\u7528')).toBeInTheDocument()
+    expect(await screen.findByText('网关暂时不可用')).toBeInTheDocument()
     expect(screen.getByText('ETH_USDT')).toBeInTheDocument()
   })
 })

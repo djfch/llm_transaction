@@ -217,8 +217,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
   })
 
 
-describe('ConsolePage \u6302\u5355\u5237\u65b0', () => {
-  it('\u64a4\u5355\u6210\u529f\u540e\u540c\u65f6\u91cd\u65b0\u8bf7\u6c42 openOrders \u4e0e account', async () => {
+describe('ConsolePage 挂单刷新', () => {
+  it('撤单成功后同时重新请求 openOrders 与 account', async () => {
     holder.getOpenOrders
       .mockResolvedValueOnce([
         {
@@ -244,8 +244,8 @@ describe('ConsolePage \u6302\u5355\u5237\u65b0', () => {
     render(<ConsolePage />)
     await screen.findByText('ETH_USDT')
 
-    fireEvent.click(screen.getByRole('button', { name: '\u624b\u52a8\u64a4\u5355' }))
-    fireEvent.click(screen.getByRole('button', { name: '\u518d\u6b21\u70b9\u51fb\u786e\u8ba4\u64a4\u5355' }))
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
 
     await waitFor(() => expect(holder.cancelOpenOrder).toHaveBeenCalledWith('ETH_USDT', 'order-refresh'))
     await waitFor(() => expect(holder.getOpenOrders).toHaveBeenCalledTimes(2))

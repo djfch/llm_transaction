@@ -201,6 +201,41 @@ async def test_manual_cancel_syncs_open_order_to_local_record(tmp_path):
         await env.db.close()
 
 
+async def test_manual_cancel_finds_target_on_second_open_orders_page(tmp_path, monkeypatch):
+    gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
+    orders = [
+        gateway.place_order(
+            OrderRequest(contract=BTC, size=Decimal(1), price=Decimal(59000), tif="gtc")
+        )
+        for _ in range(101)
+    ]
+    target = orders[-1]
+    calls: list[dict[str, object]] = []
+    original_list_orders = gateway.list_orders
+
+    def record_list_orders(
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ):
+        calls.append({"contract": contract, "status": status, "limit": limit, "offset": offset})
+        return original_list_orders(contract, status, limit, offset)
+
+    monkeypatch.setattr(gateway, "list_orders", record_list_orders)
+    env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
+    try:
+        result = await env.loop.manual_cancel_order(BTC, target.id)
+
+        assert result["id"] == target.id
+        assert result["status"] == "finished"
+
+        assert [call["offset"] for call in calls] == [0, 100]
+        assert [call["limit"] for call in calls] == [100, 100]
+    finally:
+        await env.db.close()
+
+
 async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, monkeypatch):
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     order = gateway.place_order(
@@ -216,7 +251,7 @@ async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, mon
         result = await env.loop.manual_cancel_order(BTC, order.id)
 
         assert gateway.list_orders(status="open") == []
-        assert "\u8bf7\u52ff\u91cd\u8bd5\u64a4\u5355" in result["warning"]
+        assert "请勿重试撤单" in result["warning"]
         assert "local database offline" in result["warning"]
     finally:
         await env.db.close()

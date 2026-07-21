@@ -62,6 +62,7 @@ const positions: Position[] = [
   },
 ]
 
+// mock 模式的可撤销挂单，用于覆盖真实接口不可用时的完整交互。
 const openOrders: OpenOrder[] = [
   {
     id: 'mock-open-1',
@@ -245,9 +246,10 @@ export const mockApi: ApiClient = {
       text: `已按标记价 ${closed.mark_price} 市价平仓`,
     })
   },
+  // 模拟撤单会从内存订单簿移除目标卡片，与真实接口的成功结果保持一致。
   cancelOpenOrder: (contract, orderId) => {
     const index = openOrders.findIndex((order) => order.contract === contract && order.id === orderId)
-    if (index < 0) return Promise.reject(new ApiError(404, '\u6302\u5355\u4e0d\u5b58\u5728'))
+    if (index < 0) return Promise.reject(new ApiError(404, '挂单不存在'))
     const [cancelled] = openOrders.splice(index, 1)
     return reply({
       id: cancelled.id,

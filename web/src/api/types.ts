@@ -33,6 +33,7 @@ export interface Position {
   liq_price: number // 预估强平价
 }
 
+/** 未成交挂单的前端契约，字段与 GET /api/open_orders 一一对应。 */
 export interface OpenOrder {
   id: string
   contract: string
@@ -131,6 +132,7 @@ export interface ClosePositionResult {
   text: string // 结果描述文本
 }
 
+/** DELETE /api/orders/{contract}/{order_id} 的撤单结果。 */
 export interface CancelOpenOrderResult {
   id: string
   contract: string
@@ -261,6 +263,7 @@ export interface ApiClient {
   getStatus(): Promise<StatusInfo>
   getAccount(): Promise<AccountInfo>
   getPositions(): Promise<Position[]>
+  /** 读取交易所或模拟撮合引擎当前仍为 open 的订单。 */
   getOpenOrders(): Promise<OpenOrder[]>
   getRounds(offset: number, limit: number): Promise<RoundSummary[]>
   getRound(roundId: string): Promise<RoundDetail>
@@ -268,6 +271,7 @@ export interface ApiClient {
   getTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult>
   getCandles(contract: string, interval: string, limit?: number): Promise<Candle[]>
   closePosition(contract: string): Promise<ClosePositionResult>
+  /** 撤销指定合约和订单 ID；已终态订单由调用方刷新列表。 */
   cancelOpenOrder(contract: string, orderId: string): Promise<CancelOpenOrderResult>
   resetPaperEquity(equity: number): Promise<PaperResetResult>
   startAgent(): Promise<AgentStateResult>

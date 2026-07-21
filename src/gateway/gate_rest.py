@@ -147,6 +147,7 @@ def _to_position(p: gate_api.Position) -> Position:
     )
 
 
+# 将 Gate futures order 转换为前后端共用的订单快照。
 def _to_order(o: gate_api.FuturesOrder) -> OrderResult:
     return OrderResult(
         id=str(o.id),
@@ -279,6 +280,7 @@ class GateRestGateway:
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
+    # 支持省略 contract 的全合约查询，并透传分页参数给 Gate。
     def list_orders(
         self,
         contract: str | None = None,
