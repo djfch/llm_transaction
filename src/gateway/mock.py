@@ -113,6 +113,10 @@ class MockGateway:
                 id=order_id,
                 contract=req.contract,
                 status="open",
+                size=req.size,
+                price=req.price,
+                tif=req.tif or "gtc",
+                reduce_only=req.reduce_only,
                 left=abs(req.size),
                 fill_price=Decimal(0),
                 text=req.text or "",
@@ -176,6 +180,7 @@ class MockGateway:
         pos = self.positions.get(contract)
         return bool(pos and pos.size > 0)
 
+    # 改单后同步更新展示所需的委托量和委托价快照。
     def amend_order(
         self,
         contract: str,
@@ -186,7 +191,12 @@ class MockGateway:
         order = self._open_order(order_id)
         # mock 未成交，改 size 即改 left；价格仅记录（不影响结果模型字段）
         new_left = abs(size) if size is not None else order.left
-        amended = order.model_copy(update={"left": new_left})
+        updates: dict[str, Decimal | None] = {"left": new_left}
+        if size is not None:
+            updates["size"] = size
+        if price is not None:
+            updates["price"] = price
+        amended = order.model_copy(update=updates)
         self.orders[order_id] = amended
         return amended
 
@@ -202,8 +212,20 @@ class MockGateway:
             raise OrderNotFound(f"订单不存在或非 open: {order_id}", label="ORDER_NOT_FOUND")
         return order
 
-    def list_orders(self, contract: str, status: str = "open") -> list[OrderResult]:
-        return [o for o in self.orders.values() if o.contract == contract and o.status == status]
+    # 模拟网关按合约、状态和分页规则返回与真实网关一致的订单快照。
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]:
+        orders = [
+            o
+            for o in self.orders.values()
+            if (contract is None or o.contract == contract) and o.status == status
+        ]
+        return orders[offset:] if limit is None else orders[offset : offset + limit]
 
     def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
         return [order for order in self.tpsl_orders.values() if order.contract == contract]

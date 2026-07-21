@@ -191,6 +191,7 @@ class PaperGateway:
             return self._market_order(req, order_id, text)
         return self._limit_order(req, order_id, text)
 
+    # 改单后将最新委托量和价格写回未成交订单快照。
     def amend_order(
         self,
         contract: str,
@@ -212,7 +213,7 @@ class PaperGateway:
             self._apply_tpsl(contract, order.size, order.stop_loss_price, order.take_profit_price)
             return result
         self._results[order_id] = self._results[order_id].model_copy(
-            update={"left": abs(order.size)}
+            update={"left": abs(order.size), "size": order.size, "price": order.price}
         )
         return self._results[order_id]
 
@@ -225,8 +226,20 @@ class PaperGateway:
         self._results[order_id] = cancelled
         return cancelled
 
-    def list_orders(self, contract: str, status: str = "open") -> list[OrderResult]:
-        return [r for r in self._results.values() if r.contract == contract and r.status == status]
+    # 模拟撮合引擎支持全合约 open 订单的分页读取。
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]:
+        orders = [
+            r
+            for r in self._results.values()
+            if (contract is None or r.contract == contract) and r.status == status
+        ]
+        return orders[offset:] if limit is None else orders[offset : offset + limit]
 
     def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
         return [order for order in self._tpsl.values() if order.contract == contract]
@@ -288,10 +301,15 @@ class PaperGateway:
             result = self._execute(order_id, req.contract, req.size, fill, maker=False, text=text)
             self._apply_request_tpsl(req)
             return result
+        # 挂单卡片依赖原始委托字段，不能只保留 left。
         result = OrderResult(
             id=order_id,
             contract=req.contract,
             status="open",
+            size=req.size,
+            price=req.price,
+            tif=req.tif or "gtc",
+            reduce_only=req.reduce_only,
             left=abs(req.size),
             fill_price=Decimal(0),
             text=text,

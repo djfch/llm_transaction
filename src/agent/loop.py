@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from src.agent.context import AgentContext, ContextBuilder
+from src.agent.manual_cancel import execute_manual_cancel
 from src.agent.manual_close import execute_manual_close, persist_fills
 from src.agent.prompts import PromptLoader
 from src.agent.providers.base import LLMProvider, ToolCall
@@ -275,6 +276,10 @@ class DecisionLoop:
         """
         async with self._persist_fills_lock:
             return await execute_manual_close(self._deps, contract, drain_fills=self._drain_fills)
+
+    async def manual_cancel_order(self, contract: str, order_id: str) -> dict:
+        # 将监控 API 的手动撤单请求转交给统一撤单执行器。
+        return await execute_manual_cancel(self._deps, contract, order_id)
 
     async def _engage_lock(self) -> None:
         """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。"""

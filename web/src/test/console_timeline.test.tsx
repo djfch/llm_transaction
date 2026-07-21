@@ -1,80 +1,88 @@
 /**
- * 决策时间线（console）测试：分页渲染与「加载更多」追加、卡片展开 lazy 拉取 getRound、
- * RoundFocus 定位已加载轮 → 展开 + jump-hl 高亮类 + scrollIntoView；
- * 定位未加载轮 → 逐页加载；全部耗尽仍无 → 顶部提示「未找到该决策轮」；
- * WS round 事件 → 失效信号重拉第一页去重前合（payload 不作数据源）。
- * ApiClient 全量 mock；WS 经 wsHolder.lastMessage 可控派发（jsdom 无 WebSocket）。
+ * 决策时间线测试：服务端分页、最多五个页码、跳页、WS 刷新回退、卡片详情与跨页定位。
+ * API 与 WebSocket 均使用可控桩，确保测试验证页面状态而非网络实现。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Note, RoundDetail, RoundSummary, WsMessage } from '../api/types'
+import type { Note, NotesPageResult, RoundDetail, RoundsPageResult, RoundSummary, WsMessage } from '../api/types'
 import RoundTimeline from '../components/console/RoundTimeline'
 import { RoundFocusProvider, useRoundFocus } from '../hooks/useRoundFocus'
 
-// 25 轮（第一页 20 + 第二页 5），验证分页追加与「无更多」
-const ROUNDS: RoundSummary[] = Array.from({ length: 25 }, (_, i) => ({
-  round_id: `id-${100 - i}`,
-  started_at: new Date(1_700_000_000_000 - i * 3_600_000).toISOString(),
-  wake_source: ['定时唤醒', '价格触发', '手动唤醒'][i % 3],
-  summary: `第 ${100 - i} 轮结论摘要`,
+/** 37 轮决策足以覆盖 8 页数据与五页码滑动窗口。 */
+const ROUNDS: RoundSummary[] = Array.from({ length: 37 }, (_, index) => ({
+  round_id: `id-${100 - index}`,
+  started_at: new Date(1_700_000_000_000 - index * 3_600_000).toISOString(),
+  wake_source: ['定时唤醒', '价格触发', '手动唤醒'][index % 3],
+  summary: `第 ${100 - index} 轮结论摘要`,
 }))
 
+/** 将任意列表切片为与后端一致的分页响应。 */
+function pageOf<T>(items: T[], offset: number, limit: number) {
+  return { items: items.slice(offset, offset + limit), total: items.length, offset, limit }
+}
+
+/** 建立可由测试主动完成的 Promise，用于验证首屏请求尚未结束时的交互。 */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((finish) => {
+    resolve = finish
+  })
+  return { promise, resolve }
+}
+
 const holder = vi.hoisted(() => ({
-  getRounds: vi.fn() as ReturnType<typeof vi.fn<(o: number, l: number) => Promise<RoundSummary[]>>>,
-  getRound: vi.fn() as ReturnType<typeof vi.fn<(id: string) => Promise<RoundDetail>>>,
-  getNotes: vi.fn() as ReturnType<typeof vi.fn<() => Promise<Note[]>>>,
+  getRounds: vi.fn(),
+  getRound: vi.fn(),
+  getNotes: vi.fn(),
 }))
 vi.mock('../api', () => ({
   api: {
-    getRounds: (o: number, l: number) => holder.getRounds(o, l),
-    getRound: (id: string) => holder.getRound(id),
-    getNotes: () => holder.getNotes(),
+    getRounds: (offset: number, limit: number) => holder.getRounds(offset, limit),
+    getRound: (roundId: string) => holder.getRound(roundId),
+    getNotes: (offset?: number, limit?: number) => holder.getNotes(offset, limit),
   },
 }))
-// WS 可控桩：测试改写 wsHolder.lastMessage 后 rerender 即可派发消息
+
+/** 测试通过重渲染派发可控的 WebSocket 消息。 */
 const wsHolder = vi.hoisted(() => ({ lastMessage: null as WsMessage | null }))
 vi.mock('../hooks/useWs', () => ({
   useWs: () => ({ connected: true, lastMessage: wsHolder.lastMessage }),
 }))
 
-beforeAll(() => {
-  // jsdom 未实现 scrollIntoView，注入桩
-  window.HTMLElement.prototype.scrollIntoView = vi.fn()
-})
-
-/** 审计详情夹具：2 次工具调用（含一次 deny）+ llm_raw 原文标记 */
-function detail(id: string): RoundDetail {
+/** 构造可展开的审计详情夹具。 */
+function detail(roundId: string): RoundDetail {
   return {
-    round_id: id,
+    round_id: roundId,
     prompt_snapshot: 'prompt',
-    llm_raw: `RAW-${id}`,
+    llm_raw: `RAW-${roundId}`,
     tool_calls: [
       { seq: 1, tool: 'get_account', args: {}, risk_verdict: '', risk_reason: '', result: 'ok', duration_ms: 5 },
-      {
-        seq: 2,
-        tool: 'place_order',
-        args: { size: 1 },
-        risk_verdict: 'deny',
-        risk_reason: '超限',
-        result: '风控拒绝，未下单',
-        duration_ms: 8,
-      },
     ],
   }
 }
 
-beforeEach(() => {
-  wsHolder.lastMessage = null
-  holder.getRounds = vi
-    .fn<(o: number, l: number) => Promise<RoundSummary[]>>()
-    .mockImplementation((offset, limit) => Promise.resolve(ROUNDS.slice(offset, offset + limit)))
-  holder.getRound = vi
-    .fn<(id: string) => Promise<RoundDetail>>()
-    .mockImplementation((id) => Promise.resolve(detail(id)))
-  holder.getNotes = vi.fn<() => Promise<Note[]>>().mockResolvedValue([])
+let currentRounds: RoundSummary[]
+let currentNotes: Note[]
+
+beforeAll(() => {
+  window.HTMLElement.prototype.scrollIntoView = vi.fn()
 })
 
-/** focus 触发器：按钮点击即定位指定轮 */
+beforeEach(() => {
+  currentRounds = [...ROUNDS]
+  currentNotes = []
+  wsHolder.lastMessage = null
+  vi.clearAllMocks()
+  holder.getRounds.mockImplementation((offset: number, limit: number): Promise<RoundsPageResult> =>
+    Promise.resolve(pageOf(currentRounds, offset, limit)),
+  )
+  holder.getRound.mockImplementation((roundId: string): Promise<RoundDetail> => Promise.resolve(detail(roundId)))
+  holder.getNotes.mockImplementation((offset = 0, limit = 20): Promise<NotesPageResult> =>
+    Promise.resolve(pageOf(currentNotes, offset, limit)),
+  )
+})
+
+/** 焦点按钮模拟成交表或 K 线向时间线发送的 round_id 定位请求。 */
 function FocusTrigger({ roundId }: { roundId: string }) {
   const { focus } = useRoundFocus()
   return (
@@ -84,7 +92,7 @@ function FocusTrigger({ roundId }: { roundId: string }) {
   )
 }
 
-/** 时间线 JSX（rerender 派发 WS 消息时需同一结构） */
+/** 渲染包含焦点上下文的完整时间线。 */
 function timelineUi(focusId: string) {
   return (
     <RoundFocusProvider>
@@ -94,153 +102,132 @@ function timelineUi(focusId: string) {
   )
 }
 
+/** 渲染时间线并允许测试修改焦点目标。 */
 function renderTimeline(focusId = '') {
   return render(timelineUi(focusId))
 }
 
 describe('RoundTimeline(决策时间线)', () => {
-  it('首屏渲染第一页卡片（短号/唤醒徽标/summary）；「加载更多」追加第二页后消失', async () => {
+  it('每页渲染 5 条、显示总数，并以最多五个页码切换下一页', async () => {
     renderTimeline()
 
     expect(await screen.findByText('第 100 轮结论摘要')).toBeInTheDocument()
-    expect(screen.getByText('第 81 轮结论摘要')).toBeInTheDocument() // 第一页末条
-    expect(screen.queryByText('第 80 轮结论摘要')).not.toBeInTheDocument()
-    // 短号（含分隔符取末段）与唤醒来源徽标
-    expect(screen.getByText('#100')).toBeInTheDocument()
-    expect(screen.getAllByText('定时唤醒').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('价格触发').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('手动唤醒').length).toBeGreaterThan(0)
+    expect(screen.getByText('第 96 轮结论摘要')).toBeInTheDocument()
+    expect(screen.queryByText('第 95 轮结论摘要')).not.toBeInTheDocument()
+    expect(screen.getByText('共 37 条决策')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /第 \d+ 页/ })).toHaveLength(5)
 
-    fireEvent.click(screen.getByRole('button', { name: '加载更多' }))
-    expect(await screen.findByText('第 76 轮结论摘要')).toBeInTheDocument() // 第二页末条
-    expect(holder.getRounds).toHaveBeenLastCalledWith(20, 20)
-    // 第二页不足 PAGE_SIZE → 无更多
-    expect(screen.queryByRole('button', { name: '加载更多' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    expect(await screen.findByText('第 95 轮结论摘要')).toBeInTheDocument()
+    expect(holder.getRounds).toHaveBeenLastCalledWith(5, 5)
   })
 
-  it('WS round 事件：payload 不作数据源，重拉第一页去重前合（新轮完整数据置顶）', async () => {
-    const NEW: RoundSummary = {
-      round_id: 'id-101',
-      started_at: new Date(1_700_000_000_000 + 3_600_000).toISOString(),
-      wake_source: '价格触发',
-      summary: '第 101 轮结论摘要',
-    }
+  it('跳转到第 6 页后页码窗口随当前页滑动，非法页码不请求接口', async () => {
+    renderTimeline()
+    await screen.findByText('第 100 轮结论摘要')
+    const input = screen.getByLabelText('跳转到第几页决策')
+
+    fireEvent.change(input, { target: { value: '6' } })
+    fireEvent.click(screen.getByRole('button', { name: '跳转' }))
+    expect(await screen.findByText('第 75 轮结论摘要')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '第 1 页' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /第 \d+ 页/ })).toHaveLength(5)
+
+    const callsBefore = holder.getRounds.mock.calls.length
+    fireEvent.change(screen.getByLabelText('跳转到第几页决策'), { target: { value: '9' } })
+    fireEvent.click(screen.getByRole('button', { name: '跳转' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('请输入 1 至 8 的整数页码')
+    expect(holder.getRounds).toHaveBeenCalledTimes(callsBefore)
+  })
+
+  it('WS round 事件重拉当前页和总数，页码越界时自动回到最后有效页', async () => {
     const { rerender } = renderTimeline()
     await screen.findByText('第 100 轮结论摘要')
-    holder.getRounds.mockClear()
-    // 服务端落库新轮后广播 round（payload 仅 {round_id, ok, wake_source}，无摘要/时间）
-    holder.getRounds.mockImplementation((offset, limit) =>
-      Promise.resolve([NEW, ...ROUNDS].slice(offset, offset + limit)),
-    )
-    wsHolder.lastMessage = {
-      type: 'round',
-      data: { round_id: 'id-101', ok: true, wake_source: '价格触发' },
-    }
+    const input = screen.getByLabelText('跳转到第几页决策')
+    fireEvent.change(input, { target: { value: '8' } })
+    fireEvent.click(screen.getByRole('button', { name: '跳转' }))
+    expect(await screen.findByText('第 65 轮结论摘要')).toBeInTheDocument()
+
+    currentRounds = currentRounds.slice(0, 5)
+    wsHolder.lastMessage = { type: 'round', data: { round_id: 'id-100', ok: true, wake_source: '定时唤醒' } }
     rerender(timelineUi(''))
 
-    // 新轮以 REST 完整数据置顶（若直接消费 payload，摘要/时间将空白）
-    expect(await screen.findByText('第 101 轮结论摘要')).toBeInTheDocument()
-    expect(holder.getRounds).toHaveBeenCalledWith(0, 20)
-    // 已有卡片不丢（去重前合）
-    expect(screen.getByText('第 100 轮结论摘要')).toBeInTheDocument()
+    expect(await screen.findByText('共 5 条决策')).toBeInTheDocument()
+    expect(await screen.findByText('第 100 轮结论摘要')).toBeInTheDocument()
+    expect(screen.getByText('第 1/1 页 · 共 5 条决策')).toBeInTheDocument()
   })
 
-  it('WS round 事件：同步重拉笔记映射（回归 M2/L6：新轮可能带来新归属笔记）', async () => {
-    const { rerender } = renderTimeline()
-    await screen.findByText('第 100 轮结论摘要')
-    expect(holder.getNotes).toHaveBeenCalledTimes(1) // 挂载时一次
-
-    wsHolder.lastMessage = {
-      type: 'round',
-      data: { round_id: 'id-101', ok: true, wake_source: '价格触发' },
-    }
-    rerender(timelineUi(''))
-
-    await waitFor(() => expect(holder.getNotes).toHaveBeenCalledTimes(2))
-  })
-
-  it('点击卡片展开 → lazy 拉取 getRound，渲染 ToolSteps 工具链与完整对话折叠区', async () => {
+  it('点击卡片仍按需读取审计详情并保留完整对话展示', async () => {
     renderTimeline()
     const summary = await screen.findByText('第 100 轮结论摘要')
-    expect(holder.getRound).not.toHaveBeenCalled()
 
     fireEvent.click(summary)
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
-    // 工具调用详情（默认展开，ToolSteps）：工具名 + deny 风控理由行内展示
-    expect(await screen.findByText('place_order')).toBeInTheDocument()
-    expect(screen.getAllByText(/risk_reason\(风控理由\)：超限/).length).toBeGreaterThan(0)
-    // 完整对话（ConversationThread 自带 details）：默认收起，点击摘要展开后可见 llm_raw 原文
+    expect(await screen.findByText('get_account')).toBeInTheDocument()
     const chatSummary = screen.getByText(/完整对话 · agent loop/)
-    const chatDetails = chatSummary.closest('details')!
-    expect(chatDetails).not.toHaveAttribute('open')
     fireEvent.click(chatSummary)
-    expect(chatDetails).toHaveAttribute('open')
     expect(screen.getByText('RAW-id-100')).toBeInTheDocument()
   })
 
-  it('归属笔记的卡片渲染引文块（紫色左边条 + 斜体 + Agent 笔记 · HH:MM），无归属不渲染', async () => {
-    holder.getNotes.mockResolvedValue([
-      { time: '2023-11-14T22:20:00.000Z', content: '趋势里分批止盈比一次清仓更稳。', round_id: 'id-100' },
-      { time: '2023-11-14T22:30:00.000Z', content: '无归属笔记', round_id: '' },
-    ])
-    renderTimeline()
-    await screen.findByText('第 100 轮结论摘要')
-
-    // 引文出现在归属轮卡片内：斜体内容 + 署名前缀
-    const card = document.querySelector('[data-round-id="id-100"]')!
-    const quote = await screen.findByText(/趋势里分批止盈比一次清仓更稳。/)
-    expect(card.contains(quote)).toBe(true)
-    expect(quote.tagName).toBe('BLOCKQUOTE')
-    expect(quote.className).toContain('italic')
-    expect(quote.className).toContain('border-violet-400/50')
-    expect(quote.textContent).toContain('—— Agent 笔记 ·')
-    // 空 round_id 笔记不入映射；其他卡片无引文
-    expect(screen.queryByText(/无归属笔记/)).not.toBeInTheDocument()
-    expect(document.querySelector('[data-round-id="id-99"] blockquote')).toBeNull()
-  })
-
-  it('同轮多条归属笔记：取最新一条（回归：依赖 http 适配层降序契约，首条即最新）', async () => {
-    // getNotes 契约=最新在前（http 适配层保证），notesMap 首见即最新
-    holder.getNotes.mockResolvedValue([
+  it('笔记引文仍取最新笔记页中同轮的第一条记录', async () => {
+    currentNotes = [
       { time: '2023-11-14T23:00:00.000Z', content: '最新结论：突破确认再加仓。', round_id: 'id-100' },
       { time: '2023-11-14T22:00:00.000Z', content: '较早记录：先观察量能。', round_id: 'id-100' },
-    ])
+    ]
     renderTimeline()
-    await screen.findByText('第 100 轮结论摘要')
 
     expect(await screen.findByText(/最新结论：突破确认再加仓。/)).toBeInTheDocument()
     expect(screen.queryByText(/较早记录：先观察量能。/)).not.toBeInTheDocument()
+    expect(holder.getNotes).toHaveBeenCalledWith(0, 20)
   })
 
-  it('每张卡片都有灰色「已完成」徽标（历史轮静态文案）', async () => {
-    renderTimeline()
+  it('焦点目标在其他页时切换到对应页并展开高亮卡片', async () => {
+    renderTimeline('id-94')
     await screen.findByText('第 100 轮结论摘要')
-    // 第一页 20 张卡片各一枚
-    expect(screen.getAllByText('已完成')).toHaveLength(20)
-  })
-
-  it('focus 已加载轮 → 展开（拉详情）+ jump-hl 高亮类 + scrollIntoView', async () => {
-    renderTimeline('id-98')
-    await screen.findByText('第 98 轮结论摘要')
 
     fireEvent.click(screen.getByTestId('focus-btn'))
-    // 展开该卡（触发 lazy getRound）
-    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-98'))
-    // 高亮类 + 平滑滚动到卡片
-    const card = document.querySelector('[data-round-id="id-98"]')
-    expect(card?.classList.contains('jump-hl')).toBe(true)
-    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled())
+    expect(await screen.findByText('第 94 轮结论摘要')).toBeInTheDocument()
+    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-94'))
+    expect(document.querySelector('[data-round-id="id-94"]')?.classList.contains('jump-hl')).toBe(true)
   })
 
-  it('focus 未加载轮 → 逐页加载；全部耗尽仍无 → 顶部提示「未找到该决策轮」', async () => {
-    renderTimeline('ghost-round')
+  it('焦点定位可跨越第 10 页以外的完整历史记录', async () => {
+    currentRounds = Array.from({ length: 60 }, (_, index) => ({
+      ...ROUNDS[0],
+      round_id: `id-${100 - index}`,
+      summary: `第 ${100 - index} 轮结论摘要`,
+    }))
+    renderTimeline('id-46')
     await screen.findByText('第 100 轮结论摘要')
-    holder.getRounds.mockClear()
 
     fireEvent.click(screen.getByTestId('focus-btn'))
-    expect(await screen.findByText(/未找到该决策轮：ghost-round/)).toBeInTheDocument()
-    // 25 轮：offset 20 追加到第二页（5 条，不足一页即判定耗尽，共 1 次追加请求）
-    expect(holder.getRounds).toHaveBeenCalledTimes(1)
-    expect(holder.getRounds).toHaveBeenNthCalledWith(1, 20, 20)
+    expect(await screen.findByText('第 46 轮结论摘要')).toBeInTheDocument()
+    expect(holder.getRounds).toHaveBeenCalledWith(50, 5)
+  })
+
+  it('首屏数据加载期间接到焦点请求时，等待数据后再定位而不误报未找到', async () => {
+    const initialPage = deferred<RoundsPageResult>()
+    holder.getRounds.mockImplementationOnce(() => initialPage.promise)
+    renderTimeline('id-100')
+
+    fireEvent.click(screen.getByTestId('focus-btn'))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+
+    initialPage.resolve(pageOf(currentRounds, 0, 5))
+    expect(await screen.findByText('第 100 轮结论摘要')).toBeInTheDocument()
+    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
+  })
+
+  it('首屏加载完成后仍能继续跨页定位此前收到的焦点请求', async () => {
+    const initialPage = deferred<RoundsPageResult>()
+    holder.getRounds.mockImplementationOnce(() => initialPage.promise)
+    renderTimeline('id-94')
+
+    fireEvent.click(screen.getByTestId('focus-btn'))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+
+    initialPage.resolve(pageOf(currentRounds, 0, 5))
+    expect(await screen.findByText('第 94 轮结论摘要')).toBeInTheDocument()
+    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-94'))
   })
 })

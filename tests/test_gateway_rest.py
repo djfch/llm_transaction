@@ -32,6 +32,10 @@ def make_sdk_order(order_id: str = "12345") -> SimpleNamespace:
         id=order_id,
         contract=BTC,
         status="finished",
+        size="-2",
+        price="59000",
+        tif="gtc",
+        is_reduce_only=True,
         left="0",
         fill_price="50000",
         finish_as="filled",
@@ -112,6 +116,23 @@ def test_place_order_gate_reject_no_recheck(monkeypatch: pytest.MonkeyPatch):
         gateway.place_order(OrderRequest(contract=BTC, size=Decimal(1)))
     assert excinfo.value.label == "INVALID_PARAM"
     recheck.assert_not_called()
+
+
+def test_list_open_orders_supports_all_contracts_pagination_and_snapshot_fields(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    gateway = make_gateway()
+    list_orders = Mock(return_value=[make_sdk_order("open-1")])
+    monkeypatch.setattr(gateway._api, "list_futures_orders", list_orders)
+
+    [order] = gateway.list_orders(limit=100, offset=200)
+
+    list_orders.assert_called_once_with(gateway._settle, "open", offset=200, limit=100)
+    assert order.id == "open-1"
+    assert order.size == Decimal("-2")
+    assert order.price == Decimal("59000")
+    assert order.tif == "gtc"
+    assert order.reduce_only is True
 
 
 def make_sdk_position() -> SimpleNamespace:

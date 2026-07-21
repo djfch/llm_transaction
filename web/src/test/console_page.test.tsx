@@ -2,11 +2,11 @@
  * ConsolePage 冒烟 + WS 联动测试：mock api + 可控 useWs 后整页渲染，
  * 断言关键区域全部就位——TopBar / 账户面板 / 实时决策轮主角 / K线 / 持仓 /
  * 决策时间线 / Agent 笔记 / 成交记录 / 配置抽屉（RoundFocusProvider 由页面内部包裹）；
- * 并验证 WS round 事件触发 account/positions/equity/notes 联动刷新（装配层核心逻辑）。
+ * 并验证 WS round 事件触发账户、持仓、权益与两个笔记消费者的刷新。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AgentLiveState, AppConfig, RoundDetail, StatusInfo, WsMessage } from '../api/types'
+import type { AgentLiveState, AppConfig, OpenOrder, RoundDetail, StatusInfo, WsMessage } from '../api/types'
 import ConsolePage from '../pages/ConsolePage'
 
 const STATUS: StatusInfo = {
@@ -73,6 +73,8 @@ const holder = vi.hoisted(() => ({
     Promise.resolve({ equity: 10284.56, available: 9216.36, unrealised_pnl: 133.13 }),
   ),
   getPositions: vi.fn(() => Promise.resolve([])),
+  getOpenOrders: vi.fn<() => Promise<OpenOrder[]>>(() => Promise.resolve([])),
+  cancelOpenOrder: vi.fn(),
   getEquity: vi.fn(() =>
     Promise.resolve([
       { time: '2026-07-19T00:00:00Z', equity: 10000 },
@@ -80,7 +82,12 @@ const holder = vi.hoisted(() => ({
     ]),
   ),
   getNotes: vi.fn(() =>
-    Promise.resolve([{ time: '2026-07-20T00:00:00Z', content: '自检笔记', round_id: '' }]),
+    Promise.resolve({
+      items: [{ time: '2026-07-20T00:00:00Z', content: '自检笔记', round_id: '' }],
+      total: 1,
+      offset: 0,
+      limit: 4,
+    }),
   ),
   getDailyStats: vi.fn(() =>
     Promise.resolve({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 }),
@@ -92,12 +99,14 @@ vi.mock('../api', () => ({
     getStatus: () => Promise.resolve(STATUS),
     getAccount: () => holder.getAccount(),
     getPositions: () => holder.getPositions(),
+    getOpenOrders: () => holder.getOpenOrders(),
+    cancelOpenOrder: (...args: [string, string]) => holder.cancelOpenOrder(...args),
     getEquity: () => holder.getEquity(),
     getNotes: () => holder.getNotes(),
     getDailyStats: () => holder.getDailyStats(),
     getAgentLive: () => Promise.resolve(LIVE),
     getRound: () => Promise.resolve(DETAIL),
-    getRounds: () => Promise.resolve([]),
+    getRounds: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 5 }),
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
@@ -188,11 +197,12 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByRole('dialog', { hidden: true })).toHaveAttribute('aria-hidden', 'true')
   })
 
-  it('WS round 事件 → account/positions/equity/notes/dailyStats 五路联动刷新', async () => {
+  it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板与引文同步失效', async () => {
     const { rerender } = render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
     expect(holder.getAccount).toHaveBeenCalledTimes(1)
     expect(holder.getPositions).toHaveBeenCalledTimes(1)
+    expect(holder.getOpenOrders).toHaveBeenCalledTimes(1)
 
     // 后端广播轮结束（payload 仅 {round_id, ok, wake_source}，装配层只当失效信号）
     holder.lastMessage = {
@@ -203,12 +213,51 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
 
     await waitFor(() => expect(holder.getAccount).toHaveBeenCalledTimes(2))
     expect(holder.getPositions).toHaveBeenCalledTimes(2)
+    expect(holder.getOpenOrders).toHaveBeenCalledTimes(2)
     expect(holder.getEquity).toHaveBeenCalledTimes(2)
-    // notes = 装配层 2 次 + RoundTimeline 自管 2 次（挂载 + round 事件重拉 notesMap）
+    // notes = NotesPanel 与 RoundTimeline 引文各 2 次（挂载 + round 事件刷新）
     expect(holder.getNotes).toHaveBeenCalledTimes(4)
     // 当日统计同步联动（新轮成交改变当日口径）
     expect(holder.getDailyStats).toHaveBeenCalledTimes(2)
   })
+
+
+describe('ConsolePage 挂单刷新', () => {
+  it('撤单成功后同时重新请求 openOrders 与 account', async () => {
+    holder.getOpenOrders
+      .mockResolvedValueOnce([
+        {
+          id: 'order-refresh',
+          contract: 'ETH_USDT',
+          size: 79,
+          left: 79,
+          price: 1900,
+          tif: 'gtc',
+          reduce_only: false,
+          status: 'open',
+        },
+      ])
+      .mockResolvedValue([])
+    holder.cancelOpenOrder.mockResolvedValue({
+      id: 'order-refresh',
+      contract: 'ETH_USDT',
+      status: 'finished',
+      finish_as: 'cancelled',
+      warning: '',
+    })
+
+    render(<ConsolePage />)
+    await screen.findByText('ETH_USDT')
+
+    fireEvent.click(screen.getByRole('button', { name: '手动撤单' }))
+    fireEvent.click(screen.getByRole('button', { name: '再次点击确认撤单' }))
+
+    await waitFor(() => expect(holder.cancelOpenOrder).toHaveBeenCalledWith('ETH_USDT', 'order-refresh'))
+    await waitFor(() => expect(holder.getOpenOrders).toHaveBeenCalledTimes(2))
+    expect(holder.getAccount).toHaveBeenCalledTimes(2)
+  })
+})
+
 
   it('paper 重置权益 → account/positions/equity/dailyStats 四路联动刷新（回归 M3）', async () => {
     render(<ConsolePage />)

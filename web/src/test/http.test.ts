@@ -82,38 +82,45 @@ describe('http 适配层（数字字符串 → number）', () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
-        '/api/notes': {
+        '/api/notes?offset=0&limit=20': {
           items: [
             { id: 1, round_id: 'r1', content: '笔记', created_at: 1784367450 },
             { id: 2, content: '无归属笔记', created_at: 1784367449 },
           ],
+          total: 2,
+          offset: 0,
+          limit: 20,
         },
       }),
     )
     const notes = await httpApi.getNotes()
-    expect(notes).toHaveLength(2)
-    expect(notes[0].content).toBe('笔记')
-    expect(notes[0].round_id).toBe('r1')
-    expect(new Date(notes[0].time).getTime()).toBe(1784367450000)
-    expect(notes[1].round_id).toBe('') // 后端缺省 → 空串（无归属）
+    expect(notes.total).toBe(2)
+    expect(notes.items).toHaveLength(2)
+    expect(notes.items[0].content).toBe('笔记')
+    expect(notes.items[0].round_id).toBe('r1')
+    expect(new Date(notes.items[0].time).getTime()).toBe(1784367450000)
+    expect(notes.items[1].round_id).toBe('') // 后端缺省 → 空串（无归属）
   })
 
-  it('getNotes：乱序输入按 created_at 降序输出（回归：后端 recent_notes 最旧在前，消费侧契约=最新在前）', async () => {
+  it('getNotes：乱序输入按 created_at 降序输出，并保留分页元数据', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
-        // 后端 /api/notes 原样透传 recent_notes 的正序（最旧在前）
-        '/api/notes': {
+        '/api/notes?offset=0&limit=20': {
           items: [
             { id: 1, round_id: 'r1', content: '最旧', created_at: 100 },
             { id: 2, round_id: 'r2', content: '最新', created_at: 300 },
             { id: 3, round_id: 'r3', content: '中间', created_at: 200 },
           ],
+          total: 9,
+          offset: 0,
+          limit: 20,
         },
       }),
     )
     const notes = await httpApi.getNotes()
-    expect(notes.map((n) => n.content)).toEqual(['最新', '中间', '最旧'])
+    expect(notes.items.map((n) => n.content)).toEqual(['最新', '中间', '最旧'])
+    expect(notes.total).toBe(9)
   })
 
   it('getDailyStats：当日统计三键数字字符串 → number（风控口径：realized_pnl/orders_today/max_orders_per_day）', async () => {
@@ -136,6 +143,7 @@ describe('http 适配层（数字字符串 → number）', () => {
         '/api/rounds?offset=0&limit=1': {
           offset: 0,
           limit: 1,
+          total: 1,
           items: [
             {
               round_id: 'r1',
@@ -148,9 +156,10 @@ describe('http 适配层（数字字符串 → number）', () => {
       }),
     )
     const rounds = await httpApi.getRounds(0, 1)
-    expect(rounds[0].summary).toBe('权益 10000，持仓 0')
-    expect(rounds[0].wake_source).toBe('timer:60min')
-    expect(new Date(rounds[0].started_at).getTime()).toBe(1784375288000)
-    expect(rounds[0].pnl_after).toBeUndefined()
+    expect(rounds.total).toBe(1)
+    expect(rounds.items[0].summary).toBe('权益 10000，持仓 0')
+    expect(rounds.items[0].wake_source).toBe('timer:60min')
+    expect(new Date(rounds.items[0].started_at).getTime()).toBe(1784375288000)
+    expect(rounds.items[0].pnl_after).toBeUndefined()
   })
 })
