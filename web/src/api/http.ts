@@ -14,13 +14,13 @@ import type {
   DailyStats,
   EquityPoint,
   KillSwitchResult,
-  Note,
+  NotesPageResult,
   PaperResetResult,
   OpenOrder,
   Position,
   PutConfigResult,
   RoundDetail,
-  RoundSummary,
+  RoundsPageResult,
   SecretsStatus,
   SetSecretsBody,
   SetSecretsResult,
@@ -166,22 +166,24 @@ function adaptEquity(raw: RawEquity): EquityPoint[] {
   }))
 }
 
-/** 后端 /api/notes：{items:[{created_at(Unix秒), content, round_id, ...}]} */
-interface RawNotes {
+/** 后端 /api/notes：标准分页壳 + created_at(Unix秒) 的笔记项。 */
+interface RawNotesPage {
   items: Array<{ created_at: number; content: string; round_id?: string }>
+  total: number
+  offset: number
+  limit: number
 }
 
-/** 后端 notes 响应 → 前端 Note[]（created_at 转 ISO time，round_id 透传，缺省空串）。
- * 后端 recent_notes 为正序（最旧在前，供 agent 拼上下文）；前端消费侧契约=最新在前
- * （NotesPanel 最新在上 / RoundTimeline 同轮取首条=最新），故适配层统一按 created_at 降序。 */
-function adaptNotes(raw: RawNotes): Note[] {
-  return [...raw.items]
-    .sort((a, b) => b.created_at - a.created_at)
-    .map((n) => ({
+/** 后端 notes 分页响应 → 前端 NotesPageResult：时间转 ISO，并防御性保持最新在前。 */
+function adaptNotes(raw: RawNotesPage): NotesPageResult {
+  return {
+    ...raw,
+    items: [...raw.items].sort((a, b) => b.created_at - a.created_at).map((n) => ({
       time: new Date(n.created_at * 1000).toISOString(),
       content: n.content,
       round_id: n.round_id ?? '',
-    }))
+    })),
+  }
 }
 
 /** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 */
@@ -192,20 +194,25 @@ interface RawRoundItem {
   created_at: number
 }
 
-interface RawRounds {
+interface RawRoundsPage {
   items: RawRoundItem[]
+  total: number
+  offset: number
+  limit: number
 }
 
-/** 后端 rounds 响应 → 前端 RoundSummary[]（started_at←created_at、summary←context_summary；
- * pnl_after 后端暂无此口径，留 undefined，页面显示 '-'） */
-function adaptRounds(raw: RawRounds): RoundSummary[] {
-  return raw.items.map((r) => ({
-    round_id: r.round_id,
-    started_at: new Date(r.created_at * 1000).toISOString(),
-    wake_source: r.wake_source,
-    summary: r.context_summary,
-    pnl_after: undefined,
-  }))
+/** 后端 rounds 分页响应 → 前端 RoundsPageResult，摘要字段转换集中在此处。 */
+function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
+  return {
+    ...raw,
+    items: raw.items.map((r) => ({
+      round_id: r.round_id,
+      started_at: new Date(r.created_at * 1000).toISOString(),
+      wake_source: r.wake_source,
+      summary: r.context_summary,
+      pnl_after: undefined,
+    })),
+  }
 }
 
 /** 后端 /api/daily_stats：数值字段可能是数字字符串（Decimal 序列化） */
@@ -230,6 +237,18 @@ async function fetchTrades(offset: number, limit: number, contract?: string): Pr
   return { ...raw, items: raw.items.map(adaptTrade) }
 }
 
+/** GET /api/rounds 适配：使用 URLSearchParams 固化分页参数并转换摘要字段。 */
+async function fetchRounds(offset: number, limit: number): Promise<RoundsPageResult> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  return adaptRounds(await request<RawRoundsPage>(`/rounds?${qs.toString()}`))
+}
+
+/** GET /api/notes 适配：默认保留旧调用的前 20 条行为，同时返回分页元数据。 */
+async function fetchNotes(offset = 0, limit = 20): Promise<NotesPageResult> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  return adaptNotes(await request<RawNotesPage>(`/notes?${qs.toString()}`))
+}
+
 /** GET /api/candles 适配：取出 items 数组（字段名 t/o/h/l/c/v 与前端一致） */
 async function fetchCandles(contract: string, interval: string, limit = 200): Promise<Candle[]> {
   const qs = new URLSearchParams({ contract, interval, limit: String(limit) })
@@ -243,8 +262,7 @@ export const httpApi: ApiClient = {
   getPositions: async () =>
     (await request<RawPosition[]>('/positions')).map(adaptPosition),
   getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
-  getRounds: async (offset, limit) =>
-    adaptRounds(await request<RawRounds>(`/rounds?offset=${offset}&limit=${limit}`)),
+  getRounds: fetchRounds,
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
   // 响应契约即最终形态（args/result 已解析、started_at 为 Unix 秒），无需适配
   getAgentLive: () => request<AgentLiveState>('/agent/live'),
@@ -263,7 +281,7 @@ export const httpApi: ApiClient = {
   startAgent: () => request<AgentStateResult>('/agent/start', { method: 'POST' }),
   stopAgent: () => request<AgentStateResult>('/agent/stop', { method: 'POST' }),
   getEquity: async () => adaptEquity(await request<RawEquity>('/equity')),
-  getNotes: async () => adaptNotes(await request<RawNotes>('/notes')),
+  getNotes: fetchNotes,
   getDailyStats: async () => adaptDailyStats(await request<RawDailyStats>('/daily_stats')),
   getConfig: () => request<AppConfig>('/config'),
   putConfig: (config) =>

@@ -54,6 +54,17 @@ export interface RoundSummary {
   pnl_after?: number // 本轮结束后的累计盈亏（后端暂无此口径，缺失时显示 '-'）
 }
 
+/** 通用分页结果：items(当前页内容) 与 total(匹配总数) 由服务端一并返回。 */
+export interface PageResult<T> {
+  items: T[]
+  total: number // 全部符合条件的记录数
+  offset: number // 当前页首项的零基偏移量
+  limit: number // 本次请求的单页条数
+}
+
+/** 决策轮分页结果：GET /api/rounds?offset=&limit=。 */
+export type RoundsPageResult = PageResult<RoundSummary>
+
 /** 工具调用记录（审计详情内嵌） */
 export interface ToolCall {
   seq: number // 调用序号
@@ -106,13 +117,8 @@ export interface Trade {
   source: string // 来源：llm_open / llm_close / user_close / liquidation / tpsl_close / ''
 }
 
-/** 成交记录分页结果：GET /api/trades */
-export interface TradesPageResult {
-  items: Trade[]
-  total: number // 符合筛选条件的总笔数
-  offset: number
-  limit: number
-}
+/** 成交记录分页结果：GET /api/trades。 */
+export type TradesPageResult = PageResult<Trade>
 
 /** K 线数据点：GET /api/candles（t 为 Unix 秒，价格字段为数字） */
 export interface Candle {
@@ -163,6 +169,9 @@ export interface Note {
   content: string
   round_id: string // 归属决策轮 ID（空串 = 无归属，如历史/手动记录）
 }
+
+/** Agent 笔记分页结果：GET /api/notes?offset=&limit=。 */
+export type NotesPageResult = PageResult<Note>
 
 /** 当日统计：GET /api/daily_stats（风控同一口径：服务器时区自然日、按 mode 过滤、仅开仓单计数） */
 export interface DailyStats {
@@ -265,7 +274,7 @@ export interface ApiClient {
   getPositions(): Promise<Position[]>
   /** 读取交易所或模拟撮合引擎当前仍为 open 的订单。 */
   getOpenOrders(): Promise<OpenOrder[]>
-  getRounds(offset: number, limit: number): Promise<RoundSummary[]>
+  getRounds(offset: number, limit: number): Promise<RoundsPageResult>
   getRound(roundId: string): Promise<RoundDetail>
   getAgentLive(): Promise<AgentLiveState>
   getTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult>
@@ -277,7 +286,7 @@ export interface ApiClient {
   startAgent(): Promise<AgentStateResult>
   stopAgent(): Promise<AgentStateResult>
   getEquity(): Promise<EquityPoint[]>
-  getNotes(): Promise<Note[]>
+  getNotes(offset?: number, limit?: number): Promise<NotesPageResult>
   getDailyStats(): Promise<DailyStats>
   getConfig(): Promise<AppConfig>
   putConfig(config: AppConfig): Promise<PutConfigResult>

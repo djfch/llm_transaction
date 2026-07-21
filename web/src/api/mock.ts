@@ -104,7 +104,7 @@ const watchlist = { settle: 'usdt', contracts: ['BTC_USDT', 'ETH_USDT'] }
 
 const WAKE_SOURCES = ['定时唤醒', '价格触发', '启动']
 
-/** 生成 37 轮决策摘要（倒序：最新在前），用于演示分页 */
+/** 生成 37 轮决策摘要（倒序：最新在前），用于演示分页。 */
 function buildRounds(): RoundSummary[] {
   return Array.from({ length: 37 }, (_, i) => {
     const seq = 37 - i
@@ -169,6 +169,11 @@ const notes: Note[] = [
   { time: new Date(Date.now() - 3600_000).toISOString(), content: 'BTC 4h 级别仍处上升通道，回调即加多机会。', round_id: rounds[0].round_id },
   { time: new Date(Date.now() - 7200_000).toISOString(), content: '资金费率偏高，注意多头持仓成本。', round_id: '' },
   { time: new Date(Date.now() - 10_800_000).toISOString(), content: 'ETH/BTC 汇率走弱，空 ETH 对冲仓位继续持有。', round_id: rounds[2].round_id },
+  ...Array.from({ length: 9 }, (_, i) => ({
+    time: new Date(Date.now() - (i + 4) * 3600_000).toISOString(),
+    content: `第 ${i + 4} 条模拟策略笔记：等待价格与成交量共同确认。`,
+    round_id: i % 2 === 0 ? rounds[i + 4]?.round_id ?? '' : '',
+  })),
 ]
 
 /** K 线周期间隔（秒），用于 mock 时间轴 */
@@ -222,7 +227,8 @@ export const mockApi: ApiClient = {
     reply({ equity: paperEquity, available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100), unrealised_pnl: 255.6 }),
   getPositions: () => reply(positions.map((p) => ({ ...p }))),
   getOpenOrders: () => reply(openOrders.map((order) => ({ ...order }))),
-  getRounds: (offset, limit) => reply(rounds.slice(offset, offset + limit)),
+  getRounds: (offset, limit) =>
+    reply({ items: rounds.slice(offset, offset + limit), total: rounds.length, offset, limit }),
   getRound: (roundId) => {
     const meta = rounds.find((r) => r.round_id === roundId)
     if (!meta) return Promise.reject(new Error(`决策轮不存在: ${roundId}`))
@@ -274,7 +280,8 @@ export const mockApi: ApiClient = {
     return reply({ agent_running: agentRunning })
   },
   getEquity: () => reply(equity),
-  getNotes: () => reply(notes),
+  getNotes: (offset = 0, limit = 20) =>
+    reply({ items: notes.slice(offset, offset + limit), total: notes.length, offset, limit }),
   // 固定值：与 mock 成交叙事自洽（当日若干笔已实现合计），上限随风控配置联动
   getDailyStats: () =>
     reply({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: config.risk.max_orders_per_day }),

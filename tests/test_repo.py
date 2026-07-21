@@ -74,6 +74,16 @@ async def test_decisions_pagination(repo: Repo):
     assert [d.round_id for d in page1] == ["r4", "r3"]  # 最新在前
     assert [d.round_id for d in page2] == ["r2", "r1"]
     assert [d.round_id for d in page3] == ["r0"]
+    assert await repo.count_decisions() == 5
+
+
+async def test_decisions_page_returns_items_and_total_from_one_query(repo: Repo):
+    """越界页仍要带回总数，供前端将页码回退到最后有效页。"""
+    for i in range(3):
+        await repo.save_decision(round_id=f"page-r{i}", mode="paper")
+    items, total = await repo.list_decisions_page(limit=2, offset=4)
+    assert items == []
+    assert total == 3
 
 
 # ---------- orders ----------
@@ -362,6 +372,22 @@ async def test_recent_notes(repo: Repo):
     assert [n.content for n in notes] == ["笔记2", "笔记3", "笔记4"]  # 时间正序
     all_notes = await repo.recent_notes(100)
     assert len(all_notes) == 5
+    page1 = await repo.list_notes(limit=2, offset=0)
+    page2 = await repo.list_notes(limit=2, offset=2)
+    assert [note.content for note in page1] == ["笔记4", "笔记3"]
+    assert [note.content for note in page2] == ["笔记2", "笔记1"]
+    assert await repo.count_notes() == 5
+
+
+async def test_notes_page_returns_latest_items_and_total(repo: Repo):
+    """笔记分页查询使用同一结果快照，越界页也保留总数。"""
+    for i in range(3):
+        await repo.add_note("r1", f"分页笔记{i}")
+    first_items, first_total = await repo.list_notes_page(limit=2, offset=0)
+    empty_items, empty_total = await repo.list_notes_page(limit=2, offset=4)
+    assert [note.content for note in first_items] == ["分页笔记2", "分页笔记1"]
+    assert first_total == empty_total == 3
+    assert empty_items == []
 
 
 # ---------- alerts ----------

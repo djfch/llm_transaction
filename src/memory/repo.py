@@ -35,6 +35,23 @@ def _order_from_row(row: aiosqlite.Row) -> OrderRecord:
     return OrderRecord(**d)
 
 
+# 单条 CTE 同时取得列表与总数，避免两次 SELECT 被新写入穿插而产生不一致的分页响应。
+_DECISIONS_PAGE_SQL = """
+WITH total AS (SELECT COUNT(*) AS value FROM decisions),
+page AS (SELECT * FROM decisions ORDER BY id DESC LIMIT ? OFFSET ?)
+SELECT page.*, total.value AS total
+FROM total LEFT JOIN page ON 1 = 1
+ORDER BY page.id DESC
+"""
+_NOTES_PAGE_SQL = """
+WITH total AS (SELECT COUNT(*) AS value FROM notes),
+page AS (SELECT * FROM notes ORDER BY id DESC LIMIT ? OFFSET ?)
+SELECT page.*, total.value AS total
+FROM total LEFT JOIN page ON 1 = 1
+ORDER BY page.id DESC
+"""
+
+
 class Repo:
     """存取方法集合。所有写操作立即 commit。"""
 
@@ -80,6 +97,17 @@ class Repo:
             "SELECT * FROM decisions ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
         )
         return [Decision(**dict(r)) for r in await cur.fetchall()]
+
+    async def count_decisions(self) -> int:
+        """返回全部决策轮总数，供监控 API 的分页器计算总页数。"""
+        cur = await self._conn.execute("SELECT COUNT(*) AS total FROM decisions")
+        row = await cur.fetchone()
+        return int(row["total"] if row is not None else 0)
+
+    async def list_decisions_page(self, limit: int, offset: int) -> tuple[list[Decision], int]:
+        """以单条 SQL 快照返回决策页及总数，越界页仍保留准确总数。"""
+        rows, total = await self._list_page_rows(_DECISIONS_PAGE_SQL, limit, offset)
+        return [Decision(**self._row_without_total(row)) for row in rows], total
 
     # ---------- orders ----------
 
@@ -283,6 +311,40 @@ class Repo:
         notes = [Note(**dict(r)) for r in await cur.fetchall()]
         notes.reverse()
         return notes
+
+    async def list_notes(self, limit: int = 50, offset: int = 0) -> list[Note]:
+        """分页读取笔记，按 id 倒序返回，确保监控界面最新内容位于第一页。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM notes ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
+        )
+        return [Note(**dict(r)) for r in await cur.fetchall()]
+
+    async def count_notes(self) -> int:
+        """返回全部笔记总数，供监控 API 的分页器计算总页数。"""
+        cur = await self._conn.execute("SELECT COUNT(*) AS total FROM notes")
+        row = await cur.fetchone()
+        return int(row["total"] if row is not None else 0)
+
+    async def list_notes_page(self, limit: int, offset: int) -> tuple[list[Note], int]:
+        """以单条 SQL 快照返回最新优先的笔记页及总数，避免分页状态撕裂。"""
+        rows, total = await self._list_page_rows(_NOTES_PAGE_SQL, limit, offset)
+        return [Note(**self._row_without_total(row)) for row in rows], total
+
+    async def _list_page_rows(
+        self, sql: str, limit: int, offset: int
+    ) -> tuple[list[aiosqlite.Row], int]:
+        """执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)。"""
+        cur = await self._conn.execute(sql, (limit, offset))
+        raw_rows = await cur.fetchall()
+        total = int(raw_rows[0]["total"]) if raw_rows else 0
+        return [row for row in raw_rows if row["id"] is not None], total
+
+    @staticmethod
+    def _row_without_total(row: aiosqlite.Row) -> dict[str, object]:
+        """移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段。"""
+        data = dict(row)
+        data.pop("total", None)
+        return data
 
     # ---------- alerts ----------
 

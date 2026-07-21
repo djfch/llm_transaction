@@ -2,13 +2,13 @@
  * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控 / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
- * 数据装配：status/account/positions/openOrders/equity/notes/daily 七路查询经 useApiData 注入面板 props；
- * WS round_start/round 事件联动刷新 account/positions/openOrders/equity/notes/daily（实时轮/时间线/K线/成交各自自管）；
+ * 数据装配：status/account/positions/openOrders/equity/daily 六路查询经 useApiData 注入面板 props；
+ * WS round_start/round 事件联动刷新账户、持仓、挂单、权益与当日统计；时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { AccountInfo, DailyStats, EquityPoint, Note, OpenOrder, Position } from '../api/types'
+import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 import EquityMiniChart from '../components/console/EquityMiniChart'
@@ -34,14 +34,13 @@ function equityChangePctOf(points: EquityPoint[]): number | undefined {
   return ((sorted[sorted.length - 1].equity - first) / first) * 100
 }
 
-/** 页面数据：七路查询由 status/account/positions/openOrders/equity/notes/daily 组成；决策事件同步刷新其中会变化的账户、持仓与挂单。 */
+/** 页面数据：状态、账户、持仓、挂单、权益与当日统计；笔记分页由 NotesPanel 独立管理。 */
 function useConsoleData() {
   const status = useApiData(() => api.getStatus(), [])
   const account = useApiData(() => api.getAccount(), [])
   const positions = useApiData(() => api.getPositions(), [])
   const openOrders = useApiData(() => api.getOpenOrders(), [])
   const equity = useApiData(() => api.getEquity(), [])
-  const notes = useApiData(() => api.getNotes(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
   const daily = useApiData(() => api.getDailyStats(), [])
   const { connected, lastMessage } = useWs()
@@ -49,7 +48,6 @@ function useConsoleData() {
   const { reload: reloadPositions } = positions
   const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadEquity } = equity
-  const { reload: reloadNotes } = notes
   const { reload: reloadDaily } = daily
   useEffect(() => {
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
@@ -57,10 +55,9 @@ function useConsoleData() {
     reloadPositions()
     reloadOpenOrders()
     reloadEquity()
-    reloadNotes()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadAccount, reloadPositions, reloadOpenOrders, reloadEquity, reloadNotes, reloadDaily])
-  return { status, account, positions, openOrders, equity, notes, daily, connected }
+  }, [lastMessage, reloadAccount, reloadPositions, reloadOpenOrders, reloadEquity, reloadDaily])
+  return { status, account, positions, openOrders, equity, daily, connected }
 }
 
 /** 首屏：右栏将当前持仓与未成交挂单相邻展示，便于一起核对和操作。 */
@@ -104,8 +101,8 @@ function FirstScreen({
   )
 }
 
-/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；第三屏：成交记录全宽 */
-function SecondScreen({ notes }: { notes: Note[] }) {
+/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；第三屏：成交记录全宽。 */
+function SecondScreen() {
   return (
     <>
       <section className="mt-6 grid grid-cols-12 gap-4">
@@ -113,7 +110,7 @@ function SecondScreen({ notes }: { notes: Note[] }) {
           <RoundTimeline />
         </div>
         <aside className="col-span-12 lg:col-span-4">
-          <NotesPanel notes={notes} />
+          <NotesPanel />
         </aside>
       </section>
       <section className="mt-8">
@@ -139,7 +136,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, account, positions, openOrders, equity, notes, daily, connected } = useConsoleData()
+  const { status, account, positions, openOrders, equity, daily, connected } = useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   // 权益曲线首末点涨跌幅（账户面板累计涨跌行；空数据/首点为 0 → undefined 不渲染）
   const equityChangePct = useMemo(() => equityChangePctOf(equity.data ?? []), [equity.data])
@@ -190,7 +187,6 @@ export default function ConsolePage() {
             ['账户', account.error],
             ['持仓', positions.error],
             ['权益曲线', equity.error],
-            ['笔记', notes.error],
           ]}
         />
         <FirstScreen
@@ -204,7 +200,7 @@ export default function ConsolePage() {
           onPositionsChanged={onPositionsChanged}
           onOpenOrdersChanged={onOpenOrdersChanged}
         />
-        <SecondScreen notes={notes.data ?? []} />
+        <SecondScreen />
       </main>
       <ConfigDrawer open={configOpen} onClose={closeConfig} onReset={onPaperReset} />
     </RoundFocusProvider>

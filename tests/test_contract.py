@@ -6,9 +6,9 @@
 - GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price
 - GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
-- GET  /api/notes → items[] 含 content/created_at/round_id
+- GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
-- GET  /api/rounds → items[] 含 round_id 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error
+- GET  /api/rounds → items[] 含 round_id 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
@@ -228,6 +228,7 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
     _typed(body["points"][0], "t:n equity:n", "/api/equity points[0]")
     notes = await _get(client, "/api/notes")
     assert notes["items"], "/api/notes items 应非空"
+    _typed(notes, "total:i offset:i limit:i", "/api/notes")
     _typed(notes["items"][0], "content:s created_at:n round_id:s", "/api/notes items[0]")
     daily = await _get(client, "/api/daily_stats")
     _typed(daily, "realized_pnl:n orders_today:i max_orders_per_day:i", "/api/daily_stats")
@@ -236,6 +237,7 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
 async def test_rounds_contract(client: AsyncClient):
     body = await _get(client, "/api/rounds")
     assert body["items"], "/api/rounds items 应非空"
+    _typed(body, "total:i offset:i limit:i", "/api/rounds")
     item = body["items"][0]
     _typed(item, "round_id:s", "/api/rounds items[0]")
     _typed(item["audit"], "round_id:s prompt_md5:s started_at:n ended_at:n error:s", "audit 摘要")

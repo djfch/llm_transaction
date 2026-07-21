@@ -149,11 +149,17 @@ async def test_account_503_when_gateway_missing(deps: ServerDeps, client: AsyncC
 async def test_rounds_list_and_pagination(client: AsyncClient):
     r = await client.get("/api/rounds", params={"offset": 0, "limit": 10})
     assert r.status_code == 200
-    items = r.json()["items"]
+    body = r.json()
+    items = body["items"]
     assert len(items) == 1 and items[0]["round_id"] == "r1"
+    assert body["total"] == 1 and body["offset"] == 0 and body["limit"] == 10
     assert "llm_raw" not in items[0]  # 列表不含 LLM 原文
     assert items[0]["audit"]["prompt_md5"] == "md5"
-    assert (await client.get("/api/rounds", params={"offset": 1})).json()["items"] == []
+    beyond = (await client.get("/api/rounds", params={"offset": 1})).json()
+    assert beyond["items"] == [] and beyond["total"] == 1
+    assert (await client.get("/api/rounds", params={"offset": -1})).status_code == 422
+    assert (await client.get("/api/rounds", params={"limit": 0})).status_code == 422
+    assert (await client.get("/api/rounds", params={"limit": 201})).status_code == 422
 
 
 async def test_round_detail_and_404(client: AsyncClient):
@@ -196,9 +202,17 @@ async def test_equity_series(client: AsyncClient):
     assert equities == [10099.0, 10048.0]  # 10000+100-1, 再 -50-1
 
 
-async def test_notes(client: AsyncClient):
-    items = (await client.get("/api/notes")).json()["items"]
-    assert items[0]["content"] == "第一条笔记"
+async def test_notes(client: AsyncClient, deps: ServerDeps):
+    for index in range(2, 6):
+        await deps.repo.add_note("r1", f"第{index}条笔记")
+    first = (await client.get("/api/notes", params={"offset": 0, "limit": 2})).json()
+    assert [item["content"] for item in first["items"]] == ["第5条笔记", "第4条笔记"]
+    assert first["total"] == 5 and first["offset"] == 0 and first["limit"] == 2
+    beyond = (await client.get("/api/notes", params={"offset": 5, "limit": 2})).json()
+    assert beyond["items"] == [] and beyond["total"] == 5
+    assert (await client.get("/api/notes", params={"offset": -1})).status_code == 422
+    assert (await client.get("/api/notes", params={"limit": 0})).status_code == 422
+    assert (await client.get("/api/notes", params={"limit": 201})).status_code == 422
 
 
 async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):

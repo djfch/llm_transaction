@@ -1,95 +1,88 @@
 /**
- * 决策时间线：决策轮卡片流（最新在前）。
- * 数据自管：getRounds(offset, 20) 分页「加载更多」追加（按 round_id 去重）；
- * WS round 事件仅作失效信号（payload 无 started_at/summary，见 api/types.ts 契约），
- * 收到后重拉第一页去重前合，新轮以完整数据置顶。
- * 定位响应：useRoundFocus().target 变化 → 已加载列表命中则展开+scrollIntoView+描边高亮 2s；
- * 未命中则逐页追加加载（上限 10 页）再找，仍无 → 顶部提示「未找到该决策轮」。
- * 笔记引文：挂载时 + WS round 事件时 getNotes()，建 round_id → 笔记 映射，归属卡片在 summary 下嵌引文。
+ * 决策时间线：服务端分页展示决策轮；卡片详情按需加载，笔记引文独立读取最新内容。
+ * WebSocket round 事件只作失效信号，当前页和总数均以 REST 响应为准。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import type { Note, RoundSummary } from '../../api/types'
+import { useApiData } from '../../hooks/useApiData'
+import { usePageState } from '../../hooks/usePageState'
 import { useRoundFocus } from '../../hooks/useRoundFocus'
 import { useWs } from '../../hooks/useWs'
 import StateHint from '../StateHint'
+import PaginationControls from './PaginationControls'
 import TimelineCard, { type RoundNote } from './TimelineCard'
 
-/** 每页轮数 */
-const PAGE_SIZE = 20
-/** focus 定位时逐页加载的页数上限 */
-const MAX_SEARCH_PAGES = 10
+/** 决策时间线每页条数，由已确认的交互规范固定为 5。 */
+const PAGE_SIZE = 5
+/** 笔记引文读取最近条数，保留原有最新 20 条的展示口径。 */
+const NOTE_QUOTE_LIMIT = 20
+/** 空决策页复用同一引用，避免 effect 依赖因新建空数组而反复变化。 */
+const EMPTY_ROUNDS: RoundSummary[] = []
 
-/** 分页追加合并：按 round_id 去重（与 WS 失效刷新前合互不冲突） */
-function mergeAppend(prev: RoundSummary[], page: RoundSummary[]): RoundSummary[] {
-  const seen = new Set(prev.map((r) => r.round_id))
-  return [...prev, ...page.filter((r) => !seen.has(r.round_id))]
-}
-
-/** WS 失效刷新前合：重拉的第一页置顶（page 为完整口径，优先于本地同 id 旧数据） */
-function mergePrepend(prev: RoundSummary[], page: RoundSummary[]): RoundSummary[] {
-  const seen = new Set(page.map((r) => r.round_id))
-  return [...page, ...prev.filter((r) => !seen.has(r.round_id))]
-}
-
-/** 笔记列表 → round_id 映射（getNotes 契约=最新在前，同轮多条首见即最新；空归属不入映射） */
+/** 笔记列表转换为 round_id(决策轮 ID) 到最新引文的映射。 */
 function buildNotesMap(list: Note[]): Map<string, RoundNote> {
   const map = new Map<string, RoundNote>()
-  for (const n of list) {
-    if (n.round_id && !map.has(n.round_id)) map.set(n.round_id, { content: n.content, time: n.time })
+  for (const note of list) {
+    if (note.round_id && !map.has(note.round_id)) {
+      map.set(note.round_id, { content: note.content, time: note.time })
+    }
   }
   return map
 }
 
-/**
- * focus 搜索：已加载未命中时逐页追加（上限 MAX_SEARCH_PAGES 页），返回最终是否命中。
- * fetchPage 负责取数并同步进组件 state；页不满即数据耗尽。
- */
-async function searchRound(
-  loaded: RoundSummary[],
-  roundId: string,
-  fetchPage: (offset: number) => Promise<RoundSummary[]>,
-  isCancelled: () => boolean,
-): Promise<boolean> {
-  let list = loaded
-  if (list.some((r) => r.round_id === roundId)) return true
-  for (let pages = 0; pages < MAX_SEARCH_PAGES; pages += 1) {
-    const page = await fetchPage(list.length)
-    if (isCancelled() || page.length === 0) return false
-    list = mergeAppend(list, page)
-    if (list.some((r) => r.round_id === roundId)) return true
-    if (page.length < PAGE_SIZE) return false
-  }
-  return false
+/** 读取时间线卡片使用的最新笔记引文，失败由调用方静默保持旧映射。 */
+async function fetchNotesMap(): Promise<Map<string, RoundNote>> {
+  const page = await api.getNotes(0, NOTE_QUOTE_LIMIT)
+  return buildNotesMap(page.items)
 }
 
+/** 查找完整历史中的目标决策轮，命中时返回其零基页码。 */
+async function findRoundPage(
+  roundId: string,
+  currentPage: number,
+  currentItems: RoundSummary[],
+  totalPages: number,
+  isCancelled: () => boolean,
+): Promise<number | null> {
+  if (currentItems.some((round) => round.round_id === roundId)) return currentPage
+  for (let page = 0; page < totalPages; page += 1) {
+    if (page === currentPage) continue
+    const result = await api.getRounds(page * PAGE_SIZE, PAGE_SIZE)
+    if (isCancelled()) return null
+    if (result.items.some((round) => round.round_id === roundId)) return page
+  }
+  return null
+}
+
+/** 分页展示决策轮，并保留外部焦点定位、卡片展开与笔记引文能力。 */
 export default function RoundTimeline() {
-  const [rounds, setRounds] = useState<RoundSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [moreError, setMoreError] = useState<string | null>(null)
-  const [hasMore, setHasMore] = useState(true)
+  const [total, setTotal] = useState(0)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [hlId, setHlId] = useState<string | null>(null)
+  const [highlightId, setHighlightId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  // round_id → 归属笔记（卡片引文用；空 round_id 或无归属轮不入映射）
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null)
   const [notesMap, setNotesMap] = useState<ReadonlyMap<string, RoundNote>>(new Map())
-
-  // rounds 的同步快照（focus 搜索读取，避免 effect 依赖列表数据反复触发）
-  const roundsRef = useRef(rounds)
-  roundsRef.current = rounds
-  // 卡片锚点：round_id → article 元素（scrollIntoView 用）
+  const { page, totalPages, goToPage } = usePageState(total, PAGE_SIZE)
+  const query = useApiData(
+    () => api.getRounds(page * PAGE_SIZE, PAGE_SIZE),
+    [page],
+  )
+  const { lastMessage } = useWs()
+  const { target } = useRoundFocus()
   const cardRefs = useRef(new Map<string, HTMLElement>())
+  const items = query.data?.items ?? EMPTY_ROUNDS
+  const { reload } = query
 
-  // 挂载时拉一次笔记建 round_id 映射（契约=最新在前，同轮首见即最新）；
-  // 引文为锦上添花：失败静默兜底，卡片照常渲染
+  useEffect(() => {
+    if (query.data) setTotal(query.data.total)
+  }, [query.data])
+
   useEffect(() => {
     let alive = true
-    api
-      .getNotes()
-      .then((list) => {
-        if (alive) setNotesMap(buildNotesMap(list))
+    fetchNotesMap()
+      .then((map) => {
+        if (alive) setNotesMap(map)
       })
       .catch(() => {})
     return () => {
@@ -97,103 +90,89 @@ export default function RoundTimeline() {
     }
   }, [])
 
-  /** 取一页并追加进列表（首屏/加载更多/focus 搜索共用） */
-  const fetchAndAppend = useCallback(async (offset: number): Promise<RoundSummary[]> => {
-    const page = await api.getRounds(offset, PAGE_SIZE)
-    setRounds((prev) => mergeAppend(prev, page))
-    setHasMore(page.length === PAGE_SIZE)
-    return page
-  }, [])
-
-  // 首屏加载第一页
-  useEffect(() => {
-    let alive = true
-    fetchAndAppend(0)
-      .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e))
-      })
-      .finally(() => {
-        if (alive) setLoading(false)
-      })
-    return () => {
-      alive = false
-    }
-  }, [fetchAndAppend])
-
-  // WS round 事件：payload 仅 {round_id, ok, wake_source}（契约见 api/types.ts），不作数据源，
-  // 只当失效信号——重拉第一页去重前合（新轮以完整数据置顶；空 round_id 幽灵轮不入库，天然免疫）；
-  // 同步重拉笔记映射（新轮可能带来新归属笔记）
-  const { lastMessage } = useWs()
   useEffect(() => {
     if (lastMessage?.type !== 'round') return
     let alive = true
-    api
-      .getRounds(0, PAGE_SIZE)
-      .then((page) => {
-        if (alive) setRounds((prev) => mergePrepend(prev, page))
+    reload()
+    fetchNotesMap()
+      .then((map) => {
+        if (alive) setNotesMap(map)
       })
-      .catch(() => {}) // 刷新失败静默兜底：列表保持现状，待下次事件/手动刷新
-    api
-      .getNotes()
-      .then((list) => {
-        if (alive) setNotesMap(buildNotesMap(list))
-      })
-      .catch(() => {}) // 引文失败静默兜底：保持旧映射
+      .catch(() => {})
     return () => {
       alive = false
     }
-  }, [lastMessage])
+  }, [lastMessage, reload])
 
-  /** 命中后：展开 + 滚动到卡片中央 + 描边高亮 2s */
+  /** 展开目标卡片、滚动到可视区中央，并短暂显示定位高亮。 */
   const reveal = useCallback((roundId: string) => {
     setExpandedId(roundId)
-    setHlId(roundId)
-    // 等展开渲染完成再滚动（jsdom 无 scrollIntoView，测试注入桩）
+    setHighlightId(roundId)
     setTimeout(() => {
       cardRefs.current.get(roundId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }, 50)
-    setTimeout(() => setHlId((cur) => (cur === roundId ? null : cur)), 2000)
+    setTimeout(() => setHighlightId((current) => (current === roundId ? null : current)), 2000)
   }, [])
 
-  // focus 定位：已加载命中直接 reveal；否则逐页加载再找；仍无 → 顶部提示
-  const { target } = useRoundFocus()
+  /** 切换页面时收起旧页展开项，避免详情状态误带到新页。 */
+  const changePage = useCallback(
+    (nextPage: number) => {
+      if (nextPage === page) return
+      setExpandedId(null)
+      setHighlightId(null)
+      goToPage(nextPage)
+    },
+    [goToPage, page],
+  )
+
   useEffect(() => {
-    if (!target) return
+    if (!pendingFocusId || !items.some((round) => round.round_id === pendingFocusId)) return
+    reveal(pendingFocusId)
+    setPendingFocusId(null)
+  }, [items, pendingFocusId, reveal])
+
+  useEffect(() => {
+    // 首屏尚未返回 total(总数) 和 items(当前页内容) 时不能判定目标不存在。
+    if (!target || pendingFocusId || query.loading || !query.data) return
     let cancelled = false
-    const run = async () => {
+    const focusRound = async () => {
       setNotice(null)
-      const found = await searchRound(roundsRef.current, target.roundId, fetchAndAppend, () => cancelled).catch(
-        () => false, // 搜索中途取数失败：按未命中处理（提示兜底）
-      )
+      const foundPage = await findRoundPage(
+        target.roundId,
+        page,
+        items,
+        totalPages,
+        () => cancelled,
+      ).catch(() => null)
       if (cancelled) return
-      if (found) reveal(target.roundId)
-      else setNotice(`未找到该决策轮：${target.roundId}`)
+      if (foundPage === null) {
+        setNotice(`未找到该决策轮：${target.roundId}`)
+      } else if (foundPage === page) {
+        reveal(target.roundId)
+      } else {
+        setPendingFocusId(target.roundId)
+        changePage(foundPage)
+      }
     }
-    void run()
+    void focusRound()
     return () => {
       cancelled = true
     }
-  }, [target, fetchAndAppend, reveal])
+  }, [target, pendingFocusId, page, totalPages, items, query.loading, query.data, reveal, changePage])
 
-  const onLoadMore = () => {
-    setLoadingMore(true)
-    setMoreError(null)
-    fetchAndAppend(roundsRef.current.length)
-      .catch((e: unknown) => setMoreError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoadingMore(false))
-  }
-
-  const cardRefOf = (roundId: string) => (el: HTMLElement | null) => {
-    if (el) cardRefs.current.set(roundId, el)
+  /** 维护 round_id 到卡片元素的引用，供 reveal 的平滑滚动使用。 */
+  const cardRefOf = (roundId: string) => (element: HTMLElement | null) => {
+    if (element) cardRefs.current.set(roundId, element)
     else cardRefs.current.delete(roundId)
   }
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-lg shadow-black/30">
-      <header className="mb-4">
+      <header className="mb-4 flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold text-zinc-200">
           决策时间线 <span className="text-xs font-normal text-zinc-500">— Agent 的每一笔思考都留痕</span>
         </h2>
+        <span className="ml-auto text-xs tabular-nums text-zinc-500">共 {total} 条决策</span>
       </header>
 
       {notice && (
@@ -212,35 +191,29 @@ export default function RoundTimeline() {
         </div>
       )}
 
-      <StateHint loading={loading} error={error} empty={rounds.length === 0}>
+      <StateHint loading={query.loading} error={query.error} empty={total === 0}>
         <ol className="space-y-3">
-          {rounds.map((r) => (
-            <li key={r.round_id}>
+          {items.map((round) => (
+            <li key={round.round_id}>
               <TimelineCard
-                round={r}
-                note={notesMap.get(r.round_id)}
-                expanded={expandedId === r.round_id}
-                highlight={hlId === r.round_id}
-                onToggle={() => setExpandedId((cur) => (cur === r.round_id ? null : r.round_id))}
-                cardRef={cardRefOf(r.round_id)}
+                round={round}
+                note={notesMap.get(round.round_id)}
+                expanded={expandedId === round.round_id}
+                highlight={highlightId === round.round_id}
+                onToggle={() => setExpandedId((current) => (current === round.round_id ? null : round.round_id))}
+                cardRef={cardRefOf(round.round_id)}
               />
             </li>
           ))}
         </ol>
-
-        <footer className="mt-4 border-t border-zinc-800/80 pt-3 text-center">
-          {hasMore && (
-            <button
-              type="button"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-1.5 text-xs text-zinc-300 transition hover:border-violet-400/50 hover:text-violet-300 disabled:opacity-50"
-            >
-              {loadingMore ? '加载中…' : '加载更多'}
-            </button>
-          )}
-          {moreError && <p className="mt-2 text-xs text-rose-400">加载失败：{moreError}</p>}
-        </footer>
+        <PaginationControls
+          page={page}
+          total={total}
+          pageSize={PAGE_SIZE}
+          itemLabel="决策"
+          loading={query.loading}
+          onPageChange={changePage}
+        />
       </StateHint>
     </section>
   )
