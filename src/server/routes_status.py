@@ -178,7 +178,8 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     async def list_rounds(
         offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)
     ) -> dict[str, Any]:
-        decisions = await deps.repo.list_decisions(limit=limit, offset=offset)
+        """分页返回决策轮摘要及总数，列表不包含体积较大的 LLM 原文。"""
+        decisions, total = await deps.repo.list_decisions_page(limit=limit, offset=offset)
         audits = await deps.repo.list_audit_rounds(
             [d.round_id for d in decisions]
         )  # 批量取，免 N+1
@@ -188,7 +189,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             item.pop("llm_raw", None)  # 列表不返回 LLM 原文，详情走 /rounds/{id}
             item["audit"] = _audit_summary(audits.get(d.round_id))
             items.append(item)
-        return {"offset": offset, "limit": limit, "items": items}
+        return {"offset": offset, "limit": limit, "total": total, "items": items}
 
     @router.get("/rounds/{round_id}")
     async def get_round(round_id: str) -> dict[str, Any]:
@@ -242,8 +243,16 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         }
 
     @router.get("/notes")
-    async def get_notes(limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
-        notes = await deps.repo.recent_notes(limit)
-        return {"items": [n.model_dump() for n in notes]}
+    async def get_notes(
+        offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200)
+    ) -> dict[str, Any]:
+        """分页返回最新在前的 Agent 笔记及总数，不改变 Agent 上下文的 recent_notes 顺序。"""
+        notes, total = await deps.repo.list_notes_page(limit=limit, offset=offset)
+        return {
+            "items": [n.model_dump() for n in notes],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     return router
