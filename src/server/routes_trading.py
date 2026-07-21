@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from src.config import load_watchlist
 from src.config_io import read_settings_raw, write_settings
-from src.gateway.base import GatewayError
+from src.gateway.base import GatewayError, OrderNotFound
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.server.deps import ServerDeps
 
@@ -45,6 +45,38 @@ def _agent_running(deps: ServerDeps) -> bool:
 
 def create_trading_router(deps: ServerDeps) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    @router.get("/open_orders")
+    async def list_open_orders() -> list[dict[str, Any]]:
+        if deps.gateway is None:
+            raise HTTPException(
+                status_code=503, detail="\u4ea4\u6613\u7f51\u5173\u672a\u5c31\u7eea"
+            )
+        try:
+            orders: list[Any] = []
+            offset = 0
+            while True:
+                page = deps.gateway.list_orders(status="open", limit=100, offset=offset)
+                orders.extend(page)
+                if len(page) < 100:
+                    break
+                offset += len(page)
+            return [order.model_dump() for order in orders]
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.delete("/orders/{contract}/{order_id}")
+    async def cancel_order(contract: str, order_id: str) -> dict[str, Any]:
+        if deps.manual_cancel_order is None:
+            raise HTTPException(
+                status_code=503, detail="\u624b\u52a8\u64a4\u5355\u672a\u63a5\u7ebf"
+            )
+        try:
+            return await deps.manual_cancel_order(contract, order_id)
+        except OrderNotFound as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.post("/positions/{contract}/close")
     async def close_position(contract: str) -> dict[str, Any]:

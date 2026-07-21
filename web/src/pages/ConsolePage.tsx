@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { AccountInfo, DailyStats, EquityPoint, Note, Position } from '../api/types'
+import type { AccountInfo, DailyStats, EquityPoint, Note, OpenOrder, Position } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 import EquityMiniChart from '../components/console/EquityMiniChart'
@@ -16,6 +16,7 @@ import KlinePanel from '../components/console/KlinePanel'
 import LiveRoundHero from '../components/console/LiveRoundHero'
 import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
+import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
 import TopBar from '../components/console/TopBar'
@@ -38,6 +39,7 @@ function useConsoleData() {
   const status = useApiData(() => api.getStatus(), [])
   const account = useApiData(() => api.getAccount(), [])
   const positions = useApiData(() => api.getPositions(), [])
+  const openOrders = useApiData(() => api.getOpenOrders(), [])
   const equity = useApiData(() => api.getEquity(), [])
   const notes = useApiData(() => api.getNotes(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
@@ -45,6 +47,7 @@ function useConsoleData() {
   const { connected, lastMessage } = useWs()
   const { reload: reloadAccount } = account
   const { reload: reloadPositions } = positions
+  const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadEquity } = equity
   const { reload: reloadNotes } = notes
   const { reload: reloadDaily } = daily
@@ -52,11 +55,12 @@ function useConsoleData() {
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
     reloadAccount()
     reloadPositions()
+    reloadOpenOrders()
     reloadEquity()
     reloadNotes()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadAccount, reloadPositions, reloadEquity, reloadNotes, reloadDaily])
-  return { status, account, positions, equity, notes, daily, connected }
+  }, [lastMessage, reloadAccount, reloadPositions, reloadOpenOrders, reloadEquity, reloadNotes, reloadDaily])
+  return { status, account, positions, openOrders, equity, notes, daily, connected }
 }
 
 /** 首屏：左栏账户+权益曲线+硬性风控 / 中央实时轮主角 / 右栏 K线+持仓（移动端实时轮优先） */
@@ -67,7 +71,9 @@ function FirstScreen({
   equityChangePct,
   dailyStats,
   positions,
+  openOrders,
   onPositionsChanged,
+  onOpenOrdersChanged,
 }: {
   account: AccountInfo | null
   mode: string
@@ -75,7 +81,9 @@ function FirstScreen({
   equityChangePct?: number
   dailyStats: DailyStats | null
   positions: Position[]
+  openOrders: OpenOrder[]
   onPositionsChanged: () => void
+  onOpenOrdersChanged: () => void
 }) {
   return (
     <section className="grid grid-cols-12 gap-4 pt-5">
@@ -90,6 +98,7 @@ function FirstScreen({
       <aside className="order-3 col-span-12 space-y-4 lg:col-span-3">
         <KlinePanel />
         <PositionsPanel positions={positions} onChanged={onPositionsChanged} />
+        <OpenOrdersPanel orders={openOrders} onChanged={onOpenOrdersChanged} />
       </aside>
     </section>
   )
@@ -130,7 +139,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, account, positions, equity, notes, daily, connected } = useConsoleData()
+  const { status, account, positions, openOrders, equity, notes, daily, connected } = useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   // 权益曲线首末点涨跌幅（账户面板累计涨跌行；空数据/首点为 0 → undefined 不渲染）
   const equityChangePct = useMemo(() => equityChangePctOf(equity.data ?? []), [equity.data])
@@ -146,6 +155,10 @@ export default function ConsolePage() {
     account.reload()
     equity.reload()
   }
+  const onOpenOrdersChanged = () => {
+    openOrders.reload()
+    account.reload()
+  }
   // 抽屉关闭 → 刷状态（保存密钥/LLM 配置后 TopBar 的 llm_configured 横幅需联动消失）
   const closeConfig = () => {
     setConfigOpen(false)
@@ -155,6 +168,7 @@ export default function ConsolePage() {
   const onPaperReset = () => {
     account.reload()
     positions.reload()
+    openOrders.reload()
     equity.reload()
     daily.reload()
   }
@@ -170,6 +184,7 @@ export default function ConsolePage() {
       <main className="mx-auto max-w-[1440px] px-5 pb-16">
         <LoadErrorBanner
           errors={[
+            ['\u672a\u6210\u4ea4\u6302\u5355', openOrders.error],
             ['状态', status.error],
             ['账户', account.error],
             ['持仓', positions.error],
@@ -184,7 +199,9 @@ export default function ConsolePage() {
           equityChangePct={equityChangePct}
           dailyStats={daily.data}
           positions={positions.data ?? []}
+          openOrders={openOrders.data ?? []}
           onPositionsChanged={onPositionsChanged}
+          onOpenOrdersChanged={onOpenOrdersChanged}
         />
         <SecondScreen notes={notes.data ?? []} />
       </main>

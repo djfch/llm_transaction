@@ -33,6 +33,17 @@ export interface Position {
   liq_price: number // 预估强平价
 }
 
+export interface OpenOrder {
+  id: string
+  contract: string
+  size: number
+  left: number
+  price: number
+  tif: string
+  reduce_only: boolean
+  status: string
+}
+
 /** 决策轮摘要：GET /api/rounds?offset=&limit= */
 export interface RoundSummary {
   round_id: string // 决策轮 ID
@@ -118,6 +129,14 @@ export interface ClosePositionResult {
   status: string // 平仓状态
   fill_price: number // 成交均价
   text: string // 结果描述文本
+}
+
+export interface CancelOpenOrderResult {
+  id: string
+  contract: string
+  status: string
+  finish_as: string
+  warning: string
 }
 
 /** paper 模式权益设置结果：POST /api/paper/reset */
@@ -242,12 +261,14 @@ export interface ApiClient {
   getStatus(): Promise<StatusInfo>
   getAccount(): Promise<AccountInfo>
   getPositions(): Promise<Position[]>
+  getOpenOrders(): Promise<OpenOrder[]>
   getRounds(offset: number, limit: number): Promise<RoundSummary[]>
   getRound(roundId: string): Promise<RoundDetail>
   getAgentLive(): Promise<AgentLiveState>
   getTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult>
   getCandles(contract: string, interval: string, limit?: number): Promise<Candle[]>
   closePosition(contract: string): Promise<ClosePositionResult>
+  cancelOpenOrder(contract: string, orderId: string): Promise<CancelOpenOrderResult>
   resetPaperEquity(equity: number): Promise<PaperResetResult>
   startAgent(): Promise<AgentStateResult>
   stopAgent(): Promise<AgentStateResult>

@@ -21,7 +21,7 @@ import pytest
 from src.agent import DecisionLoop, LLMResponse, ManualCloseRiskDenied, PromptLoader, ToolCall
 from src.bootstrap import build_app
 from src.config import AuditConfig, Settings, Watchlist
-from src.gateway.base import Account, Contract, GatewayError, OrderRequest
+from src.gateway.base import Account, Contract, GatewayError, OrderNotFound, OrderRequest
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
@@ -174,7 +174,76 @@ async def test_manual_close_risk_denied_raises(tmp_path):
         await env.db.close()
 
 
+async def test_manual_cancel_syncs_open_order_to_local_record(tmp_path):
+    gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
+    order = gateway.place_order(
+        OrderRequest(contract=BTC, size=Decimal(2), price=Decimal("59000"), tif="gtc")
+    )
+    env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
+    try:
+        await env.repo.save_order(
+            order.id, "round-1", "paper", BTC, order.size, order.price, order.tif
+        )
+
+        result = await env.loop.manual_cancel_order(BTC, order.id)
+
+        assert result == {
+            "id": order.id,
+            "contract": BTC,
+            "status": "finished",
+            "finish_as": "cancelled",
+            "warning": "",
+        }
+        assert gateway.list_orders(status="open") == []
+        [record] = await env.repo.list_orders("round-1")
+        assert (record.status, record.finish_as) == ("finished", "cancelled")
+    finally:
+        await env.db.close()
+
+
+async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, monkeypatch):
+    gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
+    order = gateway.place_order(
+        OrderRequest(contract=BTC, size=Decimal(-2), price=Decimal("61000"), tif="gtc")
+    )
+    env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
+
+    async def fail_sync(*_args, **_kwargs):
+        raise RuntimeError("local database offline")
+
+    monkeypatch.setattr(env.repo, "update_order_status", fail_sync)
+    try:
+        result = await env.loop.manual_cancel_order(BTC, order.id)
+
+        assert gateway.list_orders(status="open") == []
+        assert "\u8bf7\u52ff\u91cd\u8bd5\u64a4\u5355" in result["warning"]
+        assert "local database offline" in result["warning"]
+    finally:
+        await env.db.close()
+
+
 # ---------- 平仓豁免语义与 LLM close 一致：白名单外可平、kill_switch 下可平 ----------
+
+
+async def test_manual_cancel_rejects_order_from_another_contract(tmp_path):
+    eth = "ETH_USDT"
+    gateway = MockGateway(
+        contracts={
+            BTC: _contract(BTC, "0.001", "60000"),
+            eth: _contract(eth, "0.01", "3000"),
+        }
+    )
+    order = gateway.place_order(
+        OrderRequest(contract=BTC, size=Decimal(2), price=Decimal("59000"), tif="gtc")
+    )
+    env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC, eth])
+    try:
+        with pytest.raises(OrderNotFound):
+            await env.loop.manual_cancel_order(eth, order.id)
+
+        assert [open_order.id for open_order in gateway.list_orders(BTC, "open")] == [order.id]
+    finally:
+        await env.db.close()
 
 
 async def test_manual_close_non_watchlist_contract_allowed(tmp_path):

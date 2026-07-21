@@ -185,7 +185,7 @@ class PaperGateway:
             fill = snap.ask if order.size > 0 else snap.bid
             return self._execute(order_id, contract, order.size, fill, maker=False, text=order.text)
         self._results[order_id] = self._results[order_id].model_copy(
-            update={"left": abs(order.size)}
+            update={"left": abs(order.size), "size": order.size, "price": order.price}
         )
         return self._results[order_id]
 
@@ -198,8 +198,19 @@ class PaperGateway:
         self._results[order_id] = cancelled
         return cancelled
 
-    def list_orders(self, contract: str, status: str = "open") -> list[OrderResult]:
-        return [r for r in self._results.values() if r.contract == contract and r.status == status]
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]:
+        orders = [
+            r
+            for r in self._results.values()
+            if (contract is None or r.contract == contract) and r.status == status
+        ]
+        return orders[offset:] if limit is None else orders[offset : offset + limit]
 
     def get_candlesticks(
         self,
@@ -246,6 +257,10 @@ class PaperGateway:
             id=order_id,
             contract=req.contract,
             status="open",
+            size=req.size,
+            price=req.price,
+            tif=req.tif or "gtc",
+            reduce_only=req.reduce_only,
             left=abs(req.size),
             fill_price=Decimal(0),
             text=text,

@@ -365,6 +365,12 @@ def _build_server(
             result = await result
         return result
 
+    async def manual_cancel_order(contract: str, order_id: str) -> dict:
+        result = ctx.loop.manual_cancel_order(contract, order_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     def paper_reset(equity: Decimal) -> None:
         """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。"""
         ctx.gateway.reset_account(equity)  # type: ignore[attr-defined]
@@ -383,6 +389,7 @@ def _build_server(
         status_provider=status_provider,
         on_kill_switch=on_kill_switch,
         manual_close=manual_close,
+        manual_cancel_order=manual_cancel_order,
         paper_reset=paper_reset if isinstance(ctx.gateway, PaperGateway) else None,
         agent_start=agent_start,
         agent_stop=ctx.scheduler.stop,

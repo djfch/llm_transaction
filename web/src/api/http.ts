@@ -9,12 +9,14 @@ import type {
   ApiClient,
   AppConfig,
   Candle,
+  CancelOpenOrderResult,
   ClosePositionResult,
   DailyStats,
   EquityPoint,
   KillSwitchResult,
   Note,
   PaperResetResult,
+  OpenOrder,
   Position,
   PutConfigResult,
   RoundDetail,
@@ -129,6 +131,24 @@ function adaptPosition(raw: RawPosition): Position {
     liq_price: Number(raw.liq_price),
   }
 }
+type RawOpenOrder = Omit<OpenOrder, 'size' | 'left' | 'price'> & {
+  size: number | string
+  left: number | string
+  price: number | string
+}
+
+function adaptOpenOrder(raw: RawOpenOrder): OpenOrder {
+  return {
+    id: String(raw.id),
+    contract: String(raw.contract),
+    size: Number(raw.size),
+    left: Number(raw.left),
+    price: Number(raw.price),
+    tif: String(raw.tif),
+    reduce_only: Boolean(raw.reduce_only),
+    status: String(raw.status),
+  }
+}
 
 /** 后端 /api/equity：{initial_equity, baseline_source, points:[{t(Unix秒), equity}]} */
 interface RawEquity {
@@ -221,6 +241,7 @@ export const httpApi: ApiClient = {
   getAccount: async () => adaptAccount(await request<RawAccount>('/account')),
   getPositions: async () =>
     (await request<RawPosition[]>('/positions')).map(adaptPosition),
+  getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
   getRounds: async (offset, limit) =>
     adaptRounds(await request<RawRounds>(`/rounds?offset=${offset}&limit=${limit}`)),
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
@@ -231,6 +252,10 @@ export const httpApi: ApiClient = {
   closePosition: (contract) =>
     request<ClosePositionResult>(`/positions/${encodeURIComponent(contract)}/close`, {
       method: 'POST',
+    }),
+  cancelOpenOrder: (contract, orderId) =>
+    request<CancelOpenOrderResult>(`/orders/${encodeURIComponent(contract)}/${encodeURIComponent(orderId)}`, {
+      method: 'DELETE',
     }),
   resetPaperEquity: (equity) =>
     request<PaperResetResult>('/paper/reset', { method: 'POST', body: JSON.stringify({ equity }) }),

@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.config import Settings, load_settings
 from src.config_io import write_settings
-from src.gateway.base import Candle, GatewayError
+from src.gateway.base import Candle, GatewayError, OrderNotFound, OrderResult
 from src.memory.db import Database
 from src.memory.repo import Repo
 from src.server.app import create_app
@@ -31,6 +31,20 @@ class FakeGateway:
 
     def __init__(self) -> None:
         self.candle_calls: list[dict] = []
+        self.open_order_calls: list[dict] = []
+        self.orders = [
+            OrderResult(
+                id="o-1",
+                contract=BTC,
+                status="open",
+                size=Decimal("-2"),
+                left=Decimal("2"),
+                price=Decimal("59000"),
+                tif="gtc",
+                reduce_only=True,
+                fill_price=Decimal(0),
+            )
+        ]
 
     def get_candlesticks(
         self,
@@ -52,6 +66,19 @@ class FakeGateway:
             )
         ]
 
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]:
+        self.open_order_calls.append(
+            {"contract": contract, "status": status, "limit": limit, "offset": offset}
+        )
+        orders = [order for order in self.orders if order.status == status]
+        return orders[offset:] if limit is None else orders[offset : offset + limit]
+
 
 @pytest.fixture
 async def deps(tmp_path: Path):
@@ -67,8 +94,9 @@ async def deps(tmp_path: Path):
     repo = Repo(db)
 
     # close_impl 可在用例中替换为抛错版本；running 由启停 fake 翻转，status_provider 读它
-    state: dict = {"running": False, "close_impl": None}
+    state: dict = {"running": False, "close_impl": None, "cancel_impl": None}
     close_calls: list[str] = []
+    cancel_calls: list[tuple[str, str]] = []
     resets: list[Decimal] = []
 
     async def _default_close(contract: str) -> dict:
@@ -79,6 +107,21 @@ async def deps(tmp_path: Path):
     async def manual_close(contract: str) -> dict:
         close_calls.append(contract)
         return await state["close_impl"](contract)
+
+    async def _default_cancel(contract: str, order_id: str) -> dict:
+        return {
+            "id": order_id,
+            "contract": contract,
+            "status": "finished",
+            "finish_as": "cancelled",
+            "warning": "",
+        }
+
+    state["cancel_impl"] = _default_cancel
+
+    async def manual_cancel_order(contract: str, order_id: str) -> dict:
+        cancel_calls.append((contract, order_id))
+        return await state["cancel_impl"](contract, order_id)
 
     async def agent_start() -> None:
         state["running"] = True
@@ -96,12 +139,14 @@ async def deps(tmp_path: Path):
         watchlist_path=watchlist_path,
         web_dist=tmp_path / "no_dist",
         manual_close=manual_close,
+        manual_cancel_order=manual_cancel_order,
         paper_reset=resets.append,
         agent_start=agent_start,
         agent_stop=agent_stop,
     )
     d.state = state  # 测试断言用
     d.close_calls = close_calls
+    d.cancel_calls = cancel_calls
     d.resets = resets
     yield d
     await db.close()
@@ -151,6 +196,74 @@ async def test_close_position_502_on_gateway_error(client: AsyncClient, deps: Se
 
 
 # ---------- POST /api/paper/reset ----------
+async def test_open_orders_lists_all_pages(client: AsyncClient, deps: ServerDeps):
+    seed = deps.gateway.orders[0]
+    deps.gateway.orders = [seed.model_copy(update={"id": f"o-{index}"}) for index in range(101)]
+    response = await client.get("/api/open_orders")
+    assert response.status_code == 200
+    assert len(response.json()) == 101
+    first = response.json()[0]
+    assert first["size"] == "-2"
+    assert first["price"] == "59000"
+    assert first["tif"] == "gtc" and first["reduce_only"] is True
+    assert deps.gateway.open_order_calls == [
+        {"contract": None, "status": "open", "limit": 100, "offset": 0},
+        {"contract": None, "status": "open", "limit": 100, "offset": 100},
+    ]
+
+
+async def test_cancel_open_order_success(client: AsyncClient, deps: ServerDeps):
+    response = await client.delete(f"/api/orders/{BTC}/o-1")
+    assert response.status_code == 200
+    assert response.json()["warning"] == ""
+    assert deps.cancel_calls == [(BTC, "o-1")]
+
+
+async def test_cancel_open_order_keeps_gateway_success_when_local_sync_warns(
+    client: AsyncClient, deps: ServerDeps
+):
+    async def warned(contract: str, order_id: str) -> dict:
+        return {
+            "id": order_id,
+            "contract": contract,
+            "status": "finished",
+            "finish_as": "cancelled",
+            "warning": "local order sync failed; do not retry",
+        }
+
+    deps.state["cancel_impl"] = warned
+    response = await client.delete(f"/api/orders/{BTC}/o-1")
+
+    assert response.status_code == 200
+    assert response.json()["warning"] == "local order sync failed; do not retry"
+
+
+async def test_cancel_open_order_503_when_not_wired(client: AsyncClient, deps: ServerDeps):
+    deps.manual_cancel_order = None
+    response = await client.delete(f"/api/orders/{BTC}/o-1")
+    assert response.status_code == 503
+
+
+async def test_cancel_open_order_502_on_gateway_error(client: AsyncClient, deps: ServerDeps):
+    async def failed(contract: str, order_id: str) -> dict:
+        raise GatewayError("order missing", label="ORDER_NOT_FOUND")
+
+    deps.state["cancel_impl"] = failed
+    response = await client.delete(f"/api/orders/{BTC}/o-1")
+    assert response.status_code == 502
+
+
+async def test_cancel_open_order_409_when_order_is_no_longer_open(
+    client: AsyncClient, deps: ServerDeps
+):
+    async def already_closed(contract: str, order_id: str) -> dict:
+        raise OrderNotFound("order is no longer open", label="ORDER_NOT_FOUND")
+
+    deps.state["cancel_impl"] = already_closed
+    response = await client.delete(f"/api/orders/{BTC}/o-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "order is no longer open"
 
 
 async def test_paper_reset_success(client: AsyncClient, deps: ServerDeps):
@@ -175,6 +288,17 @@ async def test_paper_reset_409_when_reset_not_wired(client: AsyncClient, deps: S
     deps.paper_reset = None
     r = await client.post("/api/paper/reset", json={"equity": 20000})
     assert r.status_code == 409
+
+
+async def test_open_orders_maps_gateway_error_to_502(client: AsyncClient, deps: ServerDeps):
+    def fail_list_orders(*_args, **_kwargs):
+        raise GatewayError("gateway unavailable")
+
+    deps.gateway.list_orders = fail_list_orders
+    response = await client.get("/api/open_orders")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "gateway unavailable"
 
 
 async def test_paper_reset_422_on_non_positive_equity(client: AsyncClient, deps: ServerDeps):
