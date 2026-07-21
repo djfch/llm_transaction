@@ -98,6 +98,11 @@ class OrderResult(BaseModel):
     id: str
     contract: str
     status: str
+    # 挂单快照展示字段：size 保留方向，price/tif/reduce_only 保留委托约束。
+    size: Decimal = Decimal(0)
+    price: Decimal | None = None
+    tif: str = ""
+    reduce_only: bool = False
     left: Decimal  # 剩余未成交张数
     fill_price: Decimal  # 成交均价
     finish_as: str = ""
@@ -149,7 +154,14 @@ class Gateway(Protocol):
 
     def cancel_order(self, contract: str, order_id: str) -> OrderResult: ...
 
-    def list_orders(self, contract: str, status: str = "open") -> list[OrderResult]: ...
+    # 分页读取订单快照；contract 为空时返回全部合约。
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]: ...
 
     def get_candlesticks(
         self,

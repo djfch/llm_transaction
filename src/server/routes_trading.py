@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from src.config import load_watchlist
 from src.config_io import read_settings_raw, write_settings
-from src.gateway.base import GatewayError
+from src.gateway.base import GatewayError, OrderNotFound
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.server.deps import ServerDeps
 
@@ -22,6 +22,7 @@ from src.server.deps import ServerDeps
 _CANDLE_INTERVALS = frozenset(GATE_CANDLE_INTERVALS)
 
 
+# paper 模式账户重置请求体。
 class PaperResetBody(BaseModel):
     """模拟账户重置请求：equity 为新的初始权益（必须为正，金额 Decimal 解析）。"""
 
@@ -43,8 +44,39 @@ def _agent_running(deps: ServerDeps) -> bool:
     return bool(deps.runtime_status().get("agent_running", False))
 
 
+# 创建交易监控路由，并通过依赖注入隔离实际网关写操作。
 def create_trading_router(deps: ServerDeps) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    @router.get("/open_orders")
+    # 分页汇总当前 open 订单，避免单页上限遗漏挂单。
+    async def list_open_orders() -> list[dict[str, Any]]:
+        if deps.gateway is None:
+            raise HTTPException(status_code=503, detail="交易网关未就绪")
+        try:
+            orders: list[Any] = []
+            offset = 0
+            while True:
+                page = deps.gateway.list_orders(status="open", limit=100, offset=offset)
+                orders.extend(page)
+                if len(page) < 100:
+                    break
+                offset += len(page)
+            return [order.model_dump() for order in orders]
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.delete("/orders/{contract}/{order_id}")
+    # 执行手动撤单；已终态订单返回 409 以触发前端刷新。
+    async def cancel_order(contract: str, order_id: str) -> dict[str, Any]:
+        if deps.manual_cancel_order is None:
+            raise HTTPException(status_code=503, detail="手动撤单未接线")
+        try:
+            return await deps.manual_cancel_order(contract, order_id)
+        except OrderNotFound as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.post("/positions/{contract}/close")
     async def close_position(contract: str) -> dict[str, Any]:

@@ -147,11 +147,16 @@ def _to_position(p: gate_api.Position) -> Position:
     )
 
 
+# 将 Gate futures order 转换为前后端共用的订单快照。
 def _to_order(o: gate_api.FuturesOrder) -> OrderResult:
     return OrderResult(
         id=str(o.id),
         contract=o.contract or "",
         status=o.status or "",
+        size=_dec(getattr(o, "size", 0)),
+        price=_dec(getattr(o, "price", 0)),
+        tif=getattr(o, "tif", "") or "",
+        reduce_only=bool(getattr(o, "is_reduce_only", False)),
         left=_dec(o.left),
         fill_price=_dec(o.fill_price),
         finish_as=o.finish_as or "",
@@ -275,9 +280,21 @@ class GateRestGateway:
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
-    def list_orders(self, contract: str, status: str = "open") -> list[OrderResult]:
+    # 支持省略 contract 的全合约查询，并透传分页参数给 Gate。
+    def list_orders(
+        self,
+        contract: str | None = None,
+        status: str = "open",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[OrderResult]:
         try:
-            orders = self._api.list_futures_orders(self._settle, status, contract=contract)
+            kwargs: dict[str, object] = {"offset": offset}
+            if contract is not None:
+                kwargs["contract"] = contract
+            if limit is not None:
+                kwargs["limit"] = limit
+            orders = self._api.list_futures_orders(self._settle, status, **kwargs)
             return [_to_order(o) for o in orders]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc

@@ -9,12 +9,14 @@ import type {
   ApiClient,
   AppConfig,
   Candle,
+  CancelOpenOrderResult,
   ClosePositionResult,
   DailyStats,
   EquityPoint,
   KillSwitchResult,
   NotesPageResult,
   PaperResetResult,
+  OpenOrder,
   Position,
   PutConfigResult,
   RoundDetail,
@@ -129,6 +131,25 @@ function adaptPosition(raw: RawPosition): Position {
     liq_price: Number(raw.liq_price),
   }
 }
+type RawOpenOrder = Omit<OpenOrder, 'size' | 'left' | 'price'> & {
+  size: number | string
+  left: number | string
+  price: number | string
+}
+
+/** 将后端 Decimal 字符串订单快照转换为前端可渲染的数字模型。 */
+function adaptOpenOrder(raw: RawOpenOrder): OpenOrder {
+  return {
+    id: String(raw.id),
+    contract: String(raw.contract),
+    size: Number(raw.size),
+    left: Number(raw.left),
+    price: Number(raw.price),
+    tif: String(raw.tif),
+    reduce_only: Boolean(raw.reduce_only),
+    status: String(raw.status),
+  }
+}
 
 /** 后端 /api/equity：{initial_equity, baseline_source, points:[{t(Unix秒), equity}]} */
 interface RawEquity {
@@ -240,6 +261,7 @@ export const httpApi: ApiClient = {
   getAccount: async () => adaptAccount(await request<RawAccount>('/account')),
   getPositions: async () =>
     (await request<RawPosition[]>('/positions')).map(adaptPosition),
+  getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
   getRounds: fetchRounds,
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
   // 响应契约即最终形态（args/result 已解析、started_at 为 Unix 秒），无需适配
@@ -249,6 +271,10 @@ export const httpApi: ApiClient = {
   closePosition: (contract) =>
     request<ClosePositionResult>(`/positions/${encodeURIComponent(contract)}/close`, {
       method: 'POST',
+    }),
+  cancelOpenOrder: (contract, orderId) =>
+    request<CancelOpenOrderResult>(`/orders/${encodeURIComponent(contract)}/${encodeURIComponent(orderId)}`, {
+      method: 'DELETE',
     }),
   resetPaperEquity: (equity) =>
     request<PaperResetResult>('/paper/reset', { method: 'POST', body: JSON.stringify({ equity }) }),

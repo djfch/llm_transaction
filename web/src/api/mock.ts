@@ -10,6 +10,7 @@ import type {
   Candle,
   EquityPoint,
   Note,
+  OpenOrder,
   Position,
   RoundDetail,
   RoundSummary,
@@ -58,6 +59,20 @@ const positions: Position[] = [
     margin: 50.82, // 30 张 × 0.001 × 3388 / 2（quanto 面值推算）
     unrealised_pnl: 96,
     liq_price: 5_120,
+  },
+]
+
+// mock 模式的可撤销挂单，用于覆盖真实接口不可用时的完整交互。
+const openOrders: OpenOrder[] = [
+  {
+    id: 'mock-open-1',
+    contract: 'ETH_USDT',
+    size: 79,
+    left: 79,
+    price: 1900,
+    tif: 'gtc',
+    reduce_only: false,
+    status: 'open',
   },
 ]
 
@@ -211,6 +226,7 @@ export const mockApi: ApiClient = {
     // available 由 paperEquity 派生，避免设置金额后账户概览自相矛盾
     reply({ equity: paperEquity, available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100), unrealised_pnl: 255.6 }),
   getPositions: () => reply(positions.map((p) => ({ ...p }))),
+  getOpenOrders: () => reply(openOrders.map((order) => ({ ...order }))),
   getRounds: (offset, limit) =>
     reply({ items: rounds.slice(offset, offset + limit), total: rounds.length, offset, limit }),
   getRound: (roundId) => {
@@ -236,6 +252,20 @@ export const mockApi: ApiClient = {
       text: `已按标记价 ${closed.mark_price} 市价平仓`,
     })
   },
+  // 模拟撤单会从内存订单簿移除目标卡片，与真实接口的成功结果保持一致。
+  cancelOpenOrder: (contract, orderId) => {
+    const index = openOrders.findIndex((order) => order.contract === contract && order.id === orderId)
+    if (index < 0) return Promise.reject(new ApiError(404, '挂单不存在'))
+    const [cancelled] = openOrders.splice(index, 1)
+    return reply({
+      id: cancelled.id,
+      contract: cancelled.contract,
+      status: 'finished',
+      finish_as: 'cancelled',
+      warning: '',
+    })
+  },
+
   resetPaperEquity: (equity) => {
     if (config.mode !== 'paper') return Promise.reject(new ApiError(409, '当前非 paper 模式，无法重置权益'))
     paperEquity = equity
