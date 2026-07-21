@@ -2,13 +2,13 @@
  * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控 / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
- * 数据装配：status/account/positions/equity/notes/当日统计 经 useApiData 注入面板 props；
- * WS round_start/round 事件联动刷新 account/positions/equity/notes/当日统计（实时轮/时间线/K线/成交各自自管）；
+ * 数据装配：status/account/positions/openOrders/equity/notes/daily 七路查询经 useApiData 注入面板 props；
+ * WS round_start/round 事件联动刷新 account/positions/openOrders/equity/notes/daily（实时轮/时间线/K线/成交各自自管）；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { AccountInfo, DailyStats, EquityPoint, Note, Position } from '../api/types'
+import type { AccountInfo, DailyStats, EquityPoint, Note, OpenOrder, Position } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 import EquityMiniChart from '../components/console/EquityMiniChart'
@@ -16,6 +16,7 @@ import KlinePanel from '../components/console/KlinePanel'
 import LiveRoundHero from '../components/console/LiveRoundHero'
 import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
+import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
 import TopBar from '../components/console/TopBar'
@@ -33,11 +34,12 @@ function equityChangePctOf(points: EquityPoint[]): number | undefined {
   return ((sorted[sorted.length - 1].equity - first) / first) * 100
 }
 
-/** 页面数据：五路查询 + 当日统计 + WS 连接态；round_start/round 事件联动刷新账户/持仓/权益/笔记 */
+/** 页面数据：七路查询由 status/account/positions/openOrders/equity/notes/daily 组成；决策事件同步刷新其中会变化的账户、持仓与挂单。 */
 function useConsoleData() {
   const status = useApiData(() => api.getStatus(), [])
   const account = useApiData(() => api.getAccount(), [])
   const positions = useApiData(() => api.getPositions(), [])
+  const openOrders = useApiData(() => api.getOpenOrders(), [])
   const equity = useApiData(() => api.getEquity(), [])
   const notes = useApiData(() => api.getNotes(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
@@ -45,6 +47,7 @@ function useConsoleData() {
   const { connected, lastMessage } = useWs()
   const { reload: reloadAccount } = account
   const { reload: reloadPositions } = positions
+  const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadEquity } = equity
   const { reload: reloadNotes } = notes
   const { reload: reloadDaily } = daily
@@ -52,14 +55,15 @@ function useConsoleData() {
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
     reloadAccount()
     reloadPositions()
+    reloadOpenOrders()
     reloadEquity()
     reloadNotes()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadAccount, reloadPositions, reloadEquity, reloadNotes, reloadDaily])
-  return { status, account, positions, equity, notes, daily, connected }
+  }, [lastMessage, reloadAccount, reloadPositions, reloadOpenOrders, reloadEquity, reloadNotes, reloadDaily])
+  return { status, account, positions, openOrders, equity, notes, daily, connected }
 }
 
-/** 首屏：左栏账户+权益曲线+硬性风控 / 中央实时轮主角 / 右栏 K线+持仓（移动端实时轮优先） */
+/** 首屏：右栏将当前持仓与未成交挂单相邻展示，便于一起核对和操作。 */
 function FirstScreen({
   account,
   mode,
@@ -67,7 +71,9 @@ function FirstScreen({
   equityChangePct,
   dailyStats,
   positions,
+  openOrders,
   onPositionsChanged,
+  onOpenOrdersChanged,
 }: {
   account: AccountInfo | null
   mode: string
@@ -75,7 +81,9 @@ function FirstScreen({
   equityChangePct?: number
   dailyStats: DailyStats | null
   positions: Position[]
+  openOrders: OpenOrder[]
   onPositionsChanged: () => void
+  onOpenOrdersChanged: () => void
 }) {
   return (
     <section className="grid grid-cols-12 gap-4 pt-5">
@@ -90,6 +98,7 @@ function FirstScreen({
       <aside className="order-3 col-span-12 space-y-4 lg:col-span-3">
         <KlinePanel />
         <PositionsPanel positions={positions} onChanged={onPositionsChanged} />
+        <OpenOrdersPanel orders={openOrders} onChanged={onOpenOrdersChanged} />
       </aside>
     </section>
   )
@@ -114,7 +123,7 @@ function SecondScreen({ notes }: { notes: Note[] }) {
   )
 }
 
-/** 五路注入查询的失败横幅：任一失败列出失败数据源（哑组件只渲染空态，失败在此统一透出） */
+/** 六路关键查询的失败横幅；daily 当日统计独立降级，不进入该横幅。 */
 function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> }) {
   const failed = errors.filter(([, e]) => e !== null)
   if (failed.length === 0) return null
@@ -130,7 +139,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, account, positions, equity, notes, daily, connected } = useConsoleData()
+  const { status, account, positions, openOrders, equity, notes, daily, connected } = useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   // 权益曲线首末点涨跌幅（账户面板累计涨跌行；空数据/首点为 0 → undefined 不渲染）
   const equityChangePct = useMemo(() => equityChangePctOf(equity.data ?? []), [equity.data])
@@ -146,6 +155,11 @@ export default function ConsolePage() {
     account.reload()
     equity.reload()
   }
+  // 撤单不会改变持仓，但会释放可用余额，因此只刷新挂单和账户。
+  const onOpenOrdersChanged = () => {
+    openOrders.reload()
+    account.reload()
+  }
   // 抽屉关闭 → 刷状态（保存密钥/LLM 配置后 TopBar 的 llm_configured 横幅需联动消失）
   const closeConfig = () => {
     setConfigOpen(false)
@@ -155,6 +169,7 @@ export default function ConsolePage() {
   const onPaperReset = () => {
     account.reload()
     positions.reload()
+    openOrders.reload()
     equity.reload()
     daily.reload()
   }
@@ -170,6 +185,7 @@ export default function ConsolePage() {
       <main className="mx-auto max-w-[1440px] px-5 pb-16">
         <LoadErrorBanner
           errors={[
+            ['未成交挂单', openOrders.error],
             ['状态', status.error],
             ['账户', account.error],
             ['持仓', positions.error],
@@ -184,7 +200,9 @@ export default function ConsolePage() {
           equityChangePct={equityChangePct}
           dailyStats={daily.data}
           positions={positions.data ?? []}
+          openOrders={openOrders.data ?? []}
           onPositionsChanged={onPositionsChanged}
+          onOpenOrdersChanged={onOpenOrdersChanged}
         />
         <SecondScreen notes={notes.data ?? []} />
       </main>

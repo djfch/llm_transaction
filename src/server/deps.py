@@ -41,6 +41,8 @@ class ServerDeps:
     # manual_close 与 LLM 平仓同一风控路径；paper_reset 仅 paper 模式注入；
     # agent_start/agent_stop 启停决策调度器（运行态经 status_provider 读取）
     manual_close: Callable[[str], Awaitable[dict]] | None = None
+    # 手动撤单回调：必须走 gateway，并由 agent 层同步本地订单状态。
+    manual_cancel_order: Callable[[str, str], Awaitable[dict]] | None = None
     paper_reset: Callable[[Decimal], None] | None = None
     agent_start: Callable[[], Awaitable[None]] | None = None
     agent_stop: Callable[[], Awaitable[None]] | None = None
