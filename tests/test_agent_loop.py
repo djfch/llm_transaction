@@ -175,10 +175,9 @@ async def test_full_round_audited(env: SimpleNamespace):
     provider = MockProvider(
         [
             _resp(
-                "先看行情与账户",
+                "先看行情",
                 [
                     ToolCall("get_market_data", {"contract": "BTC_USDT", "interval": "1h"}, "c1"),
-                    ToolCall("get_account", {}, "c2"),
                 ],
                 '{"turn":1}',
             ),
@@ -186,7 +185,14 @@ async def test_full_round_audited(env: SimpleNamespace):
                 "",
                 [
                     ToolCall(
-                        "place_order", {"contract": "BTC_USDT", "size": 1, "leverage": 2}, "c3"
+                        "place_order",
+                        {
+                            "contract": "BTC_USDT",
+                            "size": 1,
+                            "leverage": 2,
+                            "stop_loss_price": 58000,
+                        },
+                        "c3",
                     ),
                     ToolCall(
                         "set_price_alert",
@@ -203,7 +209,7 @@ async def test_full_round_audited(env: SimpleNamespace):
     )
     result = await _make_loop(env, provider).run_once("timer:60min")
 
-    assert result.ok and result.tool_calls == 6
+    assert result.ok and result.tool_calls == 5
     assert len(provider.calls) == 3  # 多轮对话：工具结果回填后再问
     round_row = await env.repo.get_audit_round(result.round_id)
     assert round_row is not None and round_row.ended_at is not None
@@ -214,16 +220,15 @@ async def test_full_round_audited(env: SimpleNamespace):
     assert '{"turn":3}' in round_row.llm_raw
 
     calls = await env.repo.list_audit_tool_calls(result.round_id)
-    assert [c.seq for c in calls] == [1, 2, 3, 4, 5, 6]
+    assert [c.seq for c in calls] == [1, 2, 3, 4, 5]
     assert [c.tool for c in calls] == [
         "get_market_data",
-        "get_account",
         "place_order",
         "set_price_alert",
         "write_note",
         "set_next_wakeup",
     ]
-    place = calls[2]
+    place = calls[1]
     assert place.risk_verdict == "allow" and place.risk_reason == ""
     assert json.loads(place.args_json)["size"] == 1
     assert "下单成功" in json.loads(place.result_json)["text"]
@@ -239,9 +244,11 @@ async def test_full_round_audited(env: SimpleNamespace):
     decisions = await env.repo.list_decisions()
     assert len(decisions) == 1 and decisions[0].llm_raw != ""
     assert decisions[0].strategy_version == round_row.prompt_md5
-    # 第二轮 chat 的 messages 含首轮工具结果（多轮回填生效）
+    # 每次 LLM 调用的 messages 都含首轮账户上下文，工具结果也会持续回填
     second_msgs = provider.calls[1]["messages"]
-    assert any(m.get("role") == "tool" and "账户权益" in m.get("content", "") for m in second_msgs)
+    assert any(
+        m.get("role") == "user" and "权益(估值)" in m.get("content", "") for m in second_msgs
+    )
 
 
 # ---------- 风控拒绝：记录且不下单 ----------
@@ -254,7 +261,14 @@ async def test_risk_deny_recorded_no_order(env: SimpleNamespace):
                 "",
                 [
                     ToolCall(
-                        "place_order", {"contract": "BTC_USDT", "size": 100, "leverage": 1}, "c1"
+                        "place_order",
+                        {
+                            "contract": "BTC_USDT",
+                            "size": 100,
+                            "leverage": 1,
+                            "stop_loss_price": 58000,
+                        },
+                        "c1",
                     )
                 ],
                 '{"turn":1}',
@@ -348,17 +362,17 @@ async def test_invalid_args_return_error_text(env: SimpleNamespace):
     assert "未知工具" in texts[2]
 
 
-# ---------- set_leverage 过风控 ----------
+# ---------- 已移除工具不可调用 ----------
 
 
-async def test_set_leverage_risk_checked(env: SimpleNamespace):
+async def test_removed_tools_are_not_registered(env: SimpleNamespace):
     provider = MockProvider(
         [
             _resp(
                 "",
                 [
-                    ToolCall("set_leverage", {"contract": "BTC_USDT", "leverage": 10}, "c1"),
-                    ToolCall("set_leverage", {"contract": "BTC_USDT", "leverage": 3}, "c2"),
+                    ToolCall("set_leverage", {"contract": "BTC_USDT", "leverage": 3}, "c1"),
+                    ToolCall("get_account", {}, "c2"),
                 ],
                 '{"turn":1}',
             ),
@@ -368,9 +382,9 @@ async def test_set_leverage_risk_checked(env: SimpleNamespace):
     result = await _make_loop(env, provider).run_once("timer")
 
     calls = await env.repo.list_audit_tool_calls(result.round_id)
-    assert calls[0].risk_verdict == "deny" and "超过上限" in calls[0].risk_reason
-    assert calls[1].risk_verdict == "allow"
-    assert env.gateway.positions["BTC_USDT"].leverage == Decimal(3)
+    assert all("未知工具" in json.loads(call.result_json)["text"] for call in calls)
+    loop = _make_loop(env, MockProvider([]))
+    assert {spec.name for spec in loop._registry.specs}.isdisjoint({"get_account", "set_leverage"})
 
 
 # ---------- PromptLoader 热重载 ----------

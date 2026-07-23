@@ -15,7 +15,7 @@ _INTERVALS = list(GATE_CANDLE_INTERVALS)
 
 SCHEMAS: dict[str, dict[str, Any]] = {
     "get_market_data": {
-        "description": "获取合约行情：近期 K 线摘要（open/close/高低/变化率）、标记价与资金费率",
+        "description": "获取合约行情：按时间升序逐根返回 K 线原始开盘/收盘/最高/最低/交易量，时间为北京时间（UTC+8）",
         "parameters": {
             "type": "object",
             "properties": {
@@ -33,13 +33,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["contract"],
         },
     },
-    "get_account": {
-        "description": "获取账户状态：权益估值、可用余额、未实现盈亏与全部持仓明细",
-        "parameters": {"type": "object", "properties": {}},
-    },
     "place_order": {
         "description": (
             "下单（开仓/平仓）。size 为张数：正=开多/买入，负=开空/卖出；"
+            "会产生新敞口时必须提供 stop_loss_price 止损价，take_profit_price 可选；"
             "close=true 平掉该合约全部持仓；不传 price 为市价单。下单前自动过风控，拒绝时返回理由"
         ),
         "parameters": {
@@ -59,8 +56,30 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "type": "integer",
                     "description": "本单使用的杠杆倍数（风控校验用），默认 1",
                 },
+                "margin_mode": {
+                    "type": "string",
+                    "enum": ["isolated", "cross"],
+                    "description": "设置杠杆时的保证金模式，默认 isolated（逐仓）",
+                },
+                "stop_loss_price": {
+                    "type": "number",
+                    "description": "止损触发价；开仓、加仓或反手新开仓时必填",
+                },
+                "take_profit_price": {"type": "number", "description": "止盈触发价，可选"},
             },
             "required": ["contract"],
+        },
+    },
+    "update_tpsl": {
+        "description": "更新当前整仓止盈止损：先创建完整的新保护单组，再取消该方向全部旧整仓保护单；止损必填，止盈可选",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {"type": "string", "description": "合约名，如 BTC_USDT"},
+                "stop_loss_price": {"type": "number", "description": "新的止损触发价"},
+                "take_profit_price": {"type": "number", "description": "新的止盈触发价，可选"},
+            },
+            "required": ["contract", "stop_loss_price"],
         },
     },
     "amend_order": {
@@ -85,22 +104,6 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "order_id": {"type": "string", "description": "订单 ID"},
             },
             "required": ["contract", "order_id"],
-        },
-    },
-    "set_leverage": {
-        "description": "设置合约杠杆倍数（受风控 max_leverage 上限约束，超限拒绝）",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "contract": {"type": "string", "description": "合约名"},
-                "leverage": {"type": "integer", "description": "杠杆倍数"},
-                "margin_mode": {
-                    "type": "string",
-                    "enum": ["isolated", "cross"],
-                    "description": "保证金模式，默认 isolated（逐仓）",
-                },
-            },
-            "required": ["contract", "leverage"],
         },
     },
     "set_price_alert": {

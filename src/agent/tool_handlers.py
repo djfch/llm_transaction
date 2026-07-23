@@ -2,7 +2,7 @@
 
 约定：
 - 参数校验失败抛 ToolArgError，由 ToolRegistry 统一转成错误文本（不向上抛异常）
-- 交易类工具（place_order / amend_order / cancel_order / set_leverage）在 tool_trading，
+- 交易类工具（place_order / update_tpsl / amend_order / cancel_order）在 tool_trading，
   内部先过风控，拒绝则返回理由文本
 - 金额/数量一律 Decimal；返回 ToolOutcome 携带风控判定（供审计落库）
 """
@@ -10,14 +10,14 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from src.agent.context import compute_equity, summarize_candles
 from src.config import RiskConfig
-from src.gateway.base import Gateway, GatewayError
+from src.gateway.base import Gateway
 from src.market.candles import CandleCache
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.market.triggers import TriggerManager
@@ -134,27 +134,18 @@ async def get_market_data(deps: ToolDeps, args: dict) -> ToolOutcome:
     interval = _opt_enum(args, "interval", set(GATE_CANDLE_INTERVALS)) or "1h"
     limit = _clamp(_opt_int(args, "limit", 24), 1, 100)
     candles = deps.candles.get_recent(contract, interval, limit)
-    lines = [summarize_candles(contract, interval, candles)]
-    try:
-        meta = deps.gateway.get_contract(contract)
-        lines.append(f"标记价: {meta.mark_price}；资金费率: {meta.funding_rate}")
-    except GatewayError:
-        lines.append("（无法获取合约行情）")
-    return ToolOutcome("\n".join(lines))
-
-
-async def get_account(deps: ToolDeps, args: dict) -> ToolOutcome:
-    account = deps.gateway.get_account()
-    positions = deps.gateway.list_positions()
     lines = [
-        f"账户权益(估值): {compute_equity(account, positions)}",
-        f"可用余额: {account.available}；未实现盈亏: {account.unrealised_pnl}",
-        f"持仓数: {len(positions)}",
+        f"交易对：{contract}；时间尺度：{interval}；时间：北京时间（UTC+8）",
+        "时间（年月日时分） | 开盘价 | 收盘价 | 最高价格 | 最低价格 | 交易量",
     ]
-    for p in positions:
+    if not candles:
+        lines.append("暂无 K 线数据")
+        return ToolOutcome("\n".join(lines))
+    zone = timezone(timedelta(hours=8), name="UTC+8")
+    for candle in candles:
+        timestamp = datetime.fromtimestamp(candle.t, zone).strftime("%Y-%m-%d %H:%M")
         lines.append(
-            f"持仓 {p.contract}: size={p.size}，入场价 {p.entry_price}，"
-            f"标记价 {p.mark_price}，杠杆 {p.leverage}x，浮盈 {p.unrealised_pnl}"
+            f"{timestamp} | {candle.o} | {candle.c} | {candle.h} | {candle.l} | {candle.v}"
         )
     return ToolOutcome("\n".join(lines))
 

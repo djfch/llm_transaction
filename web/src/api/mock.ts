@@ -49,6 +49,8 @@ const positions: Position[] = [
     margin: 47.86, // 12 张 × 0.0001 × 119650 / 3（quanto 面值推算）
     unrealised_pnl: 159.6,
     liq_price: 82_400,
+    stop_loss_price: 116_800,
+    take_profit_price: 122_400,
   },
   {
     contract: 'ETH_USDT',
@@ -59,6 +61,8 @@ const positions: Position[] = [
     margin: 50.82, // 30 张 × 0.001 × 3388 / 2（quanto 面值推算）
     unrealised_pnl: 96,
     liq_price: 5_120,
+    stop_loss_price: 3_510,
+    take_profit_price: null,
   },
 ]
 
@@ -360,21 +364,17 @@ function fillNarrative(fill: Trade): Pick<RoundDetail, 'llm_raw' | 'tool_calls'>
   const action = fill.source === 'llm_open' ? (fill.size > 0 ? '开多' : '开空') : '平仓'
   const qty = Math.abs(fill.size)
   const klineArgs = { contract: fill.contract, interval: '1h', limit: 20 }
-  const orderArgs = { contract: fill.contract, size: fill.size, price: '0', tif: 'ioc' }
+  const orderArgs = { contract: fill.contract, size: fill.size, price: '0', tif: 'ioc', stop_loss_price: fill.size > 0 ? fill.price * 0.98 : fill.price * 1.02 }
   const llm_raw = [
-    anthropicTurn(`例行检查账户状态与 ${fill.contract} 走势。`, [
-      { name: 'get_account', input: {} },
-      { name: 'get_candlesticks', input: klineArgs },
-    ]),
+    anthropicTurn(`账户信息已注入上下文，检查 ${fill.contract} 走势。`, [{ name: 'get_market_data', input: klineArgs }]),
     anthropicTurn(`${fill.contract} 信号符合策略，${action} ${qty} 张。`, [
       { name: 'place_order', input: orderArgs },
     ]),
     anthropicTurn(`已${action} ${qty} 张 ${fill.contract}（成交价 ${fill.price}），30 分钟后复查。`),
   ].join('\n')
   const toolCalls: ToolCall[] = [
-    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
-    mockCall(2, 'get_candlesticks', klineArgs, '返回 20 根 K 线'),
-    mockCall(3, 'place_order', orderArgs, `已成交 ${fill.size} 张 @ ${fill.price}（成交ID ${fill.id}）`, 'allow'),
+    mockCall(1, 'get_market_data', klineArgs, '返回 20 根 K 线'),
+    mockCall(2, 'place_order', orderArgs, `已成交 ${fill.size} 张 @ ${fill.price}（成交ID ${fill.id}）`, 'allow'),
   ]
   return { llm_raw, tool_calls: toolCalls }
 }
@@ -382,37 +382,31 @@ function fillNarrative(fill: Trade): Pick<RoundDetail, 'llm_raw' | 'tool_calls'>
 /** 突破语境但无成交的轮：加仓被风控拒绝(deny)，与「无成交」自洽 */
 function denyNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
   const klineArgs = { contract: 'BTC_USDT', interval: '1h', limit: 20 }
-  const orderArgs = { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc' }
+  const orderArgs = { contract: 'BTC_USDT', size: 20, price: '0', tif: 'ioc', stop_loss_price: 112_000 }
   const noteArgs = { content: '突破有效性待确认，下次 30 分钟后唤醒。' }
   const reason = '下单后单仓名义价值占权益 36% > max_position_pct(单仓上限) 30%'
   const llm_raw = [
-    anthropicTurn('BTC 突破 118000 阻力位，先确认账户与 K 线形态。', [
-      { name: 'get_account', input: {} },
-      { name: 'get_candlesticks', input: klineArgs },
-    ]),
+    anthropicTurn('账户信息已注入上下文，确认 BTC 突破后的 K 线形态。', [{ name: 'get_market_data', input: klineArgs }]),
     anthropicTurn('量能配合，尝试加仓 20 张 BTC。', [{ name: 'place_order', input: orderArgs }]),
     anthropicTurn('加仓被风控拒绝，维持现有持仓，记录观察结论。', [{ name: 'set_note', input: noteArgs }]),
   ].join('\n')
   const toolCalls: ToolCall[] = [
-    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
-    mockCall(2, 'get_candlesticks', klineArgs, '返回 20 根 K 线'),
-    mockCall(3, 'place_order', orderArgs, '风控拒绝，未下单', 'deny', reason),
-    mockCall(4, 'set_note', noteArgs, '已保存笔记'),
+    mockCall(1, 'get_market_data', klineArgs, '返回 20 根 K 线'),
+    mockCall(2, 'place_order', orderArgs, '风控拒绝，未下单', 'deny', reason),
+    mockCall(3, 'set_note', noteArgs, '已保存笔记'),
   ]
   return { llm_raw, tool_calls: toolCalls }
 }
 
-/** 观望轮：无交易动作，只查账户并记笔记 */
+/** 观望轮：账户已在上下文中，无交易动作，只记笔记 */
 function idleNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
   const noteArgs = { content: '波动率不足，维持现有持仓，继续观察。' }
   const llm_raw = [
-    anthropicTurn('例行检查账户状态。', [{ name: 'get_account', input: {} }]),
-    anthropicTurn('波动率不足，维持现有持仓，记录观察结论。', [{ name: 'set_note', input: noteArgs }]),
+    anthropicTurn('账户信息已注入，波动率不足，记录观察结论。', [{ name: 'set_note', input: noteArgs }]),
     anthropicTurn('本轮无交易动作，60 分钟后定时唤醒。'),
   ].join('\n')
   const toolCalls: ToolCall[] = [
-    mockCall(1, 'get_account', {}, 'equity=10842.36, available=7315.20'),
-    mockCall(2, 'set_note', noteArgs, '已保存笔记'),
+    mockCall(1, 'set_note', noteArgs, '已保存笔记'),
   ]
   return { llm_raw, tool_calls: toolCalls }
 }
@@ -424,7 +418,7 @@ function buildRoundDetail(meta: RoundSummary): RoundDetail {
   return { round_id: meta.round_id, prompt_snapshot: promptSnapshot(meta), ...body }
 }
 
-/** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮（get_account/write_note/set_next_wakeup） */
+/** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮。 */
 function buildAgentLive(): AgentLiveState {
   const meta = rounds[0]
   const startedAt = Math.floor(new Date(meta.started_at).getTime() / 1000)
@@ -449,7 +443,6 @@ function buildAgentLive(): AgentLiveState {
         {
           thoughts: '波动率不足，维持现有持仓，记录观察结论后 30 分钟后再唤醒。',
           tool_calls: [
-            { tool: 'get_account', args: {} },
             { tool: 'write_note', args: { content: '突破有效性待确认，继续观察。' } },
             { tool: 'set_next_wakeup', args: { minutes: 30 } },
           ],
@@ -464,15 +457,6 @@ function buildAgentLive(): AgentLiveState {
     tool_calls: [
       {
         seq: 1,
-        tool: 'get_account',
-        args: {},
-        risk_verdict: '',
-        risk_reason: '',
-        result: { text: 'equity=10842.36, available=7315.20' },
-        duration_ms: 12,
-      },
-      {
-        seq: 2,
         tool: 'write_note',
         args: { content: '突破有效性待确认，继续观察。' },
         risk_verdict: '',
@@ -481,7 +465,7 @@ function buildAgentLive(): AgentLiveState {
         duration_ms: 5,
       },
       {
-        seq: 3,
+        seq: 2,
         tool: 'set_next_wakeup',
         args: { minutes: 30 },
         risk_verdict: '',

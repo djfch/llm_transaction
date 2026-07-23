@@ -116,7 +116,10 @@ function adaptAccount(raw: RawAccount): AccountInfo {
 }
 
 /** 后端原始持仓：数字字段可能是数字字符串 */
-type RawPosition = { [K in keyof Position]: number | string }
+type RawPosition = Omit<{ [K in keyof Position]: number | string }, 'stop_loss_price' | 'take_profit_price'> & {
+  stop_loss_price: number | string | null
+  take_profit_price: number | string | null
+}
 
 /** 后端 Position → 前端 Position：数字字符串统一转 number */
 function adaptPosition(raw: RawPosition): Position {
@@ -129,6 +132,8 @@ function adaptPosition(raw: RawPosition): Position {
     margin: Number(raw.margin),
     unrealised_pnl: Number(raw.unrealised_pnl),
     liq_price: Number(raw.liq_price),
+    stop_loss_price: raw.stop_loss_price == null ? null : Number(raw.stop_loss_price),
+    take_profit_price: raw.take_profit_price == null ? null : Number(raw.take_profit_price),
   }
 }
 type RawOpenOrder = Omit<OpenOrder, 'size' | 'left' | 'price'> & {

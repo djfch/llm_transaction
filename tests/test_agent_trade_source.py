@@ -109,13 +109,28 @@ async def _make_paper_loop(tmp_path, provider: SeqProvider) -> SimpleNamespace:
 async def test_drain_trade_source_open_close_liquidation(tmp_path):
     provider = SeqProvider(
         [
-            _resp("开多", [ToolCall("place_order", {"contract": "BTC_USDT", "size": 1}, "c1")]),
+            _resp(
+                "开多",
+                [
+                    ToolCall(
+                        "place_order",
+                        {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+                        "c1",
+                    )
+                ],
+            ),
             _resp("好", []),  # round1：drain 落 llm_open
             _resp("平仓", [ToolCall("place_order", {"contract": "BTC_USDT", "close": True}, "c2")]),
             _resp("好", []),  # round2：drain 落 llm_close
             _resp(
                 "再开",
-                [ToolCall("place_order", {"contract": "BTC_USDT", "size": 1, "leverage": 5}, "c3")],
+                [
+                    ToolCall(
+                        "place_order",
+                        {"contract": "BTC_USDT", "size": 1, "leverage": 5, "stop_loss_price": 1},
+                        "c3",
+                    )
+                ],
             ),
             _resp("好", []),  # round3：drain 落 llm_open（5x 杠杆仓）
             _resp("观望", []),  # round4：drain 落强平成交
@@ -172,7 +187,9 @@ async def test_inline_trade_source_open_and_close(tmp_path):
     """无 drain 钩子（save_fills_inline=True）：已成交单由工具层直接落 trades 并标注。"""
     env = await _make_inline_env(tmp_path)
     try:
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )
         assert out.risk_verdict == "allow", out.text
         out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
         assert out.risk_verdict == "allow", out.text
@@ -187,7 +204,9 @@ async def test_inline_reduce_only_source_llm_close(tmp_path):
     """inline 路径 reduce_only 平仓单同样标注 llm_close（需求：close or reduce_only）。"""
     env = await _make_inline_env(tmp_path)
     try:
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )
         assert out.risk_verdict == "allow", out.text
         out = await env.registry.execute(
             "place_order", {"contract": "BTC_USDT", "size": -1, "reduce_only": True}

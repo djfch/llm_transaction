@@ -28,6 +28,7 @@ from ..gateway.base import (
     OrderResult,
     Position,
     Ticker,
+    TpslOrder,
 )
 from .account import FillRecord, PaperAccount
 from .convert import PriceSnap, RestingOrder, synth_ticker, to_position
@@ -57,6 +58,7 @@ class PaperGateway:
         self._leverages: dict[str, Decimal] = {}
         self._open: dict[str, RestingOrder] = {}
         self._results: dict[str, OrderResult] = {}
+        self._tpsl: dict[str, TpslOrder] = {}
         self.liquidations: list[LiquidationEvent] = []
 
     def upsert_contract(self, contract: Contract) -> None:
@@ -82,6 +84,7 @@ class PaperGateway:
                 update={"mark_price": mark}
             )
         self._match_resting(contract)
+        self._trigger_tpsl(contract)
         self._check_liquidation(contract)
 
     def settle_funding(self, contract: str, rate: Decimal) -> Decimal:
@@ -120,6 +123,7 @@ class PaperGateway:
         self.account = PaperAccount(equity)
         self._open.clear()
         self._results = {k: r for k, r in self._results.items() if r.status != "open"}
+        self._tpsl.clear()
         self.liquidations.clear()
 
     def get_contract(self, contract: str) -> Contract:
@@ -132,7 +136,26 @@ class PaperGateway:
         return Account(available=self.account.available, unrealised_pnl=upnl)
 
     def list_positions(self) -> list[Position]:
-        return [self._position_of(pos) for pos in self.account.positions.values() if pos.size != 0]
+        positions = []
+        for pos in self.account.positions.values():
+            if pos.size == 0:
+                continue
+            item = self._position_of(pos)
+            direction = 1 if item.size > 0 else -1
+            mine = [o for o in self.list_tpsl_orders(item.contract) if o.direction == direction]
+            positions.append(
+                item.model_copy(
+                    update={
+                        "stop_loss_price": next(
+                            (o.trigger_price for o in mine if o.kind == "stop_loss"), None
+                        ),
+                        "take_profit_price": next(
+                            (o.trigger_price for o in mine if o.kind == "take_profit"), None
+                        ),
+                    }
+                )
+            )
+        return positions
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
         if margin_mode not in ("isolated", "cross"):
@@ -184,7 +207,11 @@ class PaperGateway:
         if self._crossed(order):  # 改单后立即穿透，按 taker 成交
             snap = self._snaps[contract]
             fill = snap.ask if order.size > 0 else snap.bid
-            return self._execute(order_id, contract, order.size, fill, maker=False, text=order.text)
+            result = self._execute(
+                order_id, contract, order.size, fill, maker=False, text=order.text
+            )
+            self._apply_tpsl(contract, order.size, order.stop_loss_price, order.take_profit_price)
+            return result
         self._results[order_id] = self._results[order_id].model_copy(
             update={"left": abs(order.size), "size": order.size, "price": order.price}
         )
@@ -214,6 +241,19 @@ class PaperGateway:
         ]
         return orders[offset:] if limit is None else orders[offset : offset + limit]
 
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        return [order for order in self._tpsl.values() if order.contract == contract]
+
+    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        created = order.model_copy(update={"id": f"tpsl-{self._next_id()}"})
+        self._tpsl[created.id] = created
+        return created
+
+    def cancel_tpsl_order(self, order_id: str) -> None:
+        if order_id not in self._tpsl:
+            raise OrderNotFound(f"止盈止损单不存在: {order_id}", label="ORDER_NOT_FOUND")
+        del self._tpsl[order_id]
+
     def get_candlesticks(
         self,
         contract: str,
@@ -240,7 +280,9 @@ class PaperGateway:
         snap = self._snap(req.contract)
         slip = Decimal(str(self._cfg.slippage))
         price = snap.mark * (1 + slip) if req.size > 0 else snap.mark * (1 - slip)
-        return self._execute(order_id, req.contract, req.size, price, maker=False, text=text)
+        result = self._execute(order_id, req.contract, req.size, price, maker=False, text=text)
+        self._apply_request_tpsl(req)
+        return result
 
     def _limit_order(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
         order = RestingOrder(
@@ -249,12 +291,16 @@ class PaperGateway:
             size=req.size,
             price=req.price,
             reduce_only=req.reduce_only,
+            stop_loss_price=req.stop_loss_price,
+            take_profit_price=req.take_profit_price,
             text=text,
         )
         if self._crossed(order):  # 立即成交按 taker
             snap = self._snaps[req.contract]
             fill = snap.ask if req.size > 0 else snap.bid
-            return self._execute(order_id, req.contract, req.size, fill, maker=False, text=text)
+            result = self._execute(order_id, req.contract, req.size, fill, maker=False, text=text)
+            self._apply_request_tpsl(req)
+            return result
         # 挂单卡片依赖原始委托字段，不能只保留 left。
         result = OrderResult(
             id=order_id,
@@ -291,10 +337,96 @@ class PaperGateway:
             fill = snap.ask if order.size > 0 else snap.bid
             try:
                 self._execute(order.id, contract, order.size, fill, maker=True, text=order.text)
+                self._apply_tpsl(
+                    contract, order.size, order.stop_loss_price, order.take_profit_price
+                )
             except GatewayError as exc:
                 if exc.label != "INSUFFICIENT_BALANCE":
                     raise
                 self._cancel_failed(order, exc.label)
+
+    def _trigger_tpsl(self, contract: str) -> None:
+        """价格穿越时按市价全平，并清理该方向全部保护单。"""
+        pos = self.account.position(contract)
+        if pos is None:
+            return
+        direction = 1 if pos.size > 0 else -1
+        mark = self._snap(contract).mark
+        triggered = [
+            order
+            for order in self.list_tpsl_orders(contract)
+            if order.direction == direction
+            and (
+                (
+                    order.kind == "stop_loss"
+                    and (
+                        (direction > 0 and mark <= order.trigger_price)
+                        or (direction < 0 and mark >= order.trigger_price)
+                    )
+                )
+                or (
+                    order.kind == "take_profit"
+                    and (
+                        (direction > 0 and mark >= order.trigger_price)
+                        or (direction < 0 and mark <= order.trigger_price)
+                    )
+                )
+            )
+        ]
+        if not triggered:
+            return
+        order_id = triggered[0].id
+        self._execute(order_id, contract, -pos.size, mark, maker=False, text="tpsl")
+        self._clear_tpsl(contract, direction)
+
+    def _apply_request_tpsl(self, req: OrderRequest) -> None:
+        self._apply_tpsl(req.contract, req.size, req.stop_loss_price, req.take_profit_price)
+
+    def _apply_tpsl(
+        self,
+        contract: str,
+        size: Decimal,
+        stop_loss_price: Decimal | None,
+        take_profit_price: Decimal | None,
+    ) -> None:
+        if stop_loss_price is None:
+            return
+        pos = self.account.position(contract)
+        if pos is None:
+            return
+        direction = 1 if pos.size > 0 else -1
+        self._clear_tpsl(contract, direction)
+        self.create_tpsl_order(
+            TpslOrder(
+                id="",
+                contract=contract,
+                direction=direction,
+                kind="stop_loss",
+                trigger_price=stop_loss_price,
+            )
+        )
+        if take_profit_price is not None:
+            self.create_tpsl_order(
+                TpslOrder(
+                    id="",
+                    contract=contract,
+                    direction=direction,
+                    kind="take_profit",
+                    trigger_price=take_profit_price,
+                )
+            )
+
+    def _clear_tpsl(self, contract: str, direction: int | None = None) -> None:
+        for order in list(self._tpsl.values()):
+            if order.contract == contract and (direction is None or order.direction == direction):
+                del self._tpsl[order.id]
+
+    def _clear_stale_tpsl(self, contract: str) -> None:
+        pos = self.account.position(contract)
+        direction = None if pos is None else (1 if pos.size > 0 else -1)
+        for order in list(self._tpsl.values()):
+            if order.contract == contract and (direction is None or order.direction != direction):
+                del self._tpsl[order.id]
 
     def _cancel_failed(self, order: RestingOrder, reason: str) -> None:
         """撤销触价失败的挂单：从 open 移除，结果标记 cancelled 并记录原因。"""
@@ -329,6 +461,7 @@ class PaperGateway:
         )
         self._results[order_id] = result
         self._open.pop(order_id, None)
+        self._clear_stale_tpsl(contract)
         return result
 
     def _close_all(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
@@ -346,7 +479,9 @@ class PaperGateway:
             self._results[order_id] = result
             return result
         close_req = req.model_copy(update={"size": -pos.size, "close": False})
-        return self._market_order(close_req, order_id, text)
+        result = self._market_order(close_req, order_id, text)
+        self._clear_tpsl(req.contract)
+        return result
 
     def _check_liquidation(self, contract: str) -> None:
         pos = self.account.position(contract)

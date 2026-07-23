@@ -229,12 +229,16 @@ def test_build_payload_limit_order():
         price=Decimal("49999.5"),
         tif="poc",
         reduce_only=True,
+        stop_loss_price=Decimal("49000"),
+        take_profit_price=Decimal("51000"),
         text="t-custom",
     )
     payload = build_order_payload(req)
     assert payload["price"] == "49999.5"
     assert payload["tif"] == "poc"
     assert payload["reduce_only"] is True
+    assert payload["tpsl_sl_trigger_price"] == "49000"
+    assert payload["tpsl_tp_trigger_price"] == "51000"
     assert payload["text"] == "t-custom"
 
 

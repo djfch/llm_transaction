@@ -1,4 +1,4 @@
-"""交易类工具（place_order / amend_order / cancel_order / set_leverage）。
+"""交易类工具（place_order / update_tpsl / amend_order / cancel_order）。
 
 硬规范：任何到达网关的交易动作必须先过 RiskEngine——风控拒绝返回理由文本，绝不放行。
 从 tool_handlers 拆出以控制单文件行数；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
@@ -21,14 +21,13 @@ from src.agent.tool_handlers import (
     ToolDeps,
     ToolOutcome,
     _need_decimal,
-    _need_int,
     _need_str,
     _opt_decimal,
     _opt_enum,
     _opt_int,
 )
 from src.audit.logger import get_logger
-from src.gateway.base import OrderRequest, OrderResult, Position
+from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
 from src.risk.models import AccountSnapshot, TradeIntent
 
 logger = get_logger(__name__)
@@ -84,19 +83,49 @@ async def _risk_check(
 def _resolve_leverage(
     contract: str, declared: int | None, positions: list[Position]
 ) -> tuple[int, int | None]:
-    """返回（风控判定用杠杆, 下单前需 set_leverage 生效的声明值或 None）。
-
-    - 有持仓：杠杆锁定在仓位上，按实际杠杆判定，声明值不生效（需调整用 set_leverage 工具）
-    - 无持仓且声明：声明值过 rule_leverage 判定后，下单前真实 set_leverage 生效
-    - 无持仓未声明：按 1 参与判定（paper 引擎默认杠杆即 1，rule_leverage 对 1 恒放行，
-      不会误拒；真实网关以账户当前设置为准，保证金由交易所按其实际杠杆收取）
-    """
+    """返回风控杠杆与下单前需实际设置的杠杆；声明值总会由 place_order 生效。"""
     pos = next((p for p in positions if p.contract == contract), None)
-    if pos is not None:
-        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，按 1 参与判定
     if declared is not None:
         return declared, declared
+    if pos is not None:
+        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，按 1 参与判定
     return 1, None
+
+
+def _position_after(positions: list[Position], contract: str, size: Decimal) -> Decimal:
+    pos = next((p for p in positions if p.contract == contract), None)
+    return (pos.size if pos is not None else Decimal(0)) + size
+
+
+def _opens_exposure(
+    positions: list[Position], contract: str, size: Decimal, close: bool, reduce_only: bool
+) -> bool:
+    """只把纯平仓/纯减仓视为免止损；反手残余仓属于新敞口。"""
+    if close:
+        return False
+    pos = next((p for p in positions if p.contract == contract), None)
+    if pos is None or pos.size == 0:
+        return not reduce_only
+    if (pos.size > 0) == (size > 0):
+        return True
+    return abs(size) > abs(pos.size)
+
+
+def _validate_tpsl(
+    *, direction: int, mark_price: Decimal, stop_loss: Decimal, take_profit: Decimal | None
+) -> None:
+    if stop_loss <= 0 or (take_profit is not None and take_profit <= 0):
+        raise ToolArgError("止损价与止盈价必须为正数")
+    if direction > 0:
+        if stop_loss >= mark_price:
+            raise ToolArgError("多仓止损价必须低于标记价")
+        if take_profit is not None and take_profit <= mark_price:
+            raise ToolArgError("多仓止盈价必须高于标记价")
+    else:
+        if stop_loss <= mark_price:
+            raise ToolArgError("空仓止损价必须高于标记价")
+        if take_profit is not None and take_profit >= mark_price:
+            raise ToolArgError("空仓止盈价必须低于标记价")
 
 
 # ---------- 落库辅助 ----------
@@ -188,6 +217,24 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     tif = _opt_enum(args, "tif", {"gtc", "ioc", "poc", "fok"})
     declared = _opt_int(args, "leverage", None)  # None = 未声明
     positions = deps.gateway.list_positions()
+    opens_exposure = _opens_exposure(positions, contract, size, close, reduce_only)
+    stop_loss = _opt_decimal(args, "stop_loss_price")
+    take_profit = _opt_decimal(args, "take_profit_price")
+    after = _position_after(positions, contract, size)
+    if opens_exposure:
+        if stop_loss is None:
+            raise ToolArgError("开仓、加仓或反手新开仓必须提供 stop_loss_price（止损价）")
+        _validate_tpsl(
+            direction=1 if after > 0 else -1,
+            mark_price=deps.gateway.get_contract(contract).mark_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
+    elif stop_loss is not None or take_profit is not None:
+        raise ToolArgError("纯平仓或纯减仓不接受止盈止损参数，请使用 update_tpsl 更新存量仓位")
+    if declared is not None and declared <= 0:
+        raise ToolArgError("leverage 必须为正整数")
+    margin_mode = _opt_enum(args, "margin_mode", {"isolated", "cross"}) or "isolated"
     leverage, apply_leverage = _resolve_leverage(contract, declared, positions)
     deny = await _risk_check(
         deps,
@@ -200,7 +247,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     if deny is not None:
         return deny
     if apply_leverage is not None:
-        deps.gateway.set_leverage(contract, apply_leverage)  # 声明杠杆真实生效
+        deps.gateway.set_leverage(contract, apply_leverage, margin_mode)
     req = OrderRequest(
         contract=contract,
         size=size,
@@ -208,6 +255,8 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         tif=tif,
         reduce_only=reduce_only,
         close=close,
+        stop_loss_price=stop_loss,
+        take_profit_price=take_profit,
     )
     result = deps.gateway.place_order(req)
     warning = await _record_order(deps, result, req, positions)
@@ -216,10 +265,96 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         f"下单成功：{contract} size={size} {kind}，订单号 {result.id}，"
         f"状态 {result.status}，成交均价 {result.fill_price}"
     )
-    if declared is not None and apply_leverage is None and declared != leverage:
-        text += f"；持仓中实际杠杆 {leverage}x，声明的 {declared}x 未生效"
+    if opens_exposure:
+        text += f"；止损 {stop_loss}" + (f"，止盈 {take_profit}" if take_profit else "")
     if warning:
         text += f"；警告：{warning}"
+    return ToolOutcome(text, "allow")
+
+
+async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
+    """整仓保护替换：完整新组落地后才撤销同方向旧组，避免裸露窗口。"""
+    contract = _need_str(args, "contract")
+    stop_loss = _need_decimal(args, "stop_loss_price")
+    take_profit = _opt_decimal(args, "take_profit_price")
+    positions = deps.gateway.list_positions()
+    pos = next((item for item in positions if item.contract == contract), None)
+    if pos is None or pos.size == 0:
+        raise ToolArgError("当前无持仓，无法设置整仓止盈止损")
+    direction = 1 if pos.size > 0 else -1
+    _validate_tpsl(
+        direction=direction,
+        mark_price=deps.gateway.get_contract(contract).mark_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+    )
+    deny = await _risk_check(
+        deps,
+        contract,
+        size=-pos.size,
+        price=None,
+        is_close=True,
+        leverage=max(int(pos.leverage), 1),
+    )
+    if deny is not None:
+        return deny
+    old = [
+        order for order in deps.gateway.list_tpsl_orders(contract) if order.direction == direction
+    ]
+    requested = [
+        TpslOrder(
+            id="", contract=contract, direction=direction, kind="stop_loss", trigger_price=stop_loss
+        )
+    ]
+    if take_profit is not None:
+        requested.append(
+            TpslOrder(
+                id="",
+                contract=contract,
+                direction=direction,
+                kind="take_profit",
+                trigger_price=take_profit,
+            )
+        )
+    created: list[TpslOrder] = []
+    try:
+        for item in requested:
+            created.append(deps.gateway.create_tpsl_order(item))
+    except GatewayError as exc:
+        if exc.label == "TPSL_STATE_UNKNOWN":
+            return ToolOutcome(
+                f"更新止盈止损状态未知；旧保护单未撤销，请人工核对且不要盲目重试：{exc}"
+            )
+        rollback_failed: list[str] = []
+        for item in created:
+            try:
+                deps.gateway.cancel_tpsl_order(item.id)
+            except GatewayError:
+                logger.exception("止盈止损回滚失败 id=%s", item.id)
+                rollback_failed.append(item.id)
+        if rollback_failed:
+            return ToolOutcome(
+                "更新止盈止损失败；旧保护单未变更，但以下新保护单回滚失败，"
+                f"可能与旧单并存，请人工核对：{', '.join(rollback_failed)}；原因：{exc}"
+            )
+        return ToolOutcome(f"更新止盈止损失败，新保护单已回滚，旧保护单未变更：{exc}")
+    cancelled: list[str] = []
+    try:
+        for item in old:
+            deps.gateway.cancel_tpsl_order(item.id)
+            cancelled.append(item.id)
+    except GatewayError as exc:
+        if exc.label == "TPSL_STATE_UNKNOWN":
+            return ToolOutcome(
+                f"新止盈止损已设置，但撤销旧保护单状态未知，请人工核对且不要盲目重试：{exc}"
+            )
+        return ToolOutcome(
+            "新止盈止损已设置，但旧保护单仅撤销 "
+            f"{len(cancelled)}/{len(old)} 个；其余旧单与新单的实际状态需人工核对：{exc}"
+        )
+    text = f"止损已更新为 {stop_loss}" + (
+        f"；止盈已更新为 {take_profit}" if take_profit else "；止盈未设置"
+    )
     return ToolOutcome(text, "allow")
 
 
@@ -285,16 +420,3 @@ async def cancel_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     result = deps.gateway.cancel_order(contract, order_id)
     await deps.repo.update_order_status(order_id, result.status, result.finish_as or "cancelled")
     return ToolOutcome(f"撤单成功：订单 {order_id}，状态 {result.status}")
-
-
-async def set_leverage(deps: ToolDeps, args: dict) -> ToolOutcome:
-    contract = _need_str(args, "contract")
-    leverage = _need_int(args, "leverage")
-    margin_mode = _opt_enum(args, "margin_mode", {"isolated", "cross"}) or "isolated"
-    if leverage <= 0:
-        raise ToolArgError("leverage 必须为正整数")
-    if leverage > deps.risk_config.max_leverage:
-        reason = f"杠杆 {leverage}x 超过上限 {deps.risk_config.max_leverage}x"
-        return ToolOutcome(f"风控拒绝：{reason}", "deny", reason)
-    deps.gateway.set_leverage(contract, leverage, margin_mode)
-    return ToolOutcome(f"杠杆已设置：{contract} {leverage}x（{margin_mode}）", "allow")

@@ -75,6 +75,8 @@ class Position(BaseModel):
     leverage: Decimal
     margin: Decimal
     unrealised_pnl: Decimal
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
 
 
 class OrderRequest(BaseModel):
@@ -89,6 +91,8 @@ class OrderRequest(BaseModel):
     tif: str | None = None  # gtc/ioc/poc/fok；市价单强制 ioc
     reduce_only: bool = False
     close: bool = False
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
     text: str | None = None  # 自定义订单 ID；None 时由网关生成
 
 
@@ -107,6 +111,16 @@ class OrderResult(BaseModel):
     fill_price: Decimal  # 成交均价
     finish_as: str = ""
     text: str = ""
+
+
+class TpslOrder(BaseModel):
+    """整仓止盈止损保护单。direction 正=保护多仓，负=保护空仓。"""
+
+    id: str
+    contract: str
+    direction: int
+    kind: str  # stop_loss / take_profit
+    trigger_price: Decimal
 
 
 class Candle(BaseModel):
@@ -162,6 +176,12 @@ class Gateway(Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> list[OrderResult]: ...
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]: ...
+
+    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder: ...
+
+    def cancel_tpsl_order(self, order_id: str) -> None: ...
 
     def get_candlesticks(
         self,

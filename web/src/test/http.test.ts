@@ -46,6 +46,8 @@ describe('http 适配层（数字字符串 → number）', () => {
             margin: '47.86',
             unrealised_pnl: '159.6',
             liq_price: '82400',
+            stop_loss_price: '116800',
+            take_profit_price: null,
           },
         ],
       }),
@@ -55,6 +57,8 @@ describe('http 适配层（数字字符串 → number）', () => {
     expect(p.mark_price).toBe(119650.5)
     expect(typeof p.size).toBe('number')
     expect(typeof p.liq_price).toBe('number')
+    expect(p.stop_loss_price).toBe(116800)
+    expect(p.take_profit_price).toBeNull()
   })
 
   it('getEquity：points[].t 映射为 time，equity 转 number', async () => {

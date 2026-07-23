@@ -29,11 +29,13 @@ from .base import (
     OrderStateUnknown,
     Position,
     PositionNotFound,
+    TpslOrder,
     Ticker,
 )
 
 _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒（计划附录）
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
+_TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤旧单
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
 
@@ -96,6 +98,12 @@ def build_order_payload(req: OrderRequest) -> dict:
         "price": price,
         "tif": tif,
         "reduce_only": req.reduce_only,
+        "tpsl_sl_trigger_price": (
+            _fmt_decimal(req.stop_loss_price) if req.stop_loss_price is not None else None
+        ),
+        "tpsl_tp_trigger_price": (
+            _fmt_decimal(req.take_profit_price) if req.take_profit_price is not None else None
+        ),
         "text": text,
     }
 
@@ -180,6 +188,22 @@ def _to_ticker(t: gate_api.FuturesTicker) -> Ticker:
     )
 
 
+def _to_tpsl(order: gate_api.FuturesPriceTriggeredOrder) -> TpslOrder | None:
+    """Gate 价格触发单转换为本系统整仓保护单；非整仓平仓单不参与接管。"""
+    direction = {"close-long-position": 1, "close-short-position": -1}.get(order.order_type)
+    if direction is None or order.trigger is None:
+        return None
+    rule = int(order.trigger.rule)
+    kind = "take_profit" if (direction > 0) == (rule == 1) else "stop_loss"
+    return TpslOrder(
+        id=str(order.id_string or order.id),
+        contract=order.initial.contract,
+        direction=direction,
+        kind=kind,
+        trigger_price=_dec(order.trigger.price),
+    )
+
+
 class GateRestGateway:
     """真实网关：只做 SDK 调用与异常/超时处理，下单语义由 build_order_payload 组装。"""
 
@@ -211,7 +235,15 @@ class GateRestGateway:
 
     def list_positions(self) -> list[Position]:
         try:
-            return [_to_position(p) for p in self._api.list_positions(self._settle)]
+            positions = [_to_position(p) for p in self._api.list_positions(self._settle)]
+            for pos in positions:
+                tpsl = self.list_tpsl_orders(pos.contract)
+                mine = [o for o in tpsl if o.direction == (1 if pos.size > 0 else -1)]
+                stop = next((o.trigger_price for o in mine if o.kind == "stop_loss"), None)
+                take = next((o.trigger_price for o in mine if o.kind == "take_profit"), None)
+                pos.stop_loss_price = stop
+                pos.take_profit_price = take
+            return positions
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
@@ -298,6 +330,50 @@ class GateRestGateway:
             return [_to_order(o) for o in orders]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        try:
+            orders = self._api.list_price_triggered_orders(self._settle, "open", contract=contract)
+            return [mapped for raw in orders if (mapped := _to_tpsl(raw)) is not None]
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+
+    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        rule = 1 if (order.direction > 0) == (order.kind == "take_profit") else 2
+        payload = gate_api.FuturesPriceTriggeredOrder(
+            initial=gate_api.FuturesInitialOrder(
+                contract=order.contract, size=0, price="0", close=True, tif="ioc"
+            ),
+            trigger=gate_api.FuturesPriceTrigger(
+                strategy_type=0, price_type=1, price=_fmt_decimal(order.trigger_price), rule=rule
+            ),
+            order_type="close-long-position" if order.direction > 0 else "close-short-position",
+        )
+        try:
+            result = self._api.create_price_triggered_order(
+                self._settle, payload, _request_timeout=_TPSL_TIMEOUT_S
+            )
+            return order.model_copy(update={"id": str(result.id_string or result.id)})
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+        except Exception as exc:
+            raise OrderStateUnknown(
+                "创建止盈止损超时或网络失败，状态未知；旧保护单未撤销，禁止盲目重试",
+                label="TPSL_STATE_UNKNOWN",
+            ) from exc
+
+    def cancel_tpsl_order(self, order_id: str) -> None:
+        try:
+            self._api.cancel_price_triggered_order(
+                self._settle, order_id, _request_timeout=_TPSL_TIMEOUT_S
+            )
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+        except Exception as exc:
+            raise OrderStateUnknown(
+                f"撤销止盈止损单 {order_id} 超时或网络失败，状态未知；请人工核对",
+                label="TPSL_STATE_UNKNOWN",
+            ) from exc
 
     def get_candlesticks(
         self,

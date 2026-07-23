@@ -22,6 +22,7 @@ from .base import (
     OrderResult,
     Position,
     Ticker,
+    TpslOrder,
 )
 
 
@@ -54,6 +55,7 @@ class MockGateway:
         self.candles: list[Candle] = []
         self.orders: dict[str, OrderResult] = {}
         self.placed: list[OrderRequest] = []
+        self.tpsl_orders: dict[str, TpslOrder] = {}
         self._order_seq = 0
 
     def get_contract(self, contract: str) -> Contract:
@@ -65,7 +67,25 @@ class MockGateway:
         return self.account
 
     def list_positions(self) -> list[Position]:
-        return [p for p in self.positions.values() if p.size != 0]
+        result = []
+        for pos in self.positions.values():
+            if pos.size == 0:
+                continue
+            direction = 1 if pos.size > 0 else -1
+            mine = [o for o in self.list_tpsl_orders(pos.contract) if o.direction == direction]
+            result.append(
+                pos.model_copy(
+                    update={
+                        "stop_loss_price": next(
+                            (o.trigger_price for o in mine if o.kind == "stop_loss"), None
+                        ),
+                        "take_profit_price": next(
+                            (o.trigger_price for o in mine if o.kind == "take_profit"), None
+                        ),
+                    }
+                )
+            )
+        return result
 
     def place_order(self, req: OrderRequest) -> OrderResult:
         self.placed.append(req)
@@ -102,6 +122,8 @@ class MockGateway:
                 text=req.text or "",
             )
         self.orders[order_id] = result
+        if result.status == "finished":
+            self._apply_request_tpsl(req)
         return result
 
     def _check_reduce_only(self, req: OrderRequest) -> None:
@@ -128,6 +150,7 @@ class MockGateway:
             text=req.text or "",
         )
         self.orders[order_id] = result
+        self._clear_tpsl(req.contract)
         return result
 
     def _apply_fill(self, contract: str, size: Decimal, price: Decimal) -> None:
@@ -144,6 +167,7 @@ class MockGateway:
         self.positions[contract] = pos.model_copy(
             update={"size": new_size, "entry_price": entry, "mark_price": price}
         )
+        self._clear_stale_tpsl(contract)
 
     def _mark_price(self, contract: str) -> Decimal:
         c = self.contracts.get(contract)
@@ -202,6 +226,60 @@ class MockGateway:
             if (contract is None or o.contract == contract) and o.status == status
         ]
         return orders[offset:] if limit is None else orders[offset : offset + limit]
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        return [order for order in self.tpsl_orders.values() if order.contract == contract]
+
+    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        self._order_seq += 1
+        created = order.model_copy(update={"id": f"tpsl-{self._order_seq}"})
+        self.tpsl_orders[created.id] = created
+        return created
+
+    def cancel_tpsl_order(self, order_id: str) -> None:
+        if order_id not in self.tpsl_orders:
+            raise OrderNotFound(f"止盈止损单不存在: {order_id}", label="ORDER_NOT_FOUND")
+        del self.tpsl_orders[order_id]
+
+    def _apply_request_tpsl(self, req: OrderRequest) -> None:
+        if req.stop_loss_price is None:
+            return
+        pos = self.positions.get(req.contract)
+        if pos is None or pos.size == 0:
+            return
+        direction = 1 if pos.size > 0 else -1
+        self._clear_tpsl(req.contract, direction)
+        self.create_tpsl_order(
+            TpslOrder(
+                id="",
+                contract=req.contract,
+                direction=direction,
+                kind="stop_loss",
+                trigger_price=req.stop_loss_price,
+            )
+        )
+        if req.take_profit_price is not None:
+            self.create_tpsl_order(
+                TpslOrder(
+                    id="",
+                    contract=req.contract,
+                    direction=direction,
+                    kind="take_profit",
+                    trigger_price=req.take_profit_price,
+                )
+            )
+
+    def _clear_tpsl(self, contract: str, direction: int | None = None) -> None:
+        for order in list(self.tpsl_orders.values()):
+            if order.contract == contract and (direction is None or order.direction == direction):
+                del self.tpsl_orders[order.id]
+
+    def _clear_stale_tpsl(self, contract: str) -> None:
+        pos = self.positions.get(contract)
+        direction = None if pos is None or pos.size == 0 else (1 if pos.size > 0 else -1)
+        for order in list(self.tpsl_orders.values()):
+            if order.contract == contract and (direction is None or order.direction != direction):
+                del self.tpsl_orders[order.id]
 
     def get_candlesticks(
         self,

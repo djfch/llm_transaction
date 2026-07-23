@@ -78,9 +78,14 @@ async def _make_tools(
 
 async def _open_limit_order(env: SimpleNamespace, size: int = 1, price: int = 59000) -> str:
     """下一笔限价挂单（保持 open），返回该挂单号。"""
-    out = await env.registry.execute(
-        "place_order", {"contract": "BTC_USDT", "size": size, "price": price}
+    pos = env.gateway.positions.get("BTC_USDT")
+    opens = (
+        pos is None or pos.size == 0 or (pos.size > 0) == (size > 0) or abs(size) > abs(pos.size)
     )
+    args = {"contract": "BTC_USDT", "size": size, "price": price}
+    if opens:
+        args["stop_loss_price"] = 58000 if size > 0 else 62000
+    out = await env.registry.execute("place_order", args)
     assert out.risk_verdict == "allow", out.text
     return next(o.id for o in env.gateway.orders.values() if o.status == "open")
 
@@ -145,7 +150,9 @@ async def test_amend_order_allowed_and_persisted(tmp_path):
 async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
     env = await _make_tools(tmp_path)
     try:
-        await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})  # 持多仓
+        await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )  # 持多仓
         order_id = await _open_limit_order(env, size=-1, price=59500)  # 限价卖单挂出
         env.deps.risk_config.kill_switch = True
         out = await env.registry.execute(
@@ -169,7 +176,8 @@ async def test_place_order_declared_leverage_over_limit_denied(tmp_path):
     env = await _make_tools(tmp_path)
     try:
         out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "leverage": 10}
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 10, "stop_loss_price": 58000},
         )
         assert out.risk_verdict == "deny" and "超过上限" in out.text
         assert env.gateway.placed == []
@@ -189,7 +197,8 @@ async def test_place_order_declared_leverage_applied(tmp_path):
 
         env.gateway.set_leverage = _spy
         out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "leverage": 3}
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
         )
         assert out.risk_verdict == "allow", out.text
         assert spy == [("BTC_USDT", 3, "isolated")]  # 无持仓：下单前先 set_leverage 生效
@@ -209,7 +218,9 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
             raise RuntimeError("db down")
 
         monkeypatch.setattr(env.repo, "save_order", _boom)
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )
         assert "禁止重试" in out.text
         assert "内部错误" not in out.text
         assert len(env.gateway.placed) == 1  # 订单已真实提交到网关
@@ -223,7 +234,9 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
 async def test_finished_order_saved_inline_without_drain(tmp_path):
     env = await _make_tools(tmp_path, save_fills_inline=True)
     try:
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )
         assert "下单成功" in out.text
         trades = await env.repo.list_trades()
         assert len(trades) == 1
@@ -240,7 +253,9 @@ async def test_finished_order_saved_inline_without_drain(tmp_path):
 async def test_reduce_only_order_not_counted_in_orders_today(tmp_path):
     env = await _make_tools(tmp_path)
     try:
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )
         assert out.risk_verdict == "allow"
         out = await env.registry.execute(
             "place_order", {"contract": "BTC_USDT", "size": -1, "reduce_only": True}
@@ -291,13 +306,15 @@ async def test_orders_is_close_column_migration(tmp_path):
 async def test_close_order_skips_price_deviation(tmp_path):
     env = await _make_tools(tmp_path)
     try:
-        await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})  # 持多仓
+        await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )  # 持多仓
         out = await env.registry.execute(
             "place_order", {"contract": "BTC_USDT", "close": True, "price": 100}
         )
         assert out.risk_verdict == "allow", out.text  # close 单 price 被网关忽略，不过偏离
         out2 = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "price": 100}
+            "place_order", {"contract": "BTC_USDT", "size": 1, "price": 100, "stop_loss_price": 90}
         )
         assert out2.risk_verdict == "deny" and "偏离" in out2.text  # 开仓仍受偏离约束
     finally:
