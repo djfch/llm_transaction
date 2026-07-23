@@ -78,6 +78,20 @@ export function shortRoundId(roundId: string): string {
   return seg.length > 8 ? seg.slice(0, 8) : seg
 }
 
+/** 常见 wake_source(唤醒来源) → 中文展示；未知动态值原样保留，避免审计信息丢失。 */
+export function wakeSourceLabel(source: string): string {
+  if (source === 'manual_start') return '手动启动'
+  if (source === 'price_alert') return '价格触发'
+  if (source === 'timer') return '定时唤醒'
+  const timer = /^timer:(\d+)min$/.exec(source)
+  if (timer) return `定时唤醒（${timer[1]} 分钟）`
+  if (source.startsWith('price_trigger:')) {
+    const detail = source.slice('price_trigger:'.length)
+    return detail ? `价格触发（${detail}）` : '价格触发'
+  }
+  return source
+}
+
 /** source(成交来源) → 徽标文案与色调（与 Badge 的 tone 对齐） */
 export function sourceBadge(source: string): {
   text: string

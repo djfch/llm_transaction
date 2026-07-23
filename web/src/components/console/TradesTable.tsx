@@ -13,7 +13,7 @@ import { useApiData } from '../../hooks/useApiData'
 import { useRoundFocus } from '../../hooks/useRoundFocus'
 import { useWs } from '../../hooks/useWs'
 import StateHint from '../StateHint'
-import { fmtNum, fmtPrice, fmtSigned, fmtTime, pnlClass, shortRoundId } from '../../utils/format'
+import { fmtNum, fmtPrice, fmtSigned, fmtTime, pnlClass, shortRoundId, sourceBadge } from '../../utils/format'
 
 const ALL = '全部合约'
 /** 每页笔数（服务端分页） */
@@ -54,6 +54,8 @@ function RoundBadge({ roundId }: { roundId: string }) {
 /** 单行成交：round_id 非空时整行可点（hover 高亮+指针），点击定位决策轮 */
 function TradeRow({ trade: t, onFocus }: { trade: Trade; onFocus: (roundId: string) => void }) {
   const clickable = t.round_id !== ''
+  const source = sourceBadge(t.source)
+  const sourceText = source.text === '-' && t.source ? t.source : source.text
   return (
     <tr
       onClick={clickable ? () => onFocus(t.round_id) : undefined}
@@ -67,7 +69,7 @@ function TradeRow({ trade: t, onFocus }: { trade: Trade; onFocus: (roundId: stri
       <td className="px-3 py-2 text-right text-zinc-500">{fmtNum(t.fee)}</td>
       <td className={`px-3 py-2 text-right font-medium ${pnlClass(t.pnl)}`}>{fmtSigned(t.pnl)}</td>
       <td className="px-3 py-2 whitespace-nowrap">
-        <span className={sourceBadgeClass(t.source)}>{t.source || '-'}</span>
+        <span className={sourceBadgeClass(t.source)}>{sourceText}</span>
         <RoundBadge roundId={t.round_id} />
       </td>
     </tr>
@@ -111,7 +113,7 @@ export default function TradesTable() {
     <section className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-lg shadow-black/30">
       <header className="mb-4 flex flex-wrap items-center gap-3">
         <h2 className="text-sm font-semibold text-zinc-200">成交记录</h2>
-        <span className="text-xs text-zinc-500">size 正买负卖 · pnl 为已实现盈亏 · 点击行定位到对应决策轮</span>
+        <span className="text-xs text-zinc-500">数量正买负卖 · 盈亏为已实现盈亏 · 点击行定位到对应决策轮</span>
         <label className="ml-auto flex items-center gap-2 text-xs text-zinc-500">
           合约筛选
           <select value={contract} onChange={(e) => changeContract(e.target.value)} className={selectClass}>
@@ -129,13 +131,13 @@ export default function TradesTable() {
           <table className="w-full min-w-[860px] text-sm">
             <thead>
               <tr className="border-b border-zinc-800 text-left text-[11px] text-zinc-500">
-                <th className="px-3 py-2 font-medium">time（时间）</th>
-                <th className="px-3 py-2 font-medium">contract（合约）</th>
-                <th className="px-3 py-2 text-right font-medium">size（数量）</th>
-                <th className="px-3 py-2 text-right font-medium">price（成交价）</th>
-                <th className="px-3 py-2 text-right font-medium">fee（手续费）</th>
-                <th className="px-3 py-2 text-right font-medium">pnl（已实现盈亏）</th>
-                <th className="px-3 py-2 font-medium">source（来源）· round（决策轮）</th>
+                <th className="px-3 py-2 font-medium">时间</th>
+                <th className="px-3 py-2 font-medium">合约</th>
+                <th className="px-3 py-2 text-right font-medium">数量</th>
+                <th className="px-3 py-2 text-right font-medium">成交价</th>
+                <th className="px-3 py-2 text-right font-medium">手续费</th>
+                <th className="px-3 py-2 text-right font-medium">已实现盈亏</th>
+                <th className="px-3 py-2 font-medium">来源 · 决策轮</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/60 font-mono text-[13px] tabular-nums">

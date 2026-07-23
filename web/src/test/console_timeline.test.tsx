@@ -12,7 +12,7 @@ import { RoundFocusProvider, useRoundFocus } from '../hooks/useRoundFocus'
 const ROUNDS: RoundSummary[] = Array.from({ length: 37 }, (_, index) => ({
   round_id: `id-${100 - index}`,
   started_at: new Date(1_700_000_000_000 - index * 3_600_000).toISOString(),
-  wake_source: ['定时唤醒', '价格触发', '手动唤醒'][index % 3],
+  wake_source: ['timer:60min', 'price_trigger:BTC_USDT@70000', 'manual_start'][index % 3],
   summary: `第 ${100 - index} 轮结论摘要`,
 }))
 
@@ -114,6 +114,10 @@ describe('RoundTimeline(决策时间线)', () => {
     expect(await screen.findByText('第 100 轮结论摘要')).toBeInTheDocument()
     expect(screen.getByText('第 96 轮结论摘要')).toBeInTheDocument()
     expect(screen.queryByText('第 95 轮结论摘要')).not.toBeInTheDocument()
+    expect(screen.getAllByText('定时唤醒（60 分钟）').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('价格触发（BTC_USDT@70000）').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('手动启动').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/timer:60min|price_trigger:|manual_start/)).not.toBeInTheDocument()
     expect(screen.getByText('共 37 条决策')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /第 \d+ 页/ })).toHaveLength(5)
 
@@ -164,7 +168,7 @@ describe('RoundTimeline(决策时间线)', () => {
     fireEvent.click(summary)
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
     expect(await screen.findByText('get_account')).toBeInTheDocument()
-    const chatSummary = screen.getByText(/完整对话 · agent loop/)
+    const chatSummary = screen.getByText(/完整对话 · 代理循环/)
     fireEvent.click(chatSummary)
     expect(screen.getByText('RAW-id-100')).toBeInTheDocument()
   })

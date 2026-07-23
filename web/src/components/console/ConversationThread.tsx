@@ -12,7 +12,7 @@ import { buildConversation } from '../../utils/conversation'
 function AssistantBubble({ msg }: { msg: ConversationMessage }) {
   return (
     <div className="rounded-lg border border-violet-400/25 bg-violet-400/[.05] px-3 py-2">
-      <div className="mb-1 text-[10px] font-bold tracking-widest text-violet-300/90">ASSISTANT</div>
+      <div className="mb-1 text-[10px] font-bold tracking-widest text-violet-300/90">助手</div>
       {msg.kind === 'text' ? (
         <p className="whitespace-pre-wrap text-[12px] leading-5 text-zinc-300">{msg.text}</p>
       ) : (
@@ -38,7 +38,7 @@ function ToolResultBubble({ msg }: { msg: ConversationMessage }) {
           denied ? 'text-rose-300/80' : 'text-cyan-300/70'
         }`}
       >
-        USER · 工具返回 {msg.toolName}
+        工具返回 · {msg.toolName}
         {denied ? '（风控拒绝）' : ''}
       </div>
       <p
@@ -50,7 +50,7 @@ function ToolResultBubble({ msg }: { msg: ConversationMessage }) {
       </p>
       {denied && msg.riskReason && (
         <p className="mt-1 text-[11px] leading-5 text-rose-300">
-          risk_reason(风控理由)：{msg.riskReason}
+          风控理由：{msg.riskReason}
         </p>
       )}
     </div>
@@ -72,7 +72,7 @@ export default function ConversationThread({
   return (
     <details open={defaultOpen} className="text-xs">
       <summary className="cursor-pointer list-none text-zinc-500 transition hover:text-violet-300">
-        ▸ 完整对话 · agent loop
+        ▸ 完整对话 · 代理循环
         <span className="ml-2 rounded border border-violet-400/30 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300">
           {messages.length} 条消息
         </span>

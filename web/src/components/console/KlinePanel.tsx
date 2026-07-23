@@ -204,7 +204,7 @@ export default function KlinePanel() {
         {livePrice != null && (
           <span data-testid="kline-live-price" className="font-mono text-xs tabular-nums text-cyan-300">
             {fmtPrice(livePrice)}
-            <span className="ml-1 text-[10px] text-zinc-600">· WS实时</span>
+            <span className="ml-1 text-[10px] text-zinc-600">· 实时行情</span>
           </span>
         )}
         {dayChangePct !== null && (

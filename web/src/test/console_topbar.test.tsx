@@ -33,14 +33,14 @@ describe('TopBar(顶部状态栏) status 渲染', () => {
   it('渲染产品名与 paper 徽标（琥珀）', () => {
     renderBar()
     expect(screen.getByText(/LLM 交易/)).toBeInTheDocument()
-    const badge = screen.getByText('PAPER · 模拟盘')
+    const badge = screen.getByText('模拟盘')
     expect(badge).toBeInTheDocument()
     expect(badge.className).toContain('text-amber-300')
   })
 
   it('testnet 徽标为青色', () => {
     renderBar({ mode: 'testnet' })
-    const badge = screen.getByText('TESTNET · 沙盒')
+    const badge = screen.getByText('沙盒')
     expect(badge.className).toContain('text-cyan-300')
   })
 
@@ -53,7 +53,7 @@ describe('TopBar(顶部状态栏) status 渲染', () => {
   it('status=null 时 agent/kill 按钮禁用且显示占位', () => {
     renderBar(null)
     expect(screen.getByRole('button', { name: '启动' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '⏻ 熔断 KILL' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '⏻ 紧急熔断' })).toBeDisabled()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
@@ -72,14 +72,14 @@ describe('TopBar llm_configured=false 琥珀横幅', () => {
 })
 
 describe('TopBar WS 指示灯与配置入口', () => {
-  it('wsConnected=true 显示 WS 已连接', () => {
+  it('wsConnected=true 显示行情已连接', () => {
     renderBar({}, true)
-    expect(screen.getByText('WS 已连接')).toBeInTheDocument()
+    expect(screen.getByText('行情已连接')).toBeInTheDocument()
   })
 
-  it('wsConnected=false 显示 WS 未连接', () => {
+  it('wsConnected=false 显示行情未连接', () => {
     renderBar({}, false)
-    expect(screen.getByText('WS 未连接')).toBeInTheDocument()
+    expect(screen.getByText('行情未连接')).toBeInTheDocument()
   })
 
   it('点击齿轮按钮触发 onOpenConfig', () => {
@@ -90,7 +90,7 @@ describe('TopBar WS 指示灯与配置入口', () => {
 
   it('未配置横幅中的前往配置按钮也触发 onOpenConfig', () => {
     const { onOpenConfig } = renderBar({ llm_configured: false })
-    fireEvent.click(screen.getByRole('button', { name: '前往配置 LLM API Key' }))
+    fireEvent.click(screen.getByRole('button', { name: '前往配置 LLM API 密钥' }))
     expect(onOpenConfig).toHaveBeenCalledTimes(1)
   })
 })

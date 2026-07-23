@@ -33,11 +33,12 @@ export default function AccountPanel({
   /** 当日统计；null 时底部行整体降级不渲染 */
   dailyStats?: DailyStats | null
 }) {
+  const modeLabel = { paper: '模拟盘', testnet: '沙盒', live: '实盘' }[mode] ?? mode
   return (
     <section className="space-y-4 rounded-xl border border-white/5 bg-zinc-900/60 p-4 backdrop-blur">
       <div className="flex items-center justify-between">
         <h3 className="text-xs tracking-widest text-zinc-500">
-          账户 · {mode ? mode.toUpperCase() : '…'}
+          账户 · {modeLabel || '…'}
         </h3>
         <span className="font-mono text-[10px] text-zinc-600">USDT 本位</span>
       </div>
@@ -46,7 +47,7 @@ export default function AccountPanel({
       ) : (
         <>
           <div>
-            <div className="mb-1 text-[11px] text-zinc-500">equity(账户权益)</div>
+            <div className="mb-1 text-[11px] text-zinc-500">账户权益</div>
             <div className="font-mono text-3xl font-bold tabular-nums text-zinc-50">
               {fmtNum(account.equity)}
             </div>
@@ -57,9 +58,9 @@ export default function AccountPanel({
             )}
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <MetricCell label="available(可用余额)" value={fmtNum(account.available)} />
+            <MetricCell label="可用余额" value={fmtNum(account.available)} />
             <MetricCell
-              label="unrealised_pnl(未实现盈亏)"
+              label="未实现盈亏"
               value={fmtSigned(account.unrealised_pnl)}
               cls={pnlClass(account.unrealised_pnl)}
             />

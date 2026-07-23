@@ -170,7 +170,7 @@ export default function RoundTimeline() {
     <section className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-lg shadow-black/30">
       <header className="mb-4 flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold text-zinc-200">
-          决策时间线 <span className="text-xs font-normal text-zinc-500">— Agent 的每一笔思考都留痕</span>
+          决策时间线 <span className="text-xs font-normal text-zinc-500">— 交易代理的每一笔思考都留痕</span>
         </h2>
         <span className="ml-auto text-xs tabular-nums text-zinc-500">共 {total} 条决策</span>
       </header>

@@ -5,6 +5,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { RiskConfig } from '../api/types'
 import RiskForm from '../pages/config/RiskForm'
+import GeneralForm from '../pages/config/GeneralForm'
 import { parseRisk, validateRisk } from '../pages/config/validate'
 
 const baseRisk: RiskConfig = {
@@ -52,7 +53,7 @@ describe('RiskForm(风控参数表单)', () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<RiskForm initial={baseRisk} onSave={onSave} />)
 
-    const leverageInput = screen.getByLabelText('max_leverage')
+    const leverageInput = screen.getByLabelText('最大杠杆倍数')
     const saveBtn = screen.getByRole('button', { name: /保存风控参数/ })
 
     // 非法值：0 → 报错 + 禁用保存
@@ -69,5 +70,33 @@ describe('RiskForm(风控参数表单)', () => {
     expect(onSave).toHaveBeenCalledTimes(1)
     // 提交内容：解析后的数字 + 保留未在表单内的 kill_switch 字段
     expect(onSave).toHaveBeenCalledWith({ ...baseRisk, max_leverage: 10 })
+  })
+})
+
+describe('GeneralForm(常规设置表单)', () => {
+  it('显示中文标签和模式选项，同时保留底层配置值', () => {
+    const initial = {
+      mode: 'paper',
+      llm: {
+        provider: 'anthropic',
+        model: 'claude-test',
+        max_tokens: 2048,
+        openai_base_url: '',
+        max_consecutive_failures: 3,
+      },
+      notify: { telegram_enabled: false },
+      risk: baseRisk,
+      scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
+    }
+    render(<GeneralForm initial={initial} onSave={vi.fn()} />)
+
+    expect(screen.getByText('运行模式')).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '模拟盘' })).toHaveValue('paper')
+    expect(screen.getByText('模型提供商')).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Anthropic' })).toHaveValue('anthropic')
+    expect(screen.getByText('最大输出长度（令牌）')).toBeInTheDocument()
+    expect(screen.getByText('最大连续失败次数')).toBeInTheDocument()
+    expect(screen.getByText('Telegram 通知')).toBeInTheDocument()
+    expect(screen.queryByText(/llm\.|notify\.|openai_compat/)).not.toBeInTheDocument()
   })
 })

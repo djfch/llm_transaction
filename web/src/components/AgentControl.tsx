@@ -76,7 +76,7 @@ export default function AgentControl({
         />
       </span>
       <span className={`text-xs ${running ? 'text-emerald-300' : 'text-zinc-500'}`}>
-        {running ? 'Agent 运行中' : 'Agent 已停止'}
+        {running ? '交易代理运行中' : '交易代理已停止'}
       </span>
       <button
         type="button"

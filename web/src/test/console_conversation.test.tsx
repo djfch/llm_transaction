@@ -55,11 +55,13 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getByText(/发起调用 place_order/)).toBeInTheDocument()
     // user·工具返回内容
     expect(screen.getByText(/equity=10842\.36/)).toBeInTheDocument()
-    expect(screen.getByText('USER · 工具返回 get_account')).toBeInTheDocument()
+    expect(
+      screen.getByText((_, node) => node?.textContent?.trim() === '工具返回 · get_account'),
+    ).toBeInTheDocument()
     // 标题徽标消息数：2 文本 + 2 调用 + 2 返回 = 6
     expect(screen.getByText('6 条消息')).toBeInTheDocument()
     // assistant 消息卡共 4 张
-    expect(screen.getAllByText('ASSISTANT')).toHaveLength(4)
+    expect(screen.getAllByText('助手')).toHaveLength(4)
   })
 
   it('deny 的工具返回：红色系卡片 + 「（风控拒绝）」标记 + risk_reason 展示', () => {
@@ -77,7 +79,7 @@ describe('ConversationThread 完整对话消息流', () => {
     )
     const details = container.querySelector('details')!
     expect(details).not.toHaveAttribute('open')
-    fireEvent.click(screen.getByText(/完整对话 · agent loop/))
+    fireEvent.click(screen.getByText(/完整对话 · 代理循环/))
     expect(details).toHaveAttribute('open')
     unmount()
     const again = render(<ConversationThread llmRaw={ANTHROPIC_RAW} toolCalls={AUDIT} defaultOpen />)

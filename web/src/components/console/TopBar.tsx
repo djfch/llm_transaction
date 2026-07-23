@@ -12,9 +12,9 @@ import { fmtUptime } from '../../utils/format'
 
 /** mode(运行模式) → 徽标文案与配色：paper 琥珀 / testnet 青 / live 红 */
 const MODE_BADGE: Record<string, { text: string; cls: string }> = {
-  paper: { text: 'PAPER · 模拟盘', cls: 'border-amber-300/40 bg-amber-300/10 text-amber-300' },
-  testnet: { text: 'TESTNET · 沙盒', cls: 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300' },
-  live: { text: 'LIVE · 实盘', cls: 'border-rose-500/50 bg-rose-500/10 text-rose-400' },
+  paper: { text: '模拟盘', cls: 'border-amber-300/40 bg-amber-300/10 text-amber-300' },
+  testnet: { text: '沙盒', cls: 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300' },
+  live: { text: '实盘', cls: 'border-rose-500/50 bg-rose-500/10 text-rose-400' },
 }
 
 /** 品牌区：神经元图标 + 产品名 */
@@ -81,7 +81,7 @@ function WsDot({ connected }: { connected: boolean }) {
           className={`relative inline-flex h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-zinc-600'}`}
         />
       </span>
-      {connected ? 'WS 已连接' : 'WS 未连接'}
+      {connected ? '行情已连接' : '行情未连接'}
     </div>
   )
 }
@@ -99,7 +99,7 @@ function LlmMissingBanner({ onOpenConfig }: { onOpenConfig: () => void }) {
         onClick={onOpenConfig}
         className="rounded border border-amber-300/40 px-2 py-0.5 font-medium hover:bg-amber-300/10"
       >
-        前往配置 LLM API Key
+        前往配置 LLM API 密钥
       </button>
     </div>
   )
@@ -154,7 +154,7 @@ export default function TopBar({
           <WsDot connected={wsConnected} />
           {status && (
             <div className="hidden text-xs text-zinc-500 2xl:block">
-              uptime{' '}
+              运行时长{' '}
               <span className="font-mono tabular-nums text-zinc-300">
                 {fmtUptime(status.uptime_seconds)}
               </span>

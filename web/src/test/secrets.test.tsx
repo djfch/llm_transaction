@@ -13,8 +13,8 @@ vi.mock('../api', () => ({ api: { setSecrets } }))
 const configured: SecretsStatus = { gate_key: true, llm_key: true, telegram: false }
 const unconfigured: SecretsStatus = { gate_key: false, llm_key: false, telegram: false }
 
-const anthropicLabel = 'ANTHROPIC_API_KEY'
-const openaiLabel = 'OPENAI_API_KEY'
+const anthropicLabel = 'Anthropic API 密钥'
+const openaiLabel = 'OpenAI API 密钥'
 const saveBtnName = '保存 LLM 密钥'
 
 beforeEach(() => {
@@ -32,8 +32,9 @@ describe('SecretsForm(LLM 密钥表单)', () => {
     expect(openai).toHaveAttribute('autocomplete', 'new-password')
     expect(anthropic).toHaveAttribute('placeholder', '已配置，输入以更换')
     // 交易所 / Telegram 只读徽标保留
-    expect(screen.getByText('gate_key')).toBeInTheDocument()
-    expect(screen.getByText('telegram')).toBeInTheDocument()
+    expect(screen.getByText('Gate.io 交易密钥')).toBeInTheDocument()
+    expect(screen.getByText('Telegram 通知')).toBeInTheDocument()
+    expect(screen.queryByText(/gate_key|ANTHROPIC_API_KEY|OPENAI_API_KEY/)).not.toBeInTheDocument()
 
     unmount()
     render(<SecretsForm status={unconfigured} onSaved={() => {}} />)

@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api } from '../../api'
 import type { RoundDetail, RoundSummary } from '../../api/types'
-import { fmtClock, fmtTime, shortRoundId } from '../../utils/format'
+import { fmtClock, fmtTime, shortRoundId, wakeSourceLabel } from '../../utils/format'
 import ConversationThread from './ConversationThread'
 import ToolSteps from './ToolSteps'
 
@@ -27,7 +27,7 @@ interface TimelineCardProps {
   cardRef: (el: HTMLElement | null) => void // 锚定（scrollIntoView 用）
 }
 
-/** wake_source → 徽标样式：定时灰 / 价格青 / 手动·启动·其他紫（文案保留原始来源） */
+/** wake_source → 徽标样式：定时灰 / 价格青 / 手动·启动·其他紫。 */
 function wakeBadgeClass(source: string): string {
   const base = 'rounded border px-2 py-0.5 text-[10px] font-medium'
   const lower = source.toLowerCase()
@@ -122,7 +122,7 @@ export default function TimelineCard({
       <button type="button" onClick={onToggle} aria-expanded={expanded} className="block w-full text-left">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-bold text-zinc-200">#{shortRoundId(round.round_id)}</span>
-          <span className={wakeBadgeClass(round.wake_source)}>{round.wake_source}</span>
+          <span className={wakeBadgeClass(round.wake_source)}>{wakeSourceLabel(round.wake_source)}</span>
           {/* 历史轮都是已完成（静态文案，方案 C 同款灰字小徽标） */}
           <span className="text-[11px] text-zinc-600">已完成</span>
           <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
@@ -140,7 +140,7 @@ export default function TimelineCard({
         <blockquote className="mt-3 border-l-2 border-violet-400/50 pl-3 text-[13px] italic leading-6 text-violet-200/80">
           “{note.content}”
           <span className="ml-2 text-[10px] not-italic text-zinc-600">
-            —— Agent 笔记 · {fmtClock(note.time)}
+            —— 代理笔记 · {fmtClock(note.time)}
           </span>
         </blockquote>
       )}
@@ -152,7 +152,7 @@ export default function TimelineCard({
           {detail && (
             <>
               <FoldSection
-                title={`工具调用详情 · tool_calls（${detail.tool_calls.length} 步）`}
+                title={`工具调用详情（${detail.tool_calls.length} 步）`}
                 open={toolsOpen}
                 onToggle={() => setToolsOpen((o) => !o)}
               >

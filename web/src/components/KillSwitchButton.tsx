@@ -64,8 +64,8 @@ export default function KillSwitchButton({
         ? '确认复位？'
         : '确认触发熔断？'
       : enabled
-        ? '⏻ KILL 已触发'
-        : '⏻ 熔断 KILL'
+        ? '⏻ 紧急熔断已触发'
+        : '⏻ 紧急熔断'
 
   return (
     <div className="flex items-center gap-2">

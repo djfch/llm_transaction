@@ -51,7 +51,7 @@ export default function NotesPanel() {
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-semibold text-zinc-300">Agent 笔记</h2>
+        <h2 className="text-sm font-semibold text-zinc-300">代理笔记</h2>
         <span className="text-xs text-zinc-500">— 它写给自己的备忘录</span>
         <span className="ml-auto text-xs tabular-nums text-zinc-500">共 {total} 条笔记</span>
       </div>

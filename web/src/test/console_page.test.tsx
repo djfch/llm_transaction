@@ -164,10 +164,10 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
 
     // TopBar：品牌副标题 + mode 徽标 + 配置入口
     expect(screen.getByText(/AI 大脑观察舱/)).toBeInTheDocument()
-    expect(await screen.findByText('PAPER · 模拟盘')).toBeInTheDocument()
+    expect(await screen.findByText('模拟盘')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '打开配置中心' })).toBeInTheDocument()
     // 左栏：账户面板 + 权益曲线
-    expect(await screen.findByText(/账户 · PAPER/)).toBeInTheDocument()
+    expect(await screen.findByText(/账户 · 模拟盘/)).toBeInTheDocument()
     // 权益大数字（账户面板与权益曲线末值各出现一次）
     expect(screen.getAllByText('10,284.56').length).toBeGreaterThan(0)
     // 账户面板增强：累计涨跌行（equity 夹具 10000 → 10284.56 = +2.85%）
@@ -189,7 +189,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText('当前无持仓')).toBeInTheDocument()
     // 第二屏：决策时间线 + Agent 笔记
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
-    expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
+    expect(screen.getByText('代理笔记')).toBeInTheDocument()
     expect(screen.getByText('自检笔记')).toBeInTheDocument()
     // 第三屏：成交记录
     expect(screen.getByText('成交记录')).toBeInTheDocument()
@@ -199,7 +199,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
 
   it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板与引文同步失效', async () => {
     const { rerender } = render(<ConsolePage />)
-    await screen.findByText(/账户 · PAPER/)
+    await screen.findByText(/账户 · 模拟盘/)
     expect(holder.getAccount).toHaveBeenCalledTimes(1)
     expect(holder.getPositions).toHaveBeenCalledTimes(1)
     expect(holder.getOpenOrders).toHaveBeenCalledTimes(1)
@@ -261,7 +261,7 @@ describe('ConsolePage 挂单刷新', () => {
 
   it('paper 重置权益 → account/positions/equity/dailyStats 四路联动刷新（回归 M3）', async () => {
     render(<ConsolePage />)
-    await screen.findByText(/账户 · PAPER/)
+    await screen.findByText(/账户 · 模拟盘/)
     expect(holder.getDailyStats).toHaveBeenCalledTimes(1)
 
     // 打开配置抽屉（paper 模式渲染权益重置），两段确认完成重置

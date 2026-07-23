@@ -96,7 +96,7 @@ export default function WatchlistEditor({
       </div>
       {hint && <p className="mt-2 text-xs text-rose-400">{hint}</p>}
       <p className="mt-2 text-[10px] text-zinc-600">
-        watchlist：风控硬校验，非白名单合约一律拒绝开仓。settle={initial.settle}
+        合约白名单由风控硬校验，非白名单合约一律拒绝开仓。结算币种：{initial.settle}
       </p>
     </div>
   )

@@ -6,14 +6,14 @@ import { useMemo, useState } from 'react'
 import type { RiskConfig } from '../../api/types'
 import { parseRisk, validateRisk, type RiskFormValues } from './validate'
 
-/** 字段元数据：标签直接用变量名（方案 C 对齐，不带括号注释） */
+/** 字段元数据：提交键保持接口原名，用户可见标签只显示中文含义。 */
 const FIELDS: Array<{ key: keyof RiskFormValues; label: string }> = [
-  { key: 'max_position_pct', label: 'max_position_pct' },
-  { key: 'max_total_position_pct', label: 'max_total_position_pct' },
-  { key: 'max_leverage', label: 'max_leverage' },
-  { key: 'daily_loss_limit', label: 'daily_loss_limit' },
-  { key: 'max_orders_per_day', label: 'max_orders_per_day' },
-  { key: 'max_deviation', label: 'max_deviation' },
+  { key: 'max_position_pct', label: '单仓占比上限' },
+  { key: 'max_total_position_pct', label: '总仓占比上限' },
+  { key: 'max_leverage', label: '最大杠杆倍数' },
+  { key: 'daily_loss_limit', label: '单日亏损锁仓阈值' },
+  { key: 'max_orders_per_day', label: '单日最大下单数' },
+  { key: 'max_deviation', label: '最大价格偏离' },
 ]
 
 function toValues(risk: RiskConfig): RiskFormValues {
@@ -95,7 +95,7 @@ export default function RiskForm({
         {saveError && <span className="text-xs text-rose-400">保存失败：{saveError}</span>}
       </div>
       <p className="mt-2 text-[10px] text-zinc-600">
-        kill_switch 总开关请在顶栏操作；风控参数保存后下一轮决策生效。
+        紧急熔断总开关请在顶栏操作；风控参数保存后下一轮决策生效。
       </p>
     </div>
   )
