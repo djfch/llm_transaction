@@ -43,7 +43,7 @@ export default function GeneralForm({
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">
-          <span className={labelCls}>运行模式</span>
+          <span className={labelCls}>mode</span>
           <select
             value={form.mode}
             onChange={(e) => {
@@ -52,31 +52,31 @@ export default function GeneralForm({
             }}
             className={inputCls}
           >
-            <option value="paper">模拟盘</option>
-            <option value="testnet">沙盒</option>
+            <option value="paper">paper</option>
+            <option value="testnet">testnet</option>
             <option value="live" disabled>
-              实盘
+              live
             </option>
           </select>
           <span className="mt-1 block text-[10px] text-zinc-600">
-            实盘模式需手动修改 config.yaml 并重启
+            live 实盘需手动改 config.yaml 并重启
           </span>
         </label>
 
         <label className="block">
-          <span className={labelCls}>模型提供商</span>
+          <span className={labelCls}>llm.provider</span>
           <select
             value={form.llm.provider}
             onChange={(e) => patchLlm({ provider: e.target.value })}
             className={inputCls}
           >
-            <option value="anthropic">Anthropic</option>
-            <option value="openai_compat">OpenAI 兼容</option>
+            <option value="anthropic">anthropic</option>
+            <option value="openai_compat">openai_compat</option>
           </select>
         </label>
 
         <label className="block">
-          <span className={labelCls}>模型</span>
+          <span className={labelCls}>llm.model</span>
           <input
             value={form.llm.model}
             onChange={(e) => patchLlm({ model: e.target.value })}
@@ -85,7 +85,7 @@ export default function GeneralForm({
         </label>
 
         <label className="block">
-          <span className={labelCls}>最大输出长度（令牌）</span>
+          <span className={labelCls}>llm.max_tokens</span>
           <input
             value={String(form.llm.max_tokens)}
             inputMode="numeric"
@@ -95,7 +95,7 @@ export default function GeneralForm({
         </label>
 
         <label className="block">
-          <span className={labelCls}>OpenAI 兼容接口地址</span>
+          <span className={labelCls}>llm.openai_base_url</span>
           <input
             value={form.llm.openai_base_url}
             onChange={(e) => patchLlm({ openai_base_url: e.target.value })}
@@ -105,7 +105,7 @@ export default function GeneralForm({
         </label>
 
         <label className="block">
-          <span className={labelCls}>最大连续失败次数</span>
+          <span className={labelCls}>llm.max_consecutive_failures</span>
           <input
             value={String(form.llm.max_consecutive_failures)}
             inputMode="numeric"
@@ -125,7 +125,7 @@ export default function GeneralForm({
           }}
           className="h-4 w-4 accent-violet-500"
         />
-        Telegram 通知
+        notify.telegram_enabled
       </label>
 
       <div className="flex items-center gap-3">

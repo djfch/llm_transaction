@@ -24,7 +24,7 @@ function resultText(result: ToolCall['result']): string {
 function verdictBadge(verdict: string): { text: string; tone: 'ok' | 'danger' | 'neutral' } {
   if (verdict === 'deny') return { text: '风控拒绝', tone: 'danger' }
   if (verdict === 'allow') return { text: '风控放行', tone: 'ok' }
-  return { text: '未进入风控', tone: 'neutral' }
+  return { text: '免判(未入风控)', tone: 'neutral' }
 }
 
 /** 入参行：等宽紧凑 JSON，超长截断，点击「展开/收起」切换全文 */
@@ -72,7 +72,7 @@ function StepItem({ call, last, compact }: { call: ToolCall; last: boolean; comp
         } ${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'}`}
       >
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono text-[10px] text-zinc-600">步骤 {call.seq}</span>
+          <span className="font-mono text-[10px] text-zinc-600">seq {call.seq}</span>
           <span
             className={`font-mono text-[13px] font-semibold ${denied ? 'text-rose-200' : 'text-cyan-200'}`}
           >

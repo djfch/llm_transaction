@@ -50,7 +50,7 @@ export default function EquityMiniChart({ points }: { points: EquityPoint[] }) {
   return (
     <section className="rounded-xl border border-white/5 bg-zinc-900/60 p-4 backdrop-blur">
       <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-xs tracking-widest text-zinc-500">权益曲线</h3>
+        <h3 className="text-xs tracking-widest text-zinc-500">权益曲线 equity</h3>
         {changePct !== null && (
           <span className={`font-mono text-[11px] tabular-nums ${pnlClass(changePct)}`}>
             {fmtSignedPct(changePct)}

@@ -100,15 +100,23 @@ function renderTable() {
 }
 
 describe('TradesTable(成交记录)', () => {
+  it('表头只移除英文键括号标签，成交来源仍保留原始值', async () => {
+    renderTable()
+
+    expect(await screen.findByText('llm_open')).toBeInTheDocument()
+    for (const name of ['时间', '合约', '数量', '成交价', '手续费', '已实现盈亏', '来源 · 决策轮']) {
+      expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+    }
+    expect(screen.queryByText(/time（|contract（|size（|price（|fee（|pnl（|source（|round（/)).not.toBeInTheDocument()
+  })
+
   it('round 徽标：有归属显示 #短号(前8位)，无归属灰显 -', async () => {
     renderTable()
 
     expect(await screen.findByText('#a1b2c3d4')).toBeInTheDocument()
     expect(screen.getByText('#e5f6a7b8')).toBeInTheDocument()
-    expect(screen.getByText('LLM开仓')).toBeInTheDocument()
-    expect(screen.getByText('止盈止损')).toBeInTheDocument()
-    // 无归属行（强平）：来源徽标旁为「-」，无 # 徽标
-    const cell = screen.getByText('强平').closest('td')
+    // 无归属行（liquidation）：source 徽标旁为「-」，无 # 徽标
+    const cell = screen.getByText('liquidation').closest('td')
     expect(cell?.textContent).toContain('-')
     expect(cell?.textContent).not.toContain('#')
   })
@@ -121,7 +129,7 @@ describe('TradesTable(成交记录)', () => {
     expect(probe.textContent).toBe('a1b2c3d4000111aa111111111111aaaa')
 
     // 无归属行点击不覆盖当前定位
-    fireEvent.click(screen.getByText('强平'))
+    fireEvent.click(screen.getByText('liquidation'))
     expect(probe.textContent).toBe('a1b2c3d4000111aa111111111111aaaa')
   })
 
@@ -136,19 +144,6 @@ describe('TradesTable(成交记录)', () => {
     fireEvent.change(select, { target: { value: 'ETH_USDT' } })
     expect(await screen.findByText('第 1/1 页 · 共 1 笔')).toBeInTheDocument()
     expect(holder.getTrades).toHaveBeenLastCalledWith(0, 20, 'ETH_USDT')
-  })
-
-  it('未知动态成交来源保留原始值', async () => {
-    holder.getTrades.mockResolvedValue({
-      items: [{ ...TRADES[0], id: 99, source: 'external_fill' }],
-      total: 1,
-      offset: 0,
-      limit: 20,
-    })
-    renderTable()
-
-    expect(await screen.findByText('external_fill')).toBeInTheDocument()
-    expect(screen.queryByText('llm_open')).not.toBeInTheDocument()
   })
 
   it('WS round 事件 → 失效重拉当前页（回归 M2：新轮成交需及时上表）', async () => {

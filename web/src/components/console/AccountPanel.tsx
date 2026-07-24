@@ -33,12 +33,11 @@ export default function AccountPanel({
   /** 当日统计；null 时底部行整体降级不渲染 */
   dailyStats?: DailyStats | null
 }) {
-  const modeLabel = { paper: '模拟盘', testnet: '沙盒', live: '实盘' }[mode] ?? mode
   return (
     <section className="space-y-4 rounded-xl border border-white/5 bg-zinc-900/60 p-4 backdrop-blur">
       <div className="flex items-center justify-between">
         <h3 className="text-xs tracking-widest text-zinc-500">
-          账户 · {modeLabel || '…'}
+          账户 · {mode ? mode.toUpperCase() : '…'}
         </h3>
         <span className="font-mono text-[10px] text-zinc-600">USDT 本位</span>
       </div>

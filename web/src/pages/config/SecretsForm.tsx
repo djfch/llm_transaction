@@ -14,8 +14,8 @@ const labelCls = 'mb-1 block text-[10px] text-zinc-500'
 
 // 只读状态行：LLM 已改为下方表单在线配置，此处仅剩交易所与 Telegram
 const READONLY_ITEMS: Array<{ key: 'gate_key' | 'telegram'; label: string }> = [
-  { key: 'gate_key', label: 'Gate.io 交易密钥' },
-  { key: 'telegram', label: 'Telegram 通知' },
+  { key: 'gate_key', label: 'gate_key' },
+  { key: 'telegram', label: 'telegram' },
 ]
 
 /** 配置状态文字：已配置 emerald / 未配置 zinc，等宽 */
@@ -70,7 +70,7 @@ function SaveFeedback({ result }: { result: SetSecretsResult }) {
           role="alert"
           className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
         >
-          LLM 仍未配置：请确认提交的密钥与当前模型提供商匹配，自动决策将保持暂停。
+          LLM 仍未配置：请确认提交的 Key 与当前 provider 匹配，自动决策将保持暂停。
         </p>
       )}
       <p className="text-xs text-emerald-400">已保存到服务器 .env</p>
@@ -115,12 +115,12 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
   return (
     <div className="space-y-3 border-t border-white/5 pt-4">
       <div className="flex items-center gap-2">
-        <h3 className="text-xs text-zinc-300">LLM API 密钥在线配置</h3>
+        <h3 className="text-xs text-zinc-300">LLM API Key 在线配置</h3>
         <StateText configured={configured} />
       </div>
       <div className="grid grid-cols-1 gap-3">
         <label className="block">
-          <span className={labelCls}>Anthropic API 密钥</span>
+          <span className={labelCls}>ANTHROPIC_API_KEY</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -131,7 +131,7 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
           />
         </label>
         <label className="block">
-          <span className={labelCls}>OpenAI API 密钥</span>
+          <span className={labelCls}>OPENAI_API_KEY</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -160,7 +160,7 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
       )}
       {result && <SaveFeedback result={result} />}
       <p className="text-[10px] text-zinc-600">
-        LLM 密钥保存到服务器 .env（不进 git），重启后仍有效；留空字段不改动。交易所密钥仍需手动编辑 .env。
+        LLM key 保存到服务器 .env（不进 git），重启后仍有效；留空的字段不改动。交易所 key 仍需手动编辑 .env。
       </p>
     </div>
   )

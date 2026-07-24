@@ -48,20 +48,20 @@ beforeEach(() => {
 describe('OpenOrdersPanel(未成交挂单)', () => {
   it('空持仓时仍显示挂单区域和空状态', () => {
     render(<OpenOrdersPanel orders={[]} />)
-    expect(screen.getByText('未成交挂单')).toBeInTheDocument()
+    expect(screen.getByText('未成交挂单 open_orders')).toBeInTheDocument()
     expect(screen.getByText('当前无未成交挂单')).toBeInTheDocument()
   })
 
   it('渲染多空方向与指定委托字段', () => {
     render(<OpenOrdersPanel orders={[longOrder, shortOrder]} />)
-    expect(screen.getByText('多')).toBeInTheDocument()
-    expect(screen.getByText('空')).toBeInTheDocument()
+    expect(screen.getByText('多 LONG')).toBeInTheDocument()
+    expect(screen.getByText('空 SHORT')).toBeInTheDocument()
     expect(screen.getAllByText('委托张数')).toHaveLength(2)
     expect(screen.getAllByText('未成交张数')).toHaveLength(2)
     expect(screen.getAllByText('委托价')).toHaveLength(2)
     expect(screen.getAllByText('有效方式')).toHaveLength(2)
     expect(screen.getAllByText('只减仓')).toHaveLength(2)
-    expect(screen.queryByText(/open_orders|size\(|left\(|price\(|tif\(|reduce_only/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/size\(|left\(|price\(|tif\(|reduce_only\(/)).not.toBeInTheDocument()
     expect(screen.getByText('是')).toBeInTheDocument()
   })
 

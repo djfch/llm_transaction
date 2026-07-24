@@ -88,8 +88,8 @@ function PositionItem({
   const { armed, pending, message, handleClose } = useClosePosition(contract, onChanged)
 
   const dirBadge = isLong
-    ? { text: '多', cls: 'border-emerald-400/40 bg-emerald-400/15 text-emerald-300' }
-    : { text: '空', cls: 'border-rose-400/40 bg-rose-400/15 text-rose-300' }
+    ? { text: '多 LONG', cls: 'border-emerald-400/40 bg-emerald-400/15 text-emerald-300' }
+    : { text: '空 SHORT', cls: 'border-rose-400/40 bg-rose-400/15 text-rose-300' }
   const edgeCls = isLong
     ? 'border-l-emerald-400/70'
     : isShort
@@ -115,7 +115,7 @@ function PositionItem({
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
-        <Field label="持仓张数" value={fmtSigned(size, 0)} />
+        <Field label="张数" value={fmtSigned(size, 0)} />
         <Field label="保证金" value={fmtNum(position.margin)} />
         <Field label="开仓价" value={fmtPrice(position.entry_price)} />
         <Field label="标记价" value={fmtPrice(position.mark_price)} />
@@ -165,7 +165,7 @@ export default function PositionsPanel({
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-sm font-semibold text-zinc-300">当前持仓</h2>
+        <h2 className="text-sm font-semibold text-zinc-300">当前持仓 positions</h2>
         <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-[10px] tabular-nums text-zinc-400">
           {positions.length}
         </span>

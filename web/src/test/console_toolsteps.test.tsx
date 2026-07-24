@@ -31,7 +31,7 @@ describe('ToolSteps 工具调用步骤链', () => {
     render(<ToolSteps toolCalls={[call()]} />)
     expect(screen.getByText('风控放行')).toBeInTheDocument()
     expect(screen.getByText('get_account')).toBeInTheDocument()
-    expect(screen.getByText('步骤 1')).toBeInTheDocument()
+    expect(screen.getByText('seq 1')).toBeInTheDocument()
     expect(screen.getByText('12ms')).toBeInTheDocument()
   })
 
@@ -49,12 +49,13 @@ describe('ToolSteps 工具调用步骤链', () => {
       />,
     )
     expect(screen.getByText('风控拒绝')).toBeInTheDocument()
-    expect(screen.getByText(/单仓占权益 36%/)).toBeInTheDocument()
+    expect(screen.getByText(/风控理由：下单后单仓占权益 36%/)).toBeInTheDocument()
+    expect(screen.queryByText(/deny\(|risk_reason\(/)).not.toBeInTheDocument()
   })
 
-  it('空串判定（未入风控）：显示中文状态且不误报风控拒绝', () => {
+  it('空串判定（未入风控）：显示「免判(未入风控)」而非 deny', () => {
     render(<ToolSteps toolCalls={[call({ risk_verdict: '' })]} />)
-    expect(screen.getByText('未进入风控')).toBeInTheDocument()
+    expect(screen.getByText('免判(未入风控)')).toBeInTheDocument()
     expect(screen.queryByText('风控拒绝')).not.toBeInTheDocument()
   })
 
@@ -73,9 +74,10 @@ describe('ToolSteps 工具调用步骤链', () => {
     const { container } = render(<ToolSteps toolCalls={[call()]} />)
     const details = container.querySelector('details')!
     expect(details).not.toHaveAttribute('open')
-    fireEvent.click(screen.getByText('▸ 执行结果'))
+    fireEvent.click(screen.getByText(/执行结果/))
     expect(details).toHaveAttribute('open')
     expect(screen.getByText(/equity=10842\.36/)).toBeInTheDocument()
+    expect(screen.queryByText(/result\(/)).not.toBeInTheDocument()
   })
 
   it('多步渲染：按 seq 展示圆点步骤，仅最后一步无连线', () => {
@@ -87,8 +89,8 @@ describe('ToolSteps 工具调用步骤链', () => {
         ]}
       />,
     )
-    expect(screen.getByText('步骤 1')).toBeInTheDocument()
-    expect(screen.getByText('步骤 2')).toBeInTheDocument()
+    expect(screen.getByText('seq 1')).toBeInTheDocument()
+    expect(screen.getByText('seq 2')).toBeInTheDocument()
     // deny 步骤圆点为 ✕，allow 为 ✓
     expect(screen.getByText('✕')).toBeInTheDocument()
     expect(screen.getByText('✓')).toBeInTheDocument()

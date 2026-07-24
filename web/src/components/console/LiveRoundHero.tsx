@@ -9,7 +9,7 @@ import type { AgentLiveRound, RoundDetail } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { useWs } from '../../hooks/useWs'
 import { buildConversation } from '../../utils/conversation'
-import { fmtTime, wakeSourceLabel } from '../../utils/format'
+import { fmtTime } from '../../utils/format'
 import StateHint from '../StateHint'
 import ConversationThread from './ConversationThread'
 import ToolSteps from './ToolSteps'
@@ -69,10 +69,9 @@ function fmtElapsed(sec: number): string {
 
 /** wake_source(唤醒来源) → 徽标配色：价格触发 amber / 定时唤醒 cyan / 启动 violet */
 function wakeClass(source: string): string {
-  const lower = source.toLowerCase()
-  if (source.includes('价格') || lower.includes('price')) return 'border-amber-300/40 bg-amber-400/10 text-amber-300'
-  if (source.includes('定时') || lower.includes('timer')) return 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300'
-  if (source.includes('启动') || lower.includes('start')) return 'border-violet-300/40 bg-violet-400/10 text-violet-300'
+  if (source.includes('价格')) return 'border-amber-300/40 bg-amber-400/10 text-amber-300'
+  if (source.includes('定时')) return 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300'
+  if (source.includes('启动')) return 'border-violet-300/40 bg-violet-400/10 text-violet-300'
   return 'border-zinc-500/40 bg-zinc-500/10 text-zinc-400'
 }
 
@@ -103,7 +102,7 @@ function HeroHeader({
         <span
           className={`rounded border px-2 py-0.5 text-[11px] font-semibold ${wakeClass(round.wake_source)}`}
         >
-          {wakeSourceLabel(round.wake_source)}
+          {round.wake_source}
         </span>
         {!inRound && (
           <span className="rounded border border-zinc-600/40 bg-zinc-700/30 px-2 py-0.5 text-[11px] text-zinc-400">
@@ -122,7 +121,7 @@ function HeroHeader({
         {round.ended_at !== null ? (
           fmtTime(new Date(round.ended_at * 1000).toISOString())
         ) : (
-          <span className="text-violet-300">进行中</span>
+          <span className="text-violet-300">null（进行中）</span>
         )}
       </div>
     </header>
@@ -224,7 +223,7 @@ export default function LiveRoundHero() {
             <HeroHeader round={round} inRound={inRound} elapsed={elapsed} />
             {llmOff && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/[.06] px-4 py-2.5 text-xs text-amber-300">
-                LLM 未配置：自动决策已暂停，请先在设置中配置 API 密钥
+                LLM未配置：自动决策已暂停，请先在设置中配置 API Key
               </p>
             )}
             {round.error !== '' && (
@@ -234,10 +233,10 @@ export default function LiveRoundHero() {
             )}
             <div className="mb-2 flex items-center justify-between">
               <span className="text-[11px] tracking-widest text-cyan-300/80">
-                工具调用链
+                工具调用链 · tool_calls
               </span>
               <span className="font-mono tabular-nums text-[10px] text-zinc-600">
-                放行 <span className="text-emerald-400">{allowCount}</span> / 拒绝{' '}
+                allow <span className="text-emerald-400">{allowCount}</span> / deny{' '}
                 <span className={denyCount > 0 ? 'text-rose-400' : ''}>{denyCount}</span> / 共{' '}
                 {shownCalls.length} 步
               </span>

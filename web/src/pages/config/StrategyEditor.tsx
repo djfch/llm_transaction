@@ -40,7 +40,7 @@ export default function StrategyEditor({
         }}
         rows={14}
         spellCheck={false}
-        aria-label="策略提示词内容"
+        aria-label="system_prompt 内容"
         className="w-full rounded-lg border border-white/10 bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200 focus:border-violet-400/60 focus:outline-none"
       />
       <div className="mt-3 flex items-center gap-3">

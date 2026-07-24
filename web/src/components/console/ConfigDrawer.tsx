@@ -67,14 +67,14 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
           role="alert"
           className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
         >
-          LLM 设置生效错误：{llmError}
+          LLM 热生效错误：{llmError}
         </p>
       )}
 
       {/* 模拟盘权益重置（自主页账户面板挪入）：仅 paper 模式渲染；成功后经 onReset 联动刷新父级 */}
       {configQ.data?.mode === 'paper' && (
         <section>
-          <h3 className="mb-3 text-xs tracking-widest text-zinc-500">模拟盘 · 权益重置</h3>
+          <h3 className="mb-3 text-xs tracking-widest text-zinc-500">模拟盘 paper · 权益重置</h3>
           <PaperEquitySetter onReset={onReset} />
         </section>
       )}
@@ -91,7 +91,7 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
         )}
       </DrawerSection>
 
-      <DrawerSection title="合约白名单" query={watchlistQ}>
+      <DrawerSection title="watchlist · 合约白名单" query={watchlistQ}>
         {(list) => (
           <WatchlistEditor
             initial={list}
@@ -103,7 +103,7 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
         )}
       </DrawerSection>
 
-      <DrawerSection title="策略提示词 · 在线编辑" query={strategyQ}>
+      <DrawerSection title="策略 Prompt · 在线编辑" query={strategyQ}>
         {(content) => (
           <StrategyEditor
             initial={content}

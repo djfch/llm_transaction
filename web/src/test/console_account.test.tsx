@@ -19,11 +19,11 @@ describe('AccountPanel(账户面板)', () => {
 
   it('累计涨跌行：正数 ▲ 绿色；权益重置不再内嵌', () => {
     render(<AccountPanel account={ACCOUNT} mode="paper" equityChangePct={2.8456} />)
-    expect(screen.getByText('账户 · 模拟盘')).toBeInTheDocument()
+    expect(screen.getByText('账户 · PAPER')).toBeInTheDocument()
     expect(screen.getByText('账户权益')).toBeInTheDocument()
     expect(screen.getByText('可用余额')).toBeInTheDocument()
     expect(screen.getByText('未实现盈亏')).toBeInTheDocument()
-    expect(screen.queryByText(/equity\(|available\(|unrealised_pnl/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/equity\(|available\(|unrealised_pnl\(/)).not.toBeInTheDocument()
     const line = screen.getByText(/· 累计/)
     expect(line.textContent).toBe('▲ +2.85% · 累计')
     expect(line.className).toContain('text-emerald-400')

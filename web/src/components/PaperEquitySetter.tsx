@@ -49,7 +49,7 @@ export default function PaperEquitySetter({ onReset }: { onReset: () => void }) 
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
       <label className="flex items-center gap-2">
-        设置权益金额（USDT）
+        设置权益金额 USDT
         <input
           type="number"
           min="0"
