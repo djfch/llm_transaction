@@ -12,12 +12,13 @@ import type {
   CancelOpenOrderResult,
   ClosePositionResult,
   DailyStats,
-  EquityPoint,
+  EquitySeries,
   KillSwitchResult,
   NotesPageResult,
   PaperResetResult,
   OpenOrder,
   Position,
+  PortfolioSnapshot,
   PutConfigResult,
   RoundDetail,
   RoundsPageResult,
@@ -136,10 +137,15 @@ function adaptPosition(raw: RawPosition): Position {
     take_profit_price: raw.take_profit_price == null ? null : Number(raw.take_profit_price),
   }
 }
-type RawOpenOrder = Omit<OpenOrder, 'size' | 'left' | 'price'> & {
+type RawOpenOrder = Omit<
+  OpenOrder,
+  'size' | 'left' | 'price' | 'stop_loss_price' | 'take_profit_price'
+> & {
   size: number | string
   left: number | string
   price: number | string
+  stop_loss_price?: number | string | null
+  take_profit_price?: number | string | null
 }
 
 /** 将后端 Decimal 字符串订单快照转换为前端可渲染的数字模型。 */
@@ -153,6 +159,8 @@ function adaptOpenOrder(raw: RawOpenOrder): OpenOrder {
     tif: String(raw.tif),
     reduce_only: Boolean(raw.reduce_only),
     status: String(raw.status),
+    stop_loss_price: raw.stop_loss_price == null ? null : Number(raw.stop_loss_price),
+    take_profit_price: raw.take_profit_price == null ? null : Number(raw.take_profit_price),
   }
 }
 
@@ -164,11 +172,29 @@ interface RawEquity {
 }
 
 /** 后端 equity 响应 → 前端 EquityPoint[]（取 points，t 转 ISO time） */
-function adaptEquity(raw: RawEquity): EquityPoint[] {
-  return raw.points.map((p) => ({
-    time: new Date(p.t * 1000).toISOString(),
-    equity: Number(p.equity),
-  }))
+function adaptEquity(raw: RawEquity): EquitySeries {
+  return {
+    initialEquity: Number(raw.initial_equity),
+    baselineSource: raw.baseline_source,
+    points: raw.points.map((p) => ({
+      time: new Date(p.t * 1000).toISOString(),
+      equity: Number(p.equity),
+    })),
+  }
+}
+
+interface RawPortfolio {
+  as_of: number
+  account: RawAccount
+  positions: RawPosition[]
+}
+
+function adaptPortfolio(raw: RawPortfolio): PortfolioSnapshot {
+  return {
+    asOf: new Date(raw.as_of * 1000).toISOString(),
+    account: adaptAccount(raw.account),
+    positions: raw.positions.map(adaptPosition),
+  }
 }
 
 /** 后端 /api/notes：标准分页壳 + created_at(Unix秒) 的笔记项。 */
@@ -266,6 +292,7 @@ export const httpApi: ApiClient = {
   getAccount: async () => adaptAccount(await request<RawAccount>('/account')),
   getPositions: async () =>
     (await request<RawPosition[]>('/positions')).map(adaptPosition),
+  getPortfolio: async () => adaptPortfolio(await request<RawPortfolio>('/portfolio')),
   getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
   getRounds: fetchRounds,
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),

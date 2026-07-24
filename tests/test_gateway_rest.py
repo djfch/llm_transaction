@@ -40,6 +40,8 @@ def make_sdk_order(order_id: str = "12345") -> SimpleNamespace:
         fill_price="50000",
         finish_as="filled",
         text="t-test",
+        tpsl_sl_trigger_price="",
+        tpsl_tp_trigger_price="0",
     )
 
 
@@ -133,6 +135,21 @@ def test_list_open_orders_supports_all_contracts_pagination_and_snapshot_fields(
     assert order.price == Decimal("59000")
     assert order.tif == "gtc"
     assert order.reduce_only is True
+    assert order.stop_loss_price is None
+    assert order.take_profit_price is None
+
+
+def test_list_open_orders_maps_attached_tpsl_prices(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    sdk_order = make_sdk_order("protected")
+    sdk_order.tpsl_sl_trigger_price = "58000"
+    sdk_order.tpsl_tp_trigger_price = "62000"
+    monkeypatch.setattr(gateway._api, "list_futures_orders", Mock(return_value=[sdk_order]))
+
+    [order] = gateway.list_orders()
+
+    assert order.stop_loss_price == Decimal("58000")
+    assert order.take_profit_price == Decimal("62000")
 
 
 def make_sdk_position() -> SimpleNamespace:

@@ -110,6 +110,22 @@ def test_limit_ioc_cancelled_when_not_crossed():
     assert gw.list_orders(BTC) == []
 
 
+def test_limit_order_keeps_attached_stop_loss_without_take_profit():
+    gw = make_gateway()
+    result = gw.place_order(
+        OrderRequest(
+            contract=BTC,
+            size=D(10),
+            price=D("99"),
+            stop_loss_price=D("95"),
+        )
+    )
+
+    assert result.stop_loss_price == D("95")
+    assert result.take_profit_price is None
+    assert gw.list_orders(BTC)[0].stop_loss_price == D("95")
+
+
 def test_market_slippage():
     gw = make_gateway(slippage="0.001")
     result = buy(gw, 10)

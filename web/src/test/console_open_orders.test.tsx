@@ -29,6 +29,8 @@ const longOrder: OpenOrder = {
   tif: 'gtc',
   reduce_only: false,
   status: 'open',
+  stop_loss_price: 62_000,
+  take_profit_price: 70_000,
 }
 
 const shortOrder: OpenOrder = {
@@ -39,6 +41,8 @@ const shortOrder: OpenOrder = {
   left: 5,
   price: 1_900,
   reduce_only: true,
+  stop_loss_price: null,
+  take_profit_price: null,
 }
 
 beforeEach(() => {
@@ -48,21 +52,35 @@ beforeEach(() => {
 describe('OpenOrdersPanel(未成交挂单)', () => {
   it('空持仓时仍显示挂单区域和空状态', () => {
     render(<OpenOrdersPanel orders={[]} />)
-    expect(screen.getByText('未成交挂单 open_orders')).toBeInTheDocument()
+    expect(screen.getByText('未成交挂单')).toBeInTheDocument()
     expect(screen.getByText('当前无未成交挂单')).toBeInTheDocument()
   })
 
   it('渲染多空方向与指定委托字段', () => {
     render(<OpenOrdersPanel orders={[longOrder, shortOrder]} />)
-    expect(screen.getByText('多 LONG')).toBeInTheDocument()
-    expect(screen.getByText('空 SHORT')).toBeInTheDocument()
+    expect(screen.getByText('多')).toBeInTheDocument()
+    expect(screen.getByText('空')).toBeInTheDocument()
     expect(screen.getAllByText('委托张数')).toHaveLength(2)
     expect(screen.getAllByText('未成交张数')).toHaveLength(2)
     expect(screen.getAllByText('委托价')).toHaveLength(2)
     expect(screen.getAllByText('有效方式')).toHaveLength(2)
     expect(screen.getAllByText('只减仓')).toHaveLength(2)
+    expect(screen.getByText('止损价')).toBeInTheDocument()
+    expect(screen.getByText('止盈价')).toBeInTheDocument()
+    expect(screen.getByText('62,000.00')).toBeInTheDocument()
+    expect(screen.getByText('70,000.00')).toBeInTheDocument()
     expect(screen.queryByText(/size\(|left\(|price\(|tif\(|reduce_only\(/)).not.toBeInTheDocument()
     expect(screen.getByText('是')).toBeInTheDocument()
+  })
+
+  it('未配置保护价时不显示止盈止损字段', () => {
+    render(
+      <OpenOrdersPanel
+        orders={[{ ...shortOrder, stop_loss_price: null, take_profit_price: null }]}
+      />,
+    )
+    expect(screen.queryByText('止损价')).not.toBeInTheDocument()
+    expect(screen.queryByText('止盈价')).not.toBeInTheDocument()
   })
 
   it('第一次点击只进入确认态，第二次成功后隐藏卡片并通知父级', async () => {

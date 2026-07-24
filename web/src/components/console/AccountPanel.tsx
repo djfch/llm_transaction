@@ -28,7 +28,7 @@ export default function AccountPanel({
   account: AccountInfo | null
   /** 运行模式（标题展示用） */
   mode: string
-  /** 权益曲线首末点涨跌幅（%）；undefined（空数据/首点为 0）不渲染涨跌行 */
+  /** 以初始权益为基准的累计收益率（%）；undefined（基准为 0）不渲染涨跌行 */
   equityChangePct?: number
   /** 当日统计；null 时底部行整体降级不渲染 */
   dailyStats?: DailyStats | null

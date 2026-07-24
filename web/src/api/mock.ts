@@ -77,6 +77,8 @@ const openOrders: OpenOrder[] = [
     tif: 'gtc',
     reduce_only: false,
     status: 'open',
+    stop_loss_price: 1850,
+    take_profit_price: 2050,
   },
 ]
 
@@ -168,6 +170,28 @@ const equity: EquityPoint[] = hoursAgoSeries(200).map((t, i) => ({
   equity: Math.round((10_000 + i * 4.2 + Math.sin(i / 6) * 120) * 100) / 100,
 }))
 
+function buildPortfolio() {
+  const drift = import.meta.env.MODE === 'test' ? 0 : Math.round(Math.sin(Date.now() / 3000) * 20 * 100) / 100
+  const livePositions = positions.map((position, index) =>
+    index === 0
+      ? {
+          ...position,
+          mark_price: position.mark_price + drift,
+          unrealised_pnl: position.unrealised_pnl + drift,
+        }
+      : { ...position },
+  )
+  return {
+    asOf: new Date().toISOString(),
+    account: {
+      equity: paperEquity + drift,
+      available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100),
+      unrealised_pnl: livePositions.reduce((sum, position) => sum + position.unrealised_pnl, 0),
+    },
+    positions: livePositions,
+  }
+}
+
 // round_id：部分归属 mock 决策轮（时间线卡片嵌引文演示），部分空串（无归属）
 const notes: Note[] = [
   { time: new Date(Date.now() - 3600_000).toISOString(), content: 'BTC 4h 级别仍处上升通道，回调即加多机会。', round_id: rounds[0].round_id },
@@ -230,6 +254,7 @@ export const mockApi: ApiClient = {
     // available 由 paperEquity 派生，避免设置金额后账户概览自相矛盾
     reply({ equity: paperEquity, available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100), unrealised_pnl: 255.6 }),
   getPositions: () => reply(positions.map((p) => ({ ...p }))),
+  getPortfolio: () => reply(buildPortfolio()),
   getOpenOrders: () => reply(openOrders.map((order) => ({ ...order }))),
   getRounds: (offset, limit) =>
     reply({ items: rounds.slice(offset, offset + limit), total: rounds.length, offset, limit }),
@@ -283,7 +308,8 @@ export const mockApi: ApiClient = {
     agentRunning = false
     return reply({ agent_running: agentRunning })
   },
-  getEquity: () => reply(equity),
+  getEquity: () =>
+    reply({ initialEquity: 10_000, baselineSource: 'paper_config', points: equity }),
   getNotes: (offset = 0, limit = 20) =>
     reply({ items: notes.slice(offset, offset + limit), total: notes.length, offset, limit }),
   // 固定值：与 mock 成交叙事自洽（当日若干笔已实现合计），上限随风控配置联动

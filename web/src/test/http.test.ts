@@ -72,10 +72,44 @@ describe('http 适配层（数字字符串 → number）', () => {
         },
       }),
     )
-    const points = await httpApi.getEquity()
-    expect(points).toHaveLength(1)
-    expect(points[0].equity).toBe(10000)
-    expect(new Date(points[0].time).getTime()).toBe(1784381252000)
+    const series = await httpApi.getEquity()
+    expect(series.initialEquity).toBe(10000)
+    expect(series.baselineSource).toBe('paper_config')
+    expect(series.points).toHaveLength(1)
+    expect(series.points[0].equity).toBe(10000)
+    expect(new Date(series.points[0].time).getTime()).toBe(1784381252000)
+  })
+
+  it('getPortfolio：统一转换账户、持仓与快照时间', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        '/api/portfolio': {
+          as_of: 1784381252,
+          account: { equity: '10125.5', available: '9900', unrealised_pnl: '25.5' },
+          positions: [
+            {
+              contract: 'ETH_USDT',
+              size: '2',
+              entry_price: '1880',
+              mark_price: '1905.5',
+              leverage: '3',
+              margin: '200',
+              unrealised_pnl: '25.5',
+              liq_price: '1400',
+              stop_loss_price: null,
+              take_profit_price: '1950',
+            },
+          ],
+        },
+      }),
+    )
+
+    const snapshot = await httpApi.getPortfolio()
+    expect(snapshot.asOf).toBe('2026-07-18T13:27:32.000Z')
+    expect(snapshot.account.equity).toBe(10125.5)
+    expect(snapshot.positions[0].mark_price).toBe(1905.5)
+    expect(snapshot.positions[0].take_profit_price).toBe(1950)
   })
 
   it('getNotes：items[].created_at 映射为 time，round_id 透传（缺省空串）', async () => {

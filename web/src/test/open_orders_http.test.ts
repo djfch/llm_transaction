@@ -19,6 +19,8 @@ describe('open_orders HTTP 适配', () => {
               tif: 'gtc',
               reduce_only: true,
               status: 'open',
+              stop_loss_price: '1850.5',
+              take_profit_price: null,
             },
           ]),
           { status: 200 },
@@ -36,6 +38,8 @@ describe('open_orders HTTP 适配', () => {
       tif: 'gtc',
       reduce_only: true,
       status: 'open',
+      stop_loss_price: 1850.5,
+      take_profit_price: null,
     })
   })
 

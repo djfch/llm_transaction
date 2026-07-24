@@ -26,7 +26,14 @@ function buildPaths(values: number[]): { line: string; area: string } {
   return { line, area: `${line} L ${W},${H} L 0,${H} Z` }
 }
 
-export default function EquityMiniChart({ points }: { points: EquityPoint[] }) {
+export default function EquityMiniChart({
+  points,
+  equityChangePct,
+}: {
+  points: EquityPoint[]
+  /** 以初始权益为基准的累计收益率（百分数）；由页面装配层统一计算。 */
+  equityChangePct?: number
+}) {
   const gradientId = useId()
   // 时间升序 + 防御非法点（时间不可解析/权益非有限数）
   const series = useMemo(
@@ -40,20 +47,13 @@ export default function EquityMiniChart({ points }: { points: EquityPoint[] }) {
     () => (series.length > 0 ? buildPaths(series.map((p) => p.equity)) : null),
     [series],
   )
-  // 首末点涨跌幅（0-1 比例，正绿负红）；首点为 0 无法定义基准时不显示
-  const changePct = useMemo(() => {
-    const first = series[0]?.equity
-    if (first === undefined || first === 0) return null
-    return (series[series.length - 1].equity - first) / first
-  }, [series])
-
   return (
     <section className="rounded-xl border border-white/5 bg-zinc-900/60 p-4 backdrop-blur">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-xs tracking-widest text-zinc-500">权益曲线 equity</h3>
-        {changePct !== null && (
-          <span className={`font-mono text-[11px] tabular-nums ${pnlClass(changePct)}`}>
-            {fmtSignedPct(changePct)}
+        {equityChangePct !== undefined && (
+          <span className={`font-mono text-[11px] tabular-nums ${pnlClass(equityChangePct)}`}>
+            {fmtSignedPct(equityChangePct / 100)}
           </span>
         )}
       </div>

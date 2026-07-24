@@ -107,6 +107,8 @@ class OrderResult(BaseModel):
     price: Decimal | None = None
     tif: str = ""
     reduce_only: bool = False
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
     left: Decimal  # 剩余未成交张数
     fill_price: Decimal  # 成交均价
     finish_as: str = ""

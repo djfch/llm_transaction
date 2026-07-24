@@ -151,9 +151,19 @@ def test_reduce_only_limit_without_position_rejected(gw: MockGateway):
 
 
 def test_limit_order_stays_open(gw: MockGateway):
-    result = gw.place_order(OrderRequest(contract=BTC, size=Decimal(1), price=Decimal("49000")))
+    result = gw.place_order(
+        OrderRequest(
+            contract=BTC,
+            size=Decimal(1),
+            price=Decimal("49000"),
+            stop_loss_price=Decimal("48000"),
+            take_profit_price=Decimal("51000"),
+        )
+    )
     assert result.status == "open"
     assert result.left == Decimal(1)
+    assert result.stop_loss_price == Decimal("48000")
+    assert result.take_profit_price == Decimal("51000")
     assert gw.list_orders(BTC, "open")[0].id == result.id
 
 

@@ -310,6 +310,8 @@ class PaperGateway:
             price=req.price,
             tif=req.tif or "gtc",
             reduce_only=req.reduce_only,
+            stop_loss_price=req.stop_loss_price,
+            take_profit_price=req.take_profit_price,
             left=abs(req.size),
             fill_price=Decimal(0),
             text=text,

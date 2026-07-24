@@ -22,6 +22,13 @@ export interface AccountInfo {
 }
 
 /** 持仓：GET /api/positions */
+/** 账户与持仓在同一读取周期内生成的权威快照：GET /api/portfolio */
+export interface PortfolioSnapshot {
+  asOf: string
+  account: AccountInfo
+  positions: Position[]
+}
+
 export interface Position {
   contract: string // 合约名，如 BTC_USDT
   size: number // 持仓张数，正多负空
@@ -45,6 +52,8 @@ export interface OpenOrder {
   tif: string
   reduce_only: boolean
   status: string
+  stop_loss_price: number | null
+  take_profit_price: number | null
 }
 
 /** 决策轮摘要：GET /api/rounds?offset=&limit= */
@@ -166,6 +175,13 @@ export interface EquityPoint {
 }
 
 /** 策略笔记：GET /api/notes */
+/** 权益历史及其权威基准：GET /api/equity */
+export interface EquitySeries {
+  initialEquity: number
+  baselineSource: string
+  points: EquityPoint[]
+}
+
 export interface Note {
   time: string
   content: string
@@ -274,6 +290,7 @@ export interface ApiClient {
   getStatus(): Promise<StatusInfo>
   getAccount(): Promise<AccountInfo>
   getPositions(): Promise<Position[]>
+  getPortfolio(): Promise<PortfolioSnapshot>
   /** 读取交易所或模拟撮合引擎当前仍为 open 的订单。 */
   getOpenOrders(): Promise<OpenOrder[]>
   getRounds(offset: number, limit: number): Promise<RoundsPageResult>
@@ -287,7 +304,7 @@ export interface ApiClient {
   resetPaperEquity(equity: number): Promise<PaperResetResult>
   startAgent(): Promise<AgentStateResult>
   stopAgent(): Promise<AgentStateResult>
-  getEquity(): Promise<EquityPoint[]>
+  getEquity(): Promise<EquitySeries>
   getNotes(offset?: number, limit?: number): Promise<NotesPageResult>
   getDailyStats(): Promise<DailyStats>
   getConfig(): Promise<AppConfig>

@@ -28,10 +28,14 @@ from src.server.ws import ConnectionManager, pump_events
 class FakeGateway:
     """注入用假网关：返回固定账户与持仓。"""
 
+    def __init__(self) -> None:
+        self.position_calls = 0
+
     def get_account(self) -> Account:
         return Account(available=Decimal("9000"), unrealised_pnl=Decimal("100"))
 
     def list_positions(self) -> list[Position]:
+        self.position_calls += 1
         return [
             Position(
                 contract="BTC_USDT",
@@ -139,9 +143,18 @@ async def test_account_and_positions(client: AsyncClient):
     assert positions[0]["contract"] == "BTC_USDT"
 
 
+async def test_portfolio_returns_one_authoritative_snapshot(client: AsyncClient, deps: ServerDeps):
+    body = (await client.get("/api/portfolio")).json()
+
+    assert isinstance(body["as_of"], float)
+    assert float(body["account"]["equity"]) == 10100.0
+    assert body["positions"][0]["contract"] == "BTC_USDT"
+    assert deps.gateway.position_calls == 1
+
+
 async def test_account_503_when_gateway_missing(deps: ServerDeps, client: AsyncClient):
     deps.gateway = None
-    for path in ("/api/account", "/api/positions"):
+    for path in ("/api/account", "/api/positions", "/api/portfolio"):
         r = await client.get(path)
         assert r.status_code == 503
 
