@@ -64,10 +64,10 @@ function useCancelOpenOrder(order: OpenOrder, onCancelled: (message: string) => 
 /** 依据带方向的 size 生成多空展示文案和颜色。 */
 function direction(order: OpenOrder) {
   if (order.size > 0) {
-    return { text: '多 LONG', cls: 'border-emerald-400/40 bg-emerald-400/15 text-emerald-300' }
+    return { text: '多', cls: 'border-emerald-400/40 bg-emerald-400/15 text-emerald-300' }
   }
   if (order.size < 0) {
-    return { text: '空 SHORT', cls: 'border-rose-400/40 bg-rose-400/15 text-rose-300' }
+    return { text: '空', cls: 'border-rose-400/40 bg-rose-400/15 text-rose-300' }
   }
   return { text: '未知', cls: 'border-zinc-500/40 bg-zinc-500/15 text-zinc-300' }
 }
@@ -89,7 +89,7 @@ function OpenOrderCard({
         <span className="font-mono font-bold text-zinc-100">{order.contract}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${side.cls}`}>{side.text}</span>
         <span className="ml-auto rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-200">
-          open
+          未成交
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
@@ -101,6 +101,12 @@ function OpenOrderCard({
           label="只减仓"
           value={order.reduce_only ? '是' : '否'}
         />
+        {order.stop_loss_price !== null ? (
+          <Field label="止损价" value={fmtPrice(order.stop_loss_price)} />
+        ) : null}
+        {order.take_profit_price !== null ? (
+          <Field label="止盈价" value={fmtPrice(order.take_profit_price)} />
+        ) : null}
       </div>
       <div className="mt-3 flex items-center gap-3 border-t border-white/5 pt-3">
         <button
@@ -143,7 +149,7 @@ export default function OpenOrdersPanel({
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-sm font-semibold text-zinc-300">{'未成交挂单 open_orders'}</h2>
+        <h2 className="text-sm font-semibold text-zinc-300">{'未成交挂单'}</h2>
         <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-[10px] tabular-nums text-zinc-400">
           {visibleOrders.length}
         </span>

@@ -124,6 +124,12 @@ def _dec(value: str | None) -> Decimal:
     return Decimal(str(value))
 
 
+def _optional_price(value: str | None) -> Decimal | None:
+    """Gate 附带保护价的空串与零值都表示未配置。"""
+    price = _dec(value)
+    return None if price == 0 else price
+
+
 def _to_contract(c: gate_api.Contract) -> Contract:
     return Contract(
         name=c.name,
@@ -165,6 +171,8 @@ def _to_order(o: gate_api.FuturesOrder) -> OrderResult:
         price=_dec(getattr(o, "price", 0)),
         tif=getattr(o, "tif", "") or "",
         reduce_only=bool(getattr(o, "is_reduce_only", False)),
+        stop_loss_price=_optional_price(getattr(o, "tpsl_sl_trigger_price", None)),
+        take_profit_price=_optional_price(getattr(o, "tpsl_tp_trigger_price", None)),
         left=_dec(o.left),
         fill_price=_dec(o.fill_price),
         finish_as=o.finish_as or "",

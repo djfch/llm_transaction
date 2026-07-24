@@ -42,6 +42,8 @@ class FakeGateway:
                 price=Decimal("59000"),
                 tif="gtc",
                 reduce_only=True,
+                stop_loss_price=Decimal("58000"),
+                take_profit_price=Decimal("62000"),
                 fill_price=Decimal(0),
             )
         ]
@@ -206,6 +208,8 @@ async def test_open_orders_lists_all_pages(client: AsyncClient, deps: ServerDeps
     assert first["size"] == "-2"
     assert first["price"] == "59000"
     assert first["tif"] == "gtc" and first["reduce_only"] is True
+    assert first["stop_loss_price"] == "58000"
+    assert first["take_profit_price"] == "62000"
     assert deps.gateway.open_order_calls == [
         {"contract": None, "status": "open", "limit": 100, "offset": 0},
         {"contract": None, "status": "open", "limit": 100, "offset": 100},

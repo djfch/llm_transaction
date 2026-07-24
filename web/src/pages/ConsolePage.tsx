@@ -12,6 +12,7 @@ import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position } from '
 import AccountPanel from '../components/console/AccountPanel'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 import EquityMiniChart from '../components/console/EquityMiniChart'
+import { equityChangePct, withCurrentEquity } from '../components/console/equityPresentation'
 import KlinePanel from '../components/console/KlinePanel'
 import LiveRoundHero from '../components/console/LiveRoundHero'
 import NotesPanel from '../components/console/NotesPanel'
@@ -22,42 +23,28 @@ import RoundTimeline from '../components/console/RoundTimeline'
 import TopBar from '../components/console/TopBar'
 import TradesTable from '../components/console/TradesTable'
 import { useApiData } from '../hooks/useApiData'
+import { useLivePortfolio } from '../hooks/useLivePortfolio'
 import { RoundFocusProvider } from '../hooks/useRoundFocus'
-import { useWs } from '../hooks/useWs'
-
-/** 权益曲线首末点涨跌幅（%）：空数组或首点为 0 → undefined（面板不渲染该行） */
-function equityChangePctOf(points: EquityPoint[]): number | undefined {
-  if (points.length === 0) return undefined
-  const sorted = [...points].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime())
-  const first = sorted[0].equity
-  if (first === 0) return undefined
-  return ((sorted[sorted.length - 1].equity - first) / first) * 100
-}
 
 /** 页面数据：状态、账户、持仓、挂单、权益与当日统计；笔记分页由 NotesPanel 独立管理。 */
 function useConsoleData() {
   const status = useApiData(() => api.getStatus(), [])
-  const account = useApiData(() => api.getAccount(), [])
-  const positions = useApiData(() => api.getPositions(), [])
+  const portfolio = useLivePortfolio()
   const openOrders = useApiData(() => api.getOpenOrders(), [])
   const equity = useApiData(() => api.getEquity(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
   const daily = useApiData(() => api.getDailyStats(), [])
-  const { connected, lastMessage } = useWs()
-  const { reload: reloadAccount } = account
-  const { reload: reloadPositions } = positions
+  const { connected, lastMessage } = portfolio
   const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadEquity } = equity
   const { reload: reloadDaily } = daily
   useEffect(() => {
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
-    reloadAccount()
-    reloadPositions()
     reloadOpenOrders()
     reloadEquity()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadAccount, reloadPositions, reloadOpenOrders, reloadEquity, reloadDaily])
-  return { status, account, positions, openOrders, equity, daily, connected }
+  }, [lastMessage, reloadOpenOrders, reloadEquity, reloadDaily])
+  return { status, portfolio, openOrders, equity, daily, connected }
 }
 
 /** 首屏：右栏将当前持仓与未成交挂单相邻展示，便于一起核对和操作。 */
@@ -86,7 +73,7 @@ function FirstScreen({
     <section className="grid grid-cols-12 gap-4 pt-5">
       <aside className="order-2 col-span-12 space-y-4 lg:order-1 lg:col-span-3">
         <AccountPanel account={account} mode={mode} equityChangePct={equityChangePct} dailyStats={dailyStats} />
-        <EquityMiniChart points={points} />
+        <EquityMiniChart points={points} equityChangePct={equityChangePct} />
         <RiskPanel />
       </aside>
       <div className="order-1 col-span-12 lg:order-2 lg:col-span-6">
@@ -136,26 +123,34 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, account, positions, openOrders, equity, daily, connected } = useConsoleData()
+  const { status, portfolio, openOrders, equity, daily, connected } = useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
-  // 权益曲线首末点涨跌幅（账户面板累计涨跌行；空数据/首点为 0 → undefined 不渲染）
-  const equityChangePct = useMemo(() => equityChangePctOf(equity.data ?? []), [equity.data])
+  const account = portfolio.data?.account ?? null
+  const positions = portfolio.data?.positions ?? []
+  const points = useMemo(() => {
+    const history = equity.data?.points ?? []
+    if (portfolio.data === null) return history
+    return withCurrentEquity(history, portfolio.data.asOf, portfolio.data.account.equity)
+  }, [equity.data, portfolio.data])
+  const changePct = useMemo(() => {
+    if (account === null || equity.data === null) return undefined
+    return equityChangePct(account.equity, equity.data.initialEquity)
+  }, [account, equity.data])
 
   // TopBar：agent 启停 / kill_switch 变更 → 刷状态 + 账户
   const onStatusChanged = () => {
     status.reload()
-    account.reload()
+    portfolio.reloadImmediately()
   }
   // PositionsPanel：手动平仓 → 刷持仓 + 账户 + 权益曲线（成交表数据自管，不联动）
   const onPositionsChanged = () => {
-    positions.reload()
-    account.reload()
+    portfolio.reloadImmediately()
     equity.reload()
   }
   // 撤单不会改变持仓，但会释放可用余额，因此只刷新挂单和账户。
   const onOpenOrdersChanged = () => {
     openOrders.reload()
-    account.reload()
+    portfolio.reloadImmediately()
   }
   // 抽屉关闭 → 刷状态（保存密钥/LLM 配置后 TopBar 的 llm_configured 横幅需联动消失）
   const closeConfig = () => {
@@ -164,8 +159,7 @@ export default function ConsolePage() {
   }
   // paper 权益重置成功 → 刷账户/持仓/权益/当日统计（重置改变 paper 端全部账面口径）
   const onPaperReset = () => {
-    account.reload()
-    positions.reload()
+    portfolio.reloadImmediately()
     openOrders.reload()
     equity.reload()
     daily.reload()
@@ -184,18 +178,17 @@ export default function ConsolePage() {
           errors={[
             ['未成交挂单', openOrders.error],
             ['状态', status.error],
-            ['账户', account.error],
-            ['持仓', positions.error],
+            ['组合快照', portfolio.error],
             ['权益曲线', equity.error],
           ]}
         />
         <FirstScreen
-          account={account.data}
+          account={account}
           mode={status.data?.mode ?? ''}
-          points={equity.data ?? []}
-          equityChangePct={equityChangePct}
+          points={points}
+          equityChangePct={changePct}
           dailyStats={daily.data}
-          positions={positions.data ?? []}
+          positions={positions}
           openOrders={openOrders.data ?? []}
           onPositionsChanged={onPositionsChanged}
           onOpenOrdersChanged={onOpenOrdersChanged}

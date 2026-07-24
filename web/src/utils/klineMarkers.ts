@@ -1,8 +1,8 @@
 /**
- * K线买卖点标记纯函数（与图表库解耦，供 MarkersOverlay 消费、单测直接覆盖）。
+ * K线买卖点标记映射：业务成交转换为圆形覆盖层使用的中间模型。
  * 语义：仅当前合约 + 已归属决策轮（round_id 非空）的成交才生成标记；
  * size 正买负卖 —— 买 b（K线下方，绿）、卖 s（K线上方，红）。
- * 坐标换算（timeToCoordinate/priceToCoordinate）由图表层完成，此处只产出业务字段。
+ * 成交时间按周期归入 K 线；坐标与裁剪由覆盖层按当前图表范围计算。
  */
 import type { Trade } from '../api/types'
 

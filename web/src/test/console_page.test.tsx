@@ -69,17 +69,21 @@ const DETAIL: RoundDetail = {
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */
 const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
-  getAccount: vi.fn(() =>
-    Promise.resolve({ equity: 10284.56, available: 9216.36, unrealised_pnl: 133.13 }),
+  getPortfolio: vi.fn(() =>
+    Promise.resolve({
+      asOf: '2026-07-20T00:00:01Z',
+      account: { equity: 10284.56, available: 9216.36, unrealised_pnl: 133.13 },
+      positions: [],
+    }),
   ),
-  getPositions: vi.fn(() => Promise.resolve([])),
   getOpenOrders: vi.fn<() => Promise<OpenOrder[]>>(() => Promise.resolve([])),
   cancelOpenOrder: vi.fn(),
   getEquity: vi.fn(() =>
-    Promise.resolve([
-      { time: '2026-07-19T00:00:00Z', equity: 10000 },
-      { time: '2026-07-20T00:00:00Z', equity: 10284.56 },
-    ]),
+    Promise.resolve({
+      initialEquity: 10000,
+      baselineSource: 'paper_config',
+      points: [{ time: '2026-07-19T00:00:00Z', equity: 10000 }],
+    }),
   ),
   getNotes: vi.fn(() =>
     Promise.resolve({
@@ -98,8 +102,7 @@ const holder = vi.hoisted(() => ({
 vi.mock('../api', () => ({
   api: {
     getStatus: () => Promise.resolve(STATUS),
-    getAccount: () => holder.getAccount(),
-    getPositions: () => holder.getPositions(),
+    getPortfolio: () => holder.getPortfolio(),
     getOpenOrders: () => holder.getOpenOrders(),
     cancelOpenOrder: (...args: [string, string]) => holder.cancelOpenOrder(...args),
     getEquity: () => holder.getEquity(),
@@ -131,15 +134,30 @@ vi.mock('lightweight-charts', () => ({
   HistogramSeries: 'histogram',
   LineSeries: 'line',
   createChart: () => ({
-    addSeries: () => ({ setData: vi.fn(), update: vi.fn(), priceToCoordinate: () => null }),
+    addSeries: () => ({
+      setData: vi.fn(),
+      update: vi.fn(),
+      priceToCoordinate: () => null,
+      priceScale: () => ({
+        options: () => ({ scaleMargins: { top: 0.08, bottom: 0.26 } }),
+      }),
+      getPane: () => ({ getHeight: () => 300 }),
+      subscribeDataChanged: vi.fn(),
+      unsubscribeDataChanged: vi.fn(),
+    }),
     priceScale: () => ({ applyOptions: vi.fn() }),
     timeScale: () => ({
       setVisibleLogicalRange: vi.fn(),
       subscribeVisibleLogicalRangeChange: vi.fn(),
       unsubscribeVisibleLogicalRangeChange: vi.fn(),
+      subscribeSizeChange: vi.fn(),
+      unsubscribeSizeChange: vi.fn(),
       timeToCoordinate: () => null,
+      width: () => 400,
     }),
     applyOptions: vi.fn(),
+    subscribeClick: vi.fn(),
+    unsubscribeClick: vi.fn(),
     remove: vi.fn(),
   }),
 }))
@@ -214,8 +232,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
   it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板与引文同步失效', async () => {
     const { rerender } = render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
-    expect(holder.getAccount).toHaveBeenCalledTimes(1)
-    expect(holder.getPositions).toHaveBeenCalledTimes(1)
+    expect(holder.getPortfolio).toHaveBeenCalledTimes(1)
     expect(holder.getOpenOrders).toHaveBeenCalledTimes(1)
 
     // 后端广播轮结束（payload 仅 {round_id, ok, wake_source}，装配层只当失效信号）
@@ -225,8 +242,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     }
     rerender(<ConsolePage />)
 
-    await waitFor(() => expect(holder.getAccount).toHaveBeenCalledTimes(2))
-    expect(holder.getPositions).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(holder.getPortfolio).toHaveBeenCalledTimes(2))
     expect(holder.getOpenOrders).toHaveBeenCalledTimes(2)
     expect(holder.getEquity).toHaveBeenCalledTimes(2)
     // notes = NotesPanel 与 RoundTimeline 引文各 2 次（挂载 + round 事件刷新）
@@ -249,6 +265,8 @@ describe('ConsolePage 挂单刷新', () => {
           tif: 'gtc',
           reduce_only: false,
           status: 'open',
+          stop_loss_price: null,
+          take_profit_price: null,
         },
       ])
       .mockResolvedValue([])
@@ -268,7 +286,7 @@ describe('ConsolePage 挂单刷新', () => {
 
     await waitFor(() => expect(holder.cancelOpenOrder).toHaveBeenCalledWith('ETH_USDT', 'order-refresh'))
     await waitFor(() => expect(holder.getOpenOrders).toHaveBeenCalledTimes(2))
-    expect(holder.getAccount).toHaveBeenCalledTimes(2)
+    expect(holder.getPortfolio).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -285,8 +303,7 @@ describe('ConsolePage 挂单刷新', () => {
     fireEvent.click(await screen.findByRole('button', { name: '设置金额' }))
     fireEvent.click(await screen.findByRole('button', { name: /再次点击确认/ }))
 
-    await waitFor(() => expect(holder.getAccount).toHaveBeenCalledTimes(2))
-    expect(holder.getPositions).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(holder.getPortfolio).toHaveBeenCalledTimes(2))
     expect(holder.getEquity).toHaveBeenCalledTimes(2)
     expect(holder.getDailyStats).toHaveBeenCalledTimes(2)
   })

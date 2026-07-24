@@ -6,7 +6,7 @@
  * WS ticker 驱动末根实时跳动（mergeTick 合成）+ 末根 MA20 实时延伸（liveMaValue）；
  * 成交量无 ticker 数据源，histogram 不随 tick 更新（待下次数据重建刷新）。
  * 表头涨跌幅为真 24h 口径（changePct24h，与图表同源的 sortedUnique memo）；买卖点标记由
- * MarkersOverlay 覆盖渲染（点击定位决策轮）。
+ * 圆形覆盖层渲染买卖点（点击定位决策轮，移出主价格绘图区时隐藏）。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -252,7 +252,7 @@ export default function KlinePanel() {
         <MarkersOverlay
           chart={chartApi}
           series={seriesApi}
-          bars={bars}
+          bars={sortedBars}
           contract={contract}
           intervalSec={intervalSec}
         />

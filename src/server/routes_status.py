@@ -160,6 +160,20 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     async def get_positions() -> list[dict[str, Any]]:
         return [p.model_dump() for p in _require_gateway(deps).list_positions()]
 
+    @router.get("/portfolio")
+    async def get_portfolio() -> dict[str, Any]:
+        """一次读取账户与持仓，返回同一时点的权威组合快照。"""
+        gateway = _require_gateway(deps)
+        positions = gateway.list_positions()
+        account = gateway.get_account().model_dump()
+        margin = sum((position.margin for position in positions), Decimal(0))
+        account["equity"] = account["available"] + margin + account["unrealised_pnl"]
+        return {
+            "as_of": time.time(),
+            "account": account,
+            "positions": [position.model_dump() for position in positions],
+        }
+
     @router.get("/daily_stats")
     async def get_daily_stats() -> dict[str, Any]:
         """当日统计（风控同一口径的只读暴露）：服务器时区自然日、按当前 mode 过滤、

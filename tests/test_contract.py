@@ -4,6 +4,7 @@
 - GET  /api/status → mode/uptime_seconds/kill_switch/agent_running/llm_provider/llm_model/llm_configured
 - GET  /api/account → available/unrealised_pnl/equity（equity 必在，前端 AccountInfo 契约）
 - GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price/stop_loss_price/take_profit_price
+- GET  /api/portfolio → as_of/account/positions（同一时点的账户与持仓组合快照）
 - GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
@@ -211,6 +212,10 @@ async def test_status_account_positions_contract(client: AsyncClient):
         "contract:s size:n entry_price:n mark_price:n leverage:n margin:n unrealised_pnl:n liq_price:n",
         "/api/positions[0]",
     )
+    portfolio = await _get(client, "/api/portfolio")
+    _typed(portfolio, "as_of:n account:d positions:l", "/api/portfolio")
+    _typed(portfolio["account"], "available:n unrealised_pnl:n equity:n", "/api/portfolio account")
+    assert portfolio["positions"], "/api/portfolio positions 应非空"
 
 
 async def test_trades_equity_notes_contract(client: AsyncClient):
