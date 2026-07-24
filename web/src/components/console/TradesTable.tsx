@@ -129,13 +129,13 @@ export default function TradesTable() {
           <table className="w-full min-w-[860px] text-sm">
             <thead>
               <tr className="border-b border-zinc-800 text-left text-[11px] text-zinc-500">
-                <th className="px-3 py-2 font-medium">time（时间）</th>
-                <th className="px-3 py-2 font-medium">contract（合约）</th>
-                <th className="px-3 py-2 text-right font-medium">size（数量）</th>
-                <th className="px-3 py-2 text-right font-medium">price（成交价）</th>
-                <th className="px-3 py-2 text-right font-medium">fee（手续费）</th>
-                <th className="px-3 py-2 text-right font-medium">pnl（已实现盈亏）</th>
-                <th className="px-3 py-2 font-medium">source（来源）· round（决策轮）</th>
+                <th className="px-3 py-2 font-medium">时间</th>
+                <th className="px-3 py-2 font-medium">合约</th>
+                <th className="px-3 py-2 text-right font-medium">数量</th>
+                <th className="px-3 py-2 text-right font-medium">成交价</th>
+                <th className="px-3 py-2 text-right font-medium">手续费</th>
+                <th className="px-3 py-2 text-right font-medium">已实现盈亏</th>
+                <th className="px-3 py-2 font-medium">来源 · 决策轮</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/60 font-mono text-[13px] tabular-nums">

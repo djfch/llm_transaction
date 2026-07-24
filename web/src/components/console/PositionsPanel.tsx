@@ -49,7 +49,7 @@ function useClosePosition(contract: string, onChanged?: () => void) {
     setMessage(null)
     try {
       const res = await api.closePosition(contract)
-      setMessage(res.text || `已平仓，fill_price(成交均价) ${res.fill_price}`)
+      setMessage(res.text || `已平仓，成交均价 ${res.fill_price}`)
       onChanged?.()
     } catch (e) {
       // 422 为风控拒绝，409 等非 2xx 展示后端 detail（沿用现有模式）
@@ -116,12 +116,18 @@ function PositionItem({
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
         <Field label="张数" value={fmtSigned(size, 0)} />
-        <Field label="margin(保证金)" value={fmtNum(position.margin)} />
-        <Field label="entry_price(开仓价)" value={fmtPrice(position.entry_price)} />
-        <Field label="mark_price(标记价)" value={fmtPrice(position.mark_price)} />
-        <Field label="stop_loss_price(止损价)" value={position.stop_loss_price == null ? '未设置' : fmtPrice(position.stop_loss_price)} />
-        <Field label="take_profit_price(止盈价)" value={position.take_profit_price == null ? '未设置' : fmtPrice(position.take_profit_price)} />
-        <Field label="liq_price(强平价)" value={fmtPrice(position.liq_price)} cls="text-zinc-400" />
+        <Field label="保证金" value={fmtNum(position.margin)} />
+        <Field label="开仓价" value={fmtPrice(position.entry_price)} />
+        <Field label="标记价" value={fmtPrice(position.mark_price)} />
+        <Field
+          label="止损价"
+          value={position.stop_loss_price == null ? '未设置' : fmtPrice(position.stop_loss_price)}
+        />
+        <Field
+          label="止盈价"
+          value={position.take_profit_price == null ? '未设置' : fmtPrice(position.take_profit_price)}
+        />
+        <Field label="强平价" value={fmtPrice(position.liq_price)} cls="text-zinc-400" />
         <Field label="强平缓冲" value={fmtPct2(liqBufferRatio(position))} cls="text-emerald-300" />
         <Field
           label="保证金收益率"

@@ -22,8 +22,8 @@ function resultText(result: ToolCall['result']): string {
 
 /** 风控判定徽标三态（与后端口径一致：空串=未入风控） */
 function verdictBadge(verdict: string): { text: string; tone: 'ok' | 'danger' | 'neutral' } {
-  if (verdict === 'deny') return { text: 'deny(风控拒绝)', tone: 'danger' }
-  if (verdict === 'allow') return { text: 'allow(风控放行)', tone: 'ok' }
+  if (verdict === 'deny') return { text: '风控拒绝', tone: 'danger' }
+  if (verdict === 'allow') return { text: '风控放行', tone: 'ok' }
   return { text: '免判(未入风控)', tone: 'neutral' }
 }
 
@@ -89,12 +89,12 @@ function StepItem({ call, last, compact }: { call: ToolCall; last: boolean; comp
         {denied && call.risk_reason !== '' && (
           <div className="mt-1 flex items-start gap-1.5 text-[11px] leading-5 text-rose-300">
             <span>⛔</span>
-            <span>risk_reason(风控理由)：{call.risk_reason}</span>
+            <span>风控理由：{call.risk_reason}</span>
           </div>
         )}
         <details className="mt-1">
           <summary className="cursor-pointer list-none text-[11px] text-zinc-500 transition hover:text-violet-300">
-            ▸ result(执行结果)
+            ▸ 执行结果
           </summary>
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-zinc-950/80 p-2 font-mono text-[11px] leading-5 text-zinc-400">
             {resultText(call.result)}

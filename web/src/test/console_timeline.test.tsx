@@ -164,6 +164,7 @@ describe('RoundTimeline(决策时间线)', () => {
     fireEvent.click(summary)
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
     expect(await screen.findByText('get_account')).toBeInTheDocument()
+    expect(screen.getByText('工具调用详情 · tool_calls（1 步）')).toBeInTheDocument()
     const chatSummary = screen.getByText(/完整对话 · agent loop/)
     fireEvent.click(chatSummary)
     expect(screen.getByText('RAW-id-100')).toBeInTheDocument()

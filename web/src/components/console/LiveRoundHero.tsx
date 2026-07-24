@@ -117,8 +117,7 @@ function HeroHeader({
         </span>
       </div>
       <div className="mt-2 font-mono tabular-nums text-[11px] text-zinc-600">
-        started_at(开始) {fmtTime(new Date(round.started_at * 1000).toISOString())} ·
-        ended_at(结束){' '}
+        开始 {fmtTime(new Date(round.started_at * 1000).toISOString())} · 结束{' '}
         {round.ended_at !== null ? (
           fmtTime(new Date(round.ended_at * 1000).toISOString())
         ) : (
@@ -224,12 +223,12 @@ export default function LiveRoundHero() {
             <HeroHeader round={round} inRound={inRound} elapsed={elapsed} />
             {llmOff && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/[.06] px-4 py-2.5 text-xs text-amber-300">
-                llm_configured(LLM未配置)：自动决策已暂停，请先在设置中配置 API Key
+                LLM未配置：自动决策已暂停，请先在设置中配置 API Key
               </p>
             )}
             {round.error !== '' && (
               <p className="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/[.06] px-4 py-2.5 text-xs text-rose-300">
-                error(本轮错误)：{round.error}
+                本轮错误：{round.error}
               </p>
             )}
             <div className="mb-2 flex items-center justify-between">

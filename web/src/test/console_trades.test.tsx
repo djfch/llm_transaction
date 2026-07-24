@@ -100,6 +100,16 @@ function renderTable() {
 }
 
 describe('TradesTable(成交记录)', () => {
+  it('表头只移除英文键括号标签，成交来源仍保留原始值', async () => {
+    renderTable()
+
+    expect(await screen.findByText('llm_open')).toBeInTheDocument()
+    for (const name of ['时间', '合约', '数量', '成交价', '手续费', '已实现盈亏', '来源 · 决策轮']) {
+      expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+    }
+    expect(screen.queryByText(/time（|contract（|size（|price（|fee（|pnl（|source（|round（/)).not.toBeInTheDocument()
+  })
+
   it('round 徽标：有归属显示 #短号(前8位)，无归属灰显 -', async () => {
     renderTable()
 

@@ -62,13 +62,14 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getAllByText('ASSISTANT')).toHaveLength(4)
   })
 
-  it('deny 的工具返回：红色系卡片 + 「（风控拒绝）」标记 + risk_reason 展示', () => {
+  it('deny 的工具返回：红色系卡片 + 「（风控拒绝）」标记 + 中文风控理由标签', () => {
     render(<ConversationThread llmRaw={ANTHROPIC_RAW} toolCalls={AUDIT} defaultOpen />)
     const label = screen.getByText(/（风控拒绝）/)
     expect(label).toBeInTheDocument()
     // 所在卡片为红色系（deny 标记）
     expect(label.parentElement!.className).toContain('rose')
-    expect(screen.getByText(/单仓超限 36% > 30%/)).toBeInTheDocument()
+    expect(screen.getByText(/风控理由：单仓超限 36% > 30%/)).toBeInTheDocument()
+    expect(screen.queryByText(/risk_reason\(/)).not.toBeInTheDocument()
   })
 
   it('折叠交互：默认收起，点击摘要展开；defaultOpen 时初始展开', () => {

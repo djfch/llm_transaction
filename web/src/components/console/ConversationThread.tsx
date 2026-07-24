@@ -50,7 +50,7 @@ function ToolResultBubble({ msg }: { msg: ConversationMessage }) {
       </p>
       {denied && msg.riskReason && (
         <p className="mt-1 text-[11px] leading-5 text-rose-300">
-          risk_reason(风控理由)：{msg.riskReason}
+          风控理由：{msg.riskReason}
         </p>
       )}
     </div>

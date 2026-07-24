@@ -36,7 +36,7 @@ export default function PaperEquitySetter({ onReset }: { onReset: () => void }) 
     setMessage(null)
     try {
       const res = await api.resetPaperEquity(amount)
-      setMessage(`已设置 equity(账户权益) = ${res.equity}`)
+      setMessage(`已设置账户权益 = ${res.equity}`)
       onReset()
     } catch (e) {
       // 409 为非 paper 模式拒绝，展示后端给出的原因
@@ -49,7 +49,7 @@ export default function PaperEquitySetter({ onReset }: { onReset: () => void }) 
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
       <label className="flex items-center gap-2">
-        equity(设置权益金额 USDT)
+        设置权益金额 USDT
         <input
           type="number"
           min="0"

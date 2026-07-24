@@ -46,13 +46,16 @@ describe('PositionsPanel(持仓卡片列表)', () => {
     expect(screen.getByText('5x')).toBeInTheDocument()
     expect(screen.getByText('+300')).toBeInTheDocument() // 张数正多带 + 号
     expect(screen.getByText('张数')).toBeInTheDocument()
-    expect(screen.getByText('stop_loss_price(止损价)')).toBeInTheDocument()
-    expect(screen.getByText('take_profit_price(止盈价)')).toBeInTheDocument()
-    expect(screen.getByText('entry_price(开仓价)')).toBeInTheDocument()
+    expect(screen.getByText('止损价')).toBeInTheDocument()
+    expect(screen.getByText('止盈价')).toBeInTheDocument()
+    expect(screen.getByText('开仓价')).toBeInTheDocument()
     expect(screen.getByText('115,446.30')).toBeInTheDocument()
-    expect(screen.getByText('mark_price(标记价)')).toBeInTheDocument()
-    expect(screen.getByText('liq_price(强平价)')).toBeInTheDocument()
-    expect(screen.getByText('margin(保证金)')).toBeInTheDocument()
+    expect(screen.getByText('标记价')).toBeInTheDocument()
+    expect(screen.getByText('强平价')).toBeInTheDocument()
+    expect(screen.getByText('保证金')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/entry_price|mark_price|liq_price|margin\(|stop_loss_price|take_profit_price/),
+    ).not.toBeInTheDocument()
     expect(screen.getByText('708.38')).toBeInTheDocument()
     const pnl = screen.getByText('+78.50')
     expect(pnl.className).toContain('text-emerald-400')

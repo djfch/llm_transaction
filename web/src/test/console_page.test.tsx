@@ -92,6 +92,7 @@ const holder = vi.hoisted(() => ({
   getDailyStats: vi.fn(() =>
     Promise.resolve({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 }),
   ),
+  getAgentLive: vi.fn<() => Promise<AgentLiveState>>(() => Promise.resolve(LIVE)),
 }))
 
 vi.mock('../api', () => ({
@@ -104,7 +105,7 @@ vi.mock('../api', () => ({
     getEquity: () => holder.getEquity(),
     getNotes: () => holder.getNotes(),
     getDailyStats: () => holder.getDailyStats(),
-    getAgentLive: () => Promise.resolve(LIVE),
+    getAgentLive: () => holder.getAgentLive(),
     getRound: () => Promise.resolve(DETAIL),
     getRounds: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 5 }),
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
@@ -183,6 +184,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(await screen.findByText('30%')).toBeInTheDocument()
     // 中央：实时决策轮主角（结束后拉详情，渲染结论；结论与对话流各出现一次）
     expect(await screen.findByText(/实时决策轮/)).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent(/started_at\(开始\)|ended_at\(结束\)/)
     expect((await screen.findAllByText('RAW-SMOKE')).length).toBeGreaterThan(0)
     // 右栏：K线 + 空仓持仓面板
     expect(screen.getByText('K线')).toBeInTheDocument()
@@ -195,6 +197,18 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText('成交记录')).toBeInTheDocument()
     // 配置抽屉：默认关闭（dialog 存在但不可见）
     expect(screen.getByRole('dialog', { hidden: true })).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('进行中的决策轮保留 null 技术状态及中文补充', async () => {
+    holder.getAgentLive.mockResolvedValueOnce({
+      ...LIVE,
+      in_round: true,
+      round: LIVE.round === null ? null : { ...LIVE.round, ended_at: null },
+    })
+
+    render(<ConsolePage />)
+
+    expect(await screen.findByText('null（进行中）')).toBeInTheDocument()
   })
 
   it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板与引文同步失效', async () => {
@@ -266,6 +280,8 @@ describe('ConsolePage 挂单刷新', () => {
 
     // 打开配置抽屉（paper 模式渲染权益重置），两段确认完成重置
     fireEvent.click(screen.getByRole('button', { name: '打开配置中心' }))
+    expect(await screen.findByText('设置权益金额 USDT')).toBeInTheDocument()
+    expect(screen.queryByText(/equity\(设置权益金额/)).not.toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: '设置金额' }))
     fireEvent.click(await screen.findByRole('button', { name: /再次点击确认/ }))
 

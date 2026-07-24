@@ -93,12 +93,12 @@ function OpenOrderCard({
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
-        <Field label={'size(委托张数)'} value={fmtSigned(order.size, 0)} />
-        <Field label={'left(未成交张数)'} value={fmtNum(order.left, 0)} />
-        <Field label={'price(委托价)'} value={fmtPrice(order.price)} />
-        <Field label={'tif(有效方式)'} value={order.tif || '-'} />
+        <Field label="委托张数" value={fmtSigned(order.size, 0)} />
+        <Field label="未成交张数" value={fmtNum(order.left, 0)} />
+        <Field label="委托价" value={fmtPrice(order.price)} />
+        <Field label="有效方式" value={order.tif || '-'} />
         <Field
-          label={'reduce_only(只减仓)'}
+          label="只减仓"
           value={order.reduce_only ? '是' : '否'}
         />
       </div>
