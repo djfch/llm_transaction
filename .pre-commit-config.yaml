@@ -1,4 +1,4 @@
-# pre-commit 钩子：每次 git commit 自动检查前后端
+# pre-commit 钩子：普通提交跑后端测试；Python/web 文件分别追加对应检查
 # 安装：uvx pre-commit install
 repos:
   - repo: local
