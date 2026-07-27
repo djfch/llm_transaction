@@ -5,6 +5,7 @@
 PromptLoader mtime 热重载。
 """
 
+import hashlib
 import json
 import os
 from collections import deque
@@ -244,6 +245,10 @@ async def test_full_round_audited(env: SimpleNamespace):
     decisions = await env.repo.list_decisions()
     assert len(decisions) == 1 and decisions[0].llm_raw != ""
     assert decisions[0].strategy_version == round_row.prompt_md5
+    # strategy_md5 为策略书原文 md5（区别于 strategy_version 的拼装 md5），两表同步落库
+    expected_md5 = hashlib.md5("# 策略书\n稳健交易，控制回撤。".encode("utf-8")).hexdigest()
+    assert decisions[0].strategy_md5 == expected_md5
+    assert round_row.strategy_md5 == expected_md5
     # 每次 LLM 调用的 messages 都含首轮账户上下文，工具结果也会持续回填
     second_msgs = provider.calls[1]["messages"]
     assert any(
@@ -304,6 +309,10 @@ async def test_parse_failure_no_trade(env: SimpleNamespace):
     assert await env.repo.list_audit_tool_calls(result.round_id) == []
     decisions = await env.repo.list_decisions()  # 失败轮也落决策记录
     assert len(decisions) == 1 and decisions[0].wake_source == "price_alert"
+    # 失败路径同样落策略书原文 md5，保证失败轮也能按版本关联
+    expected_md5 = hashlib.md5("# 策略书\n稳健交易，控制回撤。".encode("utf-8")).hexdigest()
+    assert decisions[0].strategy_md5 == expected_md5
+    assert round_row.strategy_md5 == expected_md5
 
 
 # ---------- 连续失败：触发风控锁 + 告警一次 ----------

@@ -148,8 +148,11 @@ class DecisionLoop:
             logger.warning("LLM 未配置，跳过本轮决策")
             return RoundResult(round_id="", ok=False, wake_source=wake_source, error="LLM 未配置")
         prompt, prompt_md5 = self._prompts.system_prompt(self._registry.specs)
+        strategy_md5 = self._prompts.body_md5()  # 策略书原文 md5，落库供复盘按版本关联
         # 先落审计行（空上下文快照）：后续任何失败都在 audit_rounds 留痕迹
-        round_id = await self._audit.begin_round(self._settings.mode, wake_source, prompt)
+        round_id = await self._audit.begin_round(
+            self._settings.mode, wake_source, prompt, strategy_md5=strategy_md5
+        )
         self._deps.round_id = round_id
         ctx: AgentContext | None = None
         try:
@@ -157,13 +160,14 @@ class DecisionLoop:
             await self._audit.record_context(round_id, ctx.text)
             text, raw, n_calls = await self._chat_loop(prompt, ctx, round_id)
         except Exception as e:
-            result = await self._fail_round(round_id, prompt_md5, wake_source, ctx, e)
+            result = await self._fail_round(round_id, prompt_md5, strategy_md5, wake_source, ctx, e)
         else:
             self._consecutive_failures = 0
             await self._repo.save_decision(
                 round_id=round_id,
                 mode=self._settings.mode,
                 strategy_version=prompt_md5,
+                strategy_md5=strategy_md5,
                 wake_source=wake_source,
                 context_summary=ctx.summary,
                 llm_raw=raw,
@@ -223,6 +227,7 @@ class DecisionLoop:
         self,
         round_id: str,
         prompt_md5: str,
+        strategy_md5: str,
         wake_source: str,
         ctx: AgentContext | None,
         exc: Exception,
@@ -243,6 +248,7 @@ class DecisionLoop:
             round_id=round_id,
             mode=self._settings.mode,
             strategy_version=prompt_md5,
+            strategy_md5=strategy_md5,
             wake_source=wake_source,
             context_summary=ctx.summary if ctx else "",
             llm_raw="",

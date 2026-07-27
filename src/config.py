@@ -75,6 +75,26 @@ class AuditConfig(BaseModel):
     dir: str = "logs/audit"
 
 
+class ReviewConfig(BaseModel):
+    """复盘 agent：每日定时复盘的开关与触发时间（本地时间）。"""
+
+    enabled: bool = True
+    daily_time: str = "03:00"
+
+    @model_validator(mode="after")
+    def _check_daily_time(self) -> ReviewConfig:
+        """daily_time 必须为 HH:MM（时 0-23、分 0-59）。"""
+        parts = self.daily_time.split(":")
+        if (
+            len(parts) != 2
+            or not all(p.isdigit() for p in parts)
+            or not 0 <= int(parts[0]) <= 23
+            or not 0 <= int(parts[1]) <= 59
+        ):
+            raise ValueError("daily_time 必须为 HH:MM 格式（时 0-23，分 0-59）")
+        return self
+
+
 class LogConfig(BaseModel):
     dir: str = "logs"
     level: str = "INFO"
@@ -92,6 +112,7 @@ class Settings(BaseModel):
     notify: NotifyConfig = NotifyConfig()
     server: ServerConfig = ServerConfig()
     audit: AuditConfig = AuditConfig()
+    review: ReviewConfig = ReviewConfig()
     log: LogConfig = LogConfig()
 
     def validate_mode(self) -> None:

@@ -17,6 +17,9 @@ class Decision(BaseModel):
     round_id: str
     mode: str
     strategy_version: str
+    # 策略书原文 md5（与 strategy_versions.md5 关联）；strategy_version 为
+    # 「策略书+工具说明段」拼装 md5，两者并存、语义不同
+    strategy_md5: str = ""
     wake_source: str
     context_summary: str
     llm_raw: str
@@ -87,6 +90,7 @@ class AuditRound(BaseModel):
     mode: str
     wake_source: str
     prompt_md5: str
+    strategy_md5: str = ""  # 策略书原文 md5，语义同 Decision.strategy_md5
     prompt_snapshot: str
     context_snapshot: str
     llm_raw: str
@@ -107,4 +111,38 @@ class AuditToolCall(BaseModel):
     risk_reason: str
     result_json: str
     duration_ms: int
+    created_at: float
+
+
+class StrategyVersion(BaseModel):
+    """策略书版本：content 为完整原文，md5 与 decisions/audit_rounds.strategy_md5 关联。
+
+    created_by 取值：human（人工修改）/ review_agent（复盘 agent 改写）/ rollback（回滚）。
+    report_id 指向触发本版本的复盘报告（人工版本为 None）。
+    """
+
+    id: int
+    content: str
+    md5: str
+    created_by: str
+    reason: str
+    report_id: int | None = None
+    created_at: float
+
+
+class ReviewReport(BaseModel):
+    """复盘报告：period 为统计区间（Unix 秒），stats_json 为代码侧统计结果。
+
+    strategy_action 取值：none（无需调整）/ rewrite（产出新策略版本，new_version_id 指向它）。
+    error 非空表示该次复盘失败（只落错误记录，不影响交易循环）。
+    """
+
+    id: int
+    period_start: float
+    period_end: float
+    stats_json: str
+    report_md: str
+    strategy_action: str
+    new_version_id: int | None = None
+    error: str = ""
     created_at: float

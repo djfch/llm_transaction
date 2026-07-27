@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.config import SchedulerConfig, load_settings, load_watchlist
+from src.config import ReviewConfig, SchedulerConfig, load_settings, load_watchlist
 from src.config_io import ConfigError, write_settings, write_watchlist
 
 
@@ -73,6 +73,28 @@ def test_scheduler_max_over_720_rejected():
 def test_scheduler_valid_combo_accepted():
     cfg = SchedulerConfig(default_wake_minutes=30, min_wake_minutes=10, max_wake_minutes=120)
     assert cfg.max_wake_minutes == 120
+
+
+# ---------- ReviewConfig.daily_time 校验 ----------
+
+
+def test_review_config_defaults():
+    """复盘配置默认值：启用、每日 03:00（本地时间）。"""
+    cfg = ReviewConfig()
+    assert cfg.enabled is True
+    assert cfg.daily_time == "03:00"
+
+
+def test_review_daily_time_valid():
+    assert ReviewConfig(daily_time="23:59").daily_time == "23:59"
+    assert ReviewConfig(daily_time="0:00").daily_time == "0:00"
+
+
+def test_review_daily_time_invalid():
+    """非法 daily_time：越界时刻、非 HH:MM 结构均拒绝。"""
+    for bad in ["24:00", "12:60", "-1:30", "3点", "03:00:00", "", "ab:cd"]:
+        with pytest.raises(ValidationError, match="daily_time"):
+            ReviewConfig(daily_time=bad)
 
 
 # ---------- PaperConfig.initial_equity 为 Decimal ----------

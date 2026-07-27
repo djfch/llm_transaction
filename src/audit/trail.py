@@ -35,12 +35,19 @@ class AuditTrail:
         self._dir = Path(config.dir)
 
     async def begin_round(
-        self, mode: str, wake_source: str, system_prompt: str, context: str = ""
+        self,
+        mode: str,
+        wake_source: str,
+        system_prompt: str,
+        context: str = "",
+        strategy_md5: str = "",
     ) -> str:
         """开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id。
 
         context 允许为空：决策循环先落审计行（保证后续任何失败都有痕迹），
         上下文构建完成后经 record_context 回填快照。
+        strategy_md5 为策略书原文 md5（区别于 prompt_md5 的拼装 md5），
+        供复盘按策略版本关联本轮。
         """
         round_id = uuid.uuid4().hex
         prompt_md5 = hashlib.md5(system_prompt.encode("utf-8")).hexdigest()
@@ -51,6 +58,7 @@ class AuditTrail:
             prompt_md5=prompt_md5,
             prompt_snapshot=system_prompt,
             context_snapshot=context,
+            strategy_md5=strategy_md5,
         )
         logger.info("审计轮次开始 round_id=%s mode=%s wake=%s", round_id, mode, wake_source)
         return round_id
