@@ -36,6 +36,10 @@ from src.memory.db import Database
 from src.memory.repo import Repo
 from src.notify.telegram import build_notifier
 from src.paper.engine import PaperGateway
+from src.review.agent import ReviewAgent
+from src.review.prompts import ReviewPromptLoader
+from src.review.scheduler import ReviewScheduler
+from src.review.strategy import StrategyStore, StrategyValidationError
 from src.risk.engine import RiskEngine
 from src.scheduler.wakeup import WakeupScheduler
 from src.server.app import create_app
@@ -59,6 +63,9 @@ class AppContext:
     source: PriceSource
     scheduler: WakeupScheduler
     loop: DecisionLoop
+    review_agent: ReviewAgent
+    review_scheduler: ReviewScheduler
+    strategy_store: StrategyStore
     event_queue: asyncio.Queue
     candles: CandleCache
     triggers: TriggerManager
@@ -153,6 +160,7 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
             logger.warning("LLM provider 热重建失败（保留旧 provider）：%s", exc)
             return {"llm_configured": ctx.loop.llm_configured, "error": str(exc)}
         ctx.loop.set_provider(provider)
+        ctx.review_agent.set_provider(provider)  # 复盘 agent 与决策循环共享同一 provider
         logger.info(
             "LLM provider 已热重建（%s / %s）", ctx.settings.llm.provider, ctx.settings.llm.model
         )
@@ -229,7 +237,7 @@ def _build_loop(
     settings: Settings,
     watchlist: Watchlist,
     *,
-    mock_llm: bool,
+    provider: LLMProvider | None,
     gateway: Gateway,
     repo: Repo,
     candles: CandleCache,
@@ -238,7 +246,10 @@ def _build_loop(
     cfg_path: Path,
     audit: AuditTrail,
 ) -> DecisionLoop:
-    """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。"""
+    """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。
+
+    provider 由 build_app 统一创建一次传入（与复盘 agent 共享同一实例）。
+    """
     notifier = build_notifier(settings.notify)
 
     def persist_kill_switch(enabled: bool) -> None:
@@ -252,7 +263,7 @@ def _build_loop(
         watchlist=watchlist.contracts,
         gateway=gateway,
         repo=repo,
-        provider=_build_provider(settings, mock_llm),
+        provider=provider,
         risk_engine=RiskEngine(),
         candles=candles,
         triggers=triggers,
@@ -305,10 +316,12 @@ async def build_app(
     source.set_handlers(
         on_ticker=_make_on_ticker(gateway, triggers, lambda msg: event_queue.put_nowait(msg))
     )
+    # provider 创建一次：决策循环与复盘 agent 共享同一实例（热重建时两边同步替换）
+    provider = _build_provider(settings, mock_llm)
     loop = _build_loop(
         settings,
         watchlist,
-        mock_llm=mock_llm,
+        provider=provider,
         gateway=gateway,
         repo=repo,
         candles=candles,
@@ -317,6 +330,19 @@ async def build_app(
         audit=audit,
         cfg_path=config_path or ROOT / "config.yaml",
     )
+    # 复盘子系统装配：策略版本库播种 v1；复盘 agent 复用同一 provider/audit/repo
+    strategy_store = StrategyStore(ROOT / "system_prompt.md", repo)
+    await strategy_store.seed_if_empty()
+    review_agent = ReviewAgent(
+        settings=settings,
+        provider=provider,
+        repo=repo,
+        audit=audit,
+        store=strategy_store,
+        prompt_loader=ReviewPromptLoader(ROOT / "review_prompt.md"),
+        on_alert=build_notifier(settings.notify).send,  # 与决策循环同款通知通道
+    )
+    review_scheduler = ReviewScheduler(settings, review_agent, repo)
     ctx = AppContext(
         settings=settings,
         db=db,
@@ -324,6 +350,9 @@ async def build_app(
         gateway=gateway,
         source=source,
         loop=loop,
+        review_agent=review_agent,
+        review_scheduler=review_scheduler,
+        strategy_store=strategy_store,
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,
@@ -382,6 +411,27 @@ def _build_server(
         await ctx.scheduler.start()
         ctx.scheduler.wake_now("manual_start")
 
+    async def strategy_save(content: str) -> dict:
+        """前端手动保存策略书：走 StrategyStore（与复盘改写同一路径，版本落库）。
+
+        特殊语义：仅"与当前策略书无差异"一条校验失败时视为幂等成功（重复保存不产新版本）；
+        其余校验失败原样上抛 StrategyValidationError，由路由映 422。
+        """
+        try:
+            version = await ctx.strategy_store.revise(
+                content, reason="前端手动保存", created_by="human"
+            )
+        except StrategyValidationError as exc:
+            if all("无差异" in reason for reason in exc.reasons):
+                return {"saved": True, "version": None}
+            raise
+        return {"saved": True, "version": version.id}
+
+    async def strategy_rollback(version_id: int) -> dict:
+        """回滚到指定策略版本（记 created_by='rollback' 新版本）；不存在上抛映 404。"""
+        version = await ctx.strategy_store.rollback(version_id)
+        return {"rolled_back_to": version_id, "version": version.id}
+
     deps = ServerDeps(
         repo=ctx.repo,
         audit_trail=audit,
@@ -395,6 +445,9 @@ def _build_server(
         agent_start=agent_start,
         agent_stop=ctx.scheduler.stop,
         llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
+        review_run=ctx.review_scheduler.run_now,
+        strategy_save=strategy_save,
+        strategy_rollback=strategy_rollback,
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
     )
@@ -450,6 +503,8 @@ async def run_app(
     server_task = asyncio.create_task(ctx.server.serve())
     pusher_task = asyncio.create_task(price_pusher(ctx)) if price_pusher else None
     funding_task = asyncio.create_task(_funding_loop(ctx))
+    # 复盘巡检无论 enabled 与否都创建：scheduler 每 tick 读 settings.review.enabled（热开关）
+    review_task = asyncio.create_task(ctx.review_scheduler.run_forever())
     logger.info(
         "应用已启动（mode=%s，HTTP=%s:%d）",
         ctx.settings.mode,
@@ -462,7 +517,7 @@ async def run_app(
         else:
             await asyncio.Event().wait()  # 长驻，Ctrl+C 退出
     finally:
-        await shutdown(ctx, server_task, pusher_task, funding_task)
+        await shutdown(ctx, server_task, pusher_task, funding_task, review_task)
 
 
 async def shutdown(
@@ -470,6 +525,7 @@ async def shutdown(
     server_task: asyncio.Task,
     pusher_task: asyncio.Task | None,
     funding_task: asyncio.Task,
+    review_task: asyncio.Task,
 ) -> None:
     """优雅退出：停调度与行情，关 HTTP，收尾数据库。"""
     logger.info("正在关闭应用…")
@@ -478,7 +534,7 @@ async def shutdown(
     if ctx.server is not None:
         ctx.server.should_exit = True
         await asyncio.gather(server_task, return_exceptions=True)
-    for task in (pusher_task, funding_task):
+    for task in (pusher_task, funding_task, review_task):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
