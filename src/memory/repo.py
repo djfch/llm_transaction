@@ -12,17 +12,8 @@ from decimal import Decimal
 import aiosqlite
 
 from src.memory.db import Database
-from src.memory.models import (
-    Alert,
-    AuditRound,
-    AuditToolCall,
-    Decision,
-    Note,
-    OrderRecord,
-    ReviewReport,
-    StrategyVersion,
-    Trade,
-)
+from src.memory.models import Alert, AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
+from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
 
 
@@ -52,13 +43,6 @@ SELECT page.*, total.value AS total
 FROM total LEFT JOIN page ON 1 = 1
 ORDER BY page.id DESC
 """
-_REVIEW_REPORTS_PAGE_SQL = """
-WITH total AS (SELECT COUNT(*) AS value FROM review_reports),
-page AS (SELECT * FROM review_reports ORDER BY id DESC LIMIT ? OFFSET ?)
-SELECT page.*, total.value AS total
-FROM total LEFT JOIN page ON 1 = 1
-ORDER BY page.id DESC
-"""
 
 
 class Repo:
@@ -66,6 +50,9 @@ class Repo:
 
     def __init__(self, db: Database) -> None:
         self._db = db
+        # 子仓库：策略版本/复盘报告/复盘取数集中在 ReviewRepo（共享同一 Database 与连接），
+        # 复盘相关调用走 repo.review.xxx（见 src/memory/review_repo.py）
+        self.review = ReviewRepo(db)
 
     @property
     def _conn(self) -> aiosqlite.Connection:
@@ -126,8 +113,8 @@ class Repo:
 
     async def list_decisions_page(self, limit: int, offset: int) -> tuple[list[Decision], int]:
         """以单条 SQL 快照返回决策页及总数，越界页仍保留准确总数。"""
-        rows, total = await self._list_page_rows(_DECISIONS_PAGE_SQL, limit, offset)
-        return [Decision(**self._row_without_total(row)) for row in rows], total
+        rows, total = await query_page_rows(self._conn, _DECISIONS_PAGE_SQL, limit, offset)
+        return [Decision(**row_without_total(row)) for row in rows], total
 
     async def get_decision_by_round(self, round_id: str) -> Decision | None:
         """按 round_id 取唯一决策记录；不存在返回 None。"""
@@ -353,24 +340,8 @@ class Repo:
 
     async def list_notes_page(self, limit: int, offset: int) -> tuple[list[Note], int]:
         """以单条 SQL 快照返回最新优先的笔记页及总数，避免分页状态撕裂。"""
-        rows, total = await self._list_page_rows(_NOTES_PAGE_SQL, limit, offset)
-        return [Note(**self._row_without_total(row)) for row in rows], total
-
-    async def _list_page_rows(
-        self, sql: str, limit: int, offset: int
-    ) -> tuple[list[aiosqlite.Row], int]:
-        """执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)。"""
-        cur = await self._conn.execute(sql, (limit, offset))
-        raw_rows = await cur.fetchall()
-        total = int(raw_rows[0]["total"]) if raw_rows else 0
-        return [row for row in raw_rows if row["id"] is not None], total
-
-    @staticmethod
-    def _row_without_total(row: aiosqlite.Row) -> dict[str, object]:
-        """移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段。"""
-        data = dict(row)
-        data.pop("total", None)
-        return data
+        rows, total = await query_page_rows(self._conn, _NOTES_PAGE_SQL, limit, offset)
+        return [Note(**row_without_total(row)) for row in rows], total
 
     # ---------- alerts ----------
 
@@ -524,174 +495,3 @@ class Repo:
             "SELECT * FROM audit_tool_calls WHERE round_id=? ORDER BY seq", (round_id,)
         )
         return [AuditToolCall(**dict(r)) for r in await cur.fetchall()]
-
-    # ---------- strategy_versions（策略书版本） ----------
-
-    async def save_strategy_version(
-        self,
-        content: str,
-        md5: str,
-        created_by: str,
-        reason: str,
-        report_id: int | None = None,
-    ) -> StrategyVersion:
-        """落库一个策略书版本（content 为完整原文，md5 为关联键）。"""
-        ts = _now()
-        cur = await self._conn.execute(
-            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts),
-        )
-        await self._conn.commit()
-        return StrategyVersion(
-            id=cur.lastrowid or 0,
-            content=content,
-            md5=md5,
-            created_by=created_by,
-            reason=reason,
-            report_id=report_id,
-            created_at=ts,
-        )
-
-    async def list_strategy_versions(self) -> list[StrategyVersion]:
-        """全部版本，按 id 倒序（最新在前）。"""
-        cur = await self._conn.execute("SELECT * FROM strategy_versions ORDER BY id DESC")
-        return [StrategyVersion(**dict(r)) for r in await cur.fetchall()]
-
-    async def get_strategy_version(self, version_id: int) -> StrategyVersion | None:
-        cur = await self._conn.execute("SELECT * FROM strategy_versions WHERE id=?", (version_id,))
-        row = await cur.fetchone()
-        return StrategyVersion(**dict(row)) if row else None
-
-    async def attach_report_to_version(self, version_id: int, report_id: int) -> None:
-        """回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）。"""
-        await self._conn.execute(
-            "UPDATE strategy_versions SET report_id=? WHERE id=?", (report_id, version_id)
-        )
-        await self._conn.commit()
-
-    # ---------- review_reports（复盘报告） ----------
-
-    async def save_review_report(
-        self,
-        period_start: float,
-        period_end: float,
-        stats_json: str,
-        report_md: str,
-        strategy_action: str,
-        new_version_id: int | None = None,
-        error: str = "",
-    ) -> ReviewReport:
-        """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。"""
-        ts = _now()
-        cur = await self._conn.execute(
-            "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
-            "strategy_action,new_version_id,error,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            (
-                period_start,
-                period_end,
-                stats_json,
-                report_md,
-                strategy_action,
-                new_version_id,
-                error,
-                ts,
-            ),
-        )
-        await self._conn.commit()
-        return ReviewReport(
-            id=cur.lastrowid or 0,
-            period_start=period_start,
-            period_end=period_end,
-            stats_json=stats_json,
-            report_md=report_md,
-            strategy_action=strategy_action,
-            new_version_id=new_version_id,
-            error=error,
-            created_at=ts,
-        )
-
-    async def list_review_reports_page(
-        self, limit: int, offset: int
-    ) -> tuple[list[ReviewReport], int]:
-        """以单条 SQL 快照返回报告页及总数，越界页仍保留准确总数。"""
-        rows, total = await self._list_page_rows(_REVIEW_REPORTS_PAGE_SQL, limit, offset)
-        return [ReviewReport(**self._row_without_total(row)) for row in rows], total
-
-    async def get_review_report(self, report_id: int) -> ReviewReport | None:
-        cur = await self._conn.execute("SELECT * FROM review_reports WHERE id=?", (report_id,))
-        row = await cur.fetchone()
-        return ReviewReport(**dict(row)) if row else None
-
-    async def latest_review_period_end(self) -> float | None:
-        """最近一次复盘的 period_end；无记录返回 None（调度幂等：不重复复盘同一区间）。"""
-        cur = await self._conn.execute("SELECT MAX(period_end) AS value FROM review_reports")
-        row = await cur.fetchone()
-        value = row["value"] if row else None
-        return float(value) if value is not None else None
-
-    # ---------- 复盘统计取数 ----------
-
-    async def trades_for_review(
-        self,
-        start_ts: float,
-        end_ts: float,
-        mode: str,
-        contract: str | None = None,
-        strategy_md5: str | None = None,
-    ) -> list[Trade]:
-        """区间内成交（[start, end)，按 id 正序），join decisions 以支持按策略版本过滤。
-
-        mode 必填过滤；strategy_md5/contract 非空时分别加对应过滤。
-        无 join 匹配（decisions 缺该 round_id）的成交不参与按策略统计，不出现。
-        """
-        sql = (
-            "SELECT trades.* FROM trades"
-            " JOIN decisions ON trades.round_id = decisions.round_id"
-            " WHERE trades.created_at >= ? AND trades.created_at < ? AND trades.mode=?"
-        )
-        params: list = [start_ts, end_ts, mode]
-        if strategy_md5:
-            sql += " AND decisions.strategy_md5=?"
-            params.append(strategy_md5)
-        if contract:
-            sql += " AND trades.contract=?"
-            params.append(contract)
-        cur = await self._conn.execute(sql + " ORDER BY trades.id", params)
-        return [Trade(**dict(r)) for r in await cur.fetchall()]
-
-    async def decisions_for_review(
-        self, start_ts: float, end_ts: float, strategy_md5: str | None = None, limit: int = 100
-    ) -> list[Decision]:
-        """区间内决策（[start, end)，按 id 倒序）；limit 钳制到 1..100。"""
-        limit = max(1, min(100, limit))
-        sql = "SELECT * FROM decisions WHERE created_at >= ? AND created_at < ?"
-        params: list = [start_ts, end_ts]
-        if strategy_md5:
-            sql += " AND strategy_md5=?"
-            params.append(strategy_md5)
-        params.append(limit)
-        cur = await self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", params)
-        return [Decision(**dict(r)) for r in await cur.fetchall()]
-
-    async def list_trades_filtered(
-        self,
-        start_ts: float,
-        end_ts: float,
-        contract: str | None = None,
-        source: str | None = None,
-        limit: int = 200,
-    ) -> list[Trade]:
-        """区间内成交（[start, end)，按 id 正序）；contract/source 可选过滤，limit 钳 1..200。"""
-        limit = max(1, min(200, limit))
-        sql = "SELECT * FROM trades WHERE created_at >= ? AND created_at < ?"
-        params: list = [start_ts, end_ts]
-        if contract:
-            sql += " AND contract=?"
-            params.append(contract)
-        if source is not None:
-            sql += " AND source=?"
-            params.append(source)
-        params.append(limit)
-        cur = await self._conn.execute(sql + " ORDER BY id LIMIT ?", params)
-        return [Trade(**dict(r)) for r in await cur.fetchall()]

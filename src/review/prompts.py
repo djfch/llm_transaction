@@ -11,6 +11,10 @@ import hashlib
 from pathlib import Path
 from typing import Any, Protocol
 
+from src.audit.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class _ToolSpecLike(Protocol):
     """工具说明渲染所需的最小结构（鸭子类型，不绑定任何具体注册表）。"""
@@ -23,19 +27,27 @@ class _ToolSpecLike(Protocol):
 class ReviewPromptLoader:
     """复盘提示词加载器：缓存 + mtime 检测热重载。
 
-    与 PromptLoader 的差异：首次加载即缺文件时不抛错，返回空正文（复盘提示词
-    允许缺省，工具说明段仍可组成可用 prompt）；运行中被删除则沿用缓存。
+    与 PromptLoader 的差异：首次加载即缺文件时不抛错，返回空正文并 logger.warning
+    一次（不重复骚扰；复盘提示词允许缺省，工具说明段仍可组成可用 prompt）；
+    运行中被删除则沿用缓存。
     """
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._mtime: float | None = None
         self._body: str = ""
+        self._warned_missing = False
 
     def _load_body(self) -> str:
         try:
             mtime = self._path.stat().st_mtime
         except FileNotFoundError:
+            if not self._warned_missing:
+                logger.warning(
+                    "复盘提示词文件缺失：%s（使用空正文；可复制 review_prompt.example.md 创建）",
+                    self._path,
+                )
+                self._warned_missing = True
             return self._body  # 缺失：返回缓存（首次加载时缓存即空串）
         if mtime != self._mtime:
             self._body = self._path.read_text(encoding="utf-8")

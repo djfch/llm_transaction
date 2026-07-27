@@ -119,7 +119,7 @@ async def get_review_stats(deps: ReviewToolDeps, args: dict) -> str:
     end_ts = _need_ts(args, "end_ts")
     strategy_md5 = _opt_str(args, "strategy_md5")
     contract = _opt_str(args, "contract")
-    trades = await deps.repo.trades_for_review(
+    trades = await deps.repo.review.trades_for_review(
         start_ts, end_ts, deps.mode, contract=contract, strategy_md5=strategy_md5
     )
     filters = []
@@ -138,7 +138,9 @@ async def list_decision_rounds(deps: ReviewToolDeps, args: dict) -> str:
     end_ts = _need_ts(args, "end_ts")
     strategy_md5 = _opt_str(args, "strategy_md5")
     limit = _clamp(_opt_int(args, "limit", 20), 1, 100)
-    decisions = await deps.repo.decisions_for_review(start_ts, end_ts, strategy_md5, limit)
+    decisions = await deps.repo.review.decisions_for_review(
+        start_ts, end_ts, strategy_md5, limit, mode=deps.mode
+    )
     if not decisions:
         return "区间内无决策轮次"
     rounds = await deps.repo.list_audit_rounds([d.round_id for d in decisions])
@@ -197,7 +199,9 @@ async def list_trades(deps: ReviewToolDeps, args: dict) -> str:
     contract = _opt_str(args, "contract")
     source = _opt_str(args, "source")
     limit = _clamp(_opt_int(args, "limit", 50), 1, 200)
-    trades = await deps.repo.list_trades_filtered(start_ts, end_ts, contract, source, limit)
+    trades = await deps.repo.review.list_trades_filtered(
+        start_ts, end_ts, contract, source, limit, mode=deps.mode
+    )
     if not trades:
         return "区间内无成交记录"
     lines = [f"区间内共 {len(trades)} 笔成交（按时间正序）："]

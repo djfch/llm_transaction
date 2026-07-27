@@ -102,8 +102,9 @@ async def test_run_success_without_revision(env):
     provider = StubProvider([LLMResponse(text="# 复盘结论\n整体表现平稳。", raw="raw-1")])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is True and result["strategy_action"] == "none"
+    assert result.get("error_code") is None  # 成功路径不携带错误码
     assert result["new_version_id"] is None
-    report = await env.repo.get_review_report(result["report_id"])
+    report = await env.repo.review.get_review_report(result["report_id"])
     assert report.report_md == "# 复盘结论\n整体表现平稳。"
     assert report.error == ""
     stats = json.loads(report.stats_json)  # 代码侧预统计已落 stats_json
@@ -113,7 +114,7 @@ async def test_run_success_without_revision(env):
     assert round_row.ended_at is not None and round_row.error == ""
     assert len(env.alerts) == 1
     assert "策略未调整" in env.alerts[0] and len(env.alerts[0]) <= 500
-    assert len(await env.repo.list_strategy_versions()) == 1  # 只有播种的 v1
+    assert len(await env.repo.review.list_strategy_versions()) == 1  # 只有播种的 v1
 
 
 async def test_run_empty_text_fallback(env):
@@ -121,7 +122,7 @@ async def test_run_empty_text_fallback(env):
     provider = StubProvider([LLMResponse(text="", raw="{}")])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is True
-    report = await env.repo.get_review_report(result["report_id"])
+    report = await env.repo.review.get_review_report(result["report_id"])
     assert report.report_md == "（复盘未产出报告）"
 
 
@@ -159,11 +160,11 @@ async def test_run_with_strategy_revision(env):
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is True and result["strategy_action"] == "rewrite"
     assert provider.chat_count == 3
-    version = await env.repo.get_strategy_version(result["new_version_id"])
+    version = await env.repo.review.get_strategy_version(result["new_version_id"])
     assert version.created_by == "review_agent"
     assert version.report_id == result["report_id"]  # attach_report_to_version 回填
     assert env.store.current() == new_prompt  # 策略书文件已原子替换
-    report = await env.repo.get_review_report(result["report_id"])
+    report = await env.repo.review.get_review_report(result["report_id"])
     assert report.new_version_id == version.id
     calls = await env.repo.list_audit_tool_calls(result["round_id"])
     assert [c.tool for c in calls] == ["get_review_stats", "submit_strategy_revision"]
@@ -176,20 +177,22 @@ async def test_run_llm_failure_lands_error_report(env):
     provider = StubProvider([LLMError("boom")])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is False and "LLMError: boom" in result["error"]
-    report = await env.repo.get_review_report(result["report_id"])
+    report = await env.repo.review.get_review_report(result["report_id"])
     assert report.error == "LLMError: boom" and report.report_md == ""
     assert report.strategy_action == "none"
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.error == "LLMError: boom"
     assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]
-    assert len(await env.repo.list_strategy_versions()) == 1  # 未产生新版本
+    assert len(await env.repo.review.list_strategy_versions()) == 1  # 未产生新版本
 
 
 async def test_run_without_provider_no_audit_no_report(env):
-    """(d) provider None：返回失败但不落审计、不落报告、不告警。"""
+    """(d) provider None：返回失败但不落审计、不落报告、不告警；error_code 结构化。"""
     result = await _make_agent(env, None).run(*_PERIOD)
-    assert result == {"ok": False, "error": "LLM 未配置"}
-    assert await env.repo.latest_review_period_end() is None
+    assert result["ok"] is False
+    assert result["error_code"] == "llm_not_configured"  # 结构化错误码（路由据此映 503）
+    assert result["error"]  # 文案非空即可，不锁定具体措辞
+    assert await env.repo.review.latest_review_period_end() is None
     assert await env.repo.latest_audit_round("paper") is None
     assert env.alerts == []
 

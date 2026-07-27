@@ -100,7 +100,7 @@ class ReviewAgent:
         """执行一次复盘。失败返回 {'ok': False, 'error': ...}，绝不向上抛。"""
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次复盘")
-            return {"ok": False, "error": "LLM 未配置"}
+            return {"ok": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
         # 每次 run 新建 deps/registry（轻量）：created_version_id 不复用、不串场
         deps = ReviewToolDeps(repo=self._repo, store=self._store, mode=self._settings.mode)
         registry = ReviewToolRegistry(deps)
@@ -113,7 +113,7 @@ class ReviewAgent:
             text = await self._chat_loop(full_prompt, briefing, registry, round_id, raw_parts)
             report_md = text.strip() or "（复盘未产出报告）"
             action = "rewrite" if deps.created_version_id is not None else "none"
-            report = await self._repo.save_review_report(
+            report = await self._repo.review.save_review_report(
                 period_start,
                 period_end,
                 stats_json,
@@ -122,7 +122,7 @@ class ReviewAgent:
                 new_version_id=deps.created_version_id,
             )
             if deps.created_version_id is not None:
-                await self._repo.attach_report_to_version(deps.created_version_id, report.id)
+                await self._repo.review.attach_report_to_version(deps.created_version_id, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
         except Exception as e:
             return await self._fail(round_id, raw_parts, period_start, period_end, e)
@@ -138,7 +138,9 @@ class ReviewAgent:
 
     async def _pre_stats(self, period_start: float, period_end: float) -> tuple[str, str]:
         """代码侧预统计：中文文本（进简报）+ JSON（落 stats_json）。"""
-        trades = await self._repo.trades_for_review(period_start, period_end, self._settings.mode)
+        trades = await self._repo.review.trades_for_review(
+            period_start, period_end, self._settings.mode
+        )
         stats = compute_review_stats(trades)
         return format_stats_text(stats), json.dumps(stats.to_dict(), ensure_ascii=False)
 
@@ -221,7 +223,7 @@ class ReviewAgent:
         """失败收尾：落 error 报告 + 审计轮 error + 失败告警（不向上抛）。"""
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("复盘失败：%s", error)
-        report = await self._repo.save_review_report(
+        report = await self._repo.review.save_review_report(
             period_start, period_end, "{}", "", "none", error=error
         )
         await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)

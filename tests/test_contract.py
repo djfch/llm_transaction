@@ -121,14 +121,14 @@ async def _seed(repo: Repo) -> None:
     await repo.add_note("r1", "第一条笔记")
     await repo.add_alert("r1", BTC, "above", D("62000"))
     # 复盘种子：两个策略版本 + 一份关联 v2 的报告（版本↔报告互相关联的生产路径）
-    await repo.save_strategy_version("策略书 v1：保守止损。", "md5-v1", "human", "初始版本")
-    v2 = await repo.save_strategy_version(
+    await repo.review.save_strategy_version("策略书 v1：保守止损。", "md5-v1", "human", "初始版本")
+    v2 = await repo.review.save_strategy_version(
         "策略书 v2：收紧止损。", "md5-v2", "review_agent", "复盘改写"
     )
-    report = await repo.save_review_report(
+    report = await repo.review.save_review_report(
         1000.0, 2000.0, '{"trades":3}', _LONG_REPORT_MD, "rewrite", new_version_id=v2.id
     )
-    await repo.attach_report_to_version(v2.id, report.id)
+    await repo.review.attach_report_to_version(v2.id, report.id)
 
 
 @pytest.fixture(autouse=True)

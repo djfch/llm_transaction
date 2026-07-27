@@ -553,7 +553,7 @@ async def test_strategy_md5_migration_adds_columns(tmp_path):
     assert decision is not None and decision.strategy_md5 == ""  # 历史行不回填
     round_row = await repo.get_audit_round("r0")
     assert round_row is not None and round_row.strategy_md5 == ""
-    assert await repo.list_strategy_versions() == []  # 新表可用
+    assert await repo.review.list_strategy_versions() == []  # 新表可用
     await db2.close()
 
 
@@ -561,25 +561,25 @@ async def test_strategy_md5_migration_adds_columns(tmp_path):
 
 
 async def test_strategy_version_roundtrip(repo: Repo):
-    v1 = await repo.save_strategy_version("内容一", "md5-1", "human", "初版")
-    v2 = await repo.save_strategy_version(
+    v1 = await repo.review.save_strategy_version("内容一", "md5-1", "human", "初版")
+    v2 = await repo.review.save_strategy_version(
         "内容二", "md5-2", "review_agent", "复盘改写", report_id=7
     )
     assert 0 < v1.id < v2.id
     assert v1.report_id is None
-    versions = await repo.list_strategy_versions()
+    versions = await repo.review.list_strategy_versions()
     assert [v.md5 for v in versions] == ["md5-2", "md5-1"]  # 按 id 倒序
-    got = await repo.get_strategy_version(v2.id)
+    got = await repo.review.get_strategy_version(v2.id)
     assert got is not None
     assert got.created_by == "review_agent" and got.report_id == 7
-    assert await repo.get_strategy_version(999) is None
+    assert await repo.review.get_strategy_version(999) is None
 
 
 async def test_attach_report_to_version(repo: Repo):
     """版本先落库、报告后落库：attach_report_to_version 回填 report_id。"""
-    v = await repo.save_strategy_version("内容", "md5", "review_agent", "复盘改写")
-    await repo.attach_report_to_version(v.id, 42)
-    got = await repo.get_strategy_version(v.id)
+    v = await repo.review.save_strategy_version("内容", "md5", "review_agent", "复盘改写")
+    await repo.review.attach_report_to_version(v.id, 42)
+    got = await repo.review.get_strategy_version(v.id)
     assert got is not None and got.report_id == 42
 
 
@@ -587,29 +587,29 @@ async def test_attach_report_to_version(repo: Repo):
 
 
 async def test_review_report_roundtrip_and_page(repo: Repo):
-    await repo.save_review_report(1000.0, 2000.0, '{"win_rate":0.5}', "# 报告一", "none")
-    r2 = await repo.save_review_report(
+    await repo.review.save_review_report(1000.0, 2000.0, '{"win_rate":0.5}', "# 报告一", "none")
+    r2 = await repo.review.save_review_report(
         2000.0, 3000.0, "{}", "# 报告二", "rewrite", new_version_id=3
     )
-    r3 = await repo.save_review_report(3000.0, 4000.0, "{}", "", "none", error="LLM 超时")
-    items, total = await repo.list_review_reports_page(limit=2, offset=0)
+    r3 = await repo.review.save_review_report(3000.0, 4000.0, "{}", "", "none", error="LLM 超时")
+    items, total = await repo.review.list_review_reports_page(limit=2, offset=0)
     assert [r.id for r in items] == [r3.id, r2.id]  # 最新在前
     assert total == 3
-    empty_items, empty_total = await repo.list_review_reports_page(limit=2, offset=10)
+    empty_items, empty_total = await repo.review.list_review_reports_page(limit=2, offset=10)
     assert empty_items == [] and empty_total == 3  # 越界页仍保留总数
-    got = await repo.get_review_report(r2.id)
+    got = await repo.review.get_review_report(r2.id)
     assert got is not None and got.strategy_action == "rewrite" and got.new_version_id == 3
-    failed = await repo.get_review_report(r3.id)
+    failed = await repo.review.get_review_report(r3.id)
     assert failed is not None and failed.error == "LLM 超时"
-    assert await repo.get_review_report(999) is None
+    assert await repo.review.get_review_report(999) is None
 
 
 async def test_latest_review_period_end(repo: Repo):
     """latest_review_period_end：空库 None；有记录取最大 period_end（调度幂等用）。"""
-    assert await repo.latest_review_period_end() is None
-    await repo.save_review_report(1000.0, 2000.0, "{}", "", "none")
-    await repo.save_review_report(500.0, 1500.0, "{}", "", "none")
-    assert await repo.latest_review_period_end() == 2000.0
+    assert await repo.review.latest_review_period_end() is None
+    await repo.review.save_review_report(1000.0, 2000.0, "{}", "", "none")
+    await repo.review.save_review_report(500.0, 1500.0, "{}", "", "none")
+    assert await repo.review.latest_review_period_end() == 2000.0
 
 
 # ---------- 复盘统计取数 ----------
@@ -673,20 +673,61 @@ async def _seed_review_trades(repo: Repo) -> None:
 
 
 async def test_trades_for_review_filters(repo: Repo):
-    """trades_for_review：join decisions 按策略版本过滤；mode 必填；[start, end)；按 id 正序。"""
+    """trades_for_review：LEFT JOIN decisions；mode 必填；[start, end)；按 id 正序。
+
+    口径（spec §6）：无 strategy_md5 过滤时孤儿成交（无 decisions 行）仍计入基础样本；
+    按策略过滤时无 join 匹配的成交不参与（与 INNER JOIN 语义一致）。
+    """
     await _seed_review_trades(repo)
-    all_paper = await repo.trades_for_review(0.0, 3000.0, "paper")
-    assert [t.pnl for t in all_paper] == [Decimal("10"), Decimal("20"), Decimal("-30")]
-    # 孤立成交（r-orphan 无 decisions 行）不参与按策略统计
-    assert all(t.round_id != "r-orphan" for t in all_paper)
-    by_md5 = await repo.trades_for_review(0.0, 3000.0, "paper", strategy_md5="md5-a")
-    assert [t.pnl for t in by_md5] == [Decimal("10"), Decimal("20")]
-    by_contract = await repo.trades_for_review(0.0, 3000.0, "paper", contract="ETH_USDT")
+    all_paper = await repo.review.trades_for_review(0.0, 3000.0, "paper")
+    assert [t.pnl for t in all_paper] == [
+        Decimal("10"),
+        Decimal("20"),
+        Decimal("-30"),
+        Decimal("50"),
+    ]
+    # 孤立成交（r-orphan 无 decisions 行）无过滤时计入基础统计样本
+    assert all_paper[-1].round_id == "r-orphan"
+    by_md5 = await repo.review.trades_for_review(0.0, 3000.0, "paper", strategy_md5="md5-a")
+    assert [t.pnl for t in by_md5] == [Decimal("10"), Decimal("20")]  # 孤儿按策略统计时被排除
+    by_contract = await repo.review.trades_for_review(0.0, 3000.0, "paper", contract="ETH_USDT")
     assert [t.pnl for t in by_contract] == [Decimal("20")]
-    testnet = await repo.trades_for_review(0.0, 3000.0, "testnet", strategy_md5="md5-a")
+    testnet = await repo.review.trades_for_review(0.0, 3000.0, "testnet", strategy_md5="md5-a")
     assert [t.pnl for t in testnet] == [Decimal("40")]
-    ranged = await repo.trades_for_review(1000.0, 2000.0, "paper")  # [start, end) 边界
+    ranged = await repo.review.trades_for_review(1000.0, 2000.0, "paper")  # [start, end) 边界
     assert [t.pnl for t in ranged] == [Decimal("10"), Decimal("20")]
+
+
+async def test_trades_for_review_keeps_orphan_closes_without_strategy_filter(repo: Repo):
+    """口径回归（spec §6）：round_id='' 的孤儿平仓成交（LLM 未配置期间 drain 的
+    强平/手动平仓，无 decisions 行）无过滤时计入基础统计样本；按策略过滤时排除。"""
+    await repo.save_trade(
+        "",
+        "paper",
+        "BTC_USDT",
+        Decimal(-1),
+        Decimal("50000"),
+        Decimal("1"),
+        Decimal("66"),
+        source="user_close",
+        created_at=1000.0,
+    )
+    await repo.save_trade(
+        "",
+        "paper",
+        "BTC_USDT",
+        Decimal(-1),
+        Decimal("51000"),
+        Decimal("1"),
+        Decimal("-7"),
+        source="liquidation",
+        created_at=1100.0,
+    )
+    hits = await repo.review.trades_for_review(0.0, 2000.0, "paper")
+    assert [t.pnl for t in hits] == [Decimal("66"), Decimal("-7")]  # 孤儿成交计入样本
+    assert all(t.round_id == "" for t in hits)
+    by_md5 = await repo.review.trades_for_review(0.0, 2000.0, "paper", strategy_md5="md5-a")
+    assert by_md5 == []  # 按策略统计：无 join 匹配不参与
 
 
 async def test_decisions_for_review(repo: Repo):
@@ -696,15 +737,25 @@ async def test_decisions_for_review(repo: Repo):
         await repo.save_decision(
             round_id=f"dr{i}", mode="paper", strategy_md5="m1" if i < 2 else "m2"
         )
-    items = await repo.decisions_for_review(0.0, now + 10)
+    items = await repo.review.decisions_for_review(0.0, now + 10)
     assert [d.round_id for d in items] == ["dr2", "dr1", "dr0"]  # 按 id 倒序
-    by_md5 = await repo.decisions_for_review(0.0, now + 10, strategy_md5="m2")
+    by_md5 = await repo.review.decisions_for_review(0.0, now + 10, strategy_md5="m2")
     assert [d.round_id for d in by_md5] == ["dr2"]
-    limited = await repo.decisions_for_review(0.0, now + 10, limit=2)
+    limited = await repo.review.decisions_for_review(0.0, now + 10, limit=2)
     assert [d.round_id for d in limited] == ["dr2", "dr1"]
-    clamped = await repo.decisions_for_review(0.0, now + 10, limit=0)  # 钳到 1
+    clamped = await repo.review.decisions_for_review(0.0, now + 10, limit=0)  # 钳到 1
     assert len(clamped) == 1
-    assert await repo.decisions_for_review(now + 100, now + 200) == []  # 区间外
+    assert await repo.review.decisions_for_review(now + 100, now + 200) == []  # 区间外
+
+
+async def test_decisions_for_review_mode_filter(repo: Repo):
+    """decisions_for_review 传 mode 时只返回该模式决策；不传时行为不变（全模式）。"""
+    now = time.time()
+    await repo.save_decision(round_id="dm-p", mode="paper")
+    await repo.save_decision(round_id="dm-t", mode="testnet")
+    paper = await repo.review.decisions_for_review(0.0, now + 10, mode="paper")
+    assert [d.round_id for d in paper] == ["dm-p"]
+    assert len(await repo.review.decisions_for_review(0.0, now + 10)) == 2  # 不传 mode 全模式
 
 
 async def test_list_trades_filtered(repo: Repo):
@@ -721,14 +772,41 @@ async def test_list_trades_filtered(repo: Repo):
             source="llm_close" if i < 2 else "user_close",
             created_at=float(1000 + i),
         )
-    all_hits = await repo.list_trades_filtered(1000.0, 1004.0)
+    all_hits = await repo.review.list_trades_filtered(1000.0, 1004.0)
     assert [t.pnl for t in all_hits] == [Decimal(0), Decimal(1), Decimal(2), Decimal(3)]
-    by_contract = await repo.list_trades_filtered(1000.0, 1004.0, contract="ETH_USDT")
+    by_contract = await repo.review.list_trades_filtered(1000.0, 1004.0, contract="ETH_USDT")
     assert [t.pnl for t in by_contract] == [Decimal(1), Decimal(3)]
-    by_source = await repo.list_trades_filtered(1000.0, 1004.0, source="llm_close")
+    by_source = await repo.review.list_trades_filtered(1000.0, 1004.0, source="llm_close")
     assert [t.pnl for t in by_source] == [Decimal(0), Decimal(1)]
-    limited = await repo.list_trades_filtered(1000.0, 1004.0, limit=2)
+    limited = await repo.review.list_trades_filtered(1000.0, 1004.0, limit=2)
     assert [t.pnl for t in limited] == [Decimal(0), Decimal(1)]
-    clamped = await repo.list_trades_filtered(1000.0, 1004.0, limit=0)  # 钳到 1
+    clamped = await repo.review.list_trades_filtered(1000.0, 1004.0, limit=0)  # 钳到 1
     assert len(clamped) == 1
-    assert await repo.list_trades_filtered(2000.0, 3000.0) == []  # 区间外
+    assert await repo.review.list_trades_filtered(2000.0, 3000.0) == []  # 区间外
+
+
+async def test_list_trades_filtered_mode_filter(repo: Repo):
+    """list_trades_filtered 传 mode 时只返回该模式成交；不传时行为不变（全模式）。"""
+    await repo.save_trade(
+        "r1",
+        "paper",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("50000"),
+        Decimal("1"),
+        Decimal("10"),
+        created_at=1000.0,
+    )
+    await repo.save_trade(
+        "r2",
+        "testnet",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("50000"),
+        Decimal("1"),
+        Decimal("20"),
+        created_at=1100.0,
+    )
+    paper = await repo.review.list_trades_filtered(0.0, 2000.0, mode="paper")
+    assert [t.pnl for t in paper] == [Decimal("10")]
+    assert len(await repo.review.list_trades_filtered(0.0, 2000.0)) == 2  # 不传 mode 全模式

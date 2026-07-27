@@ -60,8 +60,8 @@ def _client_of(deps: ServerDeps) -> AsyncClient:
 
 
 async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
-    await repo.save_review_report(1000.0, 2000.0, '{"a":1}', "短报告", "none")
-    r2 = await repo.save_review_report(
+    await repo.review.save_review_report(1000.0, 2000.0, '{"a":1}', "短报告", "none")
+    r2 = await repo.review.save_review_report(
         3000.0, 4000.0, '{"b":2}', _LONG_MD, "rewrite", new_version_id=7
     )
     async with _client_of(_deps(repo, tmp_path)) as c:
@@ -80,15 +80,21 @@ async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
 
 
 async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
+    """状态码映射走结构化 error_code（busy→409、llm_not_configured→503），不依赖错误文案。"""
     async with _client_of(_deps(repo, tmp_path)) as c:  # 未接线
         r = await c.post("/api/review/run")
         assert r.status_code == 503
 
     async def _busy() -> dict:
-        return {"started": False, "error": "复盘进行中"}
+        return {"started": False, "error": "busy right now", "error_code": "busy"}
 
     async def _no_llm() -> dict:
-        return {"started": True, "ok": False, "error": "LLM 未配置"}
+        return {
+            "started": False,
+            "ok": False,
+            "error": "no llm at all",
+            "error_code": "llm_not_configured",
+        }
 
     async def _ok() -> dict:
         return {"started": True, "ok": True, "report_id": 1}
@@ -103,12 +109,41 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
         assert r.json()["started"] is True and r.json()["ok"] is True
 
 
+async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
+    """POST /api/review/run 接受可选 JSON body 透传补跑区间；非法输入 422。"""
+    calls: list[dict] = []
+
+    async def _run(**kwargs) -> dict:
+        calls.append(kwargs)
+        return {"started": True, "ok": True, "report_id": len(calls)}
+
+    async def _invalid(**kwargs) -> dict:
+        return {"started": False, "error": "区间非法", "error_code": "invalid_period"}
+
+    async with _client_of(_deps(repo, tmp_path, review_run=_run)) as c:
+        r = await c.post("/api/review/run", json={"start_ts": 1000.0, "end_ts": 2000.0})
+        assert r.status_code == 200 and r.json()["report_id"] == 1
+        assert calls == [{"period_start": 1000.0, "period_end": 2000.0}]  # 区间透传
+        r = await c.post("/api/review/run")  # 无 body：维持昨日区间（无参回调）
+        assert r.status_code == 200 and calls[-1] == {}
+        bad = await c.post("/api/review/run", json={"start_ts": "abc", "end_ts": 2000.0})
+        assert bad.status_code == 422  # 非数字（FastAPI 层校验）
+        missing = await c.post("/api/review/run", json={"start_ts": 1000.0})
+        assert missing.status_code == 422  # 缺 end_ts
+    async with _client_of(_deps(repo, tmp_path, review_run=_invalid)) as c:
+        # start>=end 由 scheduler 判定 → error_code=invalid_period → 422
+        r = await c.post("/api/review/run", json={"start_ts": 3000.0, "end_ts": 2000.0})
+        assert r.status_code == 422
+
+
 # ---------- GET /api/strategy/versions(+{id}) 与 diff ----------
 
 
 async def test_strategy_versions_list_detail_and_diff(repo: Repo, tmp_path: Path):
-    v1 = await repo.save_strategy_version("策略书 v1：保守止损。", "md5-v1", "human", "初始版本")
-    v2 = await repo.save_strategy_version(
+    v1 = await repo.review.save_strategy_version(
+        "策略书 v1：保守止损。", "md5-v1", "human", "初始版本"
+    )
+    v2 = await repo.review.save_strategy_version(
         "策略书 v2：收紧止损。", "md5-v2", "review_agent", "复盘改写"
     )
     async with _client_of(_deps(repo, tmp_path)) as c:

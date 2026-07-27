@@ -50,10 +50,11 @@ class ServerDeps:
     # None 时相关端点诚实回报 "agent 未接线"。契约 {"llm_configured": bool, "error": str}
     llm_reconfigure: Callable[[], Awaitable[dict]] | None = None
     # 复盘/策略版本写回调（主程序接线；None 时对应端点诚实 503）：
-    # review_run 手动触发一次复盘（409 进行中/503 未配置由路由按 error 文本映射）；
+    # review_run 手动触发一次复盘，可选 period_start/period_end 指定补跑区间
+    # （409 进行中/503 未配置/422 区间非法由路由按返回的 error_code 映射）；
     # strategy_save 经 StrategyStore 落版本（校验失败抛 StrategyValidationError，路由映 422）；
     # strategy_rollback 回滚到指定版本（版本不存在抛 StrategyValidationError，路由映 404）
-    review_run: Callable[[], Awaitable[dict]] | None = None
+    review_run: Callable[..., Awaitable[dict]] | None = None
     strategy_save: Callable[[str], Awaitable[dict]] | None = None
     strategy_rollback: Callable[[int], Awaitable[dict]] | None = None
     event_queue: asyncio.Queue[dict[str, Any]] | None = None

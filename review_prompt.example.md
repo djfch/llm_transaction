@@ -1,7 +1,7 @@
 # 复盘 Agent 策略书（模板）
 
 > 本文件是 `review_prompt.md` 的入库模板。运行时文件 `review_prompt.md` 不入库，
-> 启动时由程序从本模板复制（与 `system_prompt.md` 约定一致）。
+> 按 README 快速开始手动复制为 `review_prompt.md`。
 
 ## 角色定位
 

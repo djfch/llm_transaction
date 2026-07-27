@@ -66,7 +66,7 @@ async def test_tick_skips_when_already_reviewed(repo):
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
     day_start, fire = _anchors()
-    await repo.save_review_report(day_start - 86400, day_start, "{}", "", "none")
+    await repo.review.save_review_report(day_start - 86400, day_start, "{}", "", "none")
     await scheduler._tick(now=fire + 1)
     assert agent.calls == []
 
@@ -100,8 +100,23 @@ async def test_run_now_busy_when_locked(repo):
         result = await scheduler.run_now()
     finally:
         scheduler._lock.release()
-    assert result == {"started": False, "error": "复盘进行中"}  # server 层映 409
+    assert result["started"] is False
+    assert result["error_code"] == "busy"  # server 层据此映 409（不判中文文案）
+    assert result["error"]  # 文案非空即可
     assert agent.calls == []
+
+
+async def test_run_now_llm_not_configured_started_false(repo):
+    """agent 回报 llm_not_configured（复盘未实际开始）→ run_now 包装 started=False（语义诚实）。"""
+
+    class _NoLlmAgent:
+        async def run(self, period_start: float, period_end: float) -> dict:
+            return {"ok": False, "error": "任意错误文案", "error_code": "llm_not_configured"}
+
+    scheduler = ReviewScheduler(_settings(), _NoLlmAgent(), repo)
+    result = await scheduler.run_now()
+    assert result["started"] is False
+    assert result["error_code"] == "llm_not_configured"
 
 
 async def test_run_now_runs_yesterday_period(repo):
@@ -111,3 +126,34 @@ async def test_run_now_runs_yesterday_period(repo):
     result = await scheduler.run_now()
     assert result["started"] is True and result["ok"] is True
     assert agent.calls == [(day_start - 86400, day_start)]
+
+
+# ---------- 人工补跑指定区间 ----------
+
+
+async def test_run_now_with_explicit_period_passthrough(repo):
+    """人工补跑：指定区间原样透传到 agent.run（不走昨日区间）。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    result = await scheduler.run_now(period_start=1000.0, period_end=2000.0)
+    assert result["started"] is True and result["ok"] is True
+    assert agent.calls == [(1000.0, 2000.0)]
+
+
+async def test_run_now_invalid_period(repo):
+    """非法区间（start>=end、非数字、只给一端、bool）→ started=False +
+    error_code=invalid_period（server 层映 422），不触发 agent。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    bad_periods = [
+        (2000.0, 1000.0),
+        (1000.0, 1000.0),
+        ("x", 2000.0),
+        (1000.0, None),
+        (True, 2000.0),
+    ]
+    for start, end in bad_periods:
+        result = await scheduler.run_now(period_start=start, period_end=end)
+        assert result["started"] is False, (start, end)
+        assert result["error_code"] == "invalid_period", (start, end)
+    assert agent.calls == []

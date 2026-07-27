@@ -209,6 +209,30 @@ async def test_list_trades_filter_and_limit(registry):
     assert limited.count("\n- ") == 1
 
 
+async def test_list_decision_rounds_and_trades_mode_isolation(registry, deps):
+    """取数口径对齐 deps.mode（paper）：混合 mode 数据下工具只返回当前模式的轮次/成交。"""
+    await deps.repo.save_decision(round_id="round-testnet", mode="testnet", strategy_md5="md5-a")
+    await deps.repo.save_trade(
+        "round-testnet",
+        "testnet",
+        "BTC_USDT",
+        Decimal(1),
+        Decimal("60000"),
+        Decimal("1"),
+        Decimal("5"),
+        source="llm_close",
+        created_at=1200.0,
+    )
+    rounds_text = await registry.execute(
+        "list_decision_rounds", {"start_ts": 0, "end_ts": time.time() + 10}
+    )
+    assert "round-testnet" not in rounds_text  # 其他模式轮次不出现
+    assert "round-aaa" in rounds_text  # 当前模式轮次不受影响
+    trades_text = await registry.execute("list_trades", {"start_ts": 0, "end_ts": 2000})
+    assert "60000" not in trades_text  # 其他模式成交不出现
+    assert "50000" in trades_text  # 当前模式成交不受影响
+
+
 # ---------- get_round_context ----------
 
 

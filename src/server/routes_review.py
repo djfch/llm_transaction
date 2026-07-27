@@ -10,14 +10,22 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from src.memory.models import ReviewReport, StrategyVersion
 from src.review.strategy import StrategyValidationError
 from src.server.deps import ServerDeps
 
 _LIST_REPORT_MD_LIMIT = 200  # 列表项 report_md 截断长度（省流量，详情端点给全文）
+
+
+class _ReviewRunBody(BaseModel):
+    """POST /review/run 可选 body：人工补跑的历史区间（Unix 秒）；无 body = 昨日区间。"""
+
+    start_ts: float
+    end_ts: float
 
 
 def _report_item(report: ReviewReport, *, truncate: bool) -> dict[str, Any]:
@@ -34,7 +42,7 @@ def _version_item(version: StrategyVersion) -> dict[str, Any]:
 
 
 async def _get_version_or_404(deps: ServerDeps, version_id: int) -> StrategyVersion:
-    version = await deps.repo.get_strategy_version(version_id)
+    version = await deps.repo.review.get_strategy_version(version_id)
     if version is None:
         raise HTTPException(status_code=404, detail=f"策略版本不存在: {version_id}")
     return version
@@ -48,34 +56,44 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
         offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200)
     ) -> dict[str, Any]:
         """复盘报告分页列表（最新在前）；report_md 截断 200 字符省流量。"""
-        reports, total = await deps.repo.list_review_reports_page(limit=limit, offset=offset)
+        reports, total = await deps.repo.review.list_review_reports_page(limit=limit, offset=offset)
         return {"items": [_report_item(r, truncate=True) for r in reports], "total": total}
 
     @router.get("/review/reports/{report_id}")
     async def get_review_report(report_id: int) -> dict[str, Any]:
         """复盘报告详情：report_md 全文（与列表项同一组契约键）。"""
-        report = await deps.repo.get_review_report(report_id)
+        report = await deps.repo.review.get_review_report(report_id)
         if report is None:
             raise HTTPException(status_code=404, detail=f"复盘报告不存在: {report_id}")
         return _report_item(report, truncate=False)
 
     @router.post("/review/run")
-    async def run_review_now() -> dict[str, Any]:
-        """手动触发昨日区间复盘：回调未接线 503；LLM 未配置 503；复盘进行中 409。"""
+    async def run_review_now(body: _ReviewRunBody | None = Body(None)) -> dict[str, Any]:
+        """手动触发复盘：无 body 维持昨日区间；有 body（人工补跑）按指定区间透传。
+
+        回调未接线 503；LLM 未配置 503；复盘进行中 409；区间非法 422。
+        状态码映射走回调返回的结构化 error_code（llm_not_configured/busy/invalid_period），
+        不做错误文案子串匹配。
+        """
         if deps.review_run is None:
             raise HTTPException(status_code=503, detail="复盘未接线（agent 未装配复盘调度）")
-        result = await deps.review_run()
-        error = result.get("error", "")
-        if "LLM 未配置" in error:
-            raise HTTPException(status_code=503, detail=error)
-        if "复盘进行中" in error:
-            raise HTTPException(status_code=409, detail=error)
+        if body is None:
+            result = await deps.review_run()
+        else:
+            result = await deps.review_run(period_start=body.start_ts, period_end=body.end_ts)
+        error_code = result.get("error_code")
+        if error_code == "llm_not_configured":
+            raise HTTPException(status_code=503, detail=result.get("error", ""))
+        if error_code == "busy":
+            raise HTTPException(status_code=409, detail=result.get("error", ""))
+        if error_code == "invalid_period":
+            raise HTTPException(status_code=422, detail=result.get("error", ""))
         return result
 
     @router.get("/strategy/versions")
     async def list_strategy_versions() -> dict[str, Any]:
         """策略版本列表（最新在前）：不含 content，省流量。"""
-        versions = await deps.repo.list_strategy_versions()
+        versions = await deps.repo.review.list_strategy_versions()
         return {"items": [_version_item(v) for v in versions]}
 
     @router.get("/strategy/versions/{version_id}")

@@ -2,8 +2,8 @@
 
 口径假设（固化，勿漂移）：
 - 统计样本 = trades 中 source ∈ {llm_close, tpsl_close, user_close, liquidation} 的平仓成交；
-- 入参 trades 假定来自 Repo.trades_for_review（已按区间/mode/可选策略与合约过滤，
-  且 JOIN decisions 去重）——一 round_id 对应一条 decisions 行，join 不会重复计数；
+- 入参 trades 假定来自 ReviewRepo.trades_for_review（已按区间/mode/可选策略与合约过滤）；
+  一 round_id 对应一条 decisions 行，join 不会重复计数；
 - 胜率 = 盈利笔数（pnl>0）/ 样本笔数，样本为 0 时为 None；
 - 盈亏比 = 总盈利 / |总亏损|，总亏损为 0 时为 None；
 - 金额一律 Decimal，Python 侧合计（沿用 daily_stats 反浮点先例）。

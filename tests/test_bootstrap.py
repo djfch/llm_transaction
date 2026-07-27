@@ -254,15 +254,15 @@ async def test_on_wake_pushes_round_start_then_round(build_ctx):
 async def test_review_subsystem_assembled(build_ctx):
     """复盘子系统装配进 AppContext：版本库播种 v1，server 三个复盘写回调全部接线。"""
     ctx = await build_ctx()
-    assert ctx.review_agent is not None
-    assert ctx.review_scheduler is not None
-    assert ctx.strategy_store is not None
-    versions = await ctx.repo.list_strategy_versions()
+    assert ctx.review.agent is not None
+    assert ctx.review.scheduler is not None
+    assert ctx.review.store is not None
+    versions = await ctx.repo.review.list_strategy_versions()
     assert len(versions) == 1  # seed_if_empty 以真实 system_prompt.md 播种 v1
     assert versions[0].created_by == "human"
     deps = ctx.server_deps
     assert deps is not None
-    assert deps.review_run == ctx.review_scheduler.run_now
+    assert deps.review_run == ctx.review.scheduler.run_now
     assert deps.strategy_save is not None
     assert deps.strategy_rollback is not None
 
@@ -271,25 +271,25 @@ async def test_strategy_save_rollback_callbacks(tmp_path: Path, build_ctx, monke
     """strategy_save 回调：经 StrategyStore 落版本（created_by='human'，reason 固定）；
     纯"无差异"幂等成功（version=None）；其余校验失败上抛（路由映 422）；
     strategy_rollback 回写历史内容并记新版本。ROOT 隔离到 tmp，不动真实策略书。"""
-    monkeypatch.setattr("src.bootstrap.ROOT", tmp_path)  # 策略书/复盘提示词路径隔离
+    monkeypatch.setattr("src.review.setup.ROOT", tmp_path)  # 策略书/复盘提示词路径隔离
     (tmp_path / "system_prompt.md").write_text("初始策略书。" * 30, encoding="utf-8")
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None and deps.strategy_save is not None
-    seeded = await ctx.repo.list_strategy_versions()
+    seeded = await ctx.repo.review.list_strategy_versions()
     assert len(seeded) == 1  # 播种 v1（隔离后的 tmp 策略书）
 
     new_content = "改进后的策略书。" * 30
     result = await deps.strategy_save(new_content)
     assert result == {"saved": True, "version": seeded[0].id + 1}
-    version = await ctx.repo.get_strategy_version(result["version"])
+    version = await ctx.repo.review.get_strategy_version(result["version"])
     assert version is not None
     assert version.created_by == "human" and version.reason == "前端手动保存"
     assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == new_content
 
     # 幂等：同内容重复保存不产新版本（仅"无差异"一条原因）
     assert await deps.strategy_save(new_content) == {"saved": True, "version": None}
-    assert len(await ctx.repo.list_strategy_versions()) == 2
+    assert len(await ctx.repo.review.list_strategy_versions()) == 2
     # 过短：校验失败上抛 StrategyValidationError（server 路由映 422）
     with pytest.raises(StrategyValidationError):
         await deps.strategy_save("太短")
@@ -311,11 +311,11 @@ async def test_llm_reconfigure_syncs_review_provider(tmp_path: Path, monkeypatch
         settings, WATCHLIST, mock_llm=False, mock_market=True, db_path=tmp_path / "t.db"
     )
     try:
-        assert ctx.review_agent._provider is ctx.loop._provider  # 装配期共享同一实例
+        assert ctx.review.agent._provider is ctx.loop._provider  # 装配期共享同一实例
         deps = ctx.server_deps
         assert deps is not None and deps.llm_reconfigure is not None
         result = await deps.llm_reconfigure()
         assert result == {"llm_configured": True, "error": ""}
-        assert ctx.review_agent._provider is ctx.loop._provider  # 热替换后仍同一实例
+        assert ctx.review.agent._provider is ctx.loop._provider  # 热替换后仍同一实例
     finally:
         await ctx.db.close()
