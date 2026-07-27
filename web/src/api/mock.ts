@@ -3,6 +3,7 @@
  * 数据为内存态，PUT/POST 会修改内存副本（刷新页面后复原）。
  */
 import { ApiError } from './http'
+import { createReviewMock } from './mockReview'
 import type {
   AgentLiveState,
   ApiClient,
@@ -113,6 +114,18 @@ const config: AppConfig = {
 
 let strategy = `# 系统提示词（system_prompt.md）\n\n你是 Gate.io USDT 永续合约的自主交易 Agent。\n\n## 原则\n\n1. 保本优先，单笔风险不超过权益的 2%。\n2. 只交易白名单合约，遵守风控参数。\n3. 每次决策说明理由，并给出下次唤醒时间。\n`
 
+// 复盘/策略版本 mock 域（报告、版本表与 7 个方法实现）拆分到 mockReview.ts；此处装配：
+// 注入 reply 与 strategy 读写引用，回滚/人工保存经回调同步本文件的 strategy。
+const reviewMock = createReviewMock(reply, {
+  get: () => strategy,
+  set: (content) => {
+    strategy = content
+  },
+})
+
+/** 版本表 md5 快照（最新在前）：决策轮 strategyMd5 关联演示用 */
+const VERSION_MD5S = reviewMock.versionMd5s()
+
 const watchlist = { settle: 'usdt', contracts: ['BTC_USDT', 'ETH_USDT'] }
 
 const WAKE_SOURCES = ['定时唤醒', '价格触发', '启动']
@@ -131,6 +144,8 @@ function buildRounds(): RoundSummary[] {
         seq % 4 === 0
           ? 'BTC 突破阻力位，尝试加多被风控拒绝；维持现有持仓。'
           : '波动率不足，维持现有持仓，继续观察。',
+      // 按序号轮转关联三个策略版本（演示版本标签 join）；每 5 轮一条空串（历史数据无关联，显示「—」）
+      strategyMd5: seq % 5 === 0 ? '' : (VERSION_MD5S[seq % VERSION_MD5S.length] ?? ''),
       pnl_after: pnl,
     }
   })
@@ -332,6 +347,7 @@ export const mockApi: ApiClient = {
   getStrategy: () => reply(strategy),
   putStrategy: (content) => {
     strategy = content
+    reviewMock.addHumanVersion(content) // 与后端 StrategyStore 对齐：人工保存即落 human 新版本
     return reply(strategy)
   },
   getWatchlist: () => reply(structuredClone(watchlist)),
@@ -352,6 +368,14 @@ export const mockApi: ApiClient = {
     killSwitch = enabled
     return reply({ kill_switch: killSwitch })
   },
+  // 复盘/策略版本方法由 mockReview.ts 实现（同一 ApiClient 契约形态）
+  getReviewReports: reviewMock.handlers.getReviewReports,
+  getReviewReport: reviewMock.handlers.getReviewReport,
+  runReview: reviewMock.handlers.runReview,
+  getStrategyVersions: reviewMock.handlers.getStrategyVersions,
+  getStrategyVersion: reviewMock.handlers.getStrategyVersion,
+  getStrategyDiff: reviewMock.handlers.getStrategyDiff,
+  rollbackStrategy: reviewMock.handlers.rollbackStrategy,
 }
 
 /** prompt 快照（各叙事共用，与 buildAgentLive 的上下文口径一致） */
@@ -449,7 +473,7 @@ function idleNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
 function buildRoundDetail(meta: RoundSummary): RoundDetail {
   const fill = trades.find((t) => t.round_id === meta.round_id)
   const body = fill ? fillNarrative(fill) : meta.summary.includes('突破') ? denyNarrative() : idleNarrative()
-  return { round_id: meta.round_id, prompt_snapshot: promptSnapshot(meta), ...body }
+  return { round_id: meta.round_id, prompt_snapshot: promptSnapshot(meta), strategyMd5: meta.strategyMd5, ...body }
 }
 
 /** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮。 */

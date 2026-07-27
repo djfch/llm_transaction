@@ -19,6 +19,7 @@ import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
 import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
 import PriceAlertsPanel from '../components/console/PriceAlertsPanel'
+import ReviewPanel from '../components/console/ReviewPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
 import TopBar from '../components/console/TopBar'
@@ -95,7 +96,7 @@ function FirstScreen({
   )
 }
 
-/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；第三屏：成交记录全宽。 */
+/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；随后复盘报告与成交记录各占全宽。 */
 function SecondScreen() {
   return (
     <>
@@ -106,6 +107,9 @@ function SecondScreen() {
         <aside className="col-span-12 lg:col-span-4">
           <NotesPanel />
         </aside>
+      </section>
+      <section className="mt-8">
+        <ReviewPanel />
       </section>
       <section className="mt-8">
         <TradesTable />

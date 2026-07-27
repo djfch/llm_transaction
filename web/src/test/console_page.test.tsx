@@ -64,6 +64,7 @@ const DETAIL: RoundDetail = {
   prompt_snapshot: 'prompt',
   llm_raw: 'RAW-SMOKE',
   tool_calls: [],
+  strategyMd5: 'md5',
 }
 
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */
@@ -114,6 +115,9 @@ vi.mock('../api', () => ({
     getRound: () => Promise.resolve(DETAIL),
     getRounds: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 5 }),
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
+    // 复盘报告面板与决策时间线版本标签数据源
+    getReviewReports: () => Promise.resolve({ items: [], total: 0 }),
+    getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
     getCandles: () => Promise.resolve([]),
@@ -214,6 +218,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
     expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
     expect(screen.getByText('自检笔记')).toBeInTheDocument()
+    // 复盘报告面板（成交记录之前，全宽 section）
+    expect(screen.getByRole('button', { name: '立即复盘' })).toBeInTheDocument()
     // 第三屏：成交记录
     expect(screen.getByText('成交记录')).toBeInTheDocument()
     // 配置抽屉：默认关闭（dialog 存在但不可见）

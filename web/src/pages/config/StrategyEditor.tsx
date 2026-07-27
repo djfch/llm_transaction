@@ -1,7 +1,8 @@
 /**
  * system_prompt.md 在线编辑：等宽 textarea + 保存（方案 C 抽屉样式）。
+ * initial 变化（宿主重拉策略全文，如版本回滚）时同步覆盖编辑区。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export default function StrategyEditor({
   initial,
@@ -14,6 +15,12 @@ export default function StrategyEditor({
   const [pending, setPending] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // initial 由宿主刷新时同步编辑区（版本回滚后内容被替换）；
+  // 保存后 initial 追上 content，setContent 同值为无操作，不清空「已保存」状态
+  useEffect(() => {
+    setContent(initial)
+  }, [initial])
 
   const dirty = content !== initial
 

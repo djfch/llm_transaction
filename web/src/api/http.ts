@@ -21,12 +21,19 @@ import type {
   Position,
   PortfolioSnapshot,
   PutConfigResult,
+  ReviewReport,
+  ReviewReportsPage,
+  ReviewReportSummary,
+  RollbackResult,
   RoundDetail,
   RoundsPageResult,
+  RunReviewResult,
   SecretsStatus,
   SetSecretsBody,
   SetSecretsResult,
   StatusInfo,
+  StrategyVersion,
+  StrategyVersionDetail,
   Trade,
   TradesPageResult,
   Watchlist,
@@ -241,6 +248,7 @@ interface RawRoundItem {
   wake_source: string
   context_summary: string
   created_at: number
+  strategy_md5?: string // 契约恒为 string；可选仅防御历史后端
 }
 
 interface RawRoundsPage {
@@ -259,8 +267,23 @@ function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
       started_at: new Date(r.created_at * 1000).toISOString(),
       wake_source: r.wake_source,
       summary: r.context_summary,
+      strategyMd5: r.strategy_md5 ?? '',
       pnl_after: undefined,
     })),
+  }
+}
+
+/** 后端 /api/rounds/{id} 详情：契约含 strategy_md5，其余键与前端 RoundDetail 一致 */
+type RawRoundDetail = Omit<RoundDetail, 'strategyMd5'> & { strategy_md5?: string }
+
+/** 后端 round 详情 → 前端 RoundDetail：strategy_md5 适配为 strategyMd5 */
+function adaptRoundDetail(raw: RawRoundDetail): RoundDetail {
+  return {
+    round_id: raw.round_id,
+    prompt_snapshot: raw.prompt_snapshot,
+    llm_raw: raw.llm_raw,
+    tool_calls: raw.tool_calls,
+    strategyMd5: raw.strategy_md5 ?? '',
   }
 }
 
@@ -274,6 +297,90 @@ function adaptDailyStats(raw: RawDailyStats): DailyStats {
     orders_today: Number(raw.orders_today),
     max_orders_per_day: Number(raw.max_orders_per_day),
   }
+}
+
+/** 后端复盘报告原始项（列表/详情同 9 键，仅 report_md 长度不同） */
+interface RawReviewReport {
+  id: number
+  period_start: number
+  period_end: number
+  stats_json: string
+  report_md: string
+  strategy_action: string
+  new_version_id: number | null
+  error: string
+  created_at: number
+}
+
+/**
+ * 后端复盘报告 → 前端 ReviewReportSummary：Unix 秒时间统一转 ISO；
+ * stats_json 保留原始字符串不解析（口径由后端 stats.py 冻结，展示方自行 JSON.parse
+ * 并按字段缺失降级，适配层不为统计字段建类型以免双端口径漂移）。
+ */
+function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
+  return {
+    id: raw.id,
+    periodStart: new Date(raw.period_start * 1000).toISOString(),
+    periodEnd: new Date(raw.period_end * 1000).toISOString(),
+    statsJson: raw.stats_json,
+    reportMd: raw.report_md,
+    strategyAction: raw.strategy_action === 'rewrite' ? 'rewrite' : 'none',
+    newVersionId: raw.new_version_id ?? null,
+    error: raw.error ?? '',
+    time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端 POST /api/review/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+interface RawRunReview {
+  started: boolean
+  ok?: boolean
+  report_id?: number
+  round_id?: string
+  strategy_action?: string
+  new_version_id?: number | null
+  error?: string
+}
+
+/** 后端 run 响应 → 前端 RunReviewResult：snake_case 转 camelCase */
+function adaptRunReview(raw: RawRunReview): RunReviewResult {
+  return {
+    started: Boolean(raw.started),
+    ok: raw.ok,
+    reportId: raw.report_id,
+    roundId: raw.round_id,
+    strategyAction: raw.strategy_action,
+    newVersionId: raw.new_version_id ?? null,
+    error: raw.error ?? '',
+  }
+}
+
+/** 后端策略版本原始项（列表无 content，详情有） */
+interface RawStrategyVersion {
+  id: number
+  md5: string
+  created_by: string
+  reason: string
+  report_id: number | null
+  created_at: number
+  content?: string
+}
+
+/** 后端策略版本 → 前端 StrategyVersion：created_at(Unix秒) 转 ISO time */
+function adaptStrategyVersion(raw: RawStrategyVersion): StrategyVersion {
+  return {
+    id: raw.id,
+    md5: raw.md5,
+    createdBy: raw.created_by,
+    reason: raw.reason,
+    reportId: raw.report_id ?? null,
+    time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端回滚响应 → 前端 RollbackResult */
+function adaptRollback(raw: { rolled_back_to: number; version: number }): RollbackResult {
+  return { rolledBackTo: Number(raw.rolled_back_to), version: Number(raw.version) }
 }
 
 /** GET /api/trades 适配：{items,total,offset,limit} + items 内字段转换 */
@@ -298,6 +405,13 @@ async function fetchNotes(offset = 0, limit = 20): Promise<NotesPageResult> {
   return adaptNotes(await request<RawNotesPage>(`/notes?${qs.toString()}`))
 }
 
+/** GET /api/review/reports 适配：{items,total}（后端不回显 offset/limit）+ items 字段转换 */
+async function fetchReviewReports(offset: number, limit: number): Promise<ReviewReportsPage> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  const raw = await request<{ items: RawReviewReport[]; total: number }>(`/review/reports?${qs.toString()}`)
+  return { items: raw.items.map(adaptReviewReport), total: raw.total }
+}
+
 /** GET /api/candles 适配：取出 items 数组（字段名 t/o/h/l/c/v 与前端一致） */
 async function fetchCandles(contract: string, interval: string, limit = 200): Promise<Candle[]> {
   const qs = new URLSearchParams({ contract, interval, limit: String(limit) })
@@ -314,7 +428,8 @@ export const httpApi: ApiClient = {
   getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
   getAlerts: async () => (await request<RawPriceAlert[]>('/alerts')).map(adaptPriceAlert),
   getRounds: fetchRounds,
-  getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
+  getRound: async (roundId) =>
+    adaptRoundDetail(await request<RawRoundDetail>(`/rounds/${encodeURIComponent(roundId)}`)),
   // 响应契约即最终形态（args/result 已解析、started_at 为 Unix 秒），无需适配
   getAgentLive: () => request<AgentLiveState>('/agent/live'),
   getTrades: fetchTrades,
@@ -350,4 +465,22 @@ export const httpApi: ApiClient = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+  getReviewReports: fetchReviewReports,
+  getReviewReport: async (id): Promise<ReviewReport> =>
+    adaptReviewReport(await request<RawReviewReport>(`/review/reports/${id}`)),
+  runReview: async () => adaptRunReview(await request<RawRunReview>('/review/run', { method: 'POST' })),
+  getStrategyVersions: async () =>
+    (await request<{ items: RawStrategyVersion[] }>('/strategy/versions')).items.map(adaptStrategyVersion),
+  getStrategyVersion: async (id): Promise<StrategyVersionDetail> => {
+    const raw = await request<RawStrategyVersion>(`/strategy/versions/${id}`)
+    return { ...adaptStrategyVersion(raw), content: raw.content ?? '' }
+  },
+  getStrategyDiff: (fromId, toId) => {
+    const qs = new URLSearchParams({ from: String(fromId), to: String(toId) })
+    return requestText(`/strategy/diff?${qs.toString()}`)
+  },
+  rollbackStrategy: async (id) =>
+    adaptRollback(
+      await request<{ rolled_back_to: number; version: number }>(`/strategy/rollback/${id}`, { method: 'POST' }),
+    ),
 }

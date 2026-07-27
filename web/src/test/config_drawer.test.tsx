@@ -1,0 +1,122 @@
+/**
+ * 配置抽屉集成测试（回归）：回滚成功后提示可见、策略编辑器内容同步为目标版本。
+ * 旧行为：DrawerSection 在 strategyQ.reload 期间以「加载中…」卸载 children，
+ * 回滚成功提示随 StrategyVersions 销毁一闪即灭（独立渲染的单测发现不了）。
+ * 不变量：抽屉内表单数据已就绪时，后台刷新不得销毁用户可见状态（提示/已保存标记/未保存编辑）。
+ */
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AppConfig, StrategyVersion } from '../api/types'
+import ConfigDrawer from '../components/console/ConfigDrawer'
+
+/** 配置夹具（paper 模式，触发权益重置小节；与 console_page.test.tsx 同构） */
+const CONFIG: AppConfig = {
+  mode: 'paper',
+  llm: {
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    max_tokens: 4096,
+    openai_base_url: '',
+    max_consecutive_failures: 3,
+  },
+  risk: {
+    max_position_pct: 0.3,
+    max_total_position_pct: 0.8,
+    max_leverage: 5,
+    daily_loss_limit: 0.1,
+    max_orders_per_day: 20,
+    max_deviation: 0.02,
+    kill_switch: false,
+  },
+  scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
+  notify: { telegram_enabled: false },
+}
+
+/** 版本夹具（最新在前）：v2 为当前（唯一非当前 v1 才有回滚按钮） */
+const VERSIONS: StrategyVersion[] = [
+  { id: 2, md5: 'md5-b', createdBy: 'review_agent', reason: '复盘改写', reportId: 1, time: '2026-07-26T03:00:00.000Z' },
+  { id: 1, md5: 'md5-a', createdBy: 'human', reason: '初始版本', reportId: null, time: '2026-07-25T03:00:00.000Z' },
+]
+
+const holder = vi.hoisted(() => ({
+  getStrategy: vi.fn(),
+  getStrategyVersions: vi.fn(),
+  getStrategyDiff: vi.fn(),
+  rollbackStrategy: vi.fn(),
+}))
+
+vi.mock('../api', () => ({
+  api: {
+    getConfig: () => Promise.resolve(CONFIG),
+    getSecretsStatus: () => Promise.resolve({ gate_key: true, llm_key: true, telegram: false }),
+    getWatchlist: () => Promise.resolve({ settle: 'usdt', contracts: ['BTC_USDT'] }),
+    getStrategy: () => holder.getStrategy(),
+    getStrategyVersions: () => holder.getStrategyVersions(),
+    getStrategyDiff: (from: number, to: number) => holder.getStrategyDiff(from, to),
+    rollbackStrategy: (id: number) => holder.rollbackStrategy(id),
+  },
+  // StrategyVersions catch 分支仅取 message，但保持与生产 mock 一致的透出形态
+  ApiError: class ApiError extends Error {},
+}))
+
+let strategyText: string
+let versions: StrategyVersion[]
+
+beforeEach(() => {
+  strategyText = '策略书 v2 全文'
+  versions = [...VERSIONS]
+  vi.clearAllMocks()
+  holder.getStrategy.mockImplementation(() => Promise.resolve(strategyText))
+  holder.getStrategyVersions.mockImplementation(() => Promise.resolve([...versions]))
+  holder.getStrategyDiff.mockImplementation(() => Promise.resolve(''))
+  holder.rollbackStrategy.mockImplementation((id: number) => {
+    if (id === 1) strategyText = '策略书 v1 全文'
+    versions = [
+      { id: 3, md5: 'md5-a', createdBy: 'rollback', reason: `回滚到 v${id}`, reportId: null, time: '2026-07-27T04:00:00.000Z' },
+      ...versions,
+    ]
+    return Promise.resolve({ rolledBackTo: id, version: 3 })
+  })
+})
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
+  it('回滚成功：提示在 strategyQ 刷新期间不随 DrawerSection 卸载而消失', async () => {
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    render(<ConfigDrawer open onClose={() => {}} />)
+
+    // 等策略小节就绪：编辑器初值 + 版本列表渲染
+    expect(await screen.findByLabelText('system_prompt 内容')).toHaveValue('策略书 v2 全文')
+    await screen.findByText('初始版本')
+    const strategyCallsBefore = holder.getStrategy.mock.calls.length
+
+    // 回滚触发的 strategyQ.reload 挂起：让「后台刷新中」窗口可观察
+    // （旧实现此时以「加载中…」卸载 children，成功提示随之销毁）
+    let resolveStrategy: ((value: string) => void) | null = null
+    holder.getStrategy.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStrategy = resolve
+        }),
+    )
+
+    // v1 是唯一非当前版本，只有一枚回滚按钮
+    fireEvent.click(screen.getByRole('button', { name: '回滚到此版本' }))
+
+    await waitFor(() => expect(holder.rollbackStrategy).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(holder.getStrategy).toHaveBeenCalledTimes(strategyCallsBefore + 1))
+
+    // 核心回归断言：strategyQ 刷新尚未完成，成功提示必须仍然可见
+    expect(screen.getByText('已回滚到 v1（生成新版本 v3）')).toBeInTheDocument()
+
+    // 刷新完成后：编辑器同步为目标版本内容，提示依然在；版本列表 v3（rollback）置顶标当前
+    resolveStrategy!('策略书 v1 全文')
+    const textarea = await screen.findByLabelText('system_prompt 内容')
+    await waitFor(() => expect(textarea).toHaveValue('策略书 v1 全文'))
+    expect(screen.getByText('已回滚到 v1（生成新版本 v3）')).toBeInTheDocument()
+    expect(await screen.findByText('v3')).toBeInTheDocument()
+    expect(screen.getByText('回滚')).toBeInTheDocument()
+    expect(screen.getAllByText('当前')).toHaveLength(1)
+  })
+})

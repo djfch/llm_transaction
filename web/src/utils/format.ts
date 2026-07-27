@@ -98,3 +98,17 @@ export function sourceBadge(source: string): {
       return { text: '-', tone: 'neutral' }
   }
 }
+
+/** created_by(策略版本来源) → 中文文案：human→人工 / review_agent→复盘 / rollback→回滚；未知值原样显示 */
+export function strategyCreatorText(createdBy: string): string {
+  switch (createdBy) {
+    case 'human':
+      return '人工'
+    case 'review_agent':
+      return '复盘'
+    case 'rollback':
+      return '回滚'
+    default:
+      return createdBy
+  }
+}
