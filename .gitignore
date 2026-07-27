@@ -17,6 +17,7 @@ data/
 config.yaml
 watchlist.yaml
 system_prompt.md
+review_prompt.md
 
 # Node
 node_modules/
