@@ -25,6 +25,7 @@ cp .env.example .env
 cp config.example.yaml config.yaml
 cp watchlist.example.yaml watchlist.yaml
 cp system_prompt.example.md system_prompt.md
+cp review_prompt.example.md review_prompt.md
 
 # 运行（默认 paper 模式 + 监控后台 http://127.0.0.1:17577）
 uv run python -m src.main
@@ -52,8 +53,9 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 
 ## 配置说明
 
-- `config.yaml`、`watchlist.yaml`、`system_prompt.md` 为运行时文件（会被 API/程序写回），**不入库**；仓库只存 `.example` 模板，克隆后需复制（见快速开始）
+- `config.yaml`、`watchlist.yaml`、`system_prompt.md`、`review_prompt.md` 为运行时文件（会被 API/程序写回），**不入库**；仓库只存 `.example` 模板，克隆后需复制（见快速开始）
 - `config.yaml`：运行模式（paper/testnet/live）、风控参数、LLM provider、通知、端口；`scheduler.autostart` 控制启动后是否自动开始决策（默认 false，在监控主页点击"启动 agent"才开始）
+- `config.yaml` 的 `review` 节：复盘 agent 配置——`review.enabled(每日复盘开关)` 默认 true、`review.daily_time(每日触发时间，本地 HH:MM)` 默认 03:00，保存后热生效；复盘报告与策略版本历史（含 diff 与回滚）在监控页查看
 - **安全提示**：监控 API 目前无鉴权且为明文 HTTP。`server.host` 默认 `127.0.0.1`（仅本机可达）——**绑定 `0.0.0.0` 或任何非回环地址前须知**：同网段任何人可改配置、解 kill_switch、写入 LLM key，且密钥明文过网。对外暴露前先加鉴权（后续排期）。
 - `watchlist.yaml`：允许新增仓位的合约白名单（平仓不受白名单限制）
 - `system_prompt.md`：策略书，LLM 每轮决策的 system prompt，改完下一轮自动生效
