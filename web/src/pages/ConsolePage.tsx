@@ -2,13 +2,13 @@
  * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控 / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
- * 数据装配：status/account/positions/openOrders/equity/daily 六路查询经 useApiData 注入面板 props；
- * WS round_start/round 事件联动刷新账户、持仓、挂单、权益与当日统计；时间线与笔记各自管理分页；
+ * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
+ * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益与当日统计；时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position } from '../api/types'
+import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position, PriceAlert } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 import EquityMiniChart from '../components/console/EquityMiniChart'
@@ -18,6 +18,7 @@ import LiveRoundHero from '../components/console/LiveRoundHero'
 import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
 import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
+import PriceAlertsPanel from '../components/console/PriceAlertsPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
 import TopBar from '../components/console/TopBar'
@@ -26,28 +27,31 @@ import { useApiData } from '../hooks/useApiData'
 import { useLivePortfolio } from '../hooks/useLivePortfolio'
 import { RoundFocusProvider } from '../hooks/useRoundFocus'
 
-/** 页面数据：状态、账户、持仓、挂单、权益与当日统计；笔记分页由 NotesPanel 独立管理。 */
+/** 页面数据：状态、账户、持仓、挂单、价格唤醒、权益与当日统计；笔记分页由 NotesPanel 独立管理。 */
 function useConsoleData() {
   const status = useApiData(() => api.getStatus(), [])
   const portfolio = useLivePortfolio()
   const openOrders = useApiData(() => api.getOpenOrders(), [])
+  const alerts = useApiData(() => api.getAlerts(), [])
   const equity = useApiData(() => api.getEquity(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
   const daily = useApiData(() => api.getDailyStats(), [])
   const { connected, lastMessage } = portfolio
   const { reload: reloadOpenOrders } = openOrders
+  const { reload: reloadAlerts } = alerts
   const { reload: reloadEquity } = equity
   const { reload: reloadDaily } = daily
   useEffect(() => {
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
     reloadOpenOrders()
+    reloadAlerts() // LLM 设置/触发唤醒都伴随决策轮事件
     reloadEquity()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadOpenOrders, reloadEquity, reloadDaily])
-  return { status, portfolio, openOrders, equity, daily, connected }
+  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily])
+  return { status, portfolio, openOrders, alerts, equity, daily, connected }
 }
 
-/** 首屏：右栏将当前持仓与未成交挂单相邻展示，便于一起核对和操作。 */
+/** 首屏：右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
 function FirstScreen({
   account,
   mode,
@@ -56,6 +60,7 @@ function FirstScreen({
   dailyStats,
   positions,
   openOrders,
+  alerts,
   onPositionsChanged,
   onOpenOrdersChanged,
 }: {
@@ -66,6 +71,7 @@ function FirstScreen({
   dailyStats: DailyStats | null
   positions: Position[]
   openOrders: OpenOrder[]
+  alerts: PriceAlert[]
   onPositionsChanged: () => void
   onOpenOrdersChanged: () => void
 }) {
@@ -83,6 +89,7 @@ function FirstScreen({
         <KlinePanel />
         <PositionsPanel positions={positions} onChanged={onPositionsChanged} />
         <OpenOrdersPanel orders={openOrders} onChanged={onOpenOrdersChanged} />
+        <PriceAlertsPanel alerts={alerts} />
       </aside>
     </section>
   )
@@ -123,7 +130,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, portfolio, openOrders, equity, daily, connected } = useConsoleData()
+  const { status, portfolio, openOrders, alerts, equity, daily, connected } = useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   const account = portfolio.data?.account ?? null
   const positions = portfolio.data?.positions ?? []
@@ -177,6 +184,7 @@ export default function ConsolePage() {
         <LoadErrorBanner
           errors={[
             ['未成交挂单', openOrders.error],
+            ['价格唤醒', alerts.error],
             ['状态', status.error],
             ['组合快照', portfolio.error],
             ['权益曲线', equity.error],
@@ -190,6 +198,7 @@ export default function ConsolePage() {
           dailyStats={daily.data}
           positions={positions}
           openOrders={openOrders.data ?? []}
+          alerts={alerts.data ?? []}
           onPositionsChanged={onPositionsChanged}
           onOpenOrdersChanged={onOpenOrdersChanged}
         />

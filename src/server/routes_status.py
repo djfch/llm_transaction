@@ -1,4 +1,4 @@
-"""只读监控端点：运行状态、账户/持仓、决策轮、成交、权益曲线、笔记。"""
+"""只读监控端点：运行状态、账户/持仓、决策轮、成交、权益曲线、笔记、价格唤醒。"""
 
 from __future__ import annotations
 
@@ -255,6 +255,15 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             "baseline_source": source,
             "points": points,
         }
+
+    @router.get("/alerts")
+    async def list_alerts() -> list[dict[str, Any]]:
+        """LLM 设置的未触发价格唤醒（active=1），供前端「价格唤醒」面板展示。
+
+        触发即置 active=0 并唤醒 agent，故面板只暴露 active 行（触发后自然消失）。
+        """
+        alerts = await deps.repo.list_alerts(active_only=True)
+        return [a.model_dump() for a in alerts]
 
     @router.get("/notes")
     async def get_notes(

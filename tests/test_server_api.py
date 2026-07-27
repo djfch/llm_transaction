@@ -228,6 +228,25 @@ async def test_notes(client: AsyncClient, deps: ServerDeps):
     assert (await client.get("/api/notes", params={"limit": 201})).status_code == 422
 
 
+async def test_alerts_only_returns_active(client: AsyncClient, deps: ServerDeps):
+    """价格唤醒端点：只返回 active=1 的未触发唤醒，字段契约供前端面板渲染。"""
+    keep = await deps.repo.add_alert("r1", "BTC_USDT", "above", Decimal("52000"))
+    drop = await deps.repo.add_alert("r1", "ETH_USDT", "below", Decimal("2800"))
+    await deps.repo.deactivate_alert(drop.id)
+
+    r = await client.get("/api/alerts")
+    assert r.status_code == 200
+    items = r.json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["id"] == keep.id
+    assert item["contract"] == "BTC_USDT"
+    assert item["direction"] == "above"
+    assert item["price"] == "52000"  # 锁形态：Decimal 经 pydantic v2 序列化为字符串
+    assert item["active"] is True
+    assert isinstance(item["created_at"], (int, float))
+
+
 async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):
     """当日统计端点：与风控同一口径（服务器时区自然日、按 mode 过滤、仅开仓单计数）。
 

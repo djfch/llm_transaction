@@ -56,6 +56,15 @@ export interface OpenOrder {
   take_profit_price: number | null
 }
 
+/** LLM 设置的未触发价格唤醒：GET /api/alerts（触发后即从列表消失）。 */
+export interface PriceAlert {
+  id: number
+  contract: string
+  direction: 'above' | 'below' // above=价格上破触发价；below=下破触发价
+  price: number // 触发价
+  time: string // 设置时间（ISO 字符串，由适配层自 created_at(Unix秒) 转换）
+}
+
 /** 决策轮摘要：GET /api/rounds?offset=&limit= */
 export interface RoundSummary {
   round_id: string // 决策轮 ID
@@ -293,6 +302,8 @@ export interface ApiClient {
   getPortfolio(): Promise<PortfolioSnapshot>
   /** 读取交易所或模拟撮合引擎当前仍为 open 的订单。 */
   getOpenOrders(): Promise<OpenOrder[]>
+  /** 读取 LLM 设置的未触发价格唤醒。 */
+  getAlerts(): Promise<PriceAlert[]>
   getRounds(offset: number, limit: number): Promise<RoundsPageResult>
   getRound(roundId: string): Promise<RoundDetail>
   getAgentLive(): Promise<AgentLiveState>
