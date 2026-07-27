@@ -6,7 +6,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AgentLiveState, AppConfig, OpenOrder, RoundDetail, StatusInfo, WsMessage } from '../api/types'
+import type { AgentLiveState, AppConfig, OpenOrder, PriceAlert, RoundDetail, StatusInfo, WsMessage } from '../api/types'
 import ConsolePage from '../pages/ConsolePage'
 
 const STATUS: StatusInfo = {
@@ -77,6 +77,7 @@ const holder = vi.hoisted(() => ({
     }),
   ),
   getOpenOrders: vi.fn<() => Promise<OpenOrder[]>>(() => Promise.resolve([])),
+  getAlerts: vi.fn<() => Promise<PriceAlert[]>>(() => Promise.resolve([])),
   cancelOpenOrder: vi.fn(),
   getEquity: vi.fn(() =>
     Promise.resolve({
@@ -104,6 +105,7 @@ vi.mock('../api', () => ({
     getStatus: () => Promise.resolve(STATUS),
     getPortfolio: () => holder.getPortfolio(),
     getOpenOrders: () => holder.getOpenOrders(),
+    getAlerts: () => holder.getAlerts(),
     cancelOpenOrder: (...args: [string, string]) => holder.cancelOpenOrder(...args),
     getEquity: () => holder.getEquity(),
     getNotes: () => holder.getNotes(),
@@ -207,6 +209,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     // 右栏：K线 + 空仓持仓面板
     expect(screen.getByText('K线')).toBeInTheDocument()
     expect(screen.getByText('当前无持仓')).toBeInTheDocument()
+    expect(screen.getByText('当前无价格唤醒')).toBeInTheDocument() // 挂单下方的新面板
     // 第二屏：决策时间线 + Agent 笔记
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
     expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
@@ -249,6 +252,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(holder.getNotes).toHaveBeenCalledTimes(4)
     // 当日统计同步联动（新轮成交改变当日口径）
     expect(holder.getDailyStats).toHaveBeenCalledTimes(2)
+    // 价格唤醒联动刷新（LLM 设置/触发唤醒均伴随决策轮事件）
+    expect(holder.getAlerts).toHaveBeenCalledTimes(2)
   })
 
 

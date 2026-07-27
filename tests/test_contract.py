@@ -8,6 +8,7 @@
 - GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
+- GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，仅 active=1）
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
 - GET  /api/rounds → items[] 含 round_id 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/prompt_snapshot/llm_raw 等）
@@ -92,6 +93,7 @@ async def _seed(repo: Repo) -> None:
         "r1", "paper", BTC, D(1), D("60000"), D("1"), D("100"), "llm_open", 1000.0
     )
     await repo.add_note("r1", "第一条笔记")
+    await repo.add_alert("r1", BTC, "above", D("62000"))
 
 
 @pytest.fixture(autouse=True)
@@ -235,6 +237,9 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
     assert notes["items"], "/api/notes items 应非空"
     _typed(notes, "total:i offset:i limit:i", "/api/notes")
     _typed(notes["items"][0], "content:s created_at:n round_id:s", "/api/notes items[0]")
+    alerts = await _get(client, "/api/alerts")
+    assert alerts, "/api/alerts 应非空"
+    _typed(alerts[0], "id:i contract:s direction:s price:n active:b created_at:n", "/api/alerts[0]")
     daily = await _get(client, "/api/daily_stats")
     _typed(daily, "realized_pnl:n orders_today:i max_orders_per_day:i", "/api/daily_stats")
 

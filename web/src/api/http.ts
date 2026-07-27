@@ -17,6 +17,7 @@ import type {
   NotesPageResult,
   PaperResetResult,
   OpenOrder,
+  PriceAlert,
   Position,
   PortfolioSnapshot,
   PutConfigResult,
@@ -164,6 +165,23 @@ function adaptOpenOrder(raw: RawOpenOrder): OpenOrder {
   }
 }
 
+/** 后端 /api/alerts：price 为 Decimal 序列化值（number 或数字字符串），created_at 为 Unix 秒。 */
+type RawPriceAlert = Omit<PriceAlert, 'price' | 'time'> & {
+  price: number | string
+  created_at: number | string
+}
+
+/** 后端价格唤醒 → 前端 PriceAlert：price 转 number，created_at(Unix秒) 转 ISO time（与 Trade/Note 同约定）。 */
+function adaptPriceAlert(raw: RawPriceAlert): PriceAlert {
+  return {
+    id: Number(raw.id),
+    contract: String(raw.contract),
+    direction: raw.direction,
+    price: Number(raw.price),
+    time: new Date(Number(raw.created_at) * 1000).toISOString(),
+  }
+}
+
 /** 后端 /api/equity：{initial_equity, baseline_source, points:[{t(Unix秒), equity}]} */
 interface RawEquity {
   initial_equity: number
@@ -294,6 +312,7 @@ export const httpApi: ApiClient = {
     (await request<RawPosition[]>('/positions')).map(adaptPosition),
   getPortfolio: async () => adaptPortfolio(await request<RawPortfolio>('/portfolio')),
   getOpenOrders: async () => (await request<RawOpenOrder[]>('/open_orders')).map(adaptOpenOrder),
+  getAlerts: async () => (await request<RawPriceAlert[]>('/alerts')).map(adaptPriceAlert),
   getRounds: fetchRounds,
   getRound: (roundId) => request<RoundDetail>(`/rounds/${encodeURIComponent(roundId)}`),
   // 响应契约即最终形态（args/result 已解析、started_at 为 Unix 秒），无需适配

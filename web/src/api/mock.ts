@@ -11,6 +11,7 @@ import type {
   EquityPoint,
   Note,
   OpenOrder,
+  PriceAlert,
   Position,
   RoundDetail,
   RoundSummary,
@@ -80,6 +81,12 @@ const openOrders: OpenOrder[] = [
     stop_loss_price: 1850,
     take_profit_price: 2050,
   },
+]
+
+// LLM 设置的未触发价格唤醒（与 mock 持仓叙事自洽：BTC 等上破、ETH 等下破）
+const priceAlerts: PriceAlert[] = [
+  { id: 1, contract: 'BTC_USDT', direction: 'above', price: 122_000, time: new Date(Date.now() - 3600_000).toISOString() },
+  { id: 2, contract: 'ETH_USDT', direction: 'below', price: 3_300, time: new Date(Date.now() - 7200_000).toISOString() },
 ]
 
 const config: AppConfig = {
@@ -256,6 +263,7 @@ export const mockApi: ApiClient = {
   getPositions: () => reply(positions.map((p) => ({ ...p }))),
   getPortfolio: () => reply(buildPortfolio()),
   getOpenOrders: () => reply(openOrders.map((order) => ({ ...order }))),
+  getAlerts: () => reply(priceAlerts.map((alert) => ({ ...alert }))),
   getRounds: (offset, limit) =>
     reply({ items: rounds.slice(offset, offset + limit), total: rounds.length, offset, limit }),
   getRound: (roundId) => {
