@@ -4,7 +4,8 @@
  * diff 方向固定 旧 → 新（from=min(id)，to=max(id)），行首 + 绿 / - 红着色（+++/-- 头部行灰显）。
  * 回滚：window.confirm 确认 → rollbackStrategy → 提示成功并刷新版本列表，
  * 同时经 onRolledBack 通知宿主重拉策略全文（编辑器内容由宿主协调刷新）。
- * 版本列表查询自管；挂在 StrategyEditor 所在 DrawerSection 内（其下方）。
+ * 版本列表查询自管；refreshKey 由宿主在「保存并热更新」成功后递增，
+ * 驱动版本列表重拉（否则新版本要等下一次请求才可见）；挂在 StrategyEditor 所在 DrawerSection 内（其下方）。
  */
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
@@ -76,8 +77,15 @@ function VersionRow({
   )
 }
 
-export default function StrategyVersions({ onRolledBack }: { onRolledBack?: () => void }) {
-  const query = useApiData(() => api.getStrategyVersions(), [])
+export default function StrategyVersions({
+  onRolledBack,
+  refreshKey = 0,
+}: {
+  onRolledBack?: () => void
+  /** 宿主保存策略成功后递增，触发版本列表重拉（同 StrategyPanel 的 refreshKey 模式） */
+  refreshKey?: number
+}) {
+  const query = useApiData(() => api.getStrategyVersions(), [refreshKey])
   const [selected, setSelected] = useState<number[]>([]) // diff 选择（至多两个版本 id）
   const [diff, setDiff] = useState<string | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)

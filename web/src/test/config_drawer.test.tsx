@@ -43,6 +43,7 @@ const holder = vi.hoisted(() => ({
   getStrategyVersions: vi.fn(),
   getStrategyDiff: vi.fn(),
   rollbackStrategy: vi.fn(),
+  putStrategy: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
@@ -54,6 +55,7 @@ vi.mock('../api', () => ({
     getStrategyVersions: () => holder.getStrategyVersions(),
     getStrategyDiff: (from: number, to: number) => holder.getStrategyDiff(from, to),
     rollbackStrategy: (id: number) => holder.rollbackStrategy(id),
+    putStrategy: (content: string) => holder.putStrategy(content),
   },
   // StrategyVersions catch 分支仅取 message，但保持与生产 mock 一致的透出形态
   ApiError: class ApiError extends Error {},
@@ -76,6 +78,15 @@ beforeEach(() => {
       ...versions,
     ]
     return Promise.resolve({ rolledBackTo: id, version: 3 })
+  })
+  // 保存策略：更新全文并生成新版本（与后端 StrategyStore 版本落库行为一致）
+  holder.putStrategy.mockImplementation((content: string) => {
+    strategyText = content
+    versions = [
+      { id: 3, md5: 'md5-c', createdBy: 'human', reason: '手动保存', reportId: null, time: '2026-07-28T04:00:00.000Z' },
+      ...versions,
+    ]
+    return Promise.resolve(content)
   })
 })
 
@@ -118,5 +129,29 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     expect(await screen.findByText('v3')).toBeInTheDocument()
     expect(screen.getByText('回滚')).toBeInTheDocument()
     expect(screen.getAllByText('当前')).toHaveLength(1)
+  })
+
+  it('保存并热更新成功：版本历史立即重拉，新版本行可见（回归：旧行为要等下一次请求）', async () => {
+    render(<ConfigDrawer open onClose={() => {}} />)
+
+    // 等策略小节就绪：编辑器初值 + 版本列表渲染
+    const textarea = await screen.findByLabelText('system_prompt 内容')
+    expect(textarea).toHaveValue('策略书 v2 全文')
+    await screen.findByText('初始版本')
+    const versionCallsBefore = holder.getStrategyVersions.mock.calls.length
+
+    // 修改内容并保存
+    fireEvent.change(textarea, { target: { value: '策略书 v3 手改全文' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并热更新' }))
+
+    await waitFor(() => expect(holder.putStrategy).toHaveBeenCalledWith('策略书 v3 手改全文'))
+    // 核心回归断言：保存后版本列表查询被再次触发
+    await waitFor(() =>
+      expect(holder.getStrategyVersions.mock.calls.length).toBeGreaterThan(versionCallsBefore),
+    )
+    // 新版本行出现并标「当前」，编辑器显示已保存标记
+    expect(await screen.findByText('v3')).toBeInTheDocument()
+    expect(screen.getByText('手动保存')).toBeInTheDocument()
+    expect(screen.getByText(/^已保存 /)).toBeInTheDocument()
   })
 })
