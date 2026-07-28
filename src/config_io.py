@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .config import ROOT, Settings, Watchlist
+from .config import ENV_KEY_PREFIX, ENV_KEY_WHITELIST, ROOT, Settings, Watchlist
 
 
 class ConfigError(ValueError):
@@ -65,18 +65,27 @@ def read_watchlist_raw(path: Path | None = None) -> dict:
     return read_raw(path or ROOT / "watchlist.yaml")
 
 
+# 经 API 写 .env 的键名白名单：仅 LLM key（防经配置接口篡改 GATE_API_KEY 等交易所密钥）。
+# 常量定义在 config.py，与 CredentialConfig.api_key_env 校验共用同一份（防漂移）。
+def _check_env_key_allowed(key: str) -> None:
+    if key not in ENV_KEY_WHITELIST and not key.startswith(ENV_KEY_PREFIX):
+        raise ConfigError(f".env 写入拒绝白名单外键名：{key}")
+
+
 def set_env_keys(mapping: dict[str, str], env_path: Path) -> list[str]:
     """把 mapping 中的 key 写入 .env：已存在则替换该行，缺失则文件末尾追加。
 
     只写 mapping 里的 key，其他行与注释（含 # KEY= 形式）原样保留；空值跳过不写
     （文件不存在且无可写值时不创建）。写入成功的 key 同步进 os.environ。
+    键名必须在白名单内（ANTHROPIC_API_KEY / OPENAI_API_KEY / LLM_KEY_*），其余抛 ConfigError。
     密钥铁规：返回值只含写入的 key 名，永不返回/记录 value。
     """
-    pending = {k: v for k, v in mapping.items() if v}  # 空值跳过
-    for key, value in pending.items():
+    for key, value in mapping.items():
         # 防换行注入：控制字符可在 .env 注入任意新行（防御纵深，与 SecretsBody 校验双层）
         if any(c in key + value for c in ("\r", "\n", "\0")):
             raise ConfigError(f".env 写入拒绝控制字符（\\r/\\n/\\0）：{key}")
+        _check_env_key_allowed(key)
+    pending = {k: v for k, v in mapping.items() if v}  # 空值跳过
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     out: list[str] = []
     written: list[str] = []

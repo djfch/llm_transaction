@@ -60,6 +60,7 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 - `watchlist.yaml`：允许新增仓位的合约白名单（平仓不受白名单限制）
 - `system_prompt.md`：策略书，LLM 每轮决策的 system prompt，改完下一轮自动生效
 - 监控前端可修改 LLM、风控、通知开关、白名单和策略 Prompt；LLM provider/model 等保存后热重建并从下一轮生效，`mode` 等构造期字段会返回 `needs_restart(需要重启的字段)`
+- **多 LLM 凭证**：`config.yaml` 的 `llm.credentials` 可登记多条凭证（每条 = provider+model+base_url+`api_key_env(对应 .env 中的键名)`），`agents` 节给决策 agent（trader）与复盘 agent（reviewer）分别指定所用凭证，保存即热生效；key 明文仍只存服务器 `.env`（前端在线写入，API 永不回显）。不配 `credentials` 时旧平铺 `llm` 字段自动等价为一条 `default` 凭证，行为与之前完全一致；示例见 `config.example.yaml`
 - Gate 与 Telegram 密钥、Gate 主机、服务监听地址、审计和日志路径仍需在服务器 `.env` 或 `config.yaml` 中维护
 
 ## 手动验证脚本（scripts/，不进测试套件）

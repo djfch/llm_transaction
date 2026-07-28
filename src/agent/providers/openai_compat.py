@@ -13,13 +13,13 @@ import os
 import openai
 
 from src.agent.providers.base import LLMError, LLMParseError, LLMResponse, ToolCall
-from src.config import LLMConfig
+from src.config import CredentialConfig, LLMConfig
 
 
 class OpenAICompatProvider:
     """OpenAI chat.completions 兼容协议适配。"""
 
-    def __init__(self, config: LLMConfig, api_key: str | None = None) -> None:
+    def __init__(self, config: LLMConfig | CredentialConfig, api_key: str | None = None) -> None:
         key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not key:
             raise LLMError("缺少 OPENAI_API_KEY 环境变量，无法初始化 OpenAI 兼容 provider")

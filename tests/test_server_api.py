@@ -369,15 +369,30 @@ async def test_secrets_status_never_leaks_plaintext(client: AsyncClient, monkeyp
     ):
         monkeypatch.delenv(name, raising=False)
     r = await client.get("/api/secrets/status")
-    assert r.json() == {"gate_key": False, "llm_key": False, "telegram": False}
+    # 旧三键契约不变；credentials 为新增的多凭证状态数组（default 为旧平铺合成）
+    assert {k: v for k, v in r.json().items() if k != "credentials"} == {
+        "gate_key": False,
+        "llm_key": False,
+        "telegram": False,
+    }
+    creds = r.json()["credentials"]
+    assert len(creds) == 1 and creds[0]["name"] == "default"
+    assert creds[0]["key_configured"] is False
 
     monkeypatch.setenv("GATE_API_KEY", "明文-gate-key-xyz")
     monkeypatch.setenv("GATE_API_SECRET", "明文-gate-secret-xyz")
+    # 默认凭证为 anthropic：llm_key 由 ANTHROPIC_API_KEY 决定（M3 后按生效凭证的 api_key_env 判定）；
+    # OPENAI_API_KEY 一并设置，额外验证不出现在响应里
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "明文-ant-key-xyz")
     monkeypatch.setenv("OPENAI_API_KEY", "明文-openai-key-xyz")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "明文-tg-token-xyz")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "明文-tg-chat-xyz")
     r = await client.get("/api/secrets/status")
-    assert r.json() == {"gate_key": True, "llm_key": True, "telegram": True}
+    assert {k: v for k, v in r.json().items() if k != "credentials"} == {
+        "gate_key": True,
+        "llm_key": True,
+        "telegram": True,
+    }
     assert "明文" not in r.text and "xyz" not in r.text  # 响应不含任何明文
 
 

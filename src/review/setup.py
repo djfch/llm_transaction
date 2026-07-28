@@ -52,7 +52,7 @@ async def build_review(
     settings: Settings,
     repo: Repo,
     audit: AuditTrail,
-    provider: Any,  # LLMProvider | None：与决策循环共享同一实例（热重建时两边同步替换）
+    provider: Any,  # LLMProvider | None：按 reviewer 绑定凭证构造（与决策循环各自独立实例）
     *,
     strategy_path: Path | None = None,
     review_prompt_path: Path | None = None,

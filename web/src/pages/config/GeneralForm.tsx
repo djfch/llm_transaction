@@ -21,6 +21,10 @@ export default function GeneralForm({
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // 多凭证配置下，provider/model/max_tokens/openai_base_url 已迁入凭证管理，此处隐藏；
+  // llm.credentials 与 agents 在提交时被剔除（见 handleSave），不由本表单回写
+  const hasCredentials = (initial.llm.credentials?.length ?? 0) > 0
+
   const patchLlm = (patch: Partial<AppConfig['llm']>) => {
     setForm((f) => ({ ...f, llm: { ...f.llm, ...patch } }))
     setSavedAt(null)
@@ -30,7 +34,13 @@ export default function GeneralForm({
     setPending(true)
     setError(null)
     try {
-      await onSave(form)
+      // 剔除本表单从不编辑的两段：llm.credentials（凭证管理）与 agents（凭证分配）。
+      // 后端 _merge_body 只覆盖提及的段——不提及即保留服务端现值；
+      // 若全量提交挂载时的旧快照，会静默回写覆盖凭证管理/分配表单已保存的变更（回归 H1）。
+      const payload: AppConfig = { ...form, llm: { ...form.llm } }
+      delete payload.llm.credentials
+      delete payload.agents
+      await onSave(payload)
       setSavedAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -63,46 +73,50 @@ export default function GeneralForm({
           </span>
         </label>
 
-        <label className="block">
-          <span className={labelCls}>llm.provider</span>
-          <select
-            value={form.llm.provider}
-            onChange={(e) => patchLlm({ provider: e.target.value })}
-            className={inputCls}
-          >
-            <option value="anthropic">anthropic</option>
-            <option value="openai_compat">openai_compat</option>
-          </select>
-        </label>
+        {!hasCredentials && (
+          <>
+            <label className="block">
+              <span className={labelCls}>llm.provider</span>
+              <select
+                value={form.llm.provider}
+                onChange={(e) => patchLlm({ provider: e.target.value })}
+                className={inputCls}
+              >
+                <option value="anthropic">anthropic</option>
+                <option value="openai_compat">openai_compat</option>
+              </select>
+            </label>
 
-        <label className="block">
-          <span className={labelCls}>llm.model</span>
-          <input
-            value={form.llm.model}
-            onChange={(e) => patchLlm({ model: e.target.value })}
-            className={inputCls}
-          />
-        </label>
+            <label className="block">
+              <span className={labelCls}>llm.model</span>
+              <input
+                value={form.llm.model}
+                onChange={(e) => patchLlm({ model: e.target.value })}
+                className={inputCls}
+              />
+            </label>
 
-        <label className="block">
-          <span className={labelCls}>llm.max_tokens</span>
-          <input
-            value={String(form.llm.max_tokens)}
-            inputMode="numeric"
-            onChange={(e) => patchLlm({ max_tokens: Number(e.target.value) || 0 })}
-            className={inputCls}
-          />
-        </label>
+            <label className="block">
+              <span className={labelCls}>llm.max_tokens</span>
+              <input
+                value={String(form.llm.max_tokens)}
+                inputMode="numeric"
+                onChange={(e) => patchLlm({ max_tokens: Number(e.target.value) || 0 })}
+                className={inputCls}
+              />
+            </label>
 
-        <label className="block">
-          <span className={labelCls}>llm.openai_base_url</span>
-          <input
-            value={form.llm.openai_base_url}
-            onChange={(e) => patchLlm({ openai_base_url: e.target.value })}
-            placeholder="https://…（可空）"
-            className={inputCls}
-          />
-        </label>
+            <label className="block">
+              <span className={labelCls}>llm.openai_base_url</span>
+              <input
+                value={form.llm.openai_base_url}
+                onChange={(e) => patchLlm({ openai_base_url: e.target.value })}
+                placeholder="https://…（可空）"
+                className={inputCls}
+              />
+            </label>
+          </>
+        )}
 
         <label className="block">
           <span className={labelCls}>llm.max_consecutive_failures</span>
@@ -114,6 +128,12 @@ export default function GeneralForm({
           />
         </label>
       </div>
+
+      {hasCredentials && (
+        <p className="text-[10px] text-zinc-600">
+          llm.provider / model / max_tokens / openai_base_url 已迁入「密钥状态」小节的凭证管理。
+        </p>
+      )}
 
       <label className="flex items-center gap-2 text-xs text-zinc-300">
         <input

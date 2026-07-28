@@ -289,8 +289,8 @@ async def test_strategy_save_rollback_callbacks(tmp_path: Path, build_ctx, monke
     assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == seeded[0].content
 
 
-async def test_llm_reconfigure_syncs_review_provider(tmp_path: Path, monkeypatch):
-    """LLM 热重建成功后，决策循环与复盘 agent 同步换到新 provider（共享同一实例）。"""
+async def test_llm_reconfigure_rebuilds_each_agent_provider(tmp_path: Path, monkeypatch):
+    """LLM 热重建后，决策循环与复盘 agent 各自换到新 provider（按 agent 独立实例）。"""
     monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-reconfigure")
     monkeypatch.delenv("LLM_MOCK", raising=False)
     settings = Settings()
@@ -299,11 +299,15 @@ async def test_llm_reconfigure_syncs_review_provider(tmp_path: Path, monkeypatch
         settings, WATCHLIST, mock_llm=False, mock_market=True, db_path=tmp_path / "t.db"
     )
     try:
-        assert ctx.review.agent._provider is ctx.loop._provider  # 装配期共享同一实例
+        assert ctx.loop._provider is not None and ctx.review.agent._provider is not None
+        assert ctx.review.agent._provider is not ctx.loop._provider  # 各自独立实例
+        old_loop_provider, old_review_provider = ctx.loop._provider, ctx.review.agent._provider
         deps = ctx.server_deps
         assert deps is not None and deps.llm_reconfigure is not None
         result = await deps.llm_reconfigure()
         assert result == {"llm_configured": True, "error": ""}
-        assert ctx.review.agent._provider is ctx.loop._provider  # 热替换后仍同一实例
+        assert ctx.loop._provider is not None and ctx.loop._provider is not old_loop_provider
+        assert ctx.review.agent._provider is not None
+        assert ctx.review.agent._provider is not old_review_provider  # 两边都热替换
     finally:
         await ctx.db.close()

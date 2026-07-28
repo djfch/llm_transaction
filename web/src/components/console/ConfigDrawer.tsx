@@ -1,8 +1,8 @@
 /**
  * 配置抽屉（方案 C 换皮）：右侧滑出，固定定位、宽 480px、滑入动画、遮罩点击 / ESC 关闭。
- * 内部完整复用 pages/config 五个表单（SecretsForm/GeneralForm/RiskForm/WatchlistEditor/StrategyEditor）
- * 及 StrategyVersions 版本历史；表单为 props 驱动，数据由本抽屉在打开时统一拉取。
- * 仅在 open 时挂载表单主体：关闭不发起请求，每次打开拉取最新配置。
+ * 内部完整复用 pages/config 六个表单（SecretsForm/AgentCredentialsForm/GeneralForm/RiskForm/
+ * WatchlistEditor/StrategyEditor）及 StrategyVersions 版本历史；表单为 props 驱动，
+ * 数据由本抽屉在打开时统一拉取。仅在 open 时挂载表单主体：关闭不发起请求，每次打开拉取最新配置。
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../../api'
@@ -12,6 +12,7 @@ import PaperEquitySetter from '../PaperEquitySetter'
 import GeneralForm from '../../pages/config/GeneralForm'
 import RiskForm from '../../pages/config/RiskForm'
 import SecretsForm from '../../pages/config/SecretsForm'
+import AgentCredentialsForm from '../../pages/config/AgentCredentialsForm'
 import StrategyEditor from '../../pages/config/StrategyEditor'
 import StrategyVersions from '../../pages/config/StrategyVersions'
 import WatchlistEditor from '../../pages/config/WatchlistEditor'
@@ -38,7 +39,7 @@ function DrawerSection<T>({
   )
 }
 
-/** 抽屉主体：打开时挂载，统一拉取四类配置数据并装配五个表单 */
+/** 抽屉主体：打开时挂载，统一拉取四类配置数据并装配六个表单 */
 function DrawerBody({ onReset }: { onReset: () => void }) {
   const configQ = useApiData(() => api.getConfig(), [])
   const secretsQ = useApiData(() => api.getSecretsStatus(), [])
@@ -52,7 +53,33 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
   return (
     <>
       <DrawerSection title="密钥状态 · 仅显示是否配置，永不回显明文" query={secretsQ}>
-        {(status) => <SecretsForm status={status} onSaved={secretsQ.reload} />}
+        {(status) => (
+          <SecretsForm
+            status={status}
+            config={configQ.data}
+            onSaved={() => {
+              // 凭证/key 变更影响两侧：密钥状态（key_configured/used_by）与配置（llm.credentials）
+              secretsQ.reload()
+              configQ.reload()
+            }}
+          />
+        )}
+      </DrawerSection>
+
+      <DrawerSection title="Agent 凭证分配 · 决策与复盘可各用一条 LLM 凭证" query={configQ}>
+        {(config) => (
+          <AgentCredentialsForm
+            initial={config}
+            credentialNames={(secretsQ.data?.credentials ?? []).map((c) => c.name)}
+            onSave={async (next) => {
+              const res = await api.putConfig(next)
+              setLlmError(res.llm_error || null)
+              // 分配变更影响 used_by 徽标与凭证状态，两个查询联动刷新（保活模式不卸载表单）
+              configQ.reload()
+              secretsQ.reload()
+            }}
+          />
+        )}
       </DrawerSection>
 
       <DrawerSection title="常规设置 · LLM 设置保存即生效" query={configQ}>
