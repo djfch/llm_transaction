@@ -9,6 +9,28 @@ llm:
   max_tokens: 4096
   openai_base_url: https://api.deepseek.com
   max_consecutive_failures: 3
+  # ── 多凭证（可选）──────────────────────────────────────────────
+  # 登记多条凭证后，上方平铺的 provider/model/openai_base_url/max_tokens 不再生效，
+  # 每个 agent 按下方 agents 段分配的凭证独立连接 LLM（互不影响、可单独热重建）。
+  # key 明文不写在这里：每条凭证的 api_key_env 指定 .env 里的环境变量名
+  # （留空自动推导为 LLM_KEY_<名称大写>），到监控页「密钥」里设置即可。
+  # credentials:
+  #   - name: main                 # 主号（决策用）
+  #     provider: anthropic
+  #     model: claude-sonnet-4-5
+  #     max_tokens: 4096
+  #     # api_key_env: 留空 → LLM_KEY_MAIN
+  #   - name: backup               # 备用号（复盘用）
+  #     provider: openai_compat
+  #     model: deepseek-v4-flash
+  #     openai_base_url: https://api.deepseek.com
+  #     api_key_env: LLM_KEY_BACKUP
+# 按 agent 分配凭证（值为 credentials 里的 name；不配 credentials 时只有 default 可选）
+# agents:
+#   trader:
+#     credential: main             # 决策 agent 用主号
+#   reviewer:
+#     credential: backup           # 复盘 agent 用备用号
 risk:
   max_position_pct: 0.3
   max_total_position_pct: 0.8

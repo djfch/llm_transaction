@@ -10,8 +10,9 @@ import SecretsForm from '../pages/config/SecretsForm'
 const { setSecrets } = vi.hoisted(() => ({ setSecrets: vi.fn() }))
 vi.mock('../api', () => ({ api: { setSecrets } }))
 
-const configured: SecretsStatus = { gate_key: true, llm_key: true, telegram: false }
-const unconfigured: SecretsStatus = { gate_key: false, llm_key: false, telegram: false }
+// 旧版单凭证夹具：credentials 为空数组 → 走旧 ANTHROPIC/OPENAI 表单兼容路径
+const configured: SecretsStatus = { gate_key: true, llm_key: true, telegram: false, credentials: [] }
+const unconfigured: SecretsStatus = { gate_key: false, llm_key: false, telegram: false, credentials: [] }
 
 const anthropicLabel = 'ANTHROPIC_API_KEY'
 const openaiLabel = 'OPENAI_API_KEY'
@@ -23,7 +24,7 @@ beforeEach(() => {
 
 describe('SecretsForm(LLM 密钥表单)', () => {
   it('渲染两个 password 输入框与只读徽标，占位符随配置状态变化', () => {
-    const { unmount } = render(<SecretsForm status={configured} onSaved={() => {}} />)
+    const { unmount } = render(<SecretsForm status={configured} config={null} onSaved={() => {}} />)
     const anthropic = screen.getByLabelText(anthropicLabel)
     const openai = screen.getByLabelText(openaiLabel)
     expect(anthropic).toHaveAttribute('type', 'password')
@@ -36,13 +37,13 @@ describe('SecretsForm(LLM 密钥表单)', () => {
     expect(screen.getByText('telegram')).toBeInTheDocument()
 
     unmount()
-    render(<SecretsForm status={unconfigured} onSaved={() => {}} />)
+    render(<SecretsForm status={unconfigured} config={null} onSaved={() => {}} />)
     expect(screen.getByLabelText(anthropicLabel)).toHaveAttribute('placeholder', '未配置')
   })
 
   it('保存时剔除空串字段，仅提交已填写的 key', async () => {
     setSecrets.mockResolvedValue({ saved: true, llm_configured: true, error: '' })
-    render(<SecretsForm status={configured} onSaved={() => {}} />)
+    render(<SecretsForm status={configured} config={null} onSaved={() => {}} />)
 
     fireEvent.change(screen.getByLabelText(anthropicLabel), { target: { value: 'sk-ant-123' } })
     fireEvent.click(screen.getByRole('button', { name: saveBtnName }))
@@ -59,7 +60,7 @@ describe('SecretsForm(LLM 密钥表单)', () => {
       error: 'provider 重建失败：连接超时',
     })
     const onSaved = vi.fn()
-    render(<SecretsForm status={configured} onSaved={onSaved} />)
+    render(<SecretsForm status={configured} config={null} onSaved={onSaved} />)
 
     const input = screen.getByLabelText(anthropicLabel)
     fireEvent.change(input, { target: { value: 'sk-ant-123' } })
@@ -75,7 +76,7 @@ describe('SecretsForm(LLM 密钥表单)', () => {
   it('保存成功清空输入框并调用 onSaved 回调', async () => {
     setSecrets.mockResolvedValue({ saved: true, llm_configured: true, error: '' })
     const onSaved = vi.fn()
-    render(<SecretsForm status={configured} onSaved={onSaved} />)
+    render(<SecretsForm status={configured} config={null} onSaved={onSaved} />)
 
     const input = screen.getByLabelText(openaiLabel)
     fireEvent.change(input, { target: { value: 'sk-openai-1' } })
@@ -89,7 +90,7 @@ describe('SecretsForm(LLM 密钥表单)', () => {
 
   it('llm_configured=false 时展示琥珀色警告', async () => {
     setSecrets.mockResolvedValue({ saved: true, llm_configured: false, error: '' })
-    render(<SecretsForm status={unconfigured} onSaved={() => {}} />)
+    render(<SecretsForm status={unconfigured} config={null} onSaved={() => {}} />)
 
     fireEvent.change(screen.getByLabelText(anthropicLabel), { target: { value: 'sk-ant-123' } })
     fireEvent.click(screen.getByRole('button', { name: saveBtnName }))

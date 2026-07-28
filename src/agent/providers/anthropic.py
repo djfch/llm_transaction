@@ -14,13 +14,13 @@ from typing import Any
 import anthropic
 
 from src.agent.providers.base import LLMError, LLMResponse, ToolCall
-from src.config import LLMConfig
+from src.config import CredentialConfig, LLMConfig
 
 
 class AnthropicProvider:
     """Anthropic Messages API 适配。"""
 
-    def __init__(self, config: LLMConfig, api_key: str | None = None) -> None:
+    def __init__(self, config: LLMConfig | CredentialConfig, api_key: str | None = None) -> None:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise LLMError("缺少 ANTHROPIC_API_KEY 环境变量，无法初始化 Anthropic provider")

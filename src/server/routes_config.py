@@ -32,6 +32,7 @@ from src.server.deps import ServerDeps
 # - paper.slippage：PaperGateway 每次市价撮合时读取
 # - llm.provider/model/max_tokens/openai_base_url：写回后经 llm_reconfigure 重建 provider
 #   并热替换（set_provider），下轮决策即生效；重建失败保留旧 provider 且诚实回报 llm_error
+# - llm.credentials / agents.*.credential：多凭证与按 agent 分配，写回后同样经热重建生效
 # - review.*：ReviewScheduler 每次巡检 tick 时读 settings.review（热开关/改触发时间即生效）
 # 其余字段（mode/gate 等）在 gateway/server 构造期绑定，须重启生效。
 _RUNTIME_KEYS = frozenset(
@@ -48,6 +49,9 @@ _RUNTIME_KEYS = frozenset(
         "llm.max_tokens",
         "llm.openai_base_url",
         "llm.max_consecutive_failures",
+        "llm.credentials",
+        "agents.trader.credential",
+        "agents.reviewer.credential",
         "scheduler.default_wake_minutes",
         "scheduler.min_wake_minutes",
         "scheduler.max_wake_minutes",
@@ -58,7 +62,17 @@ _RUNTIME_KEYS = frozenset(
 )
 
 # 变更后须触发 LLM 热重建的热键（_RUNTIME_KEYS 子集）
-_LLM_HOT_KEYS = frozenset({"llm.provider", "llm.model", "llm.max_tokens", "llm.openai_base_url"})
+_LLM_HOT_KEYS = frozenset(
+    {
+        "llm.provider",
+        "llm.model",
+        "llm.max_tokens",
+        "llm.openai_base_url",
+        "llm.credentials",
+        "agents.trader.credential",
+        "agents.reviewer.credential",
+    }
+)
 
 
 class KillSwitchBody(BaseModel):
@@ -66,12 +80,18 @@ class KillSwitchBody(BaseModel):
 
 
 class SecretsBody(BaseModel):
-    """POST /api/secrets 请求体：只接受 LLM key（交易所 key 无写入端点）；空串表示不修改。"""
+    """POST /api/secrets 请求体：只接受 LLM key（交易所 key 无写入端点）；空串表示不修改。
+
+    credential + api_key 形式：按凭证定义里的 api_key_env 写 .env（多凭证）；
+    旧字段 anthropic_api_key/openai_api_key 向后兼容，两者可同请求混用。
+    """
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    credential: str = ""
+    api_key: str = ""
 
-    @field_validator("anthropic_api_key", "openai_api_key")
+    @field_validator("anthropic_api_key", "openai_api_key", "api_key")
     @classmethod
     def _no_control_chars(cls, value: str) -> str:
         """拒绝换行/回车/NUL 等控制字符（防 .env 换行注入，见 set_env_keys 同名防护）。"""
@@ -130,6 +150,16 @@ async def _run_llm_reconfigure(deps: ServerDeps) -> dict[str, Any]:
     if deps.llm_reconfigure is None:
         return {"llm_configured": False, "error": "agent 未接线"}
     return await deps.llm_reconfigure()
+
+
+def _secrets_settings(deps: ServerDeps) -> Settings:
+    """密钥端点读取配置：优先运行时共享实例，未接线时按文件加载（非法文件回退默认值）。"""
+    if deps.runtime_settings is not None:
+        return deps.runtime_settings
+    try:
+        return load_settings(deps.config_path)
+    except ValueError:
+        return Settings()
 
 
 def create_config_router(deps: ServerDeps) -> APIRouter:
@@ -205,13 +235,34 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
         return {"saved": True}
 
     @router.get("/secrets/status")
-    async def secrets_status() -> dict[str, bool]:
+    async def secrets_status() -> dict[str, Any]:
         # 只查环境变量是否存在，永不返回明文
         env = os.environ
+        settings = _secrets_settings(deps)
+        credentials = settings.llm.resolve_credentials()
+        used_by: dict[str, list[str]] = {c.name: [] for c in credentials}
+        for agent_name, binding in (
+            ("trader", settings.agents.trader),
+            ("reviewer", settings.agents.reviewer),
+        ):
+            if binding.credential in used_by:
+                used_by[binding.credential].append(agent_name)
         return {
             "gate_key": bool(env.get("GATE_API_KEY")) and bool(env.get("GATE_API_SECRET")),
-            "llm_key": bool(env.get("ANTHROPIC_API_KEY") or env.get("OPENAI_API_KEY")),
+            # 任一生效凭证的 key 已配置即为 true（多凭证下不限于两个旧键名）
+            "llm_key": any(bool(env.get(c.api_key_env)) for c in credentials),
             "telegram": bool(env.get("TELEGRAM_BOT_TOKEN")) and bool(env.get("TELEGRAM_CHAT_ID")),
+            "credentials": [
+                {
+                    "name": c.name,
+                    "provider": c.provider,
+                    "model": c.model,
+                    "api_key_env": c.api_key_env,
+                    "key_configured": bool(env.get(c.api_key_env)),
+                    "used_by": used_by[c.name],
+                }
+                for c in credentials
+            ],
         }
 
     @router.post("/secrets")
@@ -220,15 +271,20 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
         契约逐字：{"saved": true, "llm_configured": bool, "error": str}。
         空串字段不修改（set_env_keys 空值跳过）；交易所 key 无写入端点（密钥铁规）。
+        credential 非空时按其 api_key_env 写键，凭证名不存在映 422。
         """
+        mapping = {
+            "ANTHROPIC_API_KEY": body.anthropic_api_key,
+            "OPENAI_API_KEY": body.openai_api_key,
+        }
+        if body.credential:
+            credentials = _secrets_settings(deps).llm.resolve_credentials()
+            cred = next((c for c in credentials if c.name == body.credential), None)
+            if cred is None:
+                raise HTTPException(status_code=422, detail=f"凭证不存在: {body.credential}")
+            mapping[cred.api_key_env] = body.api_key
         try:
-            set_env_keys(
-                {
-                    "ANTHROPIC_API_KEY": body.anthropic_api_key,
-                    "OPENAI_API_KEY": body.openai_api_key,
-                },
-                deps.env_path,
-            )
+            set_env_keys(mapping, deps.env_path)
         except ConfigError as exc:  # 控制字符注入防护（双层之一，SecretsBody 已先拦）
             raise _config_422(exc) from exc
         reconfigure = await _run_llm_reconfigure(deps)

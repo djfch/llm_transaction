@@ -1,12 +1,16 @@
 /**
- * 密钥配置：交易所 / Telegram 为只读状态行（仅经 .env 配置）；
- * LLM API Key 支持在线表单保存（POST /api/secrets，写入服务器 .env，不进 git，重启后仍有效）。
+ * 密钥配置：交易所 / Telegram 为只读状态行（仅经 .env 配置）。
+ * LLM 部分按配置形态分两支：
+ * - 多凭证（secrets status 含 credentials）：凭证列表（行内保存 key / 删除）+ 新增凭证表单；
+ * - 旧版单凭证（无 credentials 或为空）：「default 凭证」引导提示 + 旧 ANTHROPIC/OPENAI 两输入框表单。
  * 响应永不包含密钥明文；error 非空（如 provider 重建失败）时展示错误条。
  * 方案 C 抽屉样式：标签只用变量名，状态等宽字体，紫色主按钮。
  */
 import { useState } from 'react'
 import { api } from '../../api'
-import type { SecretsStatus, SetSecretsBody, SetSecretsResult } from '../../api/types'
+import type { AppConfig, SecretsStatus, SetSecretsBody, SetSecretsResult } from '../../api/types'
+import CredentialList, { SaveFeedback, StateText } from './CredentialList'
+import NewCredentialForm from './NewCredentialForm'
 
 const inputCls =
   'w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-violet-400/60 focus:outline-none'
@@ -17,15 +21,6 @@ const READONLY_ITEMS: Array<{ key: 'gate_key' | 'telegram'; label: string }> = [
   { key: 'gate_key', label: 'gate_key' },
   { key: 'telegram', label: 'telegram' },
 ]
-
-/** 配置状态文字：已配置 emerald / 未配置 zinc，等宽 */
-function StateText({ configured }: { configured: boolean }) {
-  return (
-    <span className={`font-mono text-xs ${configured ? 'text-emerald-400' : 'text-zinc-500'}`}>
-      {configured ? '已配置' : '未配置'}
-    </span>
-  )
-}
 
 /** 只读状态区：gate_key 与 telegram 仅显示是否配置，永不回显明文 */
 function ReadonlyStatus({ status }: { status: SecretsStatus }) {
@@ -51,34 +46,7 @@ function ReadonlyStatus({ status }: { status: SecretsStatus }) {
   )
 }
 
-/** 保存结果反馈条：error 玫瑰色错误 > llm_configured=false 琥珀警告 > 成功提示 */
-function SaveFeedback({ result }: { result: SetSecretsResult }) {
-  if (result.error) {
-    return (
-      <p
-        role="alert"
-        className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300"
-      >
-        {result.error}
-      </p>
-    )
-  }
-  return (
-    <>
-      {!result.llm_configured && (
-        <p
-          role="alert"
-          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
-        >
-          LLM 仍未配置：请确认提交的 Key 与当前 provider 匹配，自动决策将保持暂停。
-        </p>
-      )}
-      <p className="text-xs text-emerald-400">已保存到服务器 .env</p>
-    </>
-  )
-}
-
-/** LLM API Key 表单：ANTHROPIC_API_KEY / OPENAI_API_KEY，空串字段发送前剔除 */
+/** LLM API Key 表单（旧版单凭证兼容路径）：ANTHROPIC_API_KEY / OPENAI_API_KEY，空串字段发送前剔除 */
 function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () => void }) {
   const [anthropicKey, setAnthropicKey] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
@@ -168,16 +136,39 @@ function LlmKeyForm({ configured, onSaved }: { configured: boolean; onSaved: () 
 
 export default function SecretsForm({
   status,
+  config,
   onSaved,
 }: {
   status: SecretsStatus
-  /** 保存成功后的回调（父级刷新密钥状态） */
+  /** PUT /api/config 提交载体（凭证新增/删除用）；config 尚未加载时为 null，对应按钮禁用 */
+  config: AppConfig | null
+  /** 保存成功后的回调（父级刷新密钥状态与配置） */
   onSaved: () => void
 }) {
+  // 防御：旧后端可能缺失 credentials 键，按旧版单凭证路径渲染
+  const credentials = status.credentials ?? []
+
   return (
     <div className="space-y-5">
       <ReadonlyStatus status={status} />
-      <LlmKeyForm configured={status.llm_key} onSaved={onSaved} />
+      {credentials.length > 0 ? (
+        <>
+          <CredentialList credentials={credentials} config={config} onSaved={onSaved} />
+          <NewCredentialForm
+            existingNames={credentials.map((c) => c.name)}
+            config={config}
+            onSaved={onSaved}
+          />
+        </>
+      ) : (
+        <>
+          <p className="rounded-lg border border-white/5 bg-zinc-900/60 px-3 py-2 text-[10px] text-zinc-500">
+            当前为旧版单凭证（default）配置：下方直接保存 Key 即可，决策与复盘 agent 共用该凭证；
+            在 config.yaml 的 llm.credentials 登记多条凭证后，此处将切换为凭证管理界面。
+          </p>
+          <LlmKeyForm configured={status.llm_key} onSaved={onSaved} />
+        </>
+      )}
     </div>
   )
 }

@@ -16,7 +16,14 @@ import pytest
 
 from src.agent.providers.mock import MockProvider
 from src.bootstrap import AppContext, build_app
-from src.config import Settings, Watchlist
+from src.config import (
+    AgentBinding,
+    AgentsConfig,
+    CredentialConfig,
+    LLMConfig,
+    Settings,
+    Watchlist,
+)
 
 BTC = "BTC_USDT"
 WATCHLIST = Watchlist(contracts=[BTC])
@@ -139,3 +146,78 @@ async def test_skip_round_still_drains_fills(no_llm_key, build_ctx):
     trades = await ctx.repo.list_trades()
     assert len(trades) == 1, "跳轮前成交缓冲必须先泄放落库"
     assert trades[0].source == "llm_open"
+
+
+# ---------- 多凭证：双 agent 独立构造与热重建 ----------
+
+
+def _dual_settings() -> Settings:
+    """trader→main（anthropic / LLM_KEY_MAIN），reviewer→review（openai_compat / LLM_KEY_REVIEW）。"""
+    return Settings(
+        llm=LLMConfig(
+            credentials=[
+                CredentialConfig(
+                    name="main",
+                    provider="anthropic",
+                    model="claude-sonnet-4-5",
+                    api_key_env="LLM_KEY_MAIN",
+                ),
+                CredentialConfig(
+                    name="review",
+                    provider="openai_compat",
+                    model="deepseek-v4-flash",
+                    api_key_env="LLM_KEY_REVIEW",
+                ),
+            ]
+        ),
+        agents=AgentsConfig(
+            trader=AgentBinding(credential="main"),
+            reviewer=AgentBinding(credential="review"),
+        ),
+    )
+
+
+@pytest.fixture
+def no_dual_llm_key(no_llm_key, monkeypatch: pytest.MonkeyPatch) -> None:
+    """在 no_llm_key 基础上再清掉多凭证环境变量。"""
+    for name in ("LLM_KEY_MAIN", "LLM_KEY_REVIEW"):
+        monkeypatch.delenv(name, raising=False)
+
+
+async def test_dual_credentials_built_per_agent(no_dual_llm_key, build_ctx, monkeypatch):
+    """双凭证：两个 agent 按其绑定凭证各自构造 provider（独立实例、独立降级）。"""
+    monkeypatch.setenv("LLM_KEY_MAIN", "sk-main")
+    ctx = await build_ctx(_dual_settings(), mock_llm=False)
+    assert ctx.loop.llm_configured is True  # trader 凭证有 key
+    assert ctx.review.agent._provider is None  # reviewer 凭证缺 key：独立降级，不影响决策循环
+    assert ctx.review.agent._provider is not ctx.loop._provider
+
+
+async def test_dual_reconfigure_failure_names_agent_and_keeps_other(
+    no_dual_llm_key, build_ctx, monkeypatch
+):
+    """单 agent 重建失败：error 点名该 agent 与环境变量，另一个 agent 不受影响。"""
+    monkeypatch.setenv("LLM_KEY_MAIN", "sk-main")
+    ctx = await build_ctx(_dual_settings(), mock_llm=False)
+    assert ctx.server_deps is not None and ctx.server_deps.llm_reconfigure is not None
+    old_loop_provider = ctx.loop._provider
+    result = await ctx.server_deps.llm_reconfigure()
+    assert result["llm_configured"] is True  # trader 正常重建
+    assert "reviewer" in result["error"] and "LLM_KEY_REVIEW" in result["error"]  # 点名失败方
+    assert ctx.loop._provider is not old_loop_provider  # trader 已热替换
+    assert ctx.review.agent._provider is None  # reviewer 失败保留旧 provider
+
+    monkeypatch.setenv("LLM_KEY_REVIEW", "sk-review")  # 补齐后全部重建成功
+    result = await ctx.server_deps.llm_reconfigure()
+    assert result == {"llm_configured": True, "error": ""}
+    assert ctx.review.agent._provider is not None
+
+
+async def test_mock_mode_shares_mock_provider(build_ctx):
+    """mock 模式行为不变：两个 agent 共享同一 MockProvider，reconfigure 短路已配置。"""
+    ctx = await build_ctx(_dual_settings(), mock_llm=True)
+    assert isinstance(ctx.loop._provider, MockProvider)
+    assert ctx.review.agent._provider is ctx.loop._provider
+    assert ctx.server_deps is not None and ctx.server_deps.llm_reconfigure is not None
+    result = await ctx.server_deps.llm_reconfigure()
+    assert result == {"llm_configured": True, "error": ""}

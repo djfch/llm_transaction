@@ -27,7 +27,8 @@ from src.server.deps import ServerDeps
 @pytest.fixture(autouse=True)
 def _clean_env():
     """用例前后恢复环境变量原状（端点经 set_env_keys 直接写 os.environ，须手动快照恢复）。"""
-    names = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    names += [k for k in os.environ if k.startswith("LLM_KEY_")]
     saved = {k: os.environ.get(k) for k in names}
     for k in names:
         os.environ.pop(k, None)
@@ -37,6 +38,8 @@ def _clean_env():
             os.environ.pop(k, None)
         else:
             os.environ[k] = saved[k]  # type: ignore[index]
+    for k in [k for k in os.environ if k.startswith("LLM_KEY_") and k not in saved]:
+        os.environ.pop(k, None)  # 用例期间新增的 LLM_KEY_* 一并清除
 
 
 @pytest.fixture
@@ -190,3 +193,163 @@ async def test_post_secrets_rejects_nul_and_cr(client: AsyncClient):
     for bad in ("sk-x\0y", "sk-x\ry"):
         r = await client.post("/api/secrets", json={"anthropic_api_key": bad})
         assert r.status_code == 422, f"应拒绝: {bad!r}"
+    for bad in ("sk-x\0y", "sk-x\ny"):
+        r = await client.post("/api/secrets", json={"credential": "c", "api_key": bad})
+        assert r.status_code == 422, f"api_key 应拒绝: {bad!r}"
+
+
+# ---------- 多凭证：{credential, api_key} 形式 ----------
+
+
+async def _put_two_credentials(client: AsyncClient) -> None:
+    """经 PUT /api/config 登记两条凭证并分配：trader→main，reviewer→backup。"""
+    raw = (await client.get("/api/config")).json()
+    raw["llm"]["credentials"] = [
+        {"name": "main", "provider": "anthropic", "model": "claude-sonnet-4-5"},
+        {"name": "backup", "provider": "openai_compat", "model": "deepseek-v4-flash"},
+    ]
+    raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "backup"}}
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 200
+
+
+async def test_post_secrets_credential_writes_mapped_env_key(client: AsyncClient, deps: ServerDeps):
+    """{credential, api_key}：按凭证 api_key_env 写 .env（缺省推导 LLM_KEY_<NAME>）并热重建。"""
+    await _put_two_credentials(client)
+    reconfigure_before = len(deps.reconfigure_calls)
+    r = await client.post("/api/secrets", json={"credential": "backup", "api_key": "sk-b-秘密"})
+    assert r.status_code == 200
+    assert r.json() == {"saved": True, "llm_configured": True, "error": ""}
+    assert "sk-b-秘密" not in r.text  # 响应永不回显明文
+    lines = deps.env_path.read_text(encoding="utf-8").splitlines()
+    assert "LLM_KEY_BACKUP=sk-b-秘密" in lines
+    assert os.environ["LLM_KEY_BACKUP"] == "sk-b-秘密"  # 同步环境变量
+    assert len(deps.reconfigure_calls) == reconfigure_before + 1  # 触发热重建
+
+
+async def test_post_secrets_credential_and_legacy_fields_mix(client: AsyncClient, deps: ServerDeps):
+    """credential 形式与旧字段可同请求混用，两者都落盘。"""
+    await _put_two_credentials(client)
+    r = await client.post(
+        "/api/secrets",
+        json={"credential": "main", "api_key": "sk-m", "anthropic_api_key": "sk-ant-old"},
+    )
+    assert r.status_code == 200
+    lines = deps.env_path.read_text(encoding="utf-8").splitlines()
+    assert "LLM_KEY_MAIN=sk-m" in lines
+    assert "ANTHROPIC_API_KEY=sk-ant-old" in lines
+
+
+async def test_post_secrets_unknown_credential_422(client: AsyncClient, deps: ServerDeps):
+    """credential 名不存在 → 422 凭证不存在，.env 不被写入。"""
+    r = await client.post("/api/secrets", json={"credential": "ghost", "api_key": "sk-x"})
+    assert r.status_code == 422
+    assert "凭证不存在" in r.json()["detail"]
+    assert not deps.env_path.exists() or "sk-x" not in deps.env_path.read_text(encoding="utf-8")
+
+
+# ---------- GET /api/secrets/status：credentials 数组 ----------
+
+
+async def test_secrets_status_default_credential(client: AsyncClient):
+    """旧配置（无 credentials）：status 含一条合成的 default 凭证，两个 agent 都引用它。"""
+    r = await client.get("/api/secrets/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["gate_key"] is False and body["llm_key"] is False and body["telegram"] is False
+    assert body["credentials"] == [
+        {
+            "name": "default",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "key_configured": False,
+            "used_by": ["trader", "reviewer"],
+        }
+    ]
+
+
+async def test_secrets_status_lists_credentials_without_plaintext(
+    client: AsyncClient, deps: ServerDeps
+):
+    """多凭证：status 列出各凭证的 key 配置状态与被引用 agent，永不回显明文。"""
+    await _put_two_credentials(client)
+    assert deps.runtime_settings is not None  # status 数据源为运行时共享实例
+    os.environ["LLM_KEY_BACKUP"] = "sk-secret-backup"
+    r = await client.get("/api/secrets/status")
+    assert r.status_code == 200
+    assert "sk-secret-backup" not in r.text  # 无明文
+    creds = {c["name"]: c for c in r.json()["credentials"]}
+    assert creds["main"] == {
+        "name": "main",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "api_key_env": "LLM_KEY_MAIN",
+        "key_configured": False,
+        "used_by": ["trader"],
+    }
+    assert creds["backup"]["key_configured"] is True
+    assert creds["backup"]["api_key_env"] == "LLM_KEY_BACKUP"
+    assert creds["backup"]["used_by"] == ["reviewer"]
+
+
+async def test_secrets_status_llm_key_true_with_only_llm_key_prefix(
+    client: AsyncClient, deps: ServerDeps
+):
+    """llm_key = 任一生效凭证的 api_key_env 已配置（多凭证下不限于两个旧键名）。"""
+    await _put_two_credentials(client)
+    os.environ["LLM_KEY_BACKUP"] = "sk-only-llm-key"
+    r = await client.get("/api/secrets/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["llm_key"] is True  # 仅 LLM_KEY_BACKUP 已配置即为 true
+    assert "sk-only-llm-key" not in r.text
+
+
+async def test_put_config_credentials_without_default_binding_422(client: AsyncClient):
+    """契约钉死：仅 PUT llm.credentials（不含 default 凭证、不带 agents 段）→ 422。
+
+    agents 缺省指向 default，credentials 非空后 default 不存在 → Settings 校验拦截。
+    """
+    raw = (await client.get("/api/config")).json()
+    raw["llm"]["credentials"] = [
+        {"name": "main", "provider": "anthropic", "model": "m1"},
+        {"name": "backup", "provider": "openai_compat", "model": "m2"},
+    ]
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 422
+    assert "不存在的凭证" in r.json()["detail"]
+
+
+# ---------- PUT /api/config：多凭证与分配热键 ----------
+
+
+async def test_put_config_credentials_and_assignment_trigger_reconfigure(
+    client: AsyncClient, deps: ServerDeps
+):
+    """llm.credentials 与 agents.*.credential 变更：原地写回 runtime 并触发热重建。"""
+    assert deps.runtime_settings is not None
+    await _put_two_credentials(client)  # 首次登记凭证 + 分配
+    assert len(deps.reconfigure_calls) == 1
+    runtime = deps.runtime_settings
+    assert [c.name for c in runtime.llm.credentials] == ["main", "backup"]  # 原地生效
+    assert runtime.agents.trader.credential == "main"
+    assert runtime.agents.reviewer.credential == "backup"
+
+    raw = (await client.get("/api/config")).json()
+    raw["agents"]["trader"]["credential"] = "backup"  # 决策 agent 改分配
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 200
+    assert r.json()["saved"] is True and r.json()["llm_configured"] is True
+    assert len(deps.reconfigure_calls) == 2  # 分配变化同样触发热重建
+    assert deps.runtime_settings.agents.trader.credential == "backup"
+
+
+async def test_put_config_agents_unknown_credential_422(client: AsyncClient):
+    """agent 引用不存在的凭证：PUT /api/config 映 422，配置落不了盘。"""
+    raw = (await client.get("/api/config")).json()
+    raw["llm"]["credentials"] = [{"name": "main", "provider": "anthropic", "model": "m1"}]
+    raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "ghost"}}
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 422
+    assert "不存在的凭证" in r.json()["detail"]

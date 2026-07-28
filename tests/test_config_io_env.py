@@ -16,7 +16,8 @@ from src.config_io import ConfigError, set_env_keys
 @pytest.fixture(autouse=True)
 def _clean_env():
     """用例前后恢复环境变量原状（set_env_keys 直接写 os.environ，须手动快照恢复）。"""
-    names = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    names += [k for k in os.environ if k.startswith("LLM_KEY_")]
     saved = {k: os.environ.get(k) for k in names}
     for k in names:
         os.environ.pop(k, None)
@@ -26,6 +27,8 @@ def _clean_env():
             os.environ.pop(k, None)
         else:
             os.environ[k] = saved[k]  # type: ignore[index]
+    for k in [k for k in os.environ if k.startswith("LLM_KEY_") and k not in saved]:
+        os.environ.pop(k, None)  # 用例期间新增的 LLM_KEY_* 一并清除
 
 
 @pytest.fixture
@@ -97,3 +100,29 @@ def test_rejects_control_chars_in_key(env_file: Path):
     """key 含控制字符同样拒绝。"""
     with pytest.raises(ConfigError, match="控制字符"):
         set_env_keys({"OPENAI_API_KEY\r": "x"}, env_file)
+
+
+# ---------- 键名白名单（防经 API 篡改 GATE_API_KEY 等） ----------
+
+
+def test_whitelist_allows_llm_key_prefix(env_file: Path):
+    """LLM_KEY_* 键可写（多凭证的 key 落盘通道）。"""
+    assert set_env_keys({"LLM_KEY_BACKUP": "sk-x"}, env_file) == ["LLM_KEY_BACKUP"]
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert lines[-1] == "LLM_KEY_BACKUP=sk-x"
+    assert os.environ["LLM_KEY_BACKUP"] == "sk-x"
+
+
+def test_whitelist_allows_builtin_llm_keys(env_file: Path):
+    """ANTHROPIC_API_KEY / OPENAI_API_KEY 在白名单内（旧行为不变）。"""
+    written = set_env_keys({"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, env_file)
+    assert written == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+
+
+def test_whitelist_rejects_gate_and_arbitrary_keys(env_file: Path):
+    """白名单外键名（GATE_API_KEY 等）一律拒绝，文件不被污染。"""
+    for bad in ("GATE_API_KEY", "GATE_API_SECRET", "TELEGRAM_BOT_TOKEN", "LLM_KEY", "llm_key_x"):
+        with pytest.raises(ConfigError, match="白名单"):
+            set_env_keys({bad: "attacker"}, env_file)
+    assert "attacker" not in env_file.read_text(encoding="utf-8")
+    assert "GATE_API_KEY=gate-old" in env_file.read_text(encoding="utf-8")  # 原有行未动

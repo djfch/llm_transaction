@@ -220,15 +220,31 @@ export interface RiskConfig {
   kill_switch: boolean // 总开关（此处只读回显，操作走 /api/kill_switch）
 }
 
+/** LLM 凭证定义：llm.credentials 数组项（PUT /api/config 整体替换） */
+export interface CredentialConfig {
+  name: string // 凭证名（小写字母数字连字符，如 claude-main）
+  provider: 'anthropic' | 'openai_compat'
+  model: string
+  max_tokens: number
+  openai_base_url: string // provider=openai_compat 时的接口地址（可空）
+  api_key_env: string // 该凭证 key 在服务器 .env 中的变量名（如 LLM_KEY_CLAUDE_MAIN）
+}
+
 /** 可编辑配置：GET/PUT /api/config（与 config.yaml 的可编辑子集对齐） */
 export interface AppConfig {
   mode: string // 运行模式
   llm: {
-    provider: string // anthropic / openai_compat
+    provider: string // anthropic / openai_compat（旧平铺字段；credentials 非空时由凭证接管）
     model: string
     max_tokens: number
     openai_base_url: string
     max_consecutive_failures: number
+    credentials?: CredentialConfig[] // 多凭证列表；缺失 = 旧版单凭证（default）配置
+  }
+  agents?: {
+    // 按 agent 分配凭证（缺失 = 旧配置，两者皆用 default 凭证）
+    trader: { credential: string } // 决策 agent 使用的凭证名
+    reviewer: { credential: string } // 复盘 agent 使用的凭证名
   }
   risk: RiskConfig
   scheduler: {
@@ -256,17 +272,30 @@ export interface PutConfigResult {
   llm_error?: string // 仅 llm 热键变更时返回：provider 重建错误（空串 = 正常）
 }
 
-/** 密钥配置状态：GET /api/secrets/status（只返回布尔，永不返回明文） */
+/** 凭证配置状态：GET /api/secrets/status 的 credentials 数组项（永无明文） */
+export interface CredentialStatus {
+  name: string // 凭证名
+  provider: 'anthropic' | 'openai_compat'
+  model: string
+  api_key_env: string // 该凭证 key 在服务器 .env 中的变量名
+  key_configured: boolean // 该凭证的 key 是否已配置
+  used_by: string[] // 引用该凭证的 agent 名（trader=决策 / reviewer=复盘）
+}
+
+/** 密钥配置状态：GET /api/secrets/status（只返回布尔与凭证状态，永不返回明文） */
 export interface SecretsStatus {
   gate_key: boolean // 交易所 API key 是否已配置
-  llm_key: boolean // LLM key 是否已配置
+  llm_key: boolean // LLM key 是否已配置（任一凭证已配置即为 true）
   telegram: boolean // Telegram token 是否已配置
+  credentials: CredentialStatus[] // 凭证列表（旧配置后端合成 default；防御性按可缺失处理）
 }
 
 /** LLM 密钥保存请求体：POST /api/secrets（空串 = 不改动该项，发送前剔除） */
 export interface SetSecretsBody {
-  anthropic_api_key?: string // Anthropic API Key（非空才发送）
-  openai_api_key?: string // OpenAI 兼容接口 Key（非空才发送）
+  anthropic_api_key?: string // Anthropic API Key（非空才发送，旧形式）
+  openai_api_key?: string // OpenAI 兼容接口 Key（非空才发送，旧形式）
+  credential?: string // 凭证名（新形式：与 api_key 成对，按凭证写 .env 对应键）
+  api_key?: string // 凭证 key 明文（仅传输，后端写 .env 后不落响应）
 }
 
 /** LLM 密钥保存结果：POST /api/secrets 响应（永不含密钥明文） */

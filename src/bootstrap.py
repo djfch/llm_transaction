@@ -18,13 +18,12 @@ import uvicorn
 
 from src.agent.loop import DecisionLoop
 from src.agent.prompts import PromptLoader
-from src.agent.providers.anthropic import AnthropicProvider
 from src.agent.providers.base import LLMError, LLMProvider
+from src.agent.providers.factory import build_provider, create_provider, resolve_agent_credential
 from src.agent.providers.mock import MockProvider
-from src.agent.providers.openai_compat import OpenAICompatProvider
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
-from src.config import ROOT, LLMConfig, Settings, Watchlist
+from src.config import ROOT, Settings, Watchlist
 from src.config_io import read_settings_raw, write_settings
 from src.gateway.base import Candle, Contract, Gateway, Ticker
 from src.gateway.gate_rest import GateRestGateway
@@ -118,48 +117,34 @@ def _build_gateway(
     return gateway
 
 
-def _create_provider(llm_config: LLMConfig) -> LLMProvider:
-    """按配置构造真实 provider；缺 key 抛 LLMError（由调用方决定降级或保留旧 provider）。"""
-    if llm_config.provider == "anthropic":
-        return AnthropicProvider(llm_config)
-    return OpenAICompatProvider(llm_config)
-
-
-def _build_provider(settings: Settings, mock_llm: bool) -> LLMProvider | None:
-    """构造 provider：mock 走 MockProvider；缺 key 等 LLMError 降级为 None（启动不崩）。
-
-    None 时决策循环跳过每轮（见 DecisionLoop.run_once），待前端补齐 key 后热重建。
-    """
-    if mock_llm or os.environ.get("LLM_MOCK") == "1":
-        return MockProvider()
-    try:
-        return _create_provider(settings.llm)
-    except LLMError as exc:
-        logger.warning("LLM provider 初始化失败（可经前端配置后热重建）：%s", exc)
-        return None
-
-
 def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Awaitable[dict]]:
-    """生成 LLM 热重建回调：按运行时 settings.llm + 当前环境变量重建 provider 并热替换。
+    """生成 LLM 热重建回调：按各 agent 当前绑定凭证逐个重建 provider 并热替换。
 
-    重建失败（LLMError）保留旧 provider，诚实回报 llm_configured（旧 provider 是否存在）
-    与 error 原文；mock 模式直接回报已配置。响应契约：{"llm_configured": bool, "error": str}。
+    单 agent 重建失败（LLMError）保留其旧 provider 并在 error 中点名（多个错误用
+    中文分号连接）；mock 模式直接回报已配置。响应契约：{"llm_configured": bool, "error": str}。
     """
 
     async def reconfigure() -> dict:
         if mock_llm or os.environ.get("LLM_MOCK") == "1":
             return {"llm_configured": True, "error": ""}
-        try:
-            provider = _create_provider(ctx.settings.llm)
-        except LLMError as exc:
-            logger.warning("LLM provider 热重建失败（保留旧 provider）：%s", exc)
-            return {"llm_configured": ctx.loop.llm_configured, "error": str(exc)}
-        ctx.loop.set_provider(provider)
-        ctx.review.agent.set_provider(provider)  # 复盘 agent 与决策循环共享同一 provider
-        logger.info(
-            "LLM provider 已热重建（%s / %s）", ctx.settings.llm.provider, ctx.settings.llm.model
+        targets = (
+            ("trader", ctx.settings.agents.trader.credential, ctx.loop),
+            ("reviewer", ctx.settings.agents.reviewer.credential, ctx.review.agent),
         )
-        return {"llm_configured": True, "error": ""}
+        errors: list[str] = []
+        for agent_name, cred_name, target in targets:
+            try:
+                cred = resolve_agent_credential(ctx.settings, cred_name)
+                target.set_provider(create_provider(cred))
+                logger.info(
+                    "LLM provider 已热重建（%s → %s / %s）", agent_name, cred.provider, cred.model
+                )
+            except LLMError as exc:
+                logger.warning(
+                    "LLM provider 热重建失败（%s，保留旧 provider）：%s", agent_name, exc
+                )
+                errors.append(f"{agent_name}: {exc}")
+        return {"llm_configured": ctx.loop.llm_configured, "error": "；".join(errors)}
 
     return reconfigure
 
@@ -243,7 +228,7 @@ def _build_loop(
 ) -> DecisionLoop:
     """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。
 
-    provider 由 build_app 统一创建一次传入（与复盘 agent 共享同一实例）。
+    provider 由 build_app 按 trader 绑定凭证构造传入（与复盘 agent 各自独立实例）。
     """
     notifier = build_notifier(settings.notify)
 
@@ -314,12 +299,17 @@ async def build_app(
     source.set_handlers(
         on_ticker=_make_on_ticker(gateway, triggers, lambda msg: event_queue.put_nowait(msg))
     )
-    # provider 创建一次：决策循环与复盘 agent 共享同一实例（热重建时两边同步替换）
-    provider = _build_provider(settings, mock_llm)
+    # 每个 agent 按其绑定凭证各自构造 provider（同一凭证也各自建实例：互不阻塞、可独立热重建）；
+    # mock 模式共享同一 MockProvider 实例
+    if mock_llm or os.environ.get("LLM_MOCK") == "1":
+        trader_provider = reviewer_provider = MockProvider()
+    else:
+        trader_provider = build_provider(settings, mock_llm, settings.agents.trader.credential)
+        reviewer_provider = build_provider(settings, mock_llm, settings.agents.reviewer.credential)
     loop = _build_loop(
         settings,
         watchlist,
-        provider=provider,
+        provider=trader_provider,
         gateway=gateway,
         repo=repo,
         candles=candles,
@@ -335,7 +325,7 @@ async def build_app(
         gateway=gateway,
         source=source,
         loop=loop,
-        review=await build_review(settings, repo, audit, provider),  # 复盘子系统装配
+        review=await build_review(settings, repo, audit, reviewer_provider),  # 复盘子系统装配
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,

@@ -9,6 +9,7 @@ import type {
   ApiClient,
   AppConfig,
   Candle,
+  CredentialStatus,
   EquityPoint,
   Note,
   OpenOrder,
@@ -98,6 +99,29 @@ const config: AppConfig = {
     max_tokens: 4096,
     openai_base_url: '',
     max_consecutive_failures: 3,
+    // 多凭证夹具：一条 anthropic 已配置（决策用），一条 openai_compat 未配置（复盘用）
+    credentials: [
+      {
+        name: 'claude-main',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4096,
+        openai_base_url: '',
+        api_key_env: 'LLM_KEY_CLAUDE_MAIN',
+      },
+      {
+        name: 'deepseek-backup',
+        provider: 'openai_compat',
+        model: 'deepseek-chat',
+        max_tokens: 4096,
+        openai_base_url: 'https://api.deepseek.com/v1',
+        api_key_env: 'LLM_KEY_DEEPSEEK_BACKUP',
+      },
+    ],
+  },
+  agents: {
+    trader: { credential: 'claude-main' },
+    reviewer: { credential: 'deepseek-backup' },
   },
   risk: {
     max_position_pct: 0.3,
@@ -111,6 +135,26 @@ const config: AppConfig = {
   scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
   notify: { telegram_enabled: false },
 }
+
+// 凭证 key 配置状态（与 config.llm.credentials 对应；setSecrets 可翻转 key_configured）
+let credentials: CredentialStatus[] = [
+  {
+    name: 'claude-main',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    api_key_env: 'LLM_KEY_CLAUDE_MAIN',
+    key_configured: true,
+    used_by: ['trader'],
+  },
+  {
+    name: 'deepseek-backup',
+    provider: 'openai_compat',
+    model: 'deepseek-chat',
+    api_key_env: 'LLM_KEY_DEEPSEEK_BACKUP',
+    key_configured: false,
+    used_by: ['reviewer'],
+  },
+]
 
 let strategy = `# 系统提示词（system_prompt.md）\n\n你是 Gate.io USDT 永续合约的自主交易 Agent。\n\n## 原则\n\n1. 保本优先，单笔风险不超过权益的 2%。\n2. 只交易白名单合约，遵守风控参数。\n3. 每次决策说明理由，并给出下次唤醒时间。\n`
 
@@ -341,6 +385,20 @@ export const mockApi: ApiClient = {
   getConfig: () => reply(structuredClone(config)),
   putConfig: (next) => {
     Object.assign(config, next)
+    // llm.credentials 整体替换时同步密钥状态列表：key_configured 按名保留，used_by 按 agents 分配重算
+    if (next.llm.credentials) {
+      credentials = next.llm.credentials.map((c) => ({
+        name: c.name,
+        provider: c.provider,
+        model: c.model,
+        api_key_env: c.api_key_env,
+        key_configured: credentials.find((o) => o.name === c.name)?.key_configured ?? false,
+        used_by: [
+          ...(next.agents?.trader.credential === c.name ? ['trader'] : []),
+          ...(next.agents?.reviewer.credential === c.name ? ['reviewer'] : []),
+        ],
+      }))
+    }
     // 与后端契约对齐：{saved, needs_restart} + llm 热键（恒按变更处理）两键
     return reply({ saved: true, needs_restart: [], llm_configured: llmConfigured, llm_error: '' })
   },
@@ -356,12 +414,25 @@ export const mockApi: ApiClient = {
     watchlist.settle = list.settle
     return reply(structuredClone(watchlist))
   },
-  getSecretsStatus: () => reply({ gate_key: true, llm_key: llmConfigured, telegram: false }),
+  getSecretsStatus: () =>
+    reply({
+      gate_key: true,
+      llm_key: llmConfigured,
+      telegram: false,
+      credentials: credentials.map((c) => ({ ...c, used_by: [...c.used_by] })),
+    }),
   setSecrets: (body) => {
     // 契约：空串/缺省 = 不改动；任一 key 非空则视为已配置（mock 无法模拟失败，error 恒空）
     const anthropic = body.anthropic_api_key ?? ''
     const openai = body.openai_api_key ?? ''
     if (anthropic !== '' || openai !== '') llmConfigured = true
+    // 契约扩展：{credential, api_key} 按凭证名写 key；未知凭证 422（与后端一致）
+    if (body.credential && body.api_key) {
+      const target = credentials.find((c) => c.name === body.credential)
+      if (!target) return Promise.reject(new ApiError(422, `未知凭证: ${body.credential}`))
+      target.key_configured = true
+      llmConfigured = true
+    }
     return reply({ saved: true, llm_configured: llmConfigured, error: '' })
   },
   setKillSwitch: (enabled) => {

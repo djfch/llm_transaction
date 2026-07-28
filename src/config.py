@@ -5,13 +5,20 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# LLM key 环境变量名白名单（.env 写入端 set_env_keys 与凭证 api_key_env 校验共用，防漂移）：
+# 两个旧键名 + LLM_KEY_* 前缀；白名单外键名绝不接受（防死凭证、防把 GATE_API_KEY 当 LLM key 读）
+ENV_KEY_WHITELIST = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+ENV_KEY_PREFIX = "LLM_KEY_"
 
 
 class GateConfig(BaseModel):
@@ -20,12 +27,80 @@ class GateConfig(BaseModel):
     live_host: str = "https://api.gateio.ws/api/v4"
 
 
+class CredentialConfig(BaseModel):
+    """一条 LLM 凭证：厂商 + 模型 + base_url + key 对应的环境变量名。
+
+    api_key_env 留空时按 `LLM_KEY_<name 大写，非字母数字换下划线>` 推导；
+    显式填写时必须是大写环境变量名（`^[A-Z][A-Z0-9_]*$`）且在白名单内
+    （ANTHROPIC_API_KEY / OPENAI_API_KEY / LLM_KEY_*，与 set_env_keys 写入端一致）。
+    key 明文永不进本模型/配置文件，只存在 .env（见 config_io.set_env_keys）。
+    """
+
+    name: str
+    provider: Literal["anthropic", "openai_compat"] = "anthropic"
+    model: str
+    max_tokens: int = 4096
+    openai_base_url: str = ""
+    api_key_env: str = ""
+
+    @model_validator(mode="after")
+    def _fill_or_check_api_key_env(self) -> CredentialConfig:
+        if not self.api_key_env:
+            self.api_key_env = ENV_KEY_PREFIX + re.sub(r"[^A-Z0-9]", "_", self.name.upper())
+        elif not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.api_key_env):
+            raise ValueError(
+                f"api_key_env 必须是大写环境变量名（^[A-Z][A-Z0-9_]*$）: {self.api_key_env}"
+            )
+        elif self.api_key_env not in ENV_KEY_WHITELIST and not self.api_key_env.startswith(
+            ENV_KEY_PREFIX
+        ):
+            raise ValueError(
+                f"api_key_env 必须在白名单内（{' / '.join(ENV_KEY_WHITELIST)} / {ENV_KEY_PREFIX}*）"
+                f": {self.api_key_env}"
+            )
+        return self
+
+
 class LLMConfig(BaseModel):
     provider: str = "anthropic"  # anthropic / openai_compat
     model: str = "claude-sonnet-4-5"
     max_tokens: int = 4096
     openai_base_url: str = ""
     max_consecutive_failures: int = 3
+    # 多凭证列表：为空时旧平铺字段生效（自动合成一条 default 凭证，零迁移）
+    credentials: list[CredentialConfig] = []
+
+    def resolve_credentials(self) -> list[CredentialConfig]:
+        """返回生效凭证列表：非空校验 name 唯一后返回；为空用旧平铺字段合成 default。"""
+        if self.credentials:
+            names = [c.name for c in self.credentials]
+            if len(set(names)) != len(names):
+                raise ValueError(f"llm.credentials 存在重名凭证: {sorted(set(names))}")
+            return list(self.credentials)
+        env = "ANTHROPIC_API_KEY" if self.provider == "anthropic" else "OPENAI_API_KEY"
+        return [
+            CredentialConfig(
+                name="default",
+                provider=self.provider,
+                model=self.model,
+                max_tokens=self.max_tokens,
+                openai_base_url=self.openai_base_url,
+                api_key_env=env,
+            )
+        ]
+
+
+class AgentBinding(BaseModel):
+    """单个 agent 的凭证分配：值为凭证 name。"""
+
+    credential: str = "default"
+
+
+class AgentsConfig(BaseModel):
+    """按 agent 分配凭证：trader（决策循环）/ reviewer（复盘 agent）。"""
+
+    trader: AgentBinding = AgentBinding()
+    reviewer: AgentBinding = AgentBinding()
 
 
 class RiskConfig(BaseModel):
@@ -114,6 +189,18 @@ class Settings(BaseModel):
     audit: AuditConfig = AuditConfig()
     review: ReviewConfig = ReviewConfig()
     log: LogConfig = LogConfig()
+    agents: AgentsConfig = AgentsConfig()
+
+    @model_validator(mode="after")
+    def _check_agent_credentials(self) -> Settings:
+        """agent 引用的凭证必须存在（凭证重名也在此经 resolve_credentials 拦截）。"""
+        names = {c.name for c in self.llm.resolve_credentials()}
+        for agent, binding in (("trader", self.agents.trader), ("reviewer", self.agents.reviewer)):
+            if binding.credential not in names:
+                raise ValueError(
+                    f"agents.{agent}.credential 引用了不存在的凭证: {binding.credential}"
+                )
+        return self
 
     def validate_mode(self) -> None:
         if self.mode not in ("paper", "testnet", "live"):
