@@ -10,24 +10,11 @@ import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import type { StrategyVersion } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
-import { fmtTime, strategyCreatorText } from '../../utils/format'
+import { fmtTime, strategyCreatorBadgeClass, strategyCreatorText } from '../../utils/format'
 import StateHint from '../../components/StateHint'
 
 /** 空版本列表复用同一引用。 */
 const EMPTY_VERSIONS: StrategyVersion[] = []
-
-/** created_by 徽标样式：复盘紫 / 回滚青 / 人工及其他灰 */
-function creatorBadgeClass(createdBy: string): string {
-  const base = 'rounded border px-1.5 py-0.5 text-[10px] font-medium'
-  switch (createdBy) {
-    case 'review_agent':
-      return `${base} border-violet-400/40 bg-violet-400/10 text-violet-300`
-    case 'rollback':
-      return `${base} border-cyan-400/40 bg-cyan-400/10 text-cyan-300`
-    default:
-      return `${base} border-zinc-600/50 bg-zinc-700/30 text-zinc-400`
-  }
-}
 
 /** diff 行着色：+ 绿 / - 红；+++ 与 --- 文件头行灰显，上下文行暗灰 */
 function diffLineClass(line: string): string {
@@ -63,7 +50,7 @@ function VersionRow({
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs font-bold text-zinc-200">v{version.id}</span>
-        <span className={creatorBadgeClass(version.createdBy)}>{strategyCreatorText(version.createdBy)}</span>
+        <span className={strategyCreatorBadgeClass(version.createdBy)}>{strategyCreatorText(version.createdBy)}</span>
         {isCurrent && (
           <span className="rounded border border-emerald-400/40 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
             当前

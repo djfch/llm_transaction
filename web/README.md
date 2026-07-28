@@ -26,7 +26,8 @@ src/
   api/          API 客户端层（types 契约 / http 真实实现 / mock 假数据 / ws 推送 / index 开关）
   components/   通用组件（Card、Badge、StateHint、AgentControl、KillSwitchButton、PaperEquitySetter）
   components/console/ 观察舱面板（TopBar、AccountPanel、LiveRoundHero、KlinePanel、RoundTimeline、
-                TradesTable、NotesPanel、PositionsPanel、EquityMiniChart、ConfigDrawer 等）
+                TradesTable、NotesPanel、PositionsPanel、EquityMiniChart、ReviewPanel、
+                StrategyPanel(策略只读视图)、ConfigDrawer 等）
   hooks/        useApiData（数据获取）、useWs（WS 订阅）、useRoundFocus（决策轮定位联动）
   pages/        ConsolePage（AI 大脑观察舱单页，路由「/」）
   pages/config/ 配置表单（RiskForm、GeneralForm、WatchlistEditor、StrategyEditor、SecretsForm、validate）

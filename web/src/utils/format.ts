@@ -112,3 +112,16 @@ export function strategyCreatorText(createdBy: string): string {
       return createdBy
   }
 }
+
+/** created_by(策略版本来源) → 徽标样式：复盘紫 / 回滚青 / 人工及其他灰（StrategyVersions 与 StrategyPanel 共用） */
+export function strategyCreatorBadgeClass(createdBy: string): string {
+  const base = 'rounded border px-1.5 py-0.5 text-[10px] font-medium'
+  switch (createdBy) {
+    case 'review_agent':
+      return `${base} border-violet-400/40 bg-violet-400/10 text-violet-300`
+    case 'rollback':
+      return `${base} border-cyan-400/40 bg-cyan-400/10 text-cyan-300`
+    default:
+      return `${base} border-zinc-600/50 bg-zinc-700/30 text-zinc-400`
+  }
+}
