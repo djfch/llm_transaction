@@ -1,10 +1,11 @@
 /**
  * 决策时间线：服务端分页展示决策轮；卡片详情按需加载，笔记引文独立读取最新内容。
  * WebSocket round 事件只作失效信号，当前页和总数均以 REST 响应为准。
+ * 策略版本标签：挂载时拉一次版本表，按 strategyMd5 join 出「vN · 来源」；WS round 事件随决策数据一并刷新版本表。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
-import type { Note, RoundSummary } from '../../api/types'
+import type { Note, RoundSummary, StrategyVersion } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { usePageState } from '../../hooks/usePageState'
 import { useRoundFocus } from '../../hooks/useRoundFocus'
@@ -68,11 +69,26 @@ export default function RoundTimeline() {
     () => api.getRounds(page * PAGE_SIZE, PAGE_SIZE),
     [page],
   )
+  // 策略版本表：挂载时拉一次，按 strategyMd5 join 版本标签；md5 重复（回滚同文）时保留最新版本
+  const versionsQ = useApiData(() => api.getStrategyVersions(), [])
+  const versionByMd5 = useMemo(() => {
+    const map = new Map<string, StrategyVersion>()
+    for (const v of versionsQ.data ?? []) {
+      if (!map.has(v.md5)) map.set(v.md5, v)
+    }
+    return map
+  }, [versionsQ.data])
+  /** md5 → 版本；空串或匹配不到返回 null（标签显示「—」） */
+  const resolveStrategyVersion = useCallback(
+    (md5: string): StrategyVersion | null => (md5 === '' ? null : (versionByMd5.get(md5) ?? null)),
+    [versionByMd5],
+  )
   const { lastMessage } = useWs()
   const { target } = useRoundFocus()
   const cardRefs = useRef(new Map<string, HTMLElement>())
   const items = query.data?.items ?? EMPTY_ROUNDS
   const { reload } = query
+  const { reload: reloadVersions } = versionsQ
 
   useEffect(() => {
     if (query.data) setTotal(query.data.total)
@@ -94,6 +110,7 @@ export default function RoundTimeline() {
     if (lastMessage?.type !== 'round') return
     let alive = true
     reload()
+    reloadVersions() // 新决策轮可能由新策略版本驱动，版本表随决策数据一并刷新
     fetchNotesMap()
       .then((map) => {
         if (alive) setNotesMap(map)
@@ -102,7 +119,7 @@ export default function RoundTimeline() {
     return () => {
       alive = false
     }
-  }, [lastMessage, reload])
+  }, [lastMessage, reload, reloadVersions])
 
   /** 展开目标卡片、滚动到可视区中央，并短暂显示定位高亮。 */
   const reveal = useCallback((roundId: string) => {
@@ -173,6 +190,8 @@ export default function RoundTimeline() {
           决策时间线 <span className="text-xs font-normal text-zinc-500">— Agent 的每一笔思考都留痕</span>
         </h2>
         <span className="ml-auto text-xs tabular-nums text-zinc-500">共 {total} 条决策</span>
+        {/* 版本表失败不阻断时间线：非阻断提示，徽标整体降级「—」 */}
+        {versionsQ.error !== null && <span className="text-[10px] text-rose-400">策略版本表加载失败</span>}
       </header>
 
       {notice && (
@@ -200,6 +219,7 @@ export default function RoundTimeline() {
                 note={notesMap.get(round.round_id)}
                 expanded={expandedId === round.round_id}
                 highlight={highlightId === round.round_id}
+                resolveStrategyVersion={resolveStrategyVersion}
                 onToggle={() => setExpandedId((current) => (current === round.round_id ? null : round.round_id))}
                 cardRef={cardRefOf(round.round_id)}
               />

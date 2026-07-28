@@ -26,6 +26,7 @@ src/
   agent/                     # LLM 循环、Provider 抽象、工具集（交易类工具在 tool_trading）
   audit/                     # 审计溯源与日志
   scheduler/                 # 唤醒调度
+  review/                    # 复盘 agent：只读工具 + 策略版本化
   notify/                    # Telegram 通知
   server/                    # FastAPI 监控 API + WebSocket
 web/                         # React 前端
@@ -33,7 +34,7 @@ tests/                       # pytest
 scripts/                     # 验证、Git 钩子辅助与部署脚本
 ```
 
-运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `system_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。
+运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `system_prompt.md` / `review_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。
 
 ## 硬性规范
 

@@ -1,14 +1,15 @@
 /**
- * 决策时间线卡片：摘要行（短号/唤醒来源徽标/已完成徽标/时间/summary），点击展开审计详情。
+ * 决策时间线卡片：摘要行（短号/唤醒来源徽标/策略版本徽标/已完成徽标/时间/summary），点击展开审计详情。
  * 归属笔记的轮在 summary 下嵌引文块（紫色左边条 + 斜体，方案 C 同款）。
+ * 策略版本徽标由父级注入的 resolveStrategyVersion 按 strategyMd5 join（vN · 来源；空串/无匹配显示「—」）；
  * 展开后 lazy 拉取 getRound（卡片生命周期内缓存），渲染两个折叠区：
  * 「工具调用详情」→ ToolSteps(compact)；「完整对话」→ ConversationThread（自带折叠）。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api } from '../../api'
-import type { RoundDetail, RoundSummary } from '../../api/types'
-import { fmtClock, fmtTime, shortRoundId } from '../../utils/format'
+import type { RoundDetail, RoundSummary, StrategyVersion } from '../../api/types'
+import { fmtClock, fmtTime, shortRoundId, strategyCreatorText } from '../../utils/format'
 import ConversationThread from './ConversationThread'
 import ToolSteps from './ToolSteps'
 
@@ -23,8 +24,23 @@ interface TimelineCardProps {
   note?: RoundNote // 归属笔记（无归属不渲染引文块）
   expanded: boolean // 受控展开（父级手风琴 + focus 定位共用）
   highlight: boolean // focus 定位描边高亮（约 2s，附 jump-hl 类供测试/样式锚定）
+  resolveStrategyVersion: (md5: string) => StrategyVersion | null // 策略版本 join（父级统一拉取版本表）
   onToggle: () => void
   cardRef: (el: HTMLElement | null) => void // 锚定（scrollIntoView 用）
+}
+
+/** 版本标签统一文案：vN · 来源（人工/复盘/回滚）；无关联显示「—」 */
+function strategyVersionText(version: StrategyVersion | null): string {
+  return version ? `v${version.id} · ${strategyCreatorText(version.createdBy)}` : '—'
+}
+
+/** 策略版本徽标：中性灰（元信息，点击不跳转） */
+function StrategyVersionBadge({ version }: { version: StrategyVersion | null }) {
+  return (
+    <span className="rounded border border-zinc-600/50 bg-zinc-700/30 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+      {strategyVersionText(version)}
+    </span>
+  )
 }
 
 /** wake_source → 徽标样式：定时灰 / 价格青 / 手动·启动·其他紫（文案保留原始来源） */
@@ -73,6 +89,7 @@ export default function TimelineCard({
   note,
   expanded,
   highlight,
+  resolveStrategyVersion,
   onToggle,
   cardRef,
 }: TimelineCardProps) {
@@ -123,6 +140,7 @@ export default function TimelineCard({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-bold text-zinc-200">#{shortRoundId(round.round_id)}</span>
           <span className={wakeBadgeClass(round.wake_source)}>{round.wake_source}</span>
+          <StrategyVersionBadge version={resolveStrategyVersion(round.strategyMd5)} />
           {/* 历史轮都是已完成（静态文案，方案 C 同款灰字小徽标） */}
           <span className="text-[11px] text-zinc-600">已完成</span>
           <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
@@ -151,6 +169,9 @@ export default function TimelineCard({
           {error && <p className="py-3 text-xs text-rose-400">加载失败：{error}</p>}
           {detail && (
             <>
+              <p className="mb-2 font-mono text-[11px] text-zinc-500">
+                策略版本：{strategyVersionText(resolveStrategyVersion(detail.strategyMd5))}
+              </p>
               <FoldSection
                 title={`工具调用详情 · tool_calls（${detail.tool_calls.length} 步）`}
                 open={toolsOpen}

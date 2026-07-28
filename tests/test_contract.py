@@ -10,10 +10,17 @@
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
 - GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，仅 active=1）
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
-- GET  /api/rounds → items[] 含 round_id 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
-- GET  /api/rounds/{id} → round 字段展平到顶层（round_id/prompt_snapshot/llm_raw 等）
+- GET  /api/rounds → items[] 含 round_id/strategy_md5 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
+- GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
+- GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at；顶层 total
+- GET  /api/review/reports/{id} → 同列表项 9 键，report_md 为全文
+- POST /api/review/run → started/ok（409 复盘进行中；503 LLM 未配置或未接线）
+- GET  /api/strategy/versions → items[] 含 id/md5/created_by/reason/report_id/created_at（不含 content，省流量）
+- GET  /api/strategy/versions/{id} → 同列表项键 + content 全文
+- GET  /api/strategy/diff?from=&to= → PlainText unified diff（契约只断状态码）
+- POST /api/strategy/rollback/{id} → rolled_back_to/version（404 版本不存在；503 未接线）
 - GET  /api/candles → items[] 含 t/o/h/l/c/v
 - GET  /api/config → mode 且含 llm/risk/scheduler 段；GET /api/watchlist → settle/contracts
 - GET  /api/secrets/status → gate_key/llm_key/telegram 全布尔
@@ -83,6 +90,25 @@ async def _reconfigure() -> dict:
     return {"llm_configured": True, "error": ""}
 
 
+async def _review_run() -> dict:
+    return {
+        "started": True,
+        "ok": True,
+        "report_id": 1,
+        "round_id": "rv-round",
+        "strategy_action": "none",
+        "new_version_id": None,
+    }
+
+
+async def _strategy_rollback(version_id: int) -> dict:
+    return {"rolled_back_to": version_id, "version": 3}
+
+
+# 长复盘报告（>200 字符）：验证列表 report_md 截断、详情全文
+_LONG_REPORT_MD = "# 复盘报告\n\n" + "区间成交 3 笔，胜率 66.7%，最大回撤可控。" * 20
+
+
 async def _seed(repo: Repo) -> None:
     """种子数据：决策/审计/工具调用/成交/笔记各一条，保证列表端点非空（键断言才有意义）。"""
     await repo.save_decision(round_id="r1", mode="paper", wake_source="timer")
@@ -94,6 +120,15 @@ async def _seed(repo: Repo) -> None:
     )
     await repo.add_note("r1", "第一条笔记")
     await repo.add_alert("r1", BTC, "above", D("62000"))
+    # 复盘种子：两个策略版本 + 一份关联 v2 的报告（版本↔报告互相关联的生产路径）
+    await repo.review.save_strategy_version("策略书 v1：保守止损。", "md5-v1", "human", "初始版本")
+    v2 = await repo.review.save_strategy_version(
+        "策略书 v2：收紧止损。", "md5-v2", "review_agent", "复盘改写"
+    )
+    report = await repo.review.save_review_report(
+        1000.0, 2000.0, '{"trades":3}', _LONG_REPORT_MD, "rewrite", new_version_id=v2.id
+    )
+    await repo.review.attach_report_to_version(v2.id, report.id)
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +170,8 @@ async def deps(tmp_path: Path):
         agent_start=lambda: _set_running(True),
         agent_stop=lambda: _set_running(False),
         llm_reconfigure=_reconfigure,
+        review_run=_review_run,
+        strategy_rollback=_strategy_rollback,
     )
     yield d
     await db.close()
@@ -249,12 +286,12 @@ async def test_rounds_contract(client: AsyncClient):
     assert body["items"], "/api/rounds items 应非空"
     _typed(body, "total:i offset:i limit:i", "/api/rounds")
     item = body["items"][0]
-    _typed(item, "round_id:s", "/api/rounds items[0]")
+    _typed(item, "round_id:s strategy_md5:s", "/api/rounds items[0]")
     _typed(item["audit"], "round_id:s prompt_md5:s started_at:n ended_at:n error:s", "audit 摘要")
     detail = await _get(client, "/api/rounds/r1")
     # 契约：round 展平到顶层（前端 RoundDetail 读顶层 round_id/prompt_snapshot/llm_raw）
     assert detail["round_id"] == "r1"
-    _typed(detail, "prompt_snapshot:s llm_raw:s", "/api/rounds/r1 展平字段")
+    _typed(detail, "prompt_snapshot:s llm_raw:s strategy_md5:s", "/api/rounds/r1 展平字段")
     assert detail["tool_calls"], "/api/rounds/r1 tool_calls 应非空"
     _typed(
         detail["tool_calls"][0],
@@ -318,3 +355,49 @@ async def test_post_secrets_contract_and_no_echo(client: AsyncClient, deps: Serv
     assert FAKE_ANTHROPIC_KEY in deps.env_path.read_text(encoding="utf-8")  # 确已注入
     for path in ("/api/secrets/status", "/api/status", "/api/config"):
         await _get(client, path)  # _get 内已扫描：注入后的假 key 绝不出现在任何响应
+
+
+_REPORT_SPEC = (
+    "id:i period_start:n period_end:n stats_json:s report_md:s "
+    "strategy_action:s new_version_id:i error:s created_at:n"
+)
+
+
+async def test_review_strategy_contract(client: AsyncClient):
+    """复盘/策略版本端点契约：响应键与类型冻结（diff 为 PlainText，只断状态码）。"""
+    body = await _get(client, "/api/review/reports?limit=10&offset=0")
+    _typed(body, "total:i", "/api/review/reports")
+    assert body["items"], "/api/review/reports items 应非空"
+    item = body["items"][0]
+    _typed(item, _REPORT_SPEC, "/api/review/reports items[0]")
+    assert len(item["report_md"]) == 200  # 列表截断 200 字符（省流量，键名不变）
+    detail = await _get(client, f"/api/review/reports/{item['id']}")
+    _typed(detail, _REPORT_SPEC, "/api/review/reports/{id}")
+    assert len(detail["report_md"]) > 200  # 详情给全文
+
+    run = await _post(client, "/api/review/run")
+    _typed(run, "started:b ok:b", "POST /api/review/run")
+
+    versions = await _get(client, "/api/strategy/versions")
+    assert versions["items"], "/api/strategy/versions items 应非空"
+    v_item = versions["items"][0]
+    _typed(
+        v_item,
+        "id:i md5:s created_by:s reason:s report_id:i created_at:n",
+        "/api/strategy/versions items[0]",
+    )
+    assert "content" not in v_item  # 列表不含全文（省流量）
+    v_detail = await _get(client, f"/api/strategy/versions/{v_item['id']}")
+    _typed(
+        v_detail,
+        "id:i content:s md5:s created_by:s reason:s report_id:i created_at:n",
+        "/api/strategy/versions/{id}",
+    )
+
+    # diff 为 PlainText：契约只断状态码（+ 泄漏扫描）
+    r = await client.get(f"/api/strategy/diff?from={versions['items'][1]['id']}&to={v_item['id']}")
+    assert r.status_code == 200, f"GET /api/strategy/diff → {r.status_code}"
+    _no_leak(r.text, "GET /api/strategy/diff")
+
+    rollback = await _post(client, "/api/strategy/rollback/1")
+    _typed(rollback, "rolled_back_to:i version:i", "POST /api/strategy/rollback/{id}")

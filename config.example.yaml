@@ -32,6 +32,9 @@ server:
   port: 17577
 audit:
   dir: logs/audit
+review:
+  enabled: true
+  daily_time: "03:00"
 log:
   dir: logs
   level: INFO

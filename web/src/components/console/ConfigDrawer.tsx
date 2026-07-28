@@ -1,7 +1,7 @@
 /**
  * 配置抽屉（方案 C 换皮）：右侧滑出，固定定位、宽 480px、滑入动画、遮罩点击 / ESC 关闭。
- * 内部完整复用 pages/config 五个表单（SecretsForm/GeneralForm/RiskForm/WatchlistEditor/StrategyEditor）；
- * 表单为 props 驱动，数据由本抽屉在打开时统一拉取。
+ * 内部完整复用 pages/config 五个表单（SecretsForm/GeneralForm/RiskForm/WatchlistEditor/StrategyEditor）
+ * 及 StrategyVersions 版本历史；表单为 props 驱动，数据由本抽屉在打开时统一拉取。
  * 仅在 open 时挂载表单主体：关闭不发起请求，每次打开拉取最新配置。
  */
 import { useEffect, useState, type ReactNode } from 'react'
@@ -13,6 +13,7 @@ import GeneralForm from '../../pages/config/GeneralForm'
 import RiskForm from '../../pages/config/RiskForm'
 import SecretsForm from '../../pages/config/SecretsForm'
 import StrategyEditor from '../../pages/config/StrategyEditor'
+import StrategyVersions from '../../pages/config/StrategyVersions'
 import WatchlistEditor from '../../pages/config/WatchlistEditor'
 
 /** 抽屉小节：标题 + 加载/失败/空态 + 表单内容 */
@@ -28,7 +29,9 @@ function DrawerSection<T>({
   return (
     <section>
       <h3 className="mb-3 text-xs tracking-widest text-zinc-500">{title}</h3>
-      <StateHint loading={query.loading} error={query.error}>
+      {/* 仅初载（data 尚未就绪）转圈；后台 reload 保活 children——
+          否则刷新会卸载表单，销毁成功提示/已保存标记等用户可见状态 */}
+      <StateHint loading={query.loading && query.data === null} error={query.error}>
         {query.data !== null && children(query.data)}
       </StateHint>
     </section>
@@ -105,13 +108,17 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
 
       <DrawerSection title="策略 Prompt · 在线编辑" query={strategyQ}>
         {(content) => (
-          <StrategyEditor
-            initial={content}
-            onSave={async (next) => {
-              await api.putStrategy(next)
-              strategyQ.reload()
-            }}
-          />
+          <>
+            <StrategyEditor
+              initial={content}
+              onSave={async (next) => {
+                await api.putStrategy(next)
+                strategyQ.reload()
+              }}
+            />
+            {/* 版本历史侧栏（挂在编辑器下方）；回滚成功后经 strategyQ.reload 重拉全文，编辑器随 initial 同步 */}
+            <StrategyVersions onRolledBack={strategyQ.reload} />
+          </>
         )}
       </DrawerSection>
     </>

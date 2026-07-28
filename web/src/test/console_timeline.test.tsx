@@ -4,17 +4,35 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Note, NotesPageResult, RoundDetail, RoundsPageResult, RoundSummary, WsMessage } from '../api/types'
+import type {
+  Note,
+  NotesPageResult,
+  RoundDetail,
+  RoundsPageResult,
+  RoundSummary,
+  StrategyVersion,
+  WsMessage,
+} from '../api/types'
 import RoundTimeline from '../components/console/RoundTimeline'
 import { RoundFocusProvider, useRoundFocus } from '../hooks/useRoundFocus'
 
-/** 37 轮决策足以覆盖 8 页数据与五页码滑动窗口。 */
+/**
+ * 37 轮决策足以覆盖 8 页数据与五页码滑动窗口。
+ * strategyMd5 分布覆盖版本标签三种形态：匹配版本表（md5-aaa/bbb）/ 无匹配（md5-unknown）/ 空串。
+ */
 const ROUNDS: RoundSummary[] = Array.from({ length: 37 }, (_, index) => ({
   round_id: `id-${100 - index}`,
   started_at: new Date(1_700_000_000_000 - index * 3_600_000).toISOString(),
   wake_source: ['定时唤醒', '价格触发', '手动唤醒'][index % 3],
   summary: `第 ${100 - index} 轮结论摘要`,
+  strategyMd5: index % 5 === 4 ? '' : index % 5 === 3 ? 'md5-unknown' : ['md5-aaa', 'md5-bbb'][index % 2],
 }))
+
+/** 策略版本表夹具（最新在前）：md5-aaa→v2 复盘、md5-bbb→v3 人工 */
+const VERSIONS: StrategyVersion[] = [
+  { id: 3, md5: 'md5-bbb', createdBy: 'human', reason: '', reportId: null, time: '2026-07-26T00:00:00.000Z' },
+  { id: 2, md5: 'md5-aaa', createdBy: 'review_agent', reason: '复盘改写', reportId: 1, time: '2026-07-25T00:00:00.000Z' },
+]
 
 /** 将任意列表切片为与后端一致的分页响应。 */
 function pageOf<T>(items: T[], offset: number, limit: number) {
@@ -34,12 +52,14 @@ const holder = vi.hoisted(() => ({
   getRounds: vi.fn(),
   getRound: vi.fn(),
   getNotes: vi.fn(),
+  getStrategyVersions: vi.fn(),
 }))
 vi.mock('../api', () => ({
   api: {
     getRounds: (offset: number, limit: number) => holder.getRounds(offset, limit),
     getRound: (roundId: string) => holder.getRound(roundId),
     getNotes: (offset?: number, limit?: number) => holder.getNotes(offset, limit),
+    getStrategyVersions: () => holder.getStrategyVersions(),
   },
 }))
 
@@ -58,6 +78,7 @@ function detail(roundId: string): RoundDetail {
     tool_calls: [
       { seq: 1, tool: 'get_account', args: {}, risk_verdict: '', risk_reason: '', result: 'ok', duration_ms: 5 },
     ],
+    strategyMd5: 'md5-aaa',
   }
 }
 
@@ -80,6 +101,7 @@ beforeEach(() => {
   holder.getNotes.mockImplementation((offset = 0, limit = 20): Promise<NotesPageResult> =>
     Promise.resolve(pageOf(currentNotes, offset, limit)),
   )
+  holder.getStrategyVersions.mockImplementation((): Promise<StrategyVersion[]> => Promise.resolve([...VERSIONS]))
 })
 
 /** 焦点按钮模拟成交表或 K 线向时间线发送的 round_id 定位请求。 */
@@ -230,5 +252,46 @@ describe('RoundTimeline(决策时间线)', () => {
     initialPage.resolve(pageOf(currentRounds, 0, 5))
     expect(await screen.findByText('第 94 轮结论摘要')).toBeInTheDocument()
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-94'))
+  })
+
+  it('策略版本标签：按 strategyMd5 join 显示 vN · 来源，无匹配与空串降级为「—」', async () => {
+    renderTimeline()
+    await screen.findByText('第 100 轮结论摘要')
+
+    // md5-aaa → v2（复盘）：第 100/98 轮各一枚徽标；md5-bbb → v3（人工）：第 99 轮
+    expect((await screen.findAllByText('v2 · 复盘')).length).toBe(2)
+    expect(screen.getByText('v3 · 人工')).toBeInTheDocument()
+    // 第 97 轮 md5-unknown（无匹配）+ 第 96 轮空串：均显示「—」
+    expect(screen.getAllByText('—').length).toBe(2)
+  })
+
+  it('展开的轮详情同样展示策略版本标签', async () => {
+    renderTimeline()
+    const summary = await screen.findByText('第 100 轮结论摘要')
+
+    fireEvent.click(summary)
+    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
+    expect(await screen.findByText('策略版本：v2 · 复盘')).toBeInTheDocument()
+  })
+
+  it('WS round 事件一并刷新策略版本表', async () => {
+    const { rerender } = renderTimeline()
+    await screen.findByText('第 100 轮结论摘要')
+    expect(holder.getStrategyVersions).toHaveBeenCalledTimes(1)
+
+    wsHolder.lastMessage = { type: 'round', data: { round_id: 'id-100', ok: true, wake_source: '定时唤醒' } }
+    rerender(timelineUi(''))
+
+    await waitFor(() => expect(holder.getStrategyVersions).toHaveBeenCalledTimes(2))
+  })
+
+  it('版本表加载失败：顶部给非阻断提示，时间线照常、徽标降级「—」', async () => {
+    holder.getStrategyVersions.mockRejectedValue(new Error('boom'))
+    renderTimeline()
+
+    expect(await screen.findByText('策略版本表加载失败')).toBeInTheDocument()
+    expect(await screen.findByText('第 100 轮结论摘要')).toBeInTheDocument()
+    // 版本表不可用：本页 5 张卡片徽标全部降级
+    expect(screen.getAllByText('—')).toHaveLength(5)
   })
 })

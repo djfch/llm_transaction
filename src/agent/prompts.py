@@ -39,6 +39,10 @@ class PromptLoader:
         full = body.rstrip() + "\n\n" + render_tool_docs(tools)
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
+    def body_md5(self) -> str:
+        """策略书原文（不含工具说明段）的 md5，作为决策/成交与策略版本的关联键。"""
+        return hashlib.md5(self._load_body().encode("utf-8")).hexdigest()
+
 
 def render_tool_docs(tools: list[ToolSpec]) -> str:
     """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。"""

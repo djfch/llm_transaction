@@ -1,12 +1,12 @@
 /**
  * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
- * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控 / 中 6：实时决策轮主角 / 右 3：K线+持仓）
- * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
+ * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
+ * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 复盘报告 → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
- * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益与当日统计；时间线与笔记各自管理分页；
+ * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略面板(refreshKey)；时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position, PriceAlert } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
@@ -19,8 +19,10 @@ import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
 import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
 import PriceAlertsPanel from '../components/console/PriceAlertsPanel'
+import ReviewPanel from '../components/console/ReviewPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
+import StrategyPanel from '../components/console/StrategyPanel'
 import TopBar from '../components/console/TopBar'
 import TradesTable from '../components/console/TradesTable'
 import { useApiData } from '../hooks/useApiData'
@@ -36,6 +38,9 @@ function useConsoleData() {
   const equity = useApiData(() => api.getEquity(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
   const daily = useApiData(() => api.getDailyStats(), [])
+  // 策略面板刷新信号：抽屉关闭（可能保存/回滚过策略）或新决策轮（可能由新策略版本驱动）时 bump
+  const [strategyTick, setStrategyTick] = useState(0)
+  const bumpStrategy = useCallback(() => setStrategyTick((t) => t + 1), [])
   const { connected, lastMessage } = portfolio
   const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadAlerts } = alerts
@@ -47,11 +52,12 @@ function useConsoleData() {
     reloadAlerts() // LLM 设置/触发唤醒都伴随决策轮事件
     reloadEquity()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
-  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily])
-  return { status, portfolio, openOrders, alerts, equity, daily, connected }
+    bumpStrategy()
+  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily, bumpStrategy])
+  return { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, bumpStrategy }
 }
 
-/** 首屏：右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
+/** 首屏：左栏账户/权益/风控/策略(只读) 四卡片；右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
 function FirstScreen({
   account,
   mode,
@@ -61,8 +67,10 @@ function FirstScreen({
   positions,
   openOrders,
   alerts,
+  strategyTick,
   onPositionsChanged,
   onOpenOrdersChanged,
+  onOpenConfig,
 }: {
   account: AccountInfo | null
   mode: string
@@ -72,8 +80,10 @@ function FirstScreen({
   positions: Position[]
   openOrders: OpenOrder[]
   alerts: PriceAlert[]
+  strategyTick: number
   onPositionsChanged: () => void
   onOpenOrdersChanged: () => void
+  onOpenConfig: () => void
 }) {
   return (
     <section className="grid grid-cols-12 gap-4 pt-5">
@@ -81,6 +91,7 @@ function FirstScreen({
         <AccountPanel account={account} mode={mode} equityChangePct={equityChangePct} dailyStats={dailyStats} />
         <EquityMiniChart points={points} equityChangePct={equityChangePct} />
         <RiskPanel />
+        <StrategyPanel refreshKey={strategyTick} onOpenConfig={onOpenConfig} />
       </aside>
       <div className="order-1 col-span-12 lg:order-2 lg:col-span-6">
         <LiveRoundHero />
@@ -95,7 +106,7 @@ function FirstScreen({
   )
 }
 
-/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；第三屏：成交记录全宽。 */
+/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；随后复盘报告与成交记录各占全宽。 */
 function SecondScreen() {
   return (
     <>
@@ -106,6 +117,9 @@ function SecondScreen() {
         <aside className="col-span-12 lg:col-span-4">
           <NotesPanel />
         </aside>
+      </section>
+      <section className="mt-8">
+        <ReviewPanel />
       </section>
       <section className="mt-8">
         <TradesTable />
@@ -130,7 +144,8 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, portfolio, openOrders, alerts, equity, daily, connected } = useConsoleData()
+  const { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, bumpStrategy } =
+    useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   const account = portfolio.data?.account ?? null
   const positions = portfolio.data?.positions ?? []
@@ -160,9 +175,11 @@ export default function ConsolePage() {
     portfolio.reloadImmediately()
   }
   // 抽屉关闭 → 刷状态（保存密钥/LLM 配置后 TopBar 的 llm_configured 横幅需联动消失）
+  //          + 刷策略面板（抽屉内可能保存/回滚过策略书）
   const closeConfig = () => {
     setConfigOpen(false)
     status.reload()
+    bumpStrategy()
   }
   // paper 权益重置成功 → 刷账户/持仓/权益/当日统计（重置改变 paper 端全部账面口径）
   const onPaperReset = () => {
@@ -199,8 +216,10 @@ export default function ConsolePage() {
           positions={positions}
           openOrders={openOrders.data ?? []}
           alerts={alerts.data ?? []}
+          strategyTick={strategyTick}
           onPositionsChanged={onPositionsChanged}
           onOpenOrdersChanged={onOpenOrdersChanged}
+          onOpenConfig={() => setConfigOpen(true)}
         />
         <SecondScreen />
       </main>

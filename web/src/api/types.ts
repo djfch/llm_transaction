@@ -71,6 +71,7 @@ export interface RoundSummary {
   started_at: string // 开始时间（ISO 字符串）
   wake_source: string // 唤醒来源（定时唤醒 / 价格触发 / 启动）
   summary: string // 本轮结论摘要
+  strategyMd5: string // 策略书原文 md5（空串 = 历史数据无关联），用于 join 策略版本
   pnl_after?: number // 本轮结束后的累计盈亏（后端暂无此口径，缺失时显示 '-'）
 }
 
@@ -102,6 +103,7 @@ export interface RoundDetail {
   prompt_snapshot: string // 完整 prompt 快照
   llm_raw: string // LLM 原始输出
   tool_calls: ToolCall[] // 工具调用链
+  strategyMd5: string // 策略书原文 md5（空串 = 历史数据无关联）
 }
 
 /** 实时决策轮快照：GET /api/agent/live 的 round 字段 */
@@ -279,6 +281,60 @@ export interface KillSwitchResult {
   kill_switch: boolean
 }
 
+/** 复盘报告摘要：GET /api/review/reports（列表项 reportMd 截断 200 字符，省流量） */
+export interface ReviewReportSummary {
+  id: number // 报告 ID
+  periodStart: string // 统计区间起（ISO 字符串，由 period_start(Unix秒) 适配）
+  periodEnd: string // 统计区间止（ISO 字符串，由 period_end(Unix秒) 适配）
+  statsJson: string // 代码侧统计 JSON 原文（展示方自行解析，字段缺失时降级）
+  reportMd: string // 复盘报告 markdown（列表截断 200 字符）
+  strategyAction: 'none' | 'rewrite' // 策略动作：none=未调整 / rewrite=改写策略书
+  newVersionId: number | null // rewrite 产出的策略版本 ID（none 时为 null）
+  error: string // 非空 = 该次复盘失败（只落错误记录，不影响交易循环）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+}
+
+/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 9 键，reportMd 为全文） */
+export type ReviewReport = ReviewReportSummary
+
+/** 复盘报告分页：GET /api/review/reports（后端仅返回 items/total，无 offset/limit 回显） */
+export interface ReviewReportsPage {
+  items: ReviewReportSummary[]
+  total: number
+}
+
+/** 手动触发复盘结果：POST /api/review/run（409=进行中 / 503=未配置，经 ApiError 抛出） */
+export interface RunReviewResult {
+  started: boolean // 是否真正启动了复盘（false 见 error）
+  ok?: boolean // 复盘是否成功
+  reportId?: number // 产出的报告 ID
+  roundId?: string // 复盘审计轮 ID
+  strategyAction?: string // 策略动作（none/rewrite）
+  newVersionId?: number | null // 产出的策略版本 ID
+  error?: string // 失败原因（空串/缺省 = 正常）
+}
+
+/** 策略版本（列表项不含 content 全文）：GET /api/strategy/versions */
+export interface StrategyVersion {
+  id: number // 版本号（vN 的 N）
+  md5: string // 策略书原文 md5（与决策轮 strategyMd5 关联）
+  createdBy: string // 来源：human(人工) / review_agent(复盘) / rollback(回滚)
+  reason: string // 变更理由
+  reportId: number | null // 触发本版本的复盘报告 ID（人工版本为 null）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+}
+
+/** 策略版本详情：GET /api/strategy/versions/{id}（含 content 全文） */
+export interface StrategyVersionDetail extends StrategyVersion {
+  content: string // 策略书完整原文
+}
+
+/** 回滚结果：POST /api/strategy/rollback/{id}（回滚 = 写回历史内容 + 记 rollback 新版本） */
+export interface RollbackResult {
+  rolledBackTo: number // 回滚目标版本号
+  version: number // 回滚产生的新版本号
+}
+
 /**
  * WS 推送消息：/ws → {type, data}
  * 一期实际契约：后端广播 hello / round_start(data={wake_source}) /
@@ -327,4 +383,18 @@ export interface ApiClient {
   getSecretsStatus(): Promise<SecretsStatus>
   setSecrets(body: SetSecretsBody): Promise<SetSecretsResult>
   setKillSwitch(enabled: boolean): Promise<KillSwitchResult>
+  /** 复盘报告分页列表（最新在前）；reportMd 截断 200 字符。 */
+  getReviewReports(offset: number, limit: number): Promise<ReviewReportsPage>
+  /** 复盘报告详情：reportMd 全文；404 经 ApiError 抛出。 */
+  getReviewReport(id: number): Promise<ReviewReport>
+  /** 手动触发昨日区间复盘；409=进行中、503=LLM 未配置/未接线（ApiError.detail 可读）。 */
+  runReview(): Promise<RunReviewResult>
+  /** 策略版本列表（最新在前，不含 content 全文）。 */
+  getStrategyVersions(): Promise<StrategyVersion[]>
+  /** 策略版本详情（含 content 全文）；404 经 ApiError 抛出。 */
+  getStrategyVersion(id: number): Promise<StrategyVersionDetail>
+  /** 两版本策略书 unified diff（纯文本）。 */
+  getStrategyDiff(fromId: number, toId: number): Promise<string>
+  /** 回滚到指定策略版本（生成 rollback 新版本）；404 经 ApiError 抛出。 */
+  rollbackStrategy(id: number): Promise<RollbackResult>
 }

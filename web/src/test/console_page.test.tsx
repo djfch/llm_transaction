@@ -64,6 +64,7 @@ const DETAIL: RoundDetail = {
   prompt_snapshot: 'prompt',
   llm_raw: 'RAW-SMOKE',
   tool_calls: [],
+  strategyMd5: 'md5',
 }
 
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */
@@ -97,6 +98,7 @@ const holder = vi.hoisted(() => ({
   getDailyStats: vi.fn(() =>
     Promise.resolve({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 }),
   ),
+  getStrategy: vi.fn(() => Promise.resolve('# 系统提示词')),
   getAgentLive: vi.fn<() => Promise<AgentLiveState>>(() => Promise.resolve(LIVE)),
 }))
 
@@ -114,11 +116,24 @@ vi.mock('../api', () => ({
     getRound: () => Promise.resolve(DETAIL),
     getRounds: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 5 }),
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
+    // 复盘报告面板与决策时间线版本标签数据源
+    getReviewReports: () => Promise.resolve({ items: [], total: 0 }),
+    getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
     getCandles: () => Promise.resolve([]),
-    // 配置抽屉数据源与 paper 重置（重置联动测试用）
-    getStrategy: () => Promise.resolve('# 系统提示词'),
+    // 配置抽屉数据源与 paper 重置（重置联动测试用）；策略面板复用 getStrategy/getStrategyVersions
+    getStrategy: () => holder.getStrategy(),
+    getStrategyVersion: (id: number) =>
+      Promise.resolve({
+        id,
+        md5: 'md5',
+        createdBy: 'human',
+        reason: '',
+        reportId: null,
+        time: '2026-07-20T00:00:00Z',
+        content: '# 旧版本',
+      }),
     getSecretsStatus: () => Promise.resolve({ gate_key: true, llm_key: true, telegram: false }),
     resetPaperEquity: (equity: number) => Promise.resolve({ equity }),
   },
@@ -202,6 +217,10 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     // 硬性风控速览（config 夹具 max_position_pct 0.3 → 30%，独立查询，异步等待）
     expect(screen.getByText('硬性风控 · 代码保证')).toBeInTheDocument()
     expect(await screen.findByText('30%')).toBeInTheDocument()
+    // 左栏：策略面板（只读）——标题、当前策略全文（getStrategy 夹具）、去配置中心入口
+    expect(screen.getByText('策略 · system_prompt')).toBeInTheDocument()
+    expect(await screen.findByText(/系统提示词/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '去配置中心修改' })).toBeInTheDocument()
     // 中央：实时决策轮主角（结束后拉详情，渲染结论；结论与对话流各出现一次）
     expect(await screen.findByText(/实时决策轮/)).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent(/started_at\(开始\)|ended_at\(结束\)/)
@@ -214,6 +233,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
     expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
     expect(screen.getByText('自检笔记')).toBeInTheDocument()
+    // 复盘报告面板（成交记录之前，全宽 section）
+    expect(screen.getByRole('button', { name: '立即复盘' })).toBeInTheDocument()
     // 第三屏：成交记录
     expect(screen.getByText('成交记录')).toBeInTheDocument()
     // 配置抽屉：默认关闭（dialog 存在但不可见）
@@ -254,6 +275,23 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(holder.getDailyStats).toHaveBeenCalledTimes(2)
     // 价格唤醒联动刷新（LLM 设置/触发唤醒均伴随决策轮事件）
     expect(holder.getAlerts).toHaveBeenCalledTimes(2)
+    // 策略面板联动刷新（新决策轮可能由新策略版本驱动）
+    expect(holder.getStrategy).toHaveBeenCalledTimes(2)
+  })
+
+  it('关闭配置抽屉 → 策略面板重拉（closeConfig → bumpStrategy 接线回归）', async () => {
+    render(<ConsolePage />)
+    await screen.findByText(/账户 · PAPER/)
+
+    // 打开抽屉（抽屉自身会拉取策略作为 StrategyEditor 数据源），等其就绪后记录计数基线
+    fireEvent.click(screen.getByRole('button', { name: '打开配置中心' }))
+    await screen.findByLabelText('system_prompt 内容')
+    const beforeClose = holder.getStrategy.mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭配置中心' }))
+
+    // 关闭走 closeConfig → bumpStrategy：策略面板重拉（+1），抽屉关闭本身不再发请求
+    await waitFor(() => expect(holder.getStrategy.mock.calls.length).toBe(beforeClose + 1))
   })
 
 

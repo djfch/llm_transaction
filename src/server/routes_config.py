@@ -22,6 +22,7 @@ from src.config_io import (
     write_settings,
     write_watchlist,
 )
+from src.review.strategy import StrategyValidationError
 from src.server.deps import ServerDeps
 
 # 变更后可原地写回运行时共享实例、下轮决策即生效的字段。生效依据（共享同一实例逐轮读取）：
@@ -31,6 +32,7 @@ from src.server.deps import ServerDeps
 # - paper.slippage：PaperGateway 每次市价撮合时读取
 # - llm.provider/model/max_tokens/openai_base_url：写回后经 llm_reconfigure 重建 provider
 #   并热替换（set_provider），下轮决策即生效；重建失败保留旧 provider 且诚实回报 llm_error
+# - review.*：ReviewScheduler 每次巡检 tick 时读 settings.review（热开关/改触发时间即生效）
 # 其余字段（mode/gate 等）在 gateway/server 构造期绑定，须重启生效。
 _RUNTIME_KEYS = frozenset(
     {
@@ -50,6 +52,8 @@ _RUNTIME_KEYS = frozenset(
         "scheduler.min_wake_minutes",
         "scheduler.max_wake_minutes",
         "paper.slippage",
+        "review.enabled",
+        "review.daily_time",
     }
 )
 
@@ -173,7 +177,16 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.put("/strategy", response_class=PlainTextResponse)
     async def put_strategy(request: Request) -> str:
+        """保存策略书：接线后经 deps.strategy_save 走 StrategyStore（校验 + 版本落库），
+        校验失败映 422（detail 为全部未过原因）；响应契约保持 PlainText 原文不变。
+        未接线（测试 fake deps）时维持直写文件的旧行为。"""
         body = (await request.body()).decode("utf-8")
+        if deps.strategy_save is not None:
+            try:
+                await deps.strategy_save(body)
+            except StrategyValidationError as exc:
+                raise HTTPException(status_code=422, detail="；".join(exc.reasons)) from exc
+            return body
         deps.prompt_path.write_text(body, encoding="utf-8")
         return body
 

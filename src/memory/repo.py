@@ -12,15 +12,8 @@ from decimal import Decimal
 import aiosqlite
 
 from src.memory.db import Database
-from src.memory.models import (
-    Alert,
-    AuditRound,
-    AuditToolCall,
-    Decision,
-    Note,
-    OrderRecord,
-    Trade,
-)
+from src.memory.models import Alert, AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
+from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
 
 
@@ -57,6 +50,9 @@ class Repo:
 
     def __init__(self, db: Database) -> None:
         self._db = db
+        # 子仓库：策略版本/复盘报告/复盘取数集中在 ReviewRepo（共享同一 Database 与连接），
+        # 复盘相关调用走 repo.review.xxx（见 src/memory/review_repo.py）
+        self.review = ReviewRepo(db)
 
     @property
     def _conn(self) -> aiosqlite.Connection:
@@ -69,15 +65,25 @@ class Repo:
         round_id: str,
         mode: str,
         strategy_version: str = "",
+        strategy_md5: str = "",
         wake_source: str = "",
         context_summary: str = "",
         llm_raw: str = "",
     ) -> Decision:
         ts = _now()
         cur = await self._conn.execute(
-            "INSERT INTO decisions(round_id,mode,strategy_version,wake_source,"
-            "context_summary,llm_raw,created_at) VALUES(?,?,?,?,?,?,?)",
-            (round_id, mode, strategy_version, wake_source, context_summary, llm_raw, ts),
+            "INSERT INTO decisions(round_id,mode,strategy_version,strategy_md5,wake_source,"
+            "context_summary,llm_raw,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                round_id,
+                mode,
+                strategy_version,
+                strategy_md5,
+                wake_source,
+                context_summary,
+                llm_raw,
+                ts,
+            ),
         )
         await self._conn.commit()
         return Decision(
@@ -85,6 +91,7 @@ class Repo:
             round_id=round_id,
             mode=mode,
             strategy_version=strategy_version,
+            strategy_md5=strategy_md5,
             wake_source=wake_source,
             context_summary=context_summary,
             llm_raw=llm_raw,
@@ -106,8 +113,14 @@ class Repo:
 
     async def list_decisions_page(self, limit: int, offset: int) -> tuple[list[Decision], int]:
         """以单条 SQL 快照返回决策页及总数，越界页仍保留准确总数。"""
-        rows, total = await self._list_page_rows(_DECISIONS_PAGE_SQL, limit, offset)
-        return [Decision(**self._row_without_total(row)) for row in rows], total
+        rows, total = await query_page_rows(self._conn, _DECISIONS_PAGE_SQL, limit, offset)
+        return [Decision(**row_without_total(row)) for row in rows], total
+
+    async def get_decision_by_round(self, round_id: str) -> Decision | None:
+        """按 round_id 取唯一决策记录；不存在返回 None。"""
+        cur = await self._conn.execute("SELECT * FROM decisions WHERE round_id=?", (round_id,))
+        row = await cur.fetchone()
+        return Decision(**dict(row)) if row else None
 
     # ---------- orders ----------
 
@@ -327,24 +340,8 @@ class Repo:
 
     async def list_notes_page(self, limit: int, offset: int) -> tuple[list[Note], int]:
         """以单条 SQL 快照返回最新优先的笔记页及总数，避免分页状态撕裂。"""
-        rows, total = await self._list_page_rows(_NOTES_PAGE_SQL, limit, offset)
-        return [Note(**self._row_without_total(row)) for row in rows], total
-
-    async def _list_page_rows(
-        self, sql: str, limit: int, offset: int
-    ) -> tuple[list[aiosqlite.Row], int]:
-        """执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)。"""
-        cur = await self._conn.execute(sql, (limit, offset))
-        raw_rows = await cur.fetchall()
-        total = int(raw_rows[0]["total"]) if raw_rows else 0
-        return [row for row in raw_rows if row["id"] is not None], total
-
-    @staticmethod
-    def _row_without_total(row: aiosqlite.Row) -> dict[str, object]:
-        """移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段。"""
-        data = dict(row)
-        data.pop("total", None)
-        return data
+        rows, total = await query_page_rows(self._conn, _NOTES_PAGE_SQL, limit, offset)
+        return [Note(**row_without_total(row)) for row in rows], total
 
     # ---------- alerts ----------
 
@@ -396,17 +393,19 @@ class Repo:
         prompt_md5: str = "",
         prompt_snapshot: str = "",
         context_snapshot: str = "",
+        strategy_md5: str = "",
         started_at: float | None = None,
     ) -> None:
         """一轮开始时写入审计主表（llm_raw/ended_at/error 由 finish_audit_round 补全）。"""
         await self._conn.execute(
-            "INSERT INTO audit_rounds(round_id,mode,wake_source,prompt_md5,prompt_snapshot,"
-            "context_snapshot,started_at) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO audit_rounds(round_id,mode,wake_source,prompt_md5,strategy_md5,"
+            "prompt_snapshot,context_snapshot,started_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 round_id,
                 mode,
                 wake_source,
                 prompt_md5,
+                strategy_md5,
                 prompt_snapshot,
                 context_snapshot,
                 started_at if started_at is not None else _now(),
