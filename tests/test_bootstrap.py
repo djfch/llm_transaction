@@ -5,7 +5,7 @@
 - persist_kill_switch 写回 config.yaml；audit 与 server 共用同一实例
 - ServerDeps.runtime_settings / runtime_watchlist 与决策循环共享同一对象
 - 资金费按合约 funding_interval 结算（8h 周期，1 小时内不重复结算）
-- 预警线：触发即持久化关闭 alerts 行；重启后从 DB 重建 TriggerManager
+- 预警线：内存唯一存储，触发即一次性移除并抢醒调度器；重启后不重建，由 LLM 决定是否重设
 """
 
 from __future__ import annotations
@@ -22,8 +22,6 @@ from src.bootstrap import AppContext, _default_contract, build_app, settle_due_f
 from src.config import Settings, Watchlist
 from src.config_io import write_settings
 from src.gateway.base import OrderRequest, Ticker
-from src.memory.db import Database
-from src.memory.repo import Repo
 from src.paper.engine import PaperGateway
 from src.review.strategy import StrategyValidationError
 
@@ -138,40 +136,30 @@ def test_funding_settles_only_when_interval_due():
     assert gateway.account.total_funding != first
 
 
-# ---------- 预警线生命周期 ----------
+# ---------- 预警线生命周期（内存唯一存储） ----------
 
 
-async def test_alert_deactivated_after_trigger_fires(build_ctx):
-    """触发即持久化关闭：触发后 alerts 行 active=0（不再永久悬挂）。"""
+async def test_trigger_fire_removes_from_memory_and_wakes(build_ctx):
+    """触发即一次性从内存索引移除，并以 price_trigger 原因抢醒调度器。"""
     ctx = await build_ctx()
-    await ctx.repo.add_alert("r1", BTC, "above", Decimal("60000"))
     ctx.triggers.add(BTC, ">=", Decimal("60000"))
+    wakes: list[str] = []
+    orig_wake_now = ctx.scheduler.wake_now
+    ctx.scheduler.wake_now = lambda reason: wakes.append(reason) or orig_wake_now(reason)
+
     await ctx.source.push_ticker(_ticker(Decimal("60000")))  # type: ignore[attr-defined]
 
-    async def _poll() -> None:  # deactivate 在后台任务中异步落库，轮询等待
-        while (await ctx.repo.list_alerts(active_only=False))[0].active:
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(_poll(), 2)
-    assert (await ctx.repo.list_alerts(active_only=False))[0].active is False
+    assert ctx.triggers.list() == []  # 一次性语义：触发即移除
+    assert wakes == [f"price_trigger:{BTC}@60000"]
 
 
-async def test_alerts_rebuilt_from_db_on_startup(tmp_path: Path, build_ctx):
-    """启动重建：DB 中 active=1 的告警恢复为内存触发器（重启后预警不丢）。"""
-    db = Database()
-    await db.open(tmp_path / "t.db")  # 与 _build 相同的 db_path：预置告警行
-    repo = Repo(db)
-    await repo.add_alert("r1", BTC, "above", Decimal("60000"))
-    gone = await repo.add_alert("r2", "ETH_USDT", "below", Decimal("3000"))
-    await repo.deactivate_alert(gone.id)  # 已关闭的不应重建
-    await db.close()
-
+async def test_triggers_not_rebuilt_on_restart(build_ctx):
+    """内存唯一存储：重启（重新组装）后预警线不重建，索引为空，由 LLM 决定是否重设。"""
     ctx = await build_ctx()
-    triggers = ctx.triggers.list()
-    assert len(triggers) == 1
-    assert triggers[0].contract == BTC
-    assert triggers[0].direction == ">="  # above → >=
-    assert triggers[0].price == Decimal("60000")
+    ctx.triggers.add(BTC, ">=", Decimal("60000"))
+    assert len(ctx.triggers.list()) == 1
+    ctx2 = await build_ctx()  # 同一 db_path 重新组装 = 模拟进程重启：内存索引全新
+    assert ctx2.triggers.list() == []
 
 
 # ---------- server 写操作接线（监控界面改进） ----------

@@ -1,4 +1,4 @@
-"""决策上下文组装：账户/持仓/白名单行情摘要/近期笔记/近期成交。
+"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/近期笔记/近期成交。
 
 产出的 AgentContext.text 同时用作发给 LLM 的 user 消息与审计的上下文快照；
 summary 为一行摘要，落 decisions.context_summary。
@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
+from src.market.triggers import TriggerManager
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
 
@@ -64,25 +65,29 @@ class AgentContext:
 
 
 class ContextBuilder:
-    """按白名单组装上下文；长度受 candle_n/notes_n/trades_n 约束。"""
+    """按白名单组装上下文；长度受 candle_n/alerts_n/notes_n/trades_n 约束。"""
 
     def __init__(
         self,
         gateway: Gateway,
         repo: Repo,
         candles: CandleCache,
+        triggers: TriggerManager,
         watchlist: list[str],
         interval: str = "1h",
         candle_n: int = 24,
+        alerts_n: int = 20,
         notes_n: int = 10,
         trades_n: int = 20,
     ) -> None:
         self._gateway = gateway
         self._repo = repo
         self._candles = candles
+        self._triggers = triggers
         self._watchlist = watchlist
         self._interval = interval
         self._candle_n = candle_n
+        self._alerts_n = alerts_n
         self._notes_n = notes_n
         self._trades_n = trades_n
 
@@ -94,6 +99,7 @@ class ContextBuilder:
             self._header(wake_source),
             self._account_section(account, positions, equity),
             self._market_section(),
+            self._alerts_section(),
             await self._notes_section(),
             await self._trades_section(),
         ]
@@ -142,6 +148,23 @@ class ContextBuilder:
             return f"{contract}: 标记价 {meta.mark_price}，资金费率 {meta.funding_rate}（取自合约元数据）"
         except GatewayError:
             return f"{contract}: 无行情数据"
+
+    def _alerts_section(self) -> str:
+        """未触发价格预警线（内存唯一存储，重启即失效——如实暴露给 LLM，供其决定重设/取消）。
+
+        条数超 alerts_n 时按 id 升序截断（旧的优先展示），标题保留总数、尾部标注未显示
+        条数，避免预警线异常累积时上下文无界膨胀。
+        """
+        triggers = sorted(self._triggers.list(), key=lambda t: t.id)
+        lines = [f"## 价格预警线（内存·重启即失效，{len(triggers)} 条）"]
+        if not triggers:
+            lines.append("（无）")
+        for t in triggers[: self._alerts_n]:
+            direction = "above" if t.direction == ">=" else "below"
+            lines.append(f"- {t.contract} {direction} {t.price}（设置于 {_fmt_ts(t.created_at)}）")
+        if len(triggers) > self._alerts_n:
+            lines.append(f"- …另有 {len(triggers) - self._alerts_n} 条未显示")
+        return "\n".join(lines)
 
     async def _notes_section(self) -> str:
         notes = await self._repo.recent_notes(self._notes_n)

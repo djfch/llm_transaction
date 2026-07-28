@@ -31,7 +31,7 @@ from src.gateway.gate_rest import GateRestGateway
 from src.market.candles import CandleCache, ManualPriceSource, PriceSource
 from src.market.feed import MarketFeed
 from src.market.intervals import GATE_CANDLE_INTERVALS
-from src.market.triggers import TriggerManager, make_fire_callback, rebuild_from_repo
+from src.market.triggers import TriggerManager
 from src.memory.db import Database
 from src.memory.repo import Repo
 from src.notify.telegram import build_notifier
@@ -304,8 +304,11 @@ async def build_app(
         )
 
     scheduler = WakeupScheduler(settings.scheduler, on_wake)
-    triggers = TriggerManager(make_fire_callback(repo, scheduler.wake_now))
-    await rebuild_from_repo(repo, triggers)  # 重启后从 active 告警行重建预警线
+    # 价格预警线为内存唯一存储：触发即移除并抢醒调度器；进程重启即失效（不重建），
+    # LLM 经上下文「价格预警线」段看到空列表后自行决定是否重设
+    triggers = TriggerManager(
+        lambda t, price: scheduler.wake_now(f"price_trigger:{t.contract}@{price}")
+    )
     event_queue: asyncio.Queue = asyncio.Queue()
     # ticker 广播进 WS 事件流：on_ticker 经 maybe_await 在事件循环线程同步调用，put_nowait 安全
     source.set_handlers(
@@ -404,6 +407,7 @@ def _build_server(
         agent_start=agent_start,
         agent_stop=ctx.scheduler.stop,
         llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
+        alerts_provider=lambda: ctx.triggers.list(),
         review_run=ctx.review.scheduler.run_now,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,

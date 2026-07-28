@@ -30,6 +30,7 @@ _HANDLERS: dict[str, Callable[[ToolDeps, dict], Awaitable[ToolOutcome]]] = {
     "amend_order": tool_trading.amend_order,
     "cancel_order": tool_trading.cancel_order,
     "set_price_alert": tool_handlers.set_price_alert,
+    "cancel_price_alert": tool_handlers.cancel_price_alert,
     "set_next_wakeup": tool_handlers.set_next_wakeup,
     "write_note": tool_handlers.write_note,
     "get_history": tool_handlers.get_history,

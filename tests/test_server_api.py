@@ -18,6 +18,7 @@ from src.audit.trail import AuditTrail
 from src.config import AuditConfig
 from src.config_io import write_settings
 from src.gateway.base import Account, Position
+from src.market.triggers import TriggerManager
 from src.memory.db import Database
 from src.memory.repo import Repo
 from src.server.app import create_app
@@ -93,18 +94,21 @@ async def deps(tmp_path: Path):
     await repo.add_note("r1", "第一条笔记")
 
     kill_calls: list[bool] = []
+    triggers = TriggerManager(lambda t, p: None)
     d = ServerDeps(
         repo=repo,
         audit_trail=audit,
         gateway=FakeGateway(),
         status_provider=lambda: {"uptime_seconds": 12},
         on_kill_switch=kill_calls.append,
+        alerts_provider=lambda: triggers.list(),
         config_path=config_path,
         watchlist_path=watchlist_path,
         prompt_path=prompt_path,
         web_dist=tmp_path / "no_dist",
     )
     d.kill_calls = kill_calls  # 测试断言用
+    d.triggers = triggers  # 价格唤醒用例直接读写内存索引（内存唯一存储）
     yield d
     await db.close()
 
@@ -228,23 +232,30 @@ async def test_notes(client: AsyncClient, deps: ServerDeps):
     assert (await client.get("/api/notes", params={"limit": 201})).status_code == 422
 
 
-async def test_alerts_only_returns_active(client: AsyncClient, deps: ServerDeps):
-    """价格唤醒端点：只返回 active=1 的未触发唤醒，字段契约供前端面板渲染。"""
-    keep = await deps.repo.add_alert("r1", "BTC_USDT", "above", Decimal("52000"))
-    drop = await deps.repo.add_alert("r1", "ETH_USDT", "below", Decimal("2800"))
-    await deps.repo.deactivate_alert(drop.id)
+async def test_alerts_lists_pending_from_memory(client: AsyncClient, deps: ServerDeps):
+    """价格唤醒端点：返回内存索引中的未触发预警线，字段契约供前端面板渲染（内存唯一存储）。"""
+    first = deps.triggers.add("BTC_USDT", ">=", Decimal("52000"))
+    drop = deps.triggers.add("ETH_USDT", "<=", Decimal("2800"))
+    second = deps.triggers.add("ETH_USDT", "<=", Decimal("3000"))
+    deps.triggers.remove(drop.id)  # 触发/取消即从索引移除，端点不再返回
 
     r = await client.get("/api/alerts")
     assert r.status_code == 200
     items = r.json()
-    assert len(items) == 1
+    assert [item["id"] for item in items] == [first.id, second.id]  # 按 id 升序
     item = items[0]
-    assert item["id"] == keep.id
     assert item["contract"] == "BTC_USDT"
     assert item["direction"] == "above"
-    assert item["price"] == "52000"  # 锁形态：Decimal 经 pydantic v2 序列化为字符串
-    assert item["active"] is True
+    assert item["price"] == "52000"  # 锁形态：Decimal 以字符串返回（原 pydantic 序列化口径）
+    assert item["active"] is True  # 内存索引只存未触发条目，恒真以保持响应形态
     assert isinstance(item["created_at"], (int, float))
+
+
+async def test_alerts_503_when_not_wired(client: AsyncClient, deps: ServerDeps):
+    """alerts_provider 未接线（agent 未就绪）时诚实 503，不返回空列表冒充无预警。"""
+    deps.alerts_provider = None
+    r = await client.get("/api/alerts")
+    assert r.status_code == 503
 
 
 async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):

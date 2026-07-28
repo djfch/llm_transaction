@@ -16,7 +16,7 @@ flowchart LR
     Tools -->|"撤单"| Gateway
     Gateway --> Execution["外部 Gate.io 或进程内模拟撮合"]
     Decision --> Audit["AuditTrail：决策轮与工具审计"]
-    Tools --> Repo["Repo：订单、成交、笔记和预警"]
+    Tools --> Repo["Repo：订单、成交和笔记"]
     Audit --> Repo
     Tools --> Decision
     Decision --> LLM
@@ -201,7 +201,8 @@ sequenceDiagram
             Tools->>Gateway: 撤单
         else 数据、笔记、预警或调度工具
             Tools->>Gateway: 按工具需要读取账户 / 合约
-            Tools->>Repo: 按工具需要查询历史或写入笔记 / 预警
+            Tools->>Repo: 按工具需要查询历史或写入笔记
+            Note over Tools: 预警写入内存 TriggerManager（不持久化，重启即失效）
             Tools->>Scheduler: 按工具需要设置下次唤醒
         end
         Tools-->>Decision: ToolOutcome(工具结果)
@@ -220,7 +221,9 @@ sequenceDiagram
 
 - 读取：`get_market_data(读取行情)`、`get_history(读取历史)`。
 - 交易：`place_order(下单)`、`update_tpsl(更新止盈止损)`、`amend_order(改单)`、`cancel_order(撤单)`。
-- 自主管理：`set_price_alert(设置价格预警)`、`set_next_wakeup(安排下次唤醒)`、`write_note(跨轮笔记)`。
+- 自主管理：`set_price_alert(设置价格预警)`、`cancel_price_alert(取消价格预警)`、`set_next_wakeup(安排下次唤醒)`、`write_note(跨轮笔记)`。
+
+价格预警线以内存为唯一存储（`TriggerManager(触发器管理器)`），进程重启即失效，由 LLM 在后续决策轮按需重设；`set_price_alert` 对同合约、同方向、同价格（Decimal 数值相等）的重复设置直接回复"已设置"，不创建第二条。当前预警线会随决策上下文注入 LLM，并在触发时以 `price_trigger(价格触发)` 原因抢醒调度器。
 
 工具异常会被转换为可读结果返回给 LLM，使其有机会在本轮修正参数；工具内部异常仍写日志，但不会直接击穿整轮循环。
 
@@ -307,7 +310,6 @@ flowchart LR
 | `orders(订单记录)` | 本地下单记录，以及已显式同步的改单/撤单状态 | `side_size(带方向张数)`、`is_close(是否平仓)` |
 | `trades(成交记录)` | 成交、手续费和已实现盈亏 | `source(成交来源)`、`pnl(已实现盈亏)` |
 | `notes(Agent 笔记)` | 跨决策轮传递的判断要点 | `content(笔记正文)` |
-| `alerts(价格预警)` | 越线后触发调度器唤醒 | `direction(越线方向)`、`active(是否有效)` |
 | `wakeup(预留唤醒记录)` | 已建表并提供 Repo 写入方法，但当前调度器和工具均未接线 | `scheduled_at(计划时间)`、`source(来源)` |
 | `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)` |
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
@@ -315,6 +317,8 @@ flowchart LR
 | `review_reports(复盘报告)` | 每次复盘的区间统计、报告全文与策略动作 | `period_start/period_end(复盘区间)`、`strategy_action(策略动作)`、`new_version_id(产生的新版本)` |
 
 注意 `decisions.strategy_version(策略版本摘要)` 与 `strategy_md5(策略书原文摘要)` 语义不同：前者是“策略书+工具说明段”拼装后的 md5（与 `audit_rounds.prompt_md5` 同值），后者是策略书原文的 md5（与 `strategy_versions.md5` 关联，供按策略版本统计）。历史数据的 `strategy_md5` 保持空串不回填；`round_id` 无法 join 到 `decisions` 的成交不参与按策略统计。
+
+价格预警线不在上表：`TriggerManager(触发器管理器)` 以内存为唯一存储，触发即移除、重启即失效；`GET /api/alerts` 也从该内存索引读取（`active(是否有效)` 恒为 true，历史 alerts 表已废弃）。
 
 `Repo(存取仓库)` 是业务层唯一的数据库访问入口。金额和数量以 Decimal 字符串写入 TEXT 列，读取时由领域模型还原。
 

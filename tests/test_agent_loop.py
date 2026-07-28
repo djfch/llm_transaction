@@ -23,6 +23,8 @@ from src.agent import (
     ToolCall,
     ToolSpec,
 )
+from src.agent.tool_schemas import SCHEMAS
+from src.agent.tools import _HANDLERS
 from src.config import AuditConfig, LLMConfig, Settings
 from src.gateway.base import Candle, Contract, Ticker
 from src.gateway.mock import MockGateway
@@ -218,6 +220,7 @@ async def test_full_round_audited(env: SimpleNamespace):
     assert "稳健交易" in round_row.prompt_snapshot  # 策略书原文
     assert "## 可用工具" in round_row.prompt_snapshot  # 工具说明自动拼接
     assert "BTC_USDT" in round_row.context_snapshot  # 上下文快照
+    assert "价格预警线" in round_row.context_snapshot  # 价格预警线段（本轮设置前为空列表）
     assert '{"turn":3}' in round_row.llm_raw
 
     calls = await env.repo.list_audit_tool_calls(result.round_id)
@@ -238,8 +241,7 @@ async def test_full_round_audited(env: SimpleNamespace):
     orders = await env.repo.list_orders(result.round_id)
     assert len(orders) == 1 and orders[0].status == "finished"
     assert (await env.repo.recent_notes(1))[0].content == "BTC 走强，开多 1 张"
-    assert len(await env.repo.list_alerts()) == 1
-    assert len(env.triggers.list("BTC_USDT")) == 1
+    assert len(env.triggers.list("BTC_USDT")) == 1  # 内存唯一存储（不再落 alerts 表）
     assert env.wake_calls == [(30, 30)]  # 请求值与钳制后生效值
 
     decisions = await env.repo.list_decisions()
@@ -254,6 +256,63 @@ async def test_full_round_audited(env: SimpleNamespace):
     assert any(
         m.get("role") == "user" and "权益(估值)" in m.get("content", "") for m in second_msgs
     )
+
+
+# ---------- 价格预警线：重复设置去重 + 取消（内存唯一存储） ----------
+
+
+async def test_price_alert_dedup_and_cancel(env: SimpleNamespace):
+    """相同 (contract, direction, price) 重复设置不创建第二个；取消按同三元组精确删除。"""
+    provider = MockProvider(
+        [
+            _resp(
+                "",
+                [
+                    ToolCall(
+                        "set_price_alert",
+                        {"contract": "BTC_USDT", "direction": "above", "price": 65000},
+                        "c1",
+                    ),
+                    # 完全相同的重复设置：返回已存在提示，不重复创建
+                    ToolCall(
+                        "set_price_alert",
+                        {"contract": "BTC_USDT", "direction": "above", "price": 65000},
+                        "c2",
+                    ),
+                ],
+                '{"turn":1}',
+            ),
+            _resp(
+                "",
+                [
+                    ToolCall(
+                        "cancel_price_alert",
+                        {"contract": "BTC_USDT", "direction": "above", "price": 65000},
+                        "c3",
+                    ),
+                    # 已取消的目标再次取消：如实回报未找到，不报错
+                    ToolCall(
+                        "cancel_price_alert",
+                        {"contract": "BTC_USDT", "direction": "above", "price": 65000},
+                        "c4",
+                    ),
+                ],
+                '{"turn":2}',
+            ),
+            _resp("完成", [], '{"turn":3}'),
+        ]
+    )
+    result = await _make_loop(env, provider).run_once("timer")
+
+    assert result.ok
+    calls = await env.repo.list_audit_tool_calls(result.round_id)
+    texts = [json.loads(c.result_json)["text"] for c in calls]
+    assert "已设置价格预警" in texts[0]
+    assert "无需重复创建" in texts[1]
+    assert "已取消价格预警" in texts[2]
+    assert "未找到" in texts[3]
+    # 取消后内存索引为空；重复设置自始至终未产生第二个实例
+    assert env.triggers.list() == []
 
 
 # ---------- 风控拒绝：记录且不下单 ----------
@@ -394,6 +453,12 @@ async def test_removed_tools_are_not_registered(env: SimpleNamespace):
     assert all("未知工具" in json.loads(call.result_json)["text"] for call in calls)
     loop = _make_loop(env, MockProvider([]))
     assert {spec.name for spec in loop._registry.specs}.isdisjoint({"get_account", "set_leverage"})
+
+
+def test_schemas_and_handlers_stay_in_sync():
+    """schema 与 handler 同名成对：schema 有 handler 无 → 工具对 LLM 静默缺失；
+    handler 有 schema 无 → ToolRegistry 构造即 KeyError（反向由构造路径隐式覆盖）。"""
+    assert set(SCHEMAS) == set(_HANDLERS)
 
 
 # ---------- PromptLoader 热重载 ----------

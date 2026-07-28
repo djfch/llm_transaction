@@ -53,15 +53,6 @@ CREATE TABLE IF NOT EXISTS notes (
     content TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    round_id TEXT NOT NULL,
-    contract TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    price TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at REAL NOT NULL
-);
 CREATE TABLE IF NOT EXISTS wakeup (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scheduled_at REAL NOT NULL,

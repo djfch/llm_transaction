@@ -156,9 +156,31 @@ async def set_price_alert(deps: ToolDeps, args: dict) -> ToolOutcome:
     price = _need_decimal(args, "price")
     if price <= 0:
         raise ToolArgError("price 必须为正数")
-    trigger = deps.triggers.add(contract, ">=" if direction == "above" else "<=", price)
-    await deps.repo.add_alert(deps.round_id, contract, direction, price)
+    sym = ">=" if direction == "above" else "<="
+    # 相同 (contract, direction, price) 查重：如实告知已设置，不重复创建（内存唯一存储）
+    existing = deps.triggers.find(contract, sym, price)
+    if existing is not None:
+        return ToolOutcome(
+            f"该价格预警已设置：{contract} {direction} {price}（触发器 {existing.id}），无需重复创建"
+        )
+    trigger = deps.triggers.add(contract, sym, price)
     return ToolOutcome(f"已设置价格预警：{contract} {direction} {price}（触发器 {trigger.id}）")
+
+
+async def cancel_price_alert(deps: ToolDeps, args: dict) -> ToolOutcome:
+    contract = _need_str(args, "contract")
+    direction = _need_enum(args, "direction", {"above", "below"})
+    price = _need_decimal(args, "price")
+    if price <= 0:
+        raise ToolArgError("price 必须为正数")
+    sym = ">=" if direction == "above" else "<="
+    existing = deps.triggers.find(contract, sym, price)
+    if existing is None:
+        return ToolOutcome(
+            f"未找到该价格预警线：{contract} {direction} {price}（当前无相同预警线，未做任何修改）"
+        )
+    deps.triggers.remove(existing.id)
+    return ToolOutcome(f"已取消价格预警：{contract} {direction} {price}（触发器 {existing.id}）")
 
 
 async def set_next_wakeup(deps: ToolDeps, args: dict) -> ToolOutcome:

@@ -1,7 +1,7 @@
 /**
  * 价格唤醒卡片列表：LLM 经 set_price_alert 设置的未触发预警线（GET /api/alerts）。
- * 样式对齐持仓/挂单方面（琥珀色左边条 = 待触发）；只读展示，触发后后端置 active=0，
- * 下轮刷新即从列表消失。数据由父级装配层下发（哑组件）。
+ * 样式对齐持仓/挂单方面（琥珀色左边条 = 待触发）；只读展示，内存唯一存储，
+ * 触发即从索引移除（重启即失效），下轮刷新即从列表消失。数据由父级装配层下发（哑组件）。
  */
 import type { PriceAlert } from '../../api/types'
 import { fmtPrice, fmtTime } from '../../utils/format'

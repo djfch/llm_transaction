@@ -107,7 +107,28 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "set_price_alert": {
-        "description": "设置价格预警线：价格越线时触发唤醒",
+        "description": (
+            "设置价格预警线：价格越线时触发唤醒。预警线仅保存在内存，进程重启即失效"
+            "（需重新设置）；相同合约/方向/价格的预警线重复设置时直接返回已存在提示，不会重复创建"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {"type": "string", "description": "合约名"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["above", "below"],
+                    "description": "above=上穿触发，below=下穿触发",
+                },
+                "price": {"type": "number", "description": "触发价格"},
+            },
+            "required": ["contract", "direction", "price"],
+        },
+    },
+    "cancel_price_alert": {
+        "description": (
+            "取消价格预警线：按合约/方向/价格精确匹配取消；不存在时返回未找到提示，不做任何修改"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
