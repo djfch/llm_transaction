@@ -1,5 +1,5 @@
 /** 通用分页控件：最多显示五个连续页码，并提供前后翻页与指定页跳转。 */
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 
 const MAX_VISIBLE_PAGES = 5
 
@@ -69,8 +69,13 @@ function JumpForm({
 }) {
   const [jumpValue, setJumpValue] = useState(String(currentPage + 1))
   const [jumpError, setJumpError] = useState('')
+  // 挂载时初始 state 已与 currentPage 同步，效应只在翻页（currentPage 真变化）时重置输入；
+  // 不跳过挂载会让迟到的挂载效应把用户刚输入的值冲掉（被动效应延迟调度，实测可复现）
+  const lastSyncedPage = useRef(currentPage)
 
   useEffect(() => {
+    if (lastSyncedPage.current === currentPage) return
+    lastSyncedPage.current = currentPage
     setJumpValue(String(currentPage + 1))
     setJumpError('')
   }, [currentPage])
