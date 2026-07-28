@@ -258,12 +258,25 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/alerts")
     async def list_alerts() -> list[dict[str, Any]]:
-        """LLM 设置的未触发价格唤醒（active=1），供前端「价格唤醒」面板展示。
+        """LLM 设置的未触发价格唤醒（内存唯一存储），供前端「价格唤醒」面板展示。
 
-        触发即置 active=0 并唤醒 agent，故面板只暴露 active 行（触发后自然消失）。
+        预警线只存于 TriggerManager 内存索引：触发即移除并唤醒 agent，进程重启即失效，
+        故面板只暴露当前未触发的条目。响应契约保持原 alerts 表形态
+        （id 数字 / direction above|below / price 字符串 / created_at Unix 秒 / active 恒 true）。
         """
-        alerts = await deps.repo.list_alerts(active_only=True)
-        return [a.model_dump() for a in alerts]
+        if deps.alerts_provider is None:
+            raise HTTPException(status_code=503, detail="价格唤醒未接线（agent 未就绪）")
+        return [
+            {
+                "id": t.id,
+                "contract": t.contract,
+                "direction": "above" if t.direction == ">=" else "below",
+                "price": str(t.price),  # 锁字符串形态（原 pydantic Decimal 序列化口径）
+                "active": True,  # 内存索引只存未触发条目，恒真以保持响应形态
+                "created_at": t.created_at,
+            }
+            for t in sorted(deps.alerts_provider(), key=lambda x: x.id)
+        ]
 
     @router.get("/notes")
     async def get_notes(

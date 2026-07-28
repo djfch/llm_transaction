@@ -1,24 +1,22 @@
-"""价格触发器：LLM 预警线的内存索引、越线检查与 alerts 表生命周期接线。
+"""价格触发器：LLM 预警线的内存唯一存储、越线检查与触发派发。
 
-不变量：同一触发器最多触发一次（触发即从索引移除，防重复触发）。
-本模块不 import 存储层实现（Repo 仅 TYPE_CHECKING 类型依赖），持久化由接线辅助完成：
-- agent 工具层 set_price_alert：落 alerts 行 + add 内存触发器（双写入口）
-- make_fire_callback：触发即把对应告警行置 active=0（不永久悬挂），并抢醒调度器
-- rebuild_from_repo：启动时把 active=1 的告警行重建为内存触发器（重启预警不丢）
+不变量：
+- 内存即唯一权威——不落库、启动不重建，进程重启后预警线即失效
+  （LLM 上下文与 /api/alerts 如实暴露空列表，由 LLM 决定是否重设）。
+- 同一触发器最多触发一次（触发即从索引移除，防重复触发）。
+- 同一 (contract, direction, price) 的唯一性由工具层经 find() 查重保证，
+  索引本身不做唯一性约束（单一事件循环内 find→add 无并发窗口）。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import uuid
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from ..memory.repo import Repo  # 仅类型注解：保持 market 运行期不依赖存储层
+from itertools import count
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +27,14 @@ Direction = Literal[">=", "<="]
 class PriceTrigger:
     """预警线。direction ">="：价格上穿 price 触发；"<="：下穿触发。"""
 
-    id: str
+    id: int  # 自增数字 id（/api/alerts 响应契约要求数字 id）
     contract: str
     direction: Direction
     price: Decimal
+    created_at: float  # 设置时间（Unix 秒）
 
 
 FireCallback = Callable[[PriceTrigger, Decimal], None]
-WakeNowFn = Callable[[str], bool]
 
 
 class TriggerManager:
@@ -44,23 +42,25 @@ class TriggerManager:
 
     def __init__(self, on_fire: FireCallback) -> None:
         self._on_fire = on_fire
-        self._triggers: dict[str, PriceTrigger] = {}
-        self._by_contract: dict[str, set[str]] = {}
+        self._triggers: dict[int, PriceTrigger] = {}
+        self._by_contract: dict[str, set[int]] = {}
+        self._next_id: Iterator[int] = count(1)
 
     def add(self, contract: str, direction: Direction, price: Decimal) -> PriceTrigger:
         if direction not in (">=", "<="):
             raise ValueError(f"非法 direction: {direction}（可选 >= / <=）")
         trigger = PriceTrigger(
-            id=f"trig-{uuid.uuid4().hex[:12]}",
+            id=next(self._next_id),
             contract=contract,
             direction=direction,
             price=price,
+            created_at=time.time(),
         )
         self._triggers[trigger.id] = trigger
         self._by_contract.setdefault(contract, set()).add(trigger.id)
         return trigger
 
-    def remove(self, trigger_id: str) -> bool:
+    def remove(self, trigger_id: int) -> bool:
         """取消预警线。存在并移除返回 True，否则 False。"""
         trigger = self._triggers.pop(trigger_id, None)
         if trigger is None:
@@ -71,6 +71,17 @@ class TriggerManager:
             if not bucket:
                 del self._by_contract[trigger.contract]
         return True
+
+    def find(self, contract: str, direction: Direction, price: Decimal) -> PriceTrigger | None:
+        """按 (contract, direction, price) 精确查找未触发预警线。
+
+        Decimal 数值相等即命中（70000 与 70000.0 视为相同）；只搜同合约分桶。
+        """
+        for trigger_id in self._by_contract.get(contract, ()):
+            trigger = self._triggers[trigger_id]
+            if trigger.direction == direction and trigger.price == price:
+                return trigger
+        return None
 
     def list(self, contract: str | None = None) -> list[PriceTrigger]:
         """列出未触发的预警线，可按合约过滤。"""
@@ -108,48 +119,3 @@ class TriggerManager:
         if trigger.direction == ">=":
             return price >= trigger.price
         return price <= trigger.price
-
-
-# ---------- alerts 表生命周期接线（由主程序组装时注入） ----------
-
-
-def make_fire_callback(repo: Repo, wake_now: WakeNowFn) -> FireCallback:
-    """生成触发回调：先把对应 active 告警行持久化关闭（best-effort），再抢醒调度器。
-
-    alerts 行由工具层按 (contract, above/below, price) 写入，触发器方向与之映射
-    （">=" ↔ above，"<=" ↔ below）；持久化失败只记日志，不影响内存触发语义。
-    """
-
-    async def _deactivate(trigger: PriceTrigger) -> None:
-        try:
-            direction = "above" if trigger.direction == ">=" else "below"
-            for alert in await repo.list_alerts(active_only=True):
-                if (alert.contract, alert.direction, alert.price) == (
-                    trigger.contract,
-                    direction,
-                    trigger.price,
-                ):
-                    await repo.deactivate_alert(alert.id)
-        except Exception:
-            logger.exception("告警持久化关闭失败（%s）", trigger.contract)
-
-    def on_fire(trigger: PriceTrigger, price: Decimal) -> None:
-        try:
-            asyncio.get_running_loop().create_task(_deactivate(trigger))
-        except RuntimeError:
-            pass  # 无运行中事件循环（纯同步用法）：跳过持久化，内存触发语义不受影响
-        wake_now(f"price_trigger:{trigger.contract}@{price}")
-
-    return on_fire
-
-
-async def rebuild_from_repo(repo: Repo, manager: TriggerManager) -> int:
-    """启动重建：把 DB 中 active=1 的告警行恢复为内存触发器，返回重建数量。"""
-    count = 0
-    for alert in await repo.list_alerts(active_only=True):
-        if alert.direction not in ("above", "below"):
-            logger.warning("跳过未知方向的告警行 id=%s direction=%s", alert.id, alert.direction)
-            continue
-        manager.add(alert.contract, ">=" if alert.direction == "above" else "<=", alert.price)
-        count += 1
-    return count

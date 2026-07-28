@@ -71,18 +71,6 @@ class Note(BaseModel):
     created_at: float
 
 
-class Alert(BaseModel):
-    """价格告警。direction: above / below。"""
-
-    id: int
-    round_id: str
-    contract: str
-    direction: str
-    price: Decimal
-    active: bool
-    created_at: float
-
-
 class AuditRound(BaseModel):
     """审计：一轮决策全过程。ended_at 为 None 表示该轮未结束。"""
 

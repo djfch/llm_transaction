@@ -8,7 +8,7 @@
 - GET  /api/trades → items[] 含 contract/size/price/fee/pnl/source/round_id；顶层 total/offset/limit
 - GET  /api/equity → initial_equity/baseline_source/points[].t,equity
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
-- GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，仅 active=1）
+- GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，内存唯一存储，触发即移除，active 恒真）
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
 - GET  /api/rounds → items[] 含 round_id/strategy_md5 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
@@ -44,6 +44,7 @@ from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
 from src.config_io import write_settings
 from src.gateway.base import Account, Candle, Position
+from src.market.triggers import TriggerManager
 from src.memory.db import Database
 from src.memory.repo import Repo
 from src.server.app import create_app
@@ -119,7 +120,6 @@ async def _seed(repo: Repo) -> None:
         "r1", "paper", BTC, D(1), D("60000"), D("1"), D("100"), "llm_open", 1000.0
     )
     await repo.add_note("r1", "第一条笔记")
-    await repo.add_alert("r1", BTC, "above", D("62000"))
     # 复盘种子：两个策略版本 + 一份关联 v2 的报告（版本↔报告互相关联的生产路径）
     await repo.review.save_strategy_version("策略书 v1：保守止损。", "md5-v1", "human", "初始版本")
     v2 = await repo.review.save_strategy_version(
@@ -149,6 +149,8 @@ async def deps(tmp_path: Path):
     await db.open(tmp_path / "t.db")
     repo = Repo(db)
     await _seed(repo)
+    triggers = TriggerManager(lambda t, price: None)  # 内存预警线索引（唯一存储）
+    triggers.add(BTC, ">=", D("62000"))  # 种子一条，保证 /api/alerts 非空
     state = {"running": False}
 
     async def _set_running(value: bool) -> None:
@@ -172,6 +174,7 @@ async def deps(tmp_path: Path):
         llm_reconfigure=_reconfigure,
         review_run=_review_run,
         strategy_rollback=_strategy_rollback,
+        alerts_provider=lambda: triggers.list(),
     )
     yield d
     await db.close()

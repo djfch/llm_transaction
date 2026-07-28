@@ -49,6 +49,10 @@ class ServerDeps:
     # LLM 热重建回调（主程序接线）：改 key/模型后重建 provider 并热替换；
     # None 时相关端点诚实回报 "agent 未接线"。契约 {"llm_configured": bool, "error": str}
     llm_reconfigure: Callable[[], Awaitable[dict]] | None = None
+    # 未触发价格预警线提供者（主程序接线，返回 TriggerManager.list() 的快照）：
+    # server 不 import market 具体实现，路由按 duck-typing 读 id/contract/direction/price/created_at；
+    # None 时 /api/alerts 诚实 503
+    alerts_provider: Callable[[], list[Any]] | None = None
     # 复盘/策略版本写回调（主程序接线；None 时对应端点诚实 503）：
     # review_run 手动触发一次复盘，可选 period_start/period_end 指定补跑区间
     # （409 进行中/503 未配置/422 区间非法由路由按返回的 error_code 映射）；

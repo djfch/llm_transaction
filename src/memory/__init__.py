@@ -2,7 +2,6 @@
 
 from src.memory.db import Database
 from src.memory.models import (
-    Alert,
     AuditRound,
     AuditToolCall,
     Decision,
@@ -15,7 +14,6 @@ from src.memory.models import (
 from src.memory.repo import Repo
 
 __all__ = [
-    "Alert",
     "AuditRound",
     "AuditToolCall",
     "Database",

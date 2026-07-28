@@ -120,7 +120,7 @@ class DecisionLoop:
             save_fills_inline=drain_fills is None,
         )
         self._registry = ToolRegistry(self._deps)
-        self._context = ContextBuilder(gateway, repo, candles, watchlist)
+        self._context = ContextBuilder(gateway, repo, candles, triggers, watchlist)
 
     @property
     def consecutive_failures(self) -> int:

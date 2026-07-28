@@ -12,7 +12,7 @@ from decimal import Decimal
 import aiosqlite
 
 from src.memory.db import Database
-from src.memory.models import Alert, AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
+from src.memory.models import AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
 from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
 
@@ -342,37 +342,6 @@ class Repo:
         """以单条 SQL 快照返回最新优先的笔记页及总数，避免分页状态撕裂。"""
         rows, total = await query_page_rows(self._conn, _NOTES_PAGE_SQL, limit, offset)
         return [Note(**row_without_total(row)) for row in rows], total
-
-    # ---------- alerts ----------
-
-    async def add_alert(
-        self, round_id: str, contract: str, direction: str, price: Decimal
-    ) -> Alert:
-        ts = _now()
-        cur = await self._conn.execute(
-            "INSERT INTO alerts(round_id,contract,direction,price,active,created_at)"
-            " VALUES(?,?,?,?,1,?)",
-            (round_id, contract, direction, str(price), ts),
-        )
-        await self._conn.commit()
-        return Alert(
-            id=cur.lastrowid or 0,
-            round_id=round_id,
-            contract=contract,
-            direction=direction,
-            price=price,
-            active=True,
-            created_at=ts,
-        )
-
-    async def deactivate_alert(self, alert_id: int) -> None:
-        await self._conn.execute("UPDATE alerts SET active=0 WHERE id=?", (alert_id,))
-        await self._conn.commit()
-
-    async def list_alerts(self, active_only: bool = True) -> list[Alert]:
-        sql = "SELECT * FROM alerts" + (" WHERE active=1" if active_only else "") + " ORDER BY id"
-        cur = await self._conn.execute(sql)
-        return [Alert(**dict(r)) for r in await cur.fetchall()]
 
     # ---------- wakeup ----------
 

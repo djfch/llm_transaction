@@ -390,21 +390,6 @@ async def test_notes_page_returns_latest_items_and_total(repo: Repo):
     assert empty_items == []
 
 
-# ---------- alerts ----------
-
-
-async def test_alerts_add_deactivate_list(repo: Repo):
-    a1 = await repo.add_alert("r1", "BTC_USDT", "above", Decimal("60000"))
-    await repo.add_alert("r1", "ETH_USDT", "below", Decimal("2500"))
-    assert len(await repo.list_alerts()) == 2
-    await repo.deactivate_alert(a1.id)
-    active = await repo.list_alerts()
-    assert len(active) == 1
-    assert active[0].contract == "ETH_USDT"
-    assert active[0].active is True
-    assert len(await repo.list_alerts(active_only=False)) == 2
-
-
 # ---------- wakeup ----------
 
 
