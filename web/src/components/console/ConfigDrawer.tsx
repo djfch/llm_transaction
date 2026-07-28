@@ -46,6 +46,8 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
   const strategyQ = useApiData(() => api.getStrategy(), [])
   // PUT /api/config 响应附带的 LLM 热生效错误（空 = 正常）
   const [llmError, setLlmError] = useState<string | null>(null)
+  // 策略保存成功信号：递增驱动 StrategyVersions 重拉版本列表（保存会生成新版本落库）
+  const [strategySavedTick, setStrategySavedTick] = useState(0)
 
   return (
     <>
@@ -114,10 +116,12 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
               onSave={async (next) => {
                 await api.putStrategy(next)
                 strategyQ.reload()
+                setStrategySavedTick((t) => t + 1) // 保存生成新版本，通知版本历史重拉
               }}
             />
-            {/* 版本历史侧栏（挂在编辑器下方）；回滚成功后经 strategyQ.reload 重拉全文，编辑器随 initial 同步 */}
-            <StrategyVersions onRolledBack={strategyQ.reload} />
+            {/* 版本历史侧栏（挂在编辑器下方）；回滚成功后经 strategyQ.reload 重拉全文，编辑器随 initial 同步；
+                refreshKey 在保存成功后递增，驱动版本列表重拉 */}
+            <StrategyVersions onRolledBack={strategyQ.reload} refreshKey={strategySavedTick} />
           </>
         )}
       </DrawerSection>
