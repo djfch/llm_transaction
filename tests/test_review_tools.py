@@ -1,7 +1,7 @@
-"""src/review 工具层测试：8 个工具经 ReviewToolRegistry.execute 逐一验证。
+"""src/review 工具层测试：9 个工具经 ReviewToolRegistry.execute 逐一验证。
 
 覆盖：正常返回文本、参数非法转错误文本、未知工具、截断行为、limit 钳制、
-submit 成功置 created_version_id、submit 校验拒绝返回原因文本。
+calc 计算、submit 成功置 created_version_id、submit 校验拒绝返回原因文本。
 """
 
 import time
@@ -188,6 +188,16 @@ async def test_get_tool_call_chain(registry):
 async def test_get_tool_call_chain_empty(registry):
     text = await registry.execute("get_tool_call_chain", {"round_id": "round-bbb"})
     assert "无工具调用记录" in text
+
+
+# ---------- calc ----------
+
+
+async def test_calc_tool(registry):
+    """calc 已注册且可算；参数缺失转错误文本；工具总数 9。"""
+    assert await registry.execute("calc", {"expression": "2*(3-1)^2"}) == "8"
+    assert "参数错误" in await registry.execute("calc", {})
+    assert len(registry.specs) == 9
 
 
 # ---------- list_trades ----------

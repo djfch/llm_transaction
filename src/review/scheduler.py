@@ -1,10 +1,10 @@
-"""复盘调度：每日定时触发 + 手动触发，asyncio.Lock 防重入（设计 spec §2）。
+"""复盘调度：按间隔天数定时触发 + 手动触发，asyncio.Lock 防重入（设计 spec §2）。
 
-- run_forever：每 60s 巡检一次（镜像 bootstrap._funding_loop），到点且当日未复盘
-  则触发「昨日00:00 ~ 当日00:00」区间；当日幂等以 review_reports 落库记录
-  （latest_review_period_end）为准，重启不重复；
-- run_now：手动触发；无参维持昨日区间，有参（人工补跑历史区间）校验后按指定区间跑；
-  与每日触发共用同一把锁，进行中返回忙（server 层映 409）；
+- run_forever：每 60s 巡检一次（镜像 bootstrap._funding_loop），到点且距上次复盘
+  已满 interval_days 则触发「最近 interval_days 天（对齐当日 00:00）」区间；
+  幂等以 review_reports 落库记录（latest_review_period_end）为准，重启不重复；
+- run_now：手动触发；无参维持最近 interval_days 天区间，有参（人工补跑历史区间）
+  校验后按指定区间跑；与定时触发共用同一把锁，进行中返回忙（server 层映 409）；
 - 单次触发异常吞掉记日志，护住巡检循环（复盘失败不影响交易决策循环）。
 """
 
@@ -66,32 +66,35 @@ class ReviewScheduler:
                 logger.exception("复盘调度巡检异常")
 
     async def _tick(self, now: float | None = None) -> None:
-        """单次巡检：到点且当日未复盘则触发昨日区间复盘（now 可注入，供测试）。"""
+        """单次巡检：到点且距上次复盘已满间隔天数则触发（now 可注入，供测试）。"""
         if not self._settings.review.enabled:
             return
         now = time.time() if now is None else now
         day_start = local_day_start(now)
         if now < daily_fire_ts(self._settings.review.daily_time, now):
             return  # 未到当日触发时刻
+        span = self._settings.review.interval_days * _SECONDS_PER_DAY
         latest = await self._repo.review.latest_review_period_end()
-        if latest is not None and latest >= day_start:
-            return  # 当日已复盘（落库幂等，重启不重复）
+        if latest is not None and day_start - latest < span:
+            return  # 距上次复盘未满间隔天数（落库幂等，重启不重复）
         if self._lock.locked():
             return  # 手动触发进行中：跳过本次，下一分钟巡检再试
         async with self._lock:
-            await self._agent.run(day_start - _SECONDS_PER_DAY, day_start)
+            await self._agent.run(day_start - span, day_start)
 
     async def run_now(
         self, period_start: float | None = None, period_end: float | None = None
     ) -> dict:
         """手动触发复盘；进行中返回忙（error_code='busy'，server 层映 409）。
 
-        无参维持昨日区间；有参（人工补跑历史区间）先校验（数字且 start < end），
-        非法返回 error_code='invalid_period'（server 层映 422），不触发 agent。
+        无参维持最近 interval_days 天区间；有参（人工补跑历史区间）先校验
+        （数字且 start < end），非法返回 error_code='invalid_period'（server 层映 422），
+        不触发 agent。
         """
         if period_start is None and period_end is None:
             day_start = local_day_start(time.time())
-            period_start, period_end = day_start - _SECONDS_PER_DAY, day_start
+            span = self._settings.review.interval_days * _SECONDS_PER_DAY
+            period_start, period_end = day_start - span, day_start
         elif not _valid_period(period_start, period_end):
             return {
                 "started": False,

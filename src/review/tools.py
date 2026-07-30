@@ -1,4 +1,4 @@
-"""复盘工具注册表：8 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
+"""复盘工具注册表：9 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
 
 安全不变量（设计 spec §7.1）：本注册表无任何交易工具、不持有 Gateway 引用；
 execute 是复盘 agent 的唯一执行入口，任何失败（未知工具/参数错误/内部异常）
@@ -28,6 +28,7 @@ _HANDLERS: dict[str, Callable[[ReviewToolDeps, dict], Awaitable[str]]] = {
     "list_trades": tool_handlers.list_trades,
     "get_round_context": tool_handlers.get_round_context,
     "get_strategy_versions": tool_handlers.get_strategy_versions,
+    "calc": tool_handlers.calc,
     "submit_strategy_revision": tool_handlers.submit_strategy_revision,
 }
 

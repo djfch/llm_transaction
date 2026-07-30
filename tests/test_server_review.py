@@ -7,7 +7,7 @@
 - GET /api/strategy/diff：200 纯文本、版本不存在 404、参数非法 422；
 - POST /api/strategy/rollback/{id}：成功 200、版本不存在 404、未接线 503；
 - PUT /api/strategy 走 strategy_save（响应保持 PlainText 原文、422 路径、无差异幂等路径）；
-- PUT /api/config 的 review.enabled/daily_time 热写回运行时（_RUNTIME_KEYS）。
+- PUT /api/config 的 review.enabled/daily_time/interval_days 热写回运行时（_RUNTIME_KEYS）。
 """
 
 from collections.abc import AsyncIterator
@@ -229,19 +229,28 @@ async def test_put_strategy_no_diff_idempotent(repo: Repo, tmp_path: Path):
 
 
 async def test_put_config_review_keys_hot_applied(repo: Repo, tmp_path: Path):
-    """review.enabled/daily_time 属 _RUNTIME_KEYS：写回运行时实例，不进 needs_restart。"""
+    """review.enabled/daily_time/interval_days 属 _RUNTIME_KEYS：写回运行时实例，不进 needs_restart。"""
     runtime = Settings()
     assert runtime.review.enabled is True
     deps = _deps(repo, tmp_path, runtime_settings=runtime)
     async with _client_of(deps) as c:
-        r = await c.put("/api/config", json={"review": {"enabled": False, "daily_time": "04:30"}})
+        r = await c.put(
+            "/api/config",
+            json={"review": {"enabled": False, "daily_time": "04:30", "interval_days": 3}},
+        )
         assert r.status_code == 200
         body = r.json()
         assert body["saved"] is True
         assert "review.enabled" not in body["needs_restart"]
         assert "review.daily_time" not in body["needs_restart"]
+        assert "review.interval_days" not in body["needs_restart"]
         assert runtime.review.enabled is False  # 热写回（scheduler 下 tick 即生效）
         assert runtime.review.daily_time == "04:30"
+        assert runtime.review.interval_days == 3
         # 非法 daily_time → 422
         r = await c.put("/api/config", json={"review": {"daily_time": "25:00"}})
         assert r.status_code == 422
+        # 非法 interval_days（越界）→ 422，运行时值不变
+        r = await c.put("/api/config", json={"review": {"interval_days": 0}})
+        assert r.status_code == 422
+        assert runtime.review.interval_days == 3

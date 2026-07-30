@@ -56,7 +56,8 @@ audit:
   dir: logs/audit
 review:
   enabled: true
-  daily_time: "03:00"
+  daily_time: "03:00"  # 到达间隔天数后的触发时刻（本地 HH:MM）
+  interval_days: 1  # 复盘间隔天数：每隔 N 天一次，区间为最近 N 天（1 = 每天）
 log:
   dir: logs
   level: INFO

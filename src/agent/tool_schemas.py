@@ -175,4 +175,17 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "calc": {
+        "description": (
+            "计算数学表达式：支持 + - * / ^（幂）与括号，如 2*(3-1)^2 → 8。"
+            "适合盈亏比、仓位名义价值等衍生计算，结果精确不丢精度"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "数学表达式，如 2*(3-1)^2"},
+            },
+            "required": ["expression"],
+        },
+    },
 }

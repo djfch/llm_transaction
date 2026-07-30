@@ -1,8 +1,8 @@
 """src/review/scheduler.py 测试：时间逻辑走可注入 now 的 _tick 与纯函数，不 sleep 60s。
 
-覆盖：到点触发（enabled 且 latest None）、当日已跑不重复（latest=当日00:00）、
+覆盖：到点触发（enabled 且 latest None）、间隔内不重复（latest 距今不足 interval_days）、
 disabled 跳过、未到点跳过、锁占用时巡检跳过、run_now 持锁返回「复盘进行中」、
-run_now 正常触发昨日区间。
+run_now 正常触发最近 interval_days 天区间（默认 1 天）。
 """
 
 import time
@@ -33,8 +33,10 @@ async def repo(tmp_path):
     await db.close()
 
 
-def _settings(enabled: bool = True) -> Settings:
-    return Settings(review=ReviewConfig(enabled=enabled, daily_time="03:00"))
+def _settings(enabled: bool = True, interval_days: int = 1) -> Settings:
+    return Settings(
+        review=ReviewConfig(enabled=enabled, daily_time="03:00", interval_days=interval_days)
+    )
 
 
 def _anchors() -> tuple[float, float]:
@@ -157,3 +159,49 @@ async def test_run_now_invalid_period(repo):
         assert result["started"] is False, (start, end)
         assert result["error_code"] == "invalid_period", (start, end)
     assert agent.calls == []
+
+
+# ---------- interval_days：指定间隔天数复盘 ----------
+
+
+async def test_tick_interval_not_reached_skips(repo):
+    """interval_days=3：距上次复盘仅 2 天 → 未满间隔，不触发。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
+    day_start, fire = _anchors()
+    await repo.review.save_review_report(
+        day_start - 5 * 86400, day_start - 2 * 86400, "{}", "", "none"
+    )
+    await scheduler._tick(now=fire + 1)
+    assert agent.calls == []
+
+
+async def test_tick_interval_reached_fires_span(repo):
+    """interval_days=3：距上次复盘恰满 3 天 → 触发，且区间为最近 3 天。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
+    day_start, fire = _anchors()
+    await repo.review.save_review_report(
+        day_start - 6 * 86400, day_start - 3 * 86400, "{}", "", "none"
+    )
+    await scheduler._tick(now=fire + 1)
+    assert agent.calls == [(day_start - 3 * 86400, day_start)]
+
+
+async def test_tick_interval_first_run_uses_span(repo):
+    """interval_days=3 且从未复盘（latest None）→ 首次即按 3 天区间触发。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
+    day_start, fire = _anchors()
+    await scheduler._tick(now=fire + 1)
+    assert agent.calls == [(day_start - 3 * 86400, day_start)]
+
+
+async def test_run_now_uses_interval_span(repo):
+    """run_now 无参：默认区间同步为最近 interval_days 天。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
+    day_start = local_day_start(time.time())
+    result = await scheduler.run_now()
+    assert result["started"] is True and result["ok"] is True
+    assert agent.calls == [(day_start - 3 * 86400, day_start)]
