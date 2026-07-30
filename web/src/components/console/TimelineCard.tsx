@@ -10,6 +10,7 @@ import type { ReactNode } from 'react'
 import { api } from '../../api'
 import type { RoundDetail, RoundSummary, StrategyVersion } from '../../api/types'
 import { fmtClock, fmtTime, shortRoundId, strategyCreatorText } from '../../utils/format'
+import ClampText from './ClampText'
 import ConversationThread from './ConversationThread'
 import ToolSteps from './ToolSteps'
 
@@ -150,14 +151,22 @@ export default function TimelineCard({
             ▸
           </span>
         </div>
-        <p className="mt-2 text-[13px] leading-6 text-zinc-300">{round.summary}</p>
       </button>
 
-      {/* 归属笔记引文：紫色左边条 + 斜体（方案 C 同款）；引文只读，不参与折叠交互 */}
+      {/* summary 在按钮外渲染：ClampText 自带展开按钮，不能嵌套进手风琴 button */}
+      <div className="mt-2">
+        <ClampText
+          text={round.summary}
+          clampClass="line-clamp-5"
+          className="text-[13px] leading-6 text-zinc-300"
+        />
+      </div>
+
+      {/* 归属笔记引文：紫色左边条 + 斜体（方案 C 同款）；引文只读，超长按 5 行折叠 */}
       {note && (
         <blockquote className="mt-3 border-l-2 border-violet-400/50 pl-3 text-[13px] italic leading-6 text-violet-200/80">
-          “{note.content}”
-          <span className="ml-2 text-[10px] not-italic text-zinc-600">
+          <ClampText text={`“${note.content}”`} clampClass="line-clamp-5" />
+          <span className="text-[10px] not-italic text-zinc-600">
             —— Agent 笔记 · {fmtClock(note.time)}
           </span>
         </blockquote>

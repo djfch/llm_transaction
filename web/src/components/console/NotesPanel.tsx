@@ -10,19 +10,24 @@ import { usePageState } from '../../hooks/usePageState'
 import { useWs } from '../../hooks/useWs'
 import { fmtTime } from '../../utils/format'
 import StateHint from '../StateHint'
+import ClampText from './ClampText'
 import PaginationControls from './PaginationControls'
 
 /** Agent 笔记面板每页条数固定为 4，使右侧面板与时间线的视觉高度更协调。 */
 const PAGE_SIZE = 4
 
-/** 单条笔记卡片：显示记录时间和 Agent 原始备忘内容。 */
+/** 单条笔记卡片：显示记录时间和 Agent 原始备忘内容；超长按 8 行折叠。 */
 function NoteCard({ note }: { note: Note }) {
   return (
     <article className="rounded-xl border border-white/5 border-l-2 border-l-violet-400/60 bg-zinc-900/60 p-3.5 backdrop-blur">
       <div className="mb-1.5 font-mono text-[10px] tabular-nums text-zinc-500">
         {fmtTime(note.time)}
       </div>
-      <p className="text-[13px] leading-6 text-zinc-300">{note.content}</p>
+      <ClampText
+        text={note.content}
+        clampClass="line-clamp-8"
+        className="text-[13px] leading-6 text-zinc-300"
+      />
     </article>
   )
 }
