@@ -176,6 +176,18 @@ async def test_tick_interval_not_reached_skips(repo):
     assert agent.calls == []
 
 
+async def test_tick_latest_not_day_aligned(repo):
+    """人工补跑的 period_end 非日对齐（昨日 12:00）：幂等判定按自然日计，今日照常触发。"""
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    day_start, fire = _anchors()
+    await repo.review.save_review_report(
+        day_start - 86400, day_start - 43200, "{}", "", "none"
+    )  # 昨日 12:00 结束的补跑区间
+    await scheduler._tick(now=fire + 1)
+    assert agent.calls == [(day_start - 86400, day_start)]
+
+
 async def test_tick_interval_reached_fires_span(repo):
     """interval_days=3：距上次复盘恰满 3 天 → 触发，且区间为最近 3 天。"""
     agent = StubAgent()

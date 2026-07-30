@@ -17,11 +17,31 @@ async def maybe_await(result: Awaitable[None] | None) -> None:
 
 _CALC_MAX_LEN = 200  # 表达式长度上限
 _CALC_MAX_EXP = Decimal(1000)  # 指数绝对值上限（防恶意大幂）
-_CALC_ALLOWED = set("0123456789.+-*/^() \t")  # tokenizer 之外的字符直接拒绝
+_CALC_MAX_DEPTH = 50  # 括号嵌套深度上限（每层括号约 5 个栈帧，显式限幅防 RecursionError）
+_CALC_ALLOWED = set("0123456789.+-*/^()Ee \t")  # tokenizer 之外的字符直接拒绝
 
 
 class _CalcError(ValueError):
     """表达式解析/求值错误：message 即返回给 LLM 的中文错误文本。"""
+
+
+def _scan_number(expr: str, start: int) -> int:
+    """从 start 扫描数字字面量，返回结束位置；支持科学计数法（如 1.07E+301）。
+
+    E 记法支持是为了闭环：calc 大数结果以 E 记法输出，LLM 可把结果代回继续计算。
+    """
+    j = start
+    while j < len(expr) and expr[j] in "0123456789.":
+        j += 1
+    if j > start and j < len(expr) and expr[j] in "Ee":  # 指数部：E[+/-]digits
+        k = j + 1
+        if k < len(expr) and expr[k] in "+-":
+            k += 1
+        if k < len(expr) and expr[k].isdigit():
+            j = k
+            while j < len(expr) and expr[j].isdigit():
+                j += 1
+    return j
 
 
 def _tokenize(expr: str) -> list[str]:
@@ -38,10 +58,10 @@ def _tokenize(expr: str) -> list[str]:
         elif ch in "+-*/^()":
             tokens.append(ch)
             i += 1
-        else:  # 数字字面量：连续的数字与小数点，交给 Decimal 做最终合法性校验
-            j = i
-            while j < len(expr) and expr[j] in "0123456789.":
-                j += 1
+        else:  # 数字字面量；扫描未推进即非法（如孤立的 E），避免死循环
+            j = _scan_number(expr, i)
+            if j == i:
+                raise _CalcError(f"无法识别的符号：{ch}")
             tokens.append(expr[i:j])
             i = j
     return tokens
@@ -53,6 +73,7 @@ class _Parser:
     def __init__(self, tokens: list[str]) -> None:
         self._tokens = tokens
         self._pos = 0
+        self._depth = 0  # 括号嵌套深度（显式限幅，不依赖 Python 栈余量）
 
     def _peek(self) -> str | None:
         return self._tokens[self._pos] if self._pos < len(self._tokens) else None
@@ -109,9 +130,13 @@ class _Parser:
     def _atom(self) -> Decimal:
         token = self._next()
         if token == "(":
+            self._depth += 1
+            if self._depth > _CALC_MAX_DEPTH:
+                raise _CalcError(f"括号嵌套过深（≤{_CALC_MAX_DEPTH} 层）")
             value = self._expr()
             if self._next() != ")":
                 raise _CalcError("括号不匹配（缺少右括号）")
+            self._depth -= 1
             return value
         try:
             return Decimal(token)

@@ -62,6 +62,31 @@ def test_illegal_characters():
     assert "不支持的字符" in out
 
 
+def test_malformed_operator_combos():
+    """`**`→`^` 归一后的畸形组合与孤立 E 均转错误文本。"""
+    assert "计算错误" in calc_expression("2*^3")
+    assert "计算错误" in calc_expression("2^^3")
+    assert "计算错误" in calc_expression("E+3")
+
+
+def test_scientific_notation_round_trip():
+    """E 记法闭环：大数结果可作为输入代回继续计算。"""
+    assert calc_expression("1.5E+3+500") == "2000"
+    assert calc_expression("1e2*2") == "200"
+
+
+def test_deep_nesting_returns_text_not_exception():
+    """括号嵌套限幅：50 层可算，超限/纯左括号洪水均返回文本而非 RecursionError。"""
+    assert calc_expression("(" * 50 + "1" + ")" * 50) == "1"
+    assert "嵌套过深" in calc_expression("(" * 51 + "1" + ")" * 51)
+    assert "计算错误" in calc_expression("(" * 100)  # 不抛异常
+
+
+def test_long_unary_minus_chain():
+    """长一元负号链：不穿透递归限制（长度上限先拦住更长输入）。"""
+    assert calc_expression("-" * 99 + "1") in ("1", "-1")
+
+
 def test_too_long_expression():
     assert "过长" in calc_expression("1+" * 101 + "1")
 

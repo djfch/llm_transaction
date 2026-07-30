@@ -75,7 +75,10 @@ class ReviewScheduler:
             return  # 未到当日触发时刻
         span = self._settings.review.interval_days * _SECONDS_PER_DAY
         latest = await self._repo.review.latest_review_period_end()
-        if latest is not None and day_start - latest < span:
+        # latest 先对齐到其所在自然日 00:00：人工补跑的 period_end 可为任意时刻，
+        # 直接做秒差会把定时复盘多推迟一天；日对齐后按自然日计数（固定 86400 秒/天，
+        # 隐含无夏令时假设，中国时区成立）
+        if latest is not None and day_start - local_day_start(latest) < span:
             return  # 距上次复盘未满间隔天数（落库幂等，重启不重复）
         if self._lock.locked():
             return  # 手动触发进行中：跳过本次，下一分钟巡检再试
