@@ -39,16 +39,17 @@ beforeEach(() => {
 })
 
 describe('NotesPanel(Agent 笔记)', () => {
-  it('每页显示 4 条、显示总数，并支持下一页与指定页跳转', async () => {
+  it('每页显示 5 条、显示总数，并支持下一页与指定页跳转', async () => {
     render(<NotesPanel />)
 
     expect(await screen.findByText('第 12 条笔记')).toBeInTheDocument()
-    expect(screen.queryByText('第 8 条笔记')).not.toBeInTheDocument()
+    expect(screen.getByText('第 8 条笔记')).toBeInTheDocument()
+    expect(screen.queryByText('第 7 条笔记')).not.toBeInTheDocument()
     expect(screen.getByText('共 12 条笔记')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-    expect(await screen.findByText('第 8 条笔记')).toBeInTheDocument()
-    expect(holder.getNotes).toHaveBeenLastCalledWith(4, 4)
+    expect(await screen.findByText('第 7 条笔记')).toBeInTheDocument()
+    expect(holder.getNotes).toHaveBeenLastCalledWith(5, 5)
 
     fireEvent.change(screen.getByLabelText('跳转到第几页笔记'), { target: { value: '3' } })
     fireEvent.click(screen.getByRole('button', { name: '跳转' }))

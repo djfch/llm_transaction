@@ -13,8 +13,8 @@ import StateHint from '../StateHint'
 import ClampText from './ClampText'
 import PaginationControls from './PaginationControls'
 
-/** Agent 笔记面板每页条数固定为 4，使右侧面板与时间线的视觉高度更协调。 */
-const PAGE_SIZE = 4
+/** Agent 笔记面板每页条数固定为 5，与决策时间线每页 5 条对齐。 */
+const PAGE_SIZE = 5
 
 /** 单条笔记卡片：显示记录时间和 Agent 原始备忘内容；超长按 8 行折叠。 */
 function NoteCard({ note }: { note: Note }) {
