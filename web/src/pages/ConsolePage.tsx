@@ -1,6 +1,6 @@
 /**
  * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
- * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
+ * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读)+交易计划(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 复盘报告 → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
  * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略面板(refreshKey)；时间线与笔记各自管理分页；
@@ -24,6 +24,7 @@ import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
 import StrategyPanel from '../components/console/StrategyPanel'
 import TopBar from '../components/console/TopBar'
+import TradePlanPanel from '../components/console/TradePlanPanel'
 import TradesTable from '../components/console/TradesTable'
 import { useApiData } from '../hooks/useApiData'
 import { useLivePortfolio } from '../hooks/useLivePortfolio'
@@ -57,7 +58,7 @@ function useConsoleData() {
   return { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, bumpStrategy }
 }
 
-/** 首屏：左栏账户/权益/风控/策略(只读) 四卡片；右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
+/** 首屏：左栏账户/权益/风控/策略(只读)/交易计划(只读) 五卡片；右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
 function FirstScreen({
   account,
   mode,
@@ -92,6 +93,7 @@ function FirstScreen({
         <EquityMiniChart points={points} equityChangePct={equityChangePct} />
         <RiskPanel />
         <StrategyPanel refreshKey={strategyTick} onOpenConfig={onOpenConfig} />
+        <TradePlanPanel refreshKey={strategyTick} />
       </aside>
       <div className="order-1 col-span-12 lg:order-2 lg:col-span-6">
         <LiveRoundHero />

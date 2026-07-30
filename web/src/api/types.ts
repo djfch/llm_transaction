@@ -202,6 +202,13 @@ export interface Note {
 /** Agent 笔记分页结果：GET /api/notes?offset=&limit=。 */
 export type NotesPageResult = PageResult<Note>
 
+/** 当前交易计划：GET /api/plan（全局唯一一份自由文本；content 空串 = 无计划）。 */
+export interface TradePlan {
+  content: string // 计划全文（Markdown）；空串表示当前无计划
+  roundId: string // 最近一次写入计划的决策轮 ID（由 round_id 适配）
+  updatedAt: string | null // 更新时间（ISO 字符串，由 updated_at(Unix秒) 适配）；无计划时 null
+}
+
 /** 当日统计：GET /api/daily_stats（风控同一口径：服务器时区自然日、按 mode 过滤、仅开仓单计数） */
 export interface DailyStats {
   realized_pnl: number // 当日已实现盈亏合计（USDT，未扣费）
@@ -402,6 +409,8 @@ export interface ApiClient {
   stopAgent(): Promise<AgentStateResult>
   getEquity(): Promise<EquitySeries>
   getNotes(offset?: number, limit?: number): Promise<NotesPageResult>
+  /** 当前交易计划（全局唯一一份）；无计划时 content 为空串、updatedAt 为 null。 */
+  getPlan(): Promise<TradePlan>
   getDailyStats(): Promise<DailyStats>
   getConfig(): Promise<AppConfig>
   putConfig(config: AppConfig): Promise<PutConfigResult>

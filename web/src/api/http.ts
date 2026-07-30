@@ -35,6 +35,7 @@ import type {
   StrategyVersion,
   StrategyVersionDetail,
   Trade,
+  TradePlan,
   TradesPageResult,
   Watchlist,
 } from './types'
@@ -405,6 +406,22 @@ async function fetchNotes(offset = 0, limit = 20): Promise<NotesPageResult> {
   return adaptNotes(await request<RawNotesPage>(`/notes?${qs.toString()}`))
 }
 
+/** 后端 /api/plan：{content, round_id, updated_at(Unix秒|null)}。 */
+interface RawTradePlan {
+  content: string
+  round_id: string
+  updated_at: number | null
+}
+
+/** 后端 plan 响应 → 前端 TradePlan（updated_at 转 ISO time，无计划时 null）。 */
+function adaptTradePlan(raw: RawTradePlan): TradePlan {
+  return {
+    content: raw.content ?? '',
+    roundId: raw.round_id ?? '',
+    updatedAt: raw.updated_at ? new Date(raw.updated_at * 1000).toISOString() : null,
+  }
+}
+
 /** GET /api/review/reports 适配：{items,total}（后端不回显 offset/limit）+ items 字段转换 */
 async function fetchReviewReports(offset: number, limit: number): Promise<ReviewReportsPage> {
   const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
@@ -448,6 +465,7 @@ export const httpApi: ApiClient = {
   stopAgent: () => request<AgentStateResult>('/agent/stop', { method: 'POST' }),
   getEquity: async () => adaptEquity(await request<RawEquity>('/equity')),
   getNotes: fetchNotes,
+  getPlan: async () => adaptTradePlan(await request<RawTradePlan>('/plan')),
   getDailyStats: async () => adaptDailyStats(await request<RawDailyStats>('/daily_stats')),
   getConfig: () => request<AppConfig>('/config'),
   putConfig: (config) =>
