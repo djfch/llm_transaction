@@ -13,6 +13,7 @@ import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
+from src.memory.plans_repo import PlansRepo
 from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
 
@@ -53,6 +54,8 @@ class Repo:
         # 子仓库：策略版本/复盘报告/复盘取数集中在 ReviewRepo（共享同一 Database 与连接），
         # 复盘相关调用走 repo.review.xxx（见 src/memory/review_repo.py）
         self.review = ReviewRepo(db)
+        # 交易计划子仓库：trade_plans 读写走 repo.plans.xxx（见 src/memory/plans_repo.py）
+        self.plans = PlansRepo(db)
 
     @property
     def _conn(self) -> aiosqlite.Connection:

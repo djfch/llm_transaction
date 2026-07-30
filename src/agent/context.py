@@ -1,4 +1,4 @@
-"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/近期笔记/近期成交。
+"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/交易计划/近期笔记/近期成交。
 
 产出的 AgentContext.text 同时用作发给 LLM 的 user 消息与审计的上下文快照；
 summary 为一行摘要，落 decisions.context_summary。
@@ -15,6 +15,7 @@ from decimal import Decimal
 from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
 from src.market.triggers import TriggerManager
+from src.memory.models import TradePlan
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
 
@@ -100,6 +101,7 @@ class ContextBuilder:
             self._account_section(account, positions, equity),
             self._market_section(),
             self._alerts_section(),
+            await self._plans_section(),
             await self._notes_section(),
             await self._trades_section(),
         ]
@@ -175,6 +177,17 @@ class ContextBuilder:
             lines.append(f"- [{_fmt_ts(n.created_at)}] {n.content}")
         return "\n".join(lines)
 
+    async def _plans_section(self) -> str:
+        """active 交易计划：每轮必看并核对；过期计划标注提醒（不自动关闭，由 agent 处置）。"""
+        plans = await self._repo.plans.active_plans()
+        lines = [f"## 交易计划（active {len(plans)} 条，执行/放弃后用 close_trade_plan 收尾）"]
+        if not plans:
+            lines.append("（无）")
+        now = time.time()
+        for p in plans:
+            lines.append(_plan_line(p, now))
+        return "\n".join(lines)
+
     async def _trades_section(self) -> str:
         trades = (await self._repo.trades_between(0.0, time.time()))[-self._trades_n :]
         lines = [f"## 近期成交（近 {self._trades_n} 笔）"]
@@ -186,6 +199,19 @@ class ContextBuilder:
                 f"价格 {t.price}，手续费 {t.fee}，已实现盈亏 {t.pnl}"
             )
         return "\n".join(lines)
+
+
+def _plan_line(p: TradePlan, now: float) -> str:
+    """单条计划渲染：id/方向/入场/止损/止盈/条件/立案时间，过期附提醒。"""
+    direction = "做多" if p.direction == "long" else "做空"
+    expired = p.expires_at is not None and p.expires_at < now
+    tail = "［已过期，请更新或关闭］" if expired else ""
+    size = f"，仓位 {p.size_hint}" if p.size_hint else ""
+    return (
+        f"- [plan_id={p.id}] {p.contract} {direction}：入场 {p.entry}，止损 {p.stop_loss}，"
+        f"止盈 {p.take_profit}，条件：{p.condition}{size}"
+        f"（立案于 {_fmt_ts(p.created_at)}）{tail}"
+    )
 
 
 def _fmt_ts(ts: float) -> str:

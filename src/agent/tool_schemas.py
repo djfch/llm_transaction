@@ -175,4 +175,60 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "save_trade_plan": {
+        "description": (
+            "保存交易计划（挂起条件单记录，不下单）：有明确的条件性交易意图时立案，"
+            "下轮唤醒会在上下文看到并核对。同合约旧 active 计划会被新计划自动替代"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {"type": "string", "description": "合约名，如 BTC_USDT"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["long", "short"],
+                    "description": "方向：long 做多 / short 做空",
+                },
+                "entry": {
+                    "type": "string",
+                    "description": "入场条件/价位，如 '反弹至 64200-64300 受阻'",
+                },
+                "stop_loss": {"type": "string", "description": "止损价位，如 '64500'"},
+                "take_profit": {"type": "string", "description": "止盈目标，如 '63800→63666'"},
+                "condition": {
+                    "type": "string",
+                    "description": "触发条件描述，如 '15m 转阴且量能萎缩'",
+                },
+                "size_hint": {
+                    "type": "string",
+                    "description": "仓位提示（可选），如 '权益 10%，杠杆 3x'",
+                },
+                "rationale": {"type": "string", "description": "立案理由（可选）"},
+                "valid_hours": {
+                    "type": "integer",
+                    "description": "有效期小时数（1-720，可选），过期上下文会提醒处理",
+                },
+            },
+            "required": ["contract", "direction", "entry", "stop_loss", "take_profit", "condition"],
+        },
+    },
+    "close_trade_plan": {
+        "description": "收尾交易计划：按计划执行后标 executed，放弃时标 cancelled，均须写明原因",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "integer",
+                    "description": "计划 ID（见上下文「交易计划」小节）",
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["executed", "cancelled"],
+                    "description": "executed 已按计划执行 / cancelled 放弃",
+                },
+                "reason": {"type": "string", "description": "收尾原因"},
+            },
+            "required": ["plan_id", "outcome", "reason"],
+        },
+    },
 }

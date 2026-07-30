@@ -10,6 +10,7 @@ from src.memory.models import (
     ReviewReport,
     StrategyVersion,
     Trade,
+    TradePlan,
 )
 from src.memory.repo import Repo
 
@@ -24,4 +25,5 @@ __all__ = [
     "ReviewReport",
     "StrategyVersion",
     "Trade",
+    "TradePlan",
 ]
