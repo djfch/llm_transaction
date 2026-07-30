@@ -379,6 +379,13 @@ export const mockApi: ApiClient = {
     reply({ initialEquity: 10_000, baselineSource: 'paper_config', points: equity }),
   getNotes: (offset = 0, limit = 20) =>
     reply({ items: notes.slice(offset, offset + limit), total: notes.length, offset, limit }),
+  getPlan: () =>
+    reply({
+      content:
+        '## BTC 做空\n入场：反弹至 64200-64300 受阻\n止损：64500；目标：63800→63666\n仓位：权益 10%，杠杆 3x\n条件：15m 转阴且量能萎缩\n\n## ETH\n观望，等回踩 1900 整数关确认',
+      roundId: rounds[0].round_id,
+      updatedAt: new Date(Date.now() - 1800_000).toISOString(),
+    }),
   // 固定值：与 mock 成交叙事自洽（当日若干笔已实现合计），上限随风控配置联动
   getDailyStats: () =>
     reply({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: config.risk.max_orders_per_day }),

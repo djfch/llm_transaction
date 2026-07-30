@@ -136,6 +136,9 @@ vi.mock('../api', () => ({
       }),
     getSecretsStatus: () => Promise.resolve({ gate_key: true, llm_key: true, telegram: false }),
     resetPaperEquity: (equity: number) => Promise.resolve({ equity }),
+    // 交易计划面板（左栏，策略下方）数据源
+    getPlan: () =>
+      Promise.resolve({ content: '## BTC 做空\n入场：反弹受阻', roundId: 'r1', updatedAt: '2026-07-20T00:00:00Z' }),
   },
   // 写操作按钮（AgentControl/PositionsPanel 等）catch 分支做 instanceof ApiError，mock 必须透出该类
   ApiError: class ApiError extends Error {},
@@ -221,6 +224,9 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText('策略 · system_prompt')).toBeInTheDocument()
     expect(await screen.findByText(/系统提示词/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '去配置中心修改' })).toBeInTheDocument()
+    // 左栏：交易计划面板（策略下方，只读）——标题与计划全文（getPlan 夹具）
+    expect(screen.getByText('交易计划 · trade_plan')).toBeInTheDocument()
+    expect(await screen.findByText(/反弹受阻/)).toBeInTheDocument()
     // 中央：实时决策轮主角（结束后拉详情，渲染结论；结论与对话流各出现一次）
     expect(await screen.findByText(/实时决策轮/)).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent(/started_at\(开始\)|ended_at\(结束\)/)
