@@ -34,8 +34,8 @@ _HANDLERS: dict[str, Callable[[ToolDeps, dict], Awaitable[ToolOutcome]]] = {
     "set_next_wakeup": tool_handlers.set_next_wakeup,
     "write_note": tool_handlers.write_note,
     "get_history": tool_handlers.get_history,
-    "save_trade_plan": tool_plans.save_trade_plan,
-    "close_trade_plan": tool_plans.close_trade_plan,
+    "update_trade_plan": tool_plans.update_trade_plan,
+    "clear_trade_plan": tool_plans.clear_trade_plan,
 }
 
 

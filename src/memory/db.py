@@ -104,21 +104,10 @@ CREATE TABLE IF NOT EXISTS review_reports (
     error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS trade_plans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    round_id TEXT NOT NULL,
-    contract TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    entry TEXT NOT NULL,
-    stop_loss TEXT NOT NULL,
-    take_profit TEXT NOT NULL,
-    size_hint TEXT NOT NULL DEFAULT '',
-    condition TEXT NOT NULL,
-    rationale TEXT NOT NULL DEFAULT '',
-    expires_at REAL,
-    status TEXT NOT NULL DEFAULT 'active',
-    closed_reason TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL,
+CREATE TABLE IF NOT EXISTS trade_plan (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    round_id TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
@@ -127,7 +116,6 @@ CREATE INDEX IF NOT EXISTS idx_orders_round ON orders(round_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_round ON audit_tool_calls(round_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_md5 ON strategy_versions(md5);
 CREATE INDEX IF NOT EXISTS idx_review_reports_created ON review_reports(created_at);
-CREATE INDEX IF NOT EXISTS idx_trade_plans_status ON trade_plans(status, contract);
 """
 
 

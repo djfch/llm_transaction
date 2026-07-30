@@ -137,25 +137,12 @@ class ReviewReport(BaseModel):
 
 
 class TradePlan(BaseModel):
-    """交易计划：agent 的挂起条件单记录（建议性，不自动下单、不经风控）。
+    """交易计划：全局唯一一份的自由文本计划书（建议性，不自动下单、不经风控）。
 
-    entry/stop_loss/take_profit 为自由文本（允许区间描述如 "64200-64300"）；
-    direction 取值 long/short；status 取值 active/executed/cancelled；
-    expires_at 为 None 表示不设有效期（过期不自动关闭，上下文标注提醒 agent 处理）。
+    content 为 Markdown 全文（多合约想法写在同一份里），更新即全文覆盖；
+    空串表示当前无计划。历史不单独留表——每轮审计上下文快照已冻结当轮计划原文。
     """
 
-    id: int
-    round_id: str
-    contract: str
-    direction: str
-    entry: str
-    stop_loss: str
-    take_profit: str
-    size_hint: str = ""
-    condition: str
-    rationale: str = ""
-    expires_at: float | None = None
-    status: str = "active"
-    closed_reason: str = ""
-    created_at: float
+    round_id: str = ""
+    content: str = ""
     updated_at: float
