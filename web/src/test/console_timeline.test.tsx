@@ -181,9 +181,10 @@ describe('RoundTimeline(决策时间线)', () => {
 
   it('点击卡片仍按需读取审计详情并保留完整对话展示', async () => {
     renderTimeline()
-    const summary = await screen.findByText('第 100 轮结论摘要')
+    await screen.findByText('第 100 轮结论摘要')
 
-    fireEvent.click(summary)
+    // summary 已移出手风琴按钮（避免与 ClampText 展开按钮嵌套），改点摘要行短号
+    fireEvent.click(screen.getByText('#100'))
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
     expect(await screen.findByText('get_account')).toBeInTheDocument()
     expect(screen.getByText('工具调用详情 · tool_calls（1 步）')).toBeInTheDocument()
@@ -267,9 +268,9 @@ describe('RoundTimeline(决策时间线)', () => {
 
   it('展开的轮详情同样展示策略版本标签', async () => {
     renderTimeline()
-    const summary = await screen.findByText('第 100 轮结论摘要')
+    await screen.findByText('第 100 轮结论摘要')
 
-    fireEvent.click(summary)
+    fireEvent.click(screen.getByText('#100'))
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
     expect(await screen.findByText('策略版本：v2 · 复盘')).toBeInTheDocument()
   })
