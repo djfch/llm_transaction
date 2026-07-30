@@ -16,6 +16,9 @@ import aiosqlite
 from src.memory.db import Database
 from src.memory.models import TradePlan
 
+# 计划全文长度上限：每轮进决策上下文，必须有界；不变量与数据同层（工具层另有友好报错）
+MAX_PLAN_CHARS = 4000
+
 
 class PlansRepo:
     """trade_plan 存取方法集合。所有写操作立即 commit。"""
@@ -38,7 +41,9 @@ class PlansRepo:
         )
 
     async def save_plan(self, round_id: str, content: str) -> TradePlan:
-        """全文覆盖更新（UPSERT 单行）。"""
+        """全文覆盖更新（UPSERT 单行）；超长直接拒绝（防绕过工具层击穿上下文有界性）。"""
+        if len(content) > MAX_PLAN_CHARS:
+            raise ValueError(f"计划全文超长（{len(content)} > {MAX_PLAN_CHARS} 字符）")
         ts = time.time()
         await self._conn.execute(
             "INSERT INTO trade_plan(id, round_id, content, updated_at) VALUES(1,?,?,?)"

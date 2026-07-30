@@ -10,15 +10,14 @@
 from __future__ import annotations
 
 from src.agent.tool_handlers import ToolArgError, ToolDeps, ToolOutcome, _need_str
-
-_MAX_PLAN_CHARS = 4000  # 计划全文长度上限：每轮进上下文，必须有界
+from src.memory.plans_repo import MAX_PLAN_CHARS
 
 
 async def update_trade_plan(deps: ToolDeps, args: dict) -> ToolOutcome:
     """全文覆盖更新交易计划（全局唯一一份，多合约想法写在同一份里）。"""
     content = _need_str(args, "content")
-    if len(content) > _MAX_PLAN_CHARS:
-        raise ToolArgError(f"计划全文过长（{len(content)} 字符，上限 {_MAX_PLAN_CHARS}）")
+    if len(content) > MAX_PLAN_CHARS:
+        raise ToolArgError(f"计划全文过长（{len(content)} 字符，上限 {MAX_PLAN_CHARS}）")
     plan = await deps.repo.plans.save_plan(deps.round_id, content)
     return ToolOutcome(
         f"交易计划已更新（全文覆盖，{len(plan.content)} 字符）；"

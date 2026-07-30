@@ -221,7 +221,9 @@ sequenceDiagram
 
 - 读取：`get_market_data(读取行情)`、`get_history(读取历史)`。
 - 交易：`place_order(下单)`、`update_tpsl(更新止盈止损)`、`amend_order(改单)`、`cancel_order(撤单)`。
-- 自主管理：`set_price_alert(设置价格预警)`、`cancel_price_alert(取消价格预警)`、`set_next_wakeup(安排下次唤醒)`、`write_note(跨轮笔记)`。
+- 自主管理：`set_price_alert(设置价格预警)`、`cancel_price_alert(取消价格预警)`、`set_next_wakeup(安排下次唤醒)`、`write_note(跨轮笔记)`、`update_trade_plan(全文覆盖更新交易计划)`、`clear_trade_plan(清空交易计划)`。
+
+交易计划为全局唯一一份自由文本（`trade_plan` 单行表，≤4000 字符）：多合约想法写在同一份里，更新即全文覆盖；当前计划每轮随决策上下文注入（原文逐行加引用前缀定界）；历史不单独留表——每轮审计上下文快照已冻结当轮计划原文，复盘可溯。计划是建议性记录：不自动下单、不触发唤醒，实际下单照常过 `RiskEngine`。
 
 价格预警线以内存为唯一存储（`TriggerManager(触发器管理器)`），进程重启即失效，由 LLM 在后续决策轮按需重设；`set_price_alert` 对同合约、同方向、同价格（Decimal 数值相等）的重复设置直接回复"已设置"，不创建第二条。当前预警线会随决策上下文注入 LLM，并在触发时以 `price_trigger(价格触发)` 原因抢醒调度器。
 
@@ -278,6 +280,7 @@ LLM key 或模型配置更新后可以热重建 Provider；`mode(运行模式)`�
 FastAPI 路由按职责拆分：
 
 - `routes_status.py`：运行状态、账户、持仓、决策轮、成交、权益和笔记。
+- `routes_plans.py`：当前交易计划（`GET /api/plan`，全局唯一一份，无计划时 content 为空串）。
 - `routes_config.py`：配置、策略、白名单、LLM 密钥状态和 `kill_switch(开仓总闸)`。
 - `routes_review.py`：复盘报告分页列表与详情（`GET /api/review/reports`、`GET /api/review/reports/{id}`）、手动触发昨日区间复盘（`POST /api/review/run`，回调未接线或 LLM 未配置 503、复盘进行中 409）、策略版本列表与详情（`GET /api/strategy/versions`、`GET /api/strategy/versions/{id}`）、两版本 unified diff（`GET /api/strategy/diff?from=&to=`，纯文本）与回滚（`POST /api/strategy/rollback/{id}`，未接线 503、版本不存在 404）。
 - `routes_trading.py`：未成交挂单、手动撤单、手动平仓、paper 重置、Agent 启停和 K 线。

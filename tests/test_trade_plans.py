@@ -55,6 +55,12 @@ async def test_clear_plan(repo: Repo):
     assert await repo.plans.get_plan() is None  # 空串 = 无计划
 
 
+async def test_repo_rejects_overlong_content(repo: Repo):
+    """长度不变量与数据同层：绕过工具层直写 repo 同样被拒。"""
+    with pytest.raises(ValueError, match="超长"):
+        await repo.plans.save_plan("r1", "x" * 4001)
+
+
 # ---------- 工具层（registry.execute，不经风控） ----------
 
 
@@ -93,8 +99,18 @@ async def test_tool_validation_errors(repo: Repo):
     assert "参数错误" in out.text  # 缺 content
     out = await registry.execute("update_trade_plan", {"content": "x" * 4001})
     assert "参数错误" in out.text and "过长" in out.text
+    out = await registry.execute("update_trade_plan", {"content": "x" * 4000})
+    assert "交易计划已更新" in out.text  # 恰好到上限可过（off-by-one 护栏）
     out = await registry.execute("clear_trade_plan", {})
     assert "参数错误" in out.text  # 缺 reason（原因必须入审计）
+
+
+async def test_tool_content_stripped(repo: Repo):
+    """_need_str 的 strip 行为固化：落库的是去首尾空白后的全文。"""
+    registry = ToolRegistry(_tool_deps(repo))
+    await registry.execute("update_trade_plan", {"content": "  计划正文  "})
+    plan = await repo.plans.get_plan()
+    assert plan is not None and plan.content == "计划正文"
 
 
 async def test_tool_clear_when_empty(repo: Repo):
@@ -125,7 +141,10 @@ async def test_context_plan_full_text_injected(repo: Repo):
     await repo.plans.save_plan("r1", _PLAN_MD)
     text = await _context_text(repo)
     assert "## 交易计划（更新于" in text
-    assert _PLAN_MD in text  # 全文原样注入
+    # 原文逐行加引用前缀定界：内容在、但不能以裸 "## " 行伪装系统 section
+    assert "> ## BTC 做空" in text
+    assert "> 入场：反弹 64200-64300 受阻；止损 64500；目标 63800" in text
+    assert "\n## BTC 做空" not in text  # 裸标题不存在
 
 
 # ---------- GET /api/plan ----------
