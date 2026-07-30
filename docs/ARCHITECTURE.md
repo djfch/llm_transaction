@@ -231,7 +231,7 @@ sequenceDiagram
 
 ### 复盘链路
 
-复盘链路与交易决策链路同进程但解耦，不复用上述唤醒调度。每日到点（`review.daily_time`，巡检循环每分钟检查）或经 `POST /api/review/run` 手动触发后，`ReviewAgent` 以 `wake_source='review'` 开启一条审计轮：先向 LLM 发送中文简报（复盘区间、当前策略书全文、代码侧预统计），随后进行最多 12 轮只读工具调用，工具循环结束后的最终文本落库为复盘报告。若 LLM 调用 `submit_strategy_revision`，`StrategyStore` 校验（strip 后 ≥100 字符、UTF-8 ≤32KB、与当前版本有差异）通过后经临时文件原子替换 `system_prompt.md` 并落新版本，下一轮决策由 `PromptLoader` mtime 热重载自动生效。复盘任何失败只落 error 报告、审计轮 error 并告警，绝不向上抛，交易决策循环零感知。
+复盘链路与交易决策链路同进程但解耦，不复用上述唤醒调度。距上次复盘满 `review.interval_days` 天且到达触发时刻（`review.daily_time`，巡检循环每分钟检查）或经 `POST /api/review/run` 手动触发后，`ReviewAgent` 以 `wake_source='review'` 开启一条审计轮：先向 LLM 发送中文简报（复盘区间——最近 interval_days 天、当前策略书全文、代码侧预统计），随后进行最多 12 轮只读工具调用，工具循环结束后的最终文本落库为复盘报告。若 LLM 调用 `submit_strategy_revision`，`StrategyStore` 校验（strip 后 ≥100 字符、UTF-8 ≤32KB、与当前版本有差异）通过后经临时文件原子替换 `system_prompt.md` 并落新版本，下一轮决策由 `PromptLoader` mtime 热重载自动生效。复盘任何失败只落 error 报告、审计轮 error 并告警，绝不向上抛，交易决策循环零感知。
 
 ## 6. 风控边界
 
@@ -334,7 +334,7 @@ flowchart LR
 | `Settings(运行时配置对象)` | 已校验并注入各组件的内存配置 | 进程内 |
 | `ServerDeps(服务依赖容器)` | FastAPI 可调用的运行时能力与路径 | 进程内 |
 
-前端保存配置时，服务端先合并未提交字段、执行 Pydantic 校验并安全写回。风控、调度、paper 滑点、复盘和部分 LLM 配置会同步到共享运行时对象；构造期字段会在响应中标记需要重启。`review.enabled(复盘开关)` 默认 true、`review.daily_time(每日触发时间，本地 HH:MM)` 默认 03:00，两者支持热写回——复盘巡检循环每次 tick 读取运行时配置，改开关或触发时间即时生效。
+前端保存配置时，服务端先合并未提交字段、执行 Pydantic 校验并安全写回。风控、调度、paper 滑点、复盘和部分 LLM 配置会同步到共享运行时对象；构造期字段会在响应中标记需要重启。`review.enabled(复盘开关)` 默认 true、`review.interval_days(复盘间隔天数)` 默认 1、`review.daily_time(到达间隔后的触发时刻，本地 HH:MM)` 默认 03:00，三者均支持热写回——复盘巡检循环每次 tick 读取运行时配置，改开关、间隔或触发时刻即时生效。
 
 ## 11. 测试与质量门禁
 

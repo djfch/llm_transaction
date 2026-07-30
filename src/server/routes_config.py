@@ -58,6 +58,7 @@ _RUNTIME_KEYS = frozenset(
         "paper.slippage",
         "review.enabled",
         "review.daily_time",
+        "review.interval_days",
     }
 )
 

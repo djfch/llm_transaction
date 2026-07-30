@@ -151,10 +151,13 @@ class AuditConfig(BaseModel):
 
 
 class ReviewConfig(BaseModel):
-    """复盘 agent：每日定时复盘的开关与触发时间（本地时间）。"""
+    """复盘 agent：定时复盘的开关、间隔天数与触发时刻（本地时间）。"""
 
     enabled: bool = True
+    # 到达间隔天数后的触发时刻（本地 HH:MM）
     daily_time: str = "03:00"
+    # 复盘间隔天数：每隔 N 天复盘一次，区间为最近 N 天（默认 1 = 每天）
+    interval_days: int = Field(default=1, ge=1, le=30)
 
     @model_validator(mode="after")
     def _check_daily_time(self) -> ReviewConfig:

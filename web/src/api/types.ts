@@ -416,7 +416,7 @@ export interface ApiClient {
   getReviewReports(offset: number, limit: number): Promise<ReviewReportsPage>
   /** 复盘报告详情：reportMd 全文；404 经 ApiError 抛出。 */
   getReviewReport(id: number): Promise<ReviewReport>
-  /** 手动触发昨日区间复盘；409=进行中、503=LLM 未配置/未接线（ApiError.detail 可读）。 */
+  /** 手动触发复盘（区间为最近 interval_days 天）；409=进行中、503=LLM 未配置/未接线（ApiError.detail 可读）。 */
   runReview(): Promise<RunReviewResult>
   /** 策略版本列表（最新在前，不含 content 全文）。 */
   getStrategyVersions(): Promise<StrategyVersion[]>

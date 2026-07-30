@@ -22,7 +22,7 @@ _LIST_REPORT_MD_LIMIT = 200  # 列表项 report_md 截断长度（省流量，�
 
 
 class _ReviewRunBody(BaseModel):
-    """POST /review/run 可选 body：人工补跑的历史区间（Unix 秒）；无 body = 昨日区间。"""
+    """POST /review/run 可选 body：人工补跑的历史区间（Unix 秒）；无 body = 最近 interval_days 天区间。"""
 
     start_ts: float
     end_ts: float
@@ -69,7 +69,7 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/review/run")
     async def run_review_now(body: _ReviewRunBody | None = Body(None)) -> dict[str, Any]:
-        """手动触发复盘：无 body 维持昨日区间；有 body（人工补跑）按指定区间透传。
+        """手动触发复盘：无 body 维持最近 interval_days 天区间；有 body（人工补跑）按指定区间透传。
 
         回调未接线 503；LLM 未配置 503；复盘进行中 409；区间非法 422。
         状态码映射走回调返回的结构化 error_code（llm_not_configured/busy/invalid_period），
