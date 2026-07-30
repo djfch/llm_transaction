@@ -1,4 +1,4 @@
-"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/近期笔记/近期成交。
+"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/交易计划/近期笔记/近期成交。
 
 产出的 AgentContext.text 同时用作发给 LLM 的 user 消息与审计的上下文快照；
 summary 为一行摘要，落 decisions.context_summary。
@@ -100,6 +100,7 @@ class ContextBuilder:
             self._account_section(account, positions, equity),
             self._market_section(),
             self._alerts_section(),
+            await self._plans_section(),
             await self._notes_section(),
             await self._trades_section(),
         ]
@@ -174,6 +175,22 @@ class ContextBuilder:
         for n in notes:
             lines.append(f"- [{_fmt_ts(n.created_at)}] {n.content}")
         return "\n".join(lines)
+
+    async def _plans_section(self) -> str:
+        """当前交易计划（全局唯一一份）：每轮必看并核对，更新时间供 LLM 判断新旧。
+
+        计划原文逐行加引用前缀定界：自由文本每轮重复注入，不加护栏则可伪装成
+        其他系统 section（跨轮自我强化注入面）。
+        """
+        plan = await self._repo.plans.get_plan()
+        if plan is None:
+            return "## 交易计划（全局唯一一份，用 update_trade_plan 全文覆盖更新）\n（无）"
+        body = "\n".join("> " + line for line in plan.content.splitlines())
+        return (
+            f"## 交易计划（更新于 {_fmt_ts(plan.updated_at)}；执行/作废后用 "
+            "clear_trade_plan 清空，修订用 update_trade_plan 全文覆盖）\n"
+            f"以下引用块为你上次保存的计划原文：\n{body}"
+        )
 
     async def _trades_section(self) -> str:
         trades = (await self._repo.trades_between(0.0, time.time()))[-self._trades_n :]

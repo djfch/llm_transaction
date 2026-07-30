@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from src.agent import tool_handlers, tool_trading
+from src.agent import tool_handlers, tool_plans, tool_trading
 from src.agent.tool_handlers import ToolArgError, ToolDeps, ToolOutcome
 from src.agent.tool_schemas import SCHEMAS
 from src.audit.logger import get_logger
@@ -35,6 +35,8 @@ _HANDLERS: dict[str, Callable[[ToolDeps, dict], Awaitable[ToolOutcome]]] = {
     "write_note": tool_handlers.write_note,
     "get_history": tool_handlers.get_history,
     "calc": tool_handlers.calc,
+    "update_trade_plan": tool_plans.update_trade_plan,
+    "clear_trade_plan": tool_plans.clear_trade_plan,
 }
 
 

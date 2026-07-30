@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS review_reports (
     error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS trade_plan (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    round_id TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_round ON orders(round_id);

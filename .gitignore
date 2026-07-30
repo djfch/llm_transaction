@@ -12,6 +12,7 @@ htmlcov/
 logs/
 data/
 *.db
+output/
 
 # 运行时会被程序写回的文件（只入库 .example 模板，克隆后自行复制）
 config.yaml

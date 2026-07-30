@@ -188,4 +188,34 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["expression"],
         },
     },
+    "update_trade_plan": {
+        "description": (
+            "全文覆盖更新交易计划（全局唯一一份，不下单）：有明确的条件性交易意图时立案/修订，"
+            "多合约想法写在同一份里；下轮唤醒会在上下文看到并核对。"
+            "提交内容必须是计划完整新全文（覆盖旧版，不是增量补充）"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "计划完整新全文（Markdown，≤4000 字符）：入场条件/止损止盈/仓位思路等",
+                },
+            },
+            "required": ["content"],
+        },
+    },
+    "clear_trade_plan": {
+        "description": "清空交易计划：计划已执行完毕或不再成立时调用，须写明原因（入审计）",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "清空原因，如 '已按计划入场' / '行情破坏前提'",
+                },
+            },
+            "required": ["reason"],
+        },
+    },
 }

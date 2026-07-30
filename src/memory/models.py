@@ -134,3 +134,15 @@ class ReviewReport(BaseModel):
     new_version_id: int | None = None
     error: str = ""
     created_at: float
+
+
+class TradePlan(BaseModel):
+    """交易计划：全局唯一一份的自由文本计划书（建议性，不自动下单、不经风控）。
+
+    content 为 Markdown 全文（多合约想法写在同一份里），更新即全文覆盖；
+    空串表示当前无计划。历史不单独留表——每轮审计上下文快照已冻结当轮计划原文。
+    """
+
+    round_id: str = ""
+    content: str = ""
+    updated_at: float
