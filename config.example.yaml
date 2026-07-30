@@ -56,7 +56,10 @@ audit:
   dir: logs/audit
 review:
   enabled: true
-  daily_time: "03:00"
+  daily_time: "03:00"  # 到达间隔天数后的触发时刻（本地 HH:MM）
+  interval_days: 1  # 复盘间隔天数：每隔 N 天一次，区间为最近 N 天（1 = 每天）。
+  # 注意：复盘失败也计入幂等记录（不自动重试，防 LLM 故障时每分钟重发），
+  # 间隔设得越大，单次失败跨过的周期越长；可在监控页「立即复盘」手动补跑
 log:
   dir: logs
   level: INFO

@@ -24,6 +24,7 @@ from src.market.triggers import TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
+from src.utils import calc_expression
 
 
 class ToolArgError(Exception):
@@ -197,6 +198,12 @@ async def write_note(deps: ToolDeps, args: dict) -> ToolOutcome:
     content = _need_str(args, "content")
     note = await deps.repo.add_note(deps.round_id, content)
     return ToolOutcome(f"笔记已保存（id={note.id}）")
+
+
+async def calc(deps: ToolDeps, args: dict) -> ToolOutcome:
+    """数学表达式计算（纯函数，不碰任何依赖）；错误以中文文本返回。"""
+    expression = _need_str(args, "expression")
+    return ToolOutcome(calc_expression(expression))
 
 
 async def get_history(deps: ToolDeps, args: dict) -> ToolOutcome:

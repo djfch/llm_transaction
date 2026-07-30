@@ -89,10 +89,23 @@ def test_scheduler_valid_combo_accepted():
 
 
 def test_review_config_defaults():
-    """复盘配置默认值：启用、每日 03:00（本地时间）。"""
+    """复盘配置默认值：启用、触发时刻 03:00（本地）、间隔 1 天。"""
     cfg = ReviewConfig()
     assert cfg.enabled is True
     assert cfg.daily_time == "03:00"
+    assert cfg.interval_days == 1
+
+
+def test_review_interval_days_valid():
+    assert ReviewConfig(interval_days=3).interval_days == 3
+    assert ReviewConfig(interval_days=30).interval_days == 30
+
+
+def test_review_interval_days_invalid():
+    """非法 interval_days：0、负数、超上限 30 均拒绝。"""
+    for bad in [0, -1, 31]:
+        with pytest.raises(ValidationError, match="interval_days"):
+            ReviewConfig(interval_days=bad)
 
 
 def test_review_daily_time_valid():

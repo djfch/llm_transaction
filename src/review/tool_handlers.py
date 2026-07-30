@@ -17,6 +17,7 @@ from typing import Any
 from src.memory.repo import Repo
 from src.review.stats import compute_review_stats, format_stats_text
 from src.review.strategy import StrategyStore, StrategyValidationError
+from src.utils import calc_expression
 
 _MAX_CHARS_LIMIT = 20000  # max_chars 上限
 _CHAIN_SNIPPET = 500  # 工具调用链单条参数/结果截断长度
@@ -245,6 +246,11 @@ async def get_strategy_versions(deps: ReviewToolDeps, args: dict) -> str:
         )
     lines += ["", "当前策略全文：", deps.store.current() or "（策略书文件不存在）"]
     return "\n".join(lines)
+
+
+async def calc(deps: ReviewToolDeps, args: dict) -> str:
+    """数学表达式计算（纯函数，不碰任何依赖）；错误以中文文本返回。"""
+    return calc_expression(_need_str(args, "expression"))
 
 
 # ---------- 写工具（唯一出口） ----------

@@ -175,6 +175,19 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "calc": {
+        "description": (
+            "计算数学表达式：支持 + - * / ^（幂）与括号，如 2*(3-1)^2 → 8。"
+            "适合盈亏比、仓位名义价值等衍生计算，28 位有效数字高精度计算"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "数学表达式，如 2*(3-1)^2"},
+            },
+            "required": ["expression"],
+        },
+    },
     "update_trade_plan": {
         "description": (
             "全文覆盖更新交易计划（全局唯一一份，不下单）：有明确的条件性交易意图时立案/修订，"

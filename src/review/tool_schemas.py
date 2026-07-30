@@ -122,6 +122,19 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "calc": {
+        "description": (
+            "计算数学表达式：支持 + - * / ^（幂）与括号，如 2*(3-1)^2 → 8。"
+            "适合盈亏比、回撤幅度等衍生计算，28 位有效数字高精度计算"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "数学表达式，如 2*(3-1)^2"},
+            },
+            "required": ["expression"],
+        },
+    },
     "submit_strategy_revision": {
         "description": (
             "提交策略书修订（唯一写出口）：new_prompt_md 为策略书完整新文本（全文重写）。"
