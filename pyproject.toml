@@ -30,6 +30,19 @@ dev = [
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# 体量/复杂度机械门禁（对应 AGENTS.md 硬性规范 §2）：
+# C901 圈复杂度、PLR0912 分支数、PLR0915 语句数（函数行数/嵌套深度的近似代理）
+extend-select = ["C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+# 阈值 13 为存量基线（update_tpsl 压线），重构后应逐步收紧到 10
+max-complexity = 13
+
+[tool.ruff.lint.per-file-ignores]
+# 路由工厂的复杂度/语句数来自端点注册数量（非嵌套逻辑），豁免体量规则
+"src/server/routes_*.py" = ["C901", "PLR0915"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

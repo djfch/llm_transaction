@@ -20,6 +20,8 @@ jobs:
         run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md
       - name: ruff check
         run: uv run ruff check src tests scripts
+      - name: 单文件行数门禁（超 500 行失败）
+        run: uv run python scripts/check_file_size.py
       - name: ruff format --check
         run: uv run ruff format --check src tests scripts
       - name: pytest（风控覆盖率 100% 门槛）

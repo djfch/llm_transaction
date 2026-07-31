@@ -17,6 +17,13 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      # 后端：单文件行数门禁（与 CI 同款，超 500 行失败）
+      - id: file-size
+        name: 单文件行数门禁（src 超 500 行失败）
+        entry: uv run python scripts/check_file_size.py
+        language: system
+        types: [python]
+        pass_filenames: false
       # 后端：pytest（与 CI 同款风控覆盖率门槛；仅 Python 变更时运行）
       - id: pytest
         name: pytest（后端测试 + 风控覆盖率 100%）
