@@ -46,7 +46,7 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 
 ## CI
 
-- pre-commit：`uvx pre-commit install`；普通提交运行后端测试，暂存 Python 文件时运行 Ruff lint/format，`web/` 有变更时运行前端 lint、类型检查与构建
+- pre-commit：`uvx pre-commit install`；暂存 Python 文件时运行后端测试（含风控覆盖率 100% 门槛，与 CI 一致）与 Ruff lint/format，`web/` 有变更时运行前端 lint、类型检查与构建；纯文档提交不再触发后端测试
 - GitHub Actions：push 到 `main/master` 或提交 PR 时，触发后端（ruff + pytest + 覆盖率门槛）、前端（lint + tsc + vitest + build）、e2e（前端构建 + 整机冒烟）三个 job
 - 契约测试：`tests/test_contract.py`（进常规 pytest 套件），冻结前端消费的全部端点响应键/类型（与 `web/src/api/types.ts` 对齐），含密钥泄漏递归扫描护栏
 - 整机冒烟：`scripts/e2e_web_smoke.py`，真实端口 + dist 静态托管 + paper reset 操作链；CI e2e job 自动运行，本地运行需先 `cd web && npm run build`
