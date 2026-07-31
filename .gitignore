@@ -27,3 +27,6 @@ web/dist/
 # 本地学习教程（个人导学材料，不入库）
 docs/tutorial/
 scripts/demo_tools.py
+
+# Qoder 本地评审/分析输出（不入库）
+.qoder/

@@ -1,5 +1,5 @@
-# pre-commit 钩子：普通提交跑后端测试；Python/web 文件分别追加对应检查
-# 安装：uvx pre-commit install
+# pre-commit 钩子：Python 变更跑后端测试（含风控覆盖率门槛）与 Ruff；web/ 变更跑前端检查
+# 安装（一次装齐两阶段）：uvx pre-commit install --hook-type pre-commit --hook-type commit-msg
 repos:
   - repo: local
     hooks:
@@ -17,11 +17,19 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-      # 后端：pytest 快速集
-      - id: pytest
-        name: pytest（后端测试）
-        entry: uv run pytest tests/ -q -x
+      # 后端：单文件行数门禁（与 CI 同款，超 500 行失败）
+      - id: file-size
+        name: 单文件行数门禁（src 超 500 行失败）
+        entry: uv run python scripts/check_file_size.py
         language: system
+        types: [python]
+        pass_filenames: false
+      # 后端：pytest（与 CI 同款风控覆盖率门槛；仅 Python 变更时运行）
+      - id: pytest
+        name: pytest（后端测试 + 风控覆盖率 100%）
+        entry: uv run pytest tests/ -q -x --cov=src/risk --cov-fail-under=100
+        language: system
+        types: [python]
         pass_filenames: false
       # 前端：lint + 类型检查 + 构建（web/ 有变更时）
       - id: web-check
@@ -30,7 +38,7 @@ repos:
         language: system
         files: ^web/
         pass_filenames: false
-      # 提交信息格式（commit-msg 阶段，需 pre-commit install --hook-type commit-msg）
+      # 提交信息格式（commit-msg 阶段，由文件头的合并安装命令一并装入）
       - id: commit-msg-format
         name: '提交信息格式（type: 描述）'
         entry: bash scripts/check_commit_msg.sh

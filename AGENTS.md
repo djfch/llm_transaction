@@ -10,7 +10,7 @@ Gate.io 永续合约 LLM 自主交易 Agent。后端 Python 3.11（uv 管理）�
 - 前端：`cd web && npm ci`；`npm run dev` 开发；`npm run build` 构建
 - 运行：`uv run python -m src.main`（默认 paper 模式）
 - 整机冒烟：`uv run python scripts/e2e_web_smoke.py`（需先 `cd web && npm run build`；真实端口起服务验证 dist 托管与 API 操作链）
-- CI：`uvx pre-commit install` 安装提交钩子；GitHub Actions 见 `.github/workflows/ci.yml`；部署说明见 `docs/DEPLOYMENT.md`
+- CI：`uvx pre-commit install --hook-type pre-commit --hook-type commit-msg` 一次装齐提交钩子与提交信息校验钩子；GitHub Actions 见 `.github/workflows/ci.yml`；部署说明见 `docs/DEPLOYMENT.md`
 
 ## 目录约定
 
@@ -39,9 +39,9 @@ scripts/                     # 验证、Git 钩子辅助与部署脚本
 ## 硬性规范
 
 1. **风控安全**：`src/risk/` 覆盖率必须 100%；新增或扩大敞口的下单/改单必须经过 `RiskEngine`，设置杠杆必须校验 `max_leverage`；LLM 工具调用须进入统一审计，人工撤单当前至少同步订单业务记录；交易所 key 只读 `.env`，永不进 API 响应/日志/前端
-2. **代码体量**：单文件 ≤300 行（超 500 必拆）、函数 ≤40 行、嵌套 ≤3 层
+2. **代码体量**：单文件 ≤300 行（超 500 必拆；机械门禁 `scripts/check_file_size.py`，进 pre-commit 与 CI，>500 行失败、300–500 行警告）、函数 ≤40 行、嵌套 ≤3 层（由 ruff C901/PLR0912/PLR0915 近似兜底，阈值见 pyproject.toml，路由工厂文件豁免；精确行数/嵌套深度为评审约定）
 3. **解耦**：基础设施（gateway/llm/notify）与业务策略分离；模块间经接口通信，禁止跨层直接 import 具体实现
-4. **金额处理**：一律 Decimal，禁止 float
+4. **金额处理**：一律 Decimal，禁止 float（评审约定，无机械 gate——float 的合法用途无法可靠区分，代码评审时重点检查金额链路）
 5. **注释与文档**：中文
 6. **Gate API 参数**：以实现计划附录的核实结果为准，禁止猜测；"文档未找到"项必须先实测
 7. **前端字段标签**：用户可见文本仅在“英文键或枚举值 + 括号内中文释义”时只保留中文；独立英文技术标识，以及括号表示计数或状态补充的文本保持原样，例如 `tool_calls（N 步）`、`null（进行中）`。内部接口字段、类型、提交值和存储键保持不变
@@ -66,7 +66,13 @@ scripts/                     # 验证、Git 钩子辅助与部署脚本
 ## Git 提交规范
 
 1. **分支**：禁止直推 main（GitHub 分支保护强制 PR + CI 全绿）。从最新 main 拉分支：`feat/xxx`、`fix/xxx`、`chore/xxx`，一个分支只做一件事，1–3 天内合回
-2. **提交信息**：`type: 中文描述`（首行 ≤72 字），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（`uvx pre-commit install --hook-type commit-msg` 安装）
+2. **提交信息**：`type: 中文描述`（首行 ≤72 字，不带 scope），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（安装命令见上方“构建与测试命令”CI 一节，一条命令装齐两阶段）
 3. **提交时机**：commit 可以小步多次攒在功能分支上（不必每次提交都开 PR）；**PR 是功能单位——一个 PR = 一个完整功能改动**，功能齐了才开
 4. **合并**：push 后开 PR，CI 三 job（backend/frontend/e2e）全绿后由**人手动确认合并**（AI 协作者只做到"CI 绿 + 改动摘要"，不得擅自合并）；squash merge，合并即删分支
-5. **大改动**（跨多文件或 >100 行）：按用户全局 AGENTS §6 流程（第一性原理 → 双 subagent 对抗审查 → 回归测试 → 验证证据）
+5. **大改动**（跨多文件或 >100 行）必须执行以下流程：
+   1. 修复问题时使用第一性原理：先定义用户可观察行为；再找出系统不可违反的不变量；然后把不变量转成可验证规则（单元测试、集成测试、类型约束、数据库约束、断言、CI 检查）；不接受只修表面现象的补丁
+   2. 实现完成后，用两个 subagent 做对抗性审查：Subagent A 主动寻找 bug、遗漏边界、架构风险、测试缺口；Subagent B 逐条核实 A 提出的问题是否真实存在、是否可复现、是否违反需求或不变量
+   3. 对真实且重要的问题，先补回归测试，再按第一性原理做最小正确修复
+   4. 检查 harness 内容（pre-commit、CI 工作流、门禁脚本）是否需要同步更改
+   5. 检查 README、AGENTS 文档是否需要同步更改
+   6. 任何“完成、修复、通过”的表述都必须基于刚刚运行过的验证证据，不能凭感觉或 subagent 报告直接声称完成
