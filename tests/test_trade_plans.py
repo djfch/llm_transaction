@@ -64,7 +64,7 @@ async def test_repo_rejects_overlong_content(repo: Repo):
 # ---------- 工具层（registry.execute，不经风控） ----------
 
 
-def _tool_deps(repo: Repo) -> ToolDeps:
+def _tool_deps(repo: Repo, notify_event=None) -> ToolDeps:
     """计划工具只用 repo 与 round_id：其余依赖空占位。"""
     none = SimpleNamespace()
     return ToolDeps(
@@ -76,6 +76,7 @@ def _tool_deps(repo: Repo) -> ToolDeps:
         candles=none,
         triggers=none,
         daily_stats_fn=None,
+        notify_event=notify_event,
         round_id="r-tool",
     )
 
@@ -117,6 +118,22 @@ async def test_tool_clear_when_empty(repo: Repo):
     registry = ToolRegistry(_tool_deps(repo))
     out = await registry.execute("clear_trade_plan", {"reason": "x"})
     assert "本就没有交易计划" in out.text
+
+
+async def test_tool_emits_plan_updated_event(repo: Repo):
+    """计划变更即推 plan_updated（前端据此立即重拉）；无效变更（空清空）不推。"""
+    events: list[dict] = []
+    registry = ToolRegistry(_tool_deps(repo, notify_event=events.append))
+    await registry.execute("update_trade_plan", {"content": _PLAN_MD})
+    assert events == [{"type": "plan_updated"}]
+    await registry.execute("clear_trade_plan", {"reason": "已入场"})
+    assert events == [{"type": "plan_updated"}, {"type": "plan_updated"}]
+    # 本就无计划时清空：无变更、不推事件
+    await registry.execute("clear_trade_plan", {"reason": "x"})
+    assert len(events) == 2
+    # 参数校验失败：未落库也不推事件
+    await registry.execute("update_trade_plan", {"content": "x" * 4001})
+    assert len(events) == 2
 
 
 # ---------- 上下文注入 ----------

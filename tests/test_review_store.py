@@ -173,3 +173,29 @@ async def test_validation_error_no_diff_only_false_when_mixed(tmp_path, repo):
         await store.revise("短内容", "r", "review_agent")
     assert len(exc_info.value.reasons) == 2
     assert exc_info.value.no_diff_only is False
+
+
+# ---------- 变更回调 on_change（WS strategy_updated 接线点） ----------
+
+
+async def test_on_change_fired_on_revise_and_rollback(prompt_path, repo):
+    """revise/rollback 落版本后各触发一次 on_change；校验失败不触发。"""
+    calls: list[int] = []
+    store = StrategyStore(prompt_path, repo, on_change=lambda: calls.append(1))
+    v1 = await store.seed_if_empty()
+    assert calls == []  # 播种不算变更（启动时无前端需要通知）
+    await store.revise(_NEW, "改进", "review_agent")
+    assert len(calls) == 1
+    await store.rollback(v1.id)
+    assert len(calls) == 2
+    with pytest.raises(StrategyValidationError):
+        await store.revise("太短了", "r", "review_agent")  # 校验拒绝：不触发
+    with pytest.raises(StrategyValidationError):
+        await store.rollback(999)  # 版本不存在：不触发
+    assert len(calls) == 2
+
+
+async def test_on_change_absent_is_noop(store, repo):
+    """未接线 on_change（默认 None）时 revise 照常工作不报错。"""
+    v = await store.revise(_NEW, "改进", "review_agent")
+    assert v.md5 == content_md5(_NEW)

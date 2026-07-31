@@ -225,6 +225,7 @@ def _build_loop(
     scheduler: WakeupScheduler,
     cfg_path: Path,
     audit: AuditTrail,
+    notify_event: Callable[[dict], None] | None = None,
 ) -> DecisionLoop:
     """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。
 
@@ -252,6 +253,7 @@ def _build_loop(
         on_alert=notifier.send,
         drain_fills=gateway.drain_fills if isinstance(gateway, PaperGateway) else None,
         persist_kill_switch=persist_kill_switch,
+        notify_event=notify_event,  # 工具层变更事件（如 plan_updated）直推 WS 广播队列
         audit=audit,  # 与 server 共用同一实例
     )
 
@@ -317,6 +319,7 @@ async def build_app(
         scheduler=scheduler,
         audit=audit,
         cfg_path=config_path or ROOT / "config.yaml",
+        notify_event=event_queue.put_nowait,
     )
     ctx = AppContext(
         settings=settings,
@@ -325,7 +328,9 @@ async def build_app(
         gateway=gateway,
         source=source,
         loop=loop,
-        review=await build_review(settings, repo, audit, reviewer_provider),  # 复盘子系统装配
+        review=await build_review(
+            settings, repo, audit, reviewer_provider, notify_event=event_queue.put_nowait
+        ),  # 复盘子系统装配（策略变更即广播 strategy_updated）
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,

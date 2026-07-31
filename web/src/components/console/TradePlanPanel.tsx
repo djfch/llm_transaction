@@ -1,7 +1,8 @@
 /**
  * 交易计划面板（首屏左栏，只读）：展示 agent 当前维护的全局唯一一份交易计划（GET /api/plan）。
  * 计划只能由 agent 的 update_trade_plan / clear_trade_plan 工具维护，界面不提供任何编辑入口。
- * 刷新语义：refreshKey 变化（WS 决策轮事件，由 ConsolePage 驱动）时重拉——agent 更新计划就发生在决策轮里。
+ * 刷新语义：refreshKey 变化时重拉——由 ConsolePage 驱动：WS plan_updated（agent 工具改完计划瞬间即推）
+ * 或决策轮事件（兜底）。
  * 空态（content 空串）显示「暂无交易计划」；后台重拉期间保留旧全文，不闪烁「加载中…」。
  */
 import { api } from '../../api'

@@ -91,6 +91,7 @@ class DecisionLoop:
         daily_stats_fn: DailyStatsFn | None = None,
         drain_fills: Callable[[], list] | None = None,
         persist_kill_switch: Callable[[bool], None] | None = None,
+        notify_event: Callable[[dict], None] | None = None,
         audit: AuditTrail | None = None,
         max_turns: int = 8,
     ) -> None:
@@ -117,6 +118,7 @@ class DecisionLoop:
             daily_stats_fn=daily_stats_fn or (lambda: default_daily_stats(repo, settings.mode)),
             mode=settings.mode,
             set_next_wake=set_next_wake,
+            notify_event=notify_event,
             save_fills_inline=drain_fills is None,
         )
         self._registry = ToolRegistry(self._deps)
