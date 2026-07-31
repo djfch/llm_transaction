@@ -8,7 +8,7 @@ from decimal import Decimal
 import logging
 import pytest
 
-from src.market.triggers import TriggerManager
+from src.market.triggers import MAX_ALERTS, TriggerManager
 
 BTC = "BTC_USDT"
 ETH = "ETH_USDT"
@@ -36,6 +36,21 @@ def test_add_invalid_direction():
     manager, _ = make_manager()
     with pytest.raises(ValueError, match="direction"):
         manager.add(BTC, "==", Decimal("70000"))
+
+
+def test_add_rejects_when_at_max_alerts():
+    """全局上限硬校验：第 MAX_ALERTS+1 条拒绝（跨合约合并计数），移除一条后可再设。"""
+    manager, _ = make_manager()
+    for i in range(MAX_ALERTS):
+        contract = BTC if i % 2 == 0 else ETH  # 跨合约分布，验证按全局总数计
+        manager.add(contract, ">=", Decimal(70000 + i))
+    with pytest.raises(ValueError, match="上限"):
+        manager.add(BTC, ">=", Decimal("99999"))
+    assert len(manager.list()) == MAX_ALERTS
+    first = manager.list()[0]
+    assert manager.remove(first.id) is True
+    manager.add(BTC, ">=", Decimal("99999"))  # 腾出名额后可再设
+    assert len(manager.list()) == MAX_ALERTS
 
 
 def test_remove():

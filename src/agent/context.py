@@ -14,7 +14,7 @@ from decimal import Decimal
 
 from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
-from src.market.triggers import TriggerManager
+from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
 
@@ -157,7 +157,7 @@ class ContextBuilder:
         条数，避免预警线异常累积时上下文无界膨胀。
         """
         triggers = sorted(self._triggers.list(), key=lambda t: t.id)
-        lines = [f"## 价格预警线（内存·重启即失效，{len(triggers)} 条）"]
+        lines = [f"## 价格预警线（内存·重启即失效，{len(triggers)}/{MAX_ALERTS} 条）"]
         if not triggers:
             lines.append("（无）")
         for t in triggers[: self._alerts_n]:

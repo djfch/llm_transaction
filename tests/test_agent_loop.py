@@ -29,7 +29,7 @@ from src.config import AuditConfig, LLMConfig, Settings
 from src.gateway.base import Candle, Contract, Ticker
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
-from src.market.triggers import TriggerManager
+from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory import Database, Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
@@ -313,6 +313,36 @@ async def test_price_alert_dedup_and_cancel(env: SimpleNamespace):
     assert "未找到" in texts[3]
     # 取消后内存索引为空；重复设置自始至终未产生第二个实例
     assert env.triggers.list() == []
+
+
+async def test_price_alert_rejects_over_max(env: SimpleNamespace):
+    """预警线全局上限：已达 MAX_ALERTS 时工具拒绝创建并返回错误文本，总数不变。"""
+    for i in range(MAX_ALERTS):
+        env.triggers.add("BTC_USDT", ">=", Decimal(70000 + i))
+    provider = MockProvider(
+        [
+            _resp(
+                "",
+                [
+                    ToolCall(
+                        "set_price_alert",
+                        {"contract": "ETH_USDT", "direction": "below", "price": 3000},
+                        "c1",
+                    ),
+                ],
+                '{"turn":1}',
+            ),
+            _resp("已达上限，放弃设置", [], '{"turn":2}'),
+        ]
+    )
+    result = await _make_loop(env, provider).run_once("timer")
+
+    assert result.ok
+    calls = await env.repo.list_audit_tool_calls(result.round_id)
+    text = json.loads(calls[0].result_json)["text"]
+    assert "错误" in text and "上限" in text and "cancel_price_alert" in text
+    assert len(env.triggers.list()) == MAX_ALERTS  # 未创建新预警
+    assert env.triggers.find("ETH_USDT", "<=", Decimal("3000")) is None
 
 
 # ---------- 风控拒绝：记录且不下单 ----------
