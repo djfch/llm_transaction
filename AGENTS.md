@@ -10,7 +10,7 @@ Gate.io 永续合约 LLM 自主交易 Agent。后端 Python 3.11（uv 管理）�
 - 前端：`cd web && npm ci`；`npm run dev` 开发；`npm run build` 构建
 - 运行：`uv run python -m src.main`（默认 paper 模式）
 - 整机冒烟：`uv run python scripts/e2e_web_smoke.py`（需先 `cd web && npm run build`；真实端口起服务验证 dist 托管与 API 操作链）
-- CI：`uvx pre-commit install` 安装提交钩子；GitHub Actions 见 `.github/workflows/ci.yml`；部署说明见 `docs/DEPLOYMENT.md`
+- CI：`uvx pre-commit install --hook-type pre-commit --hook-type commit-msg` 一次装齐提交钩子与提交信息校验钩子；GitHub Actions 见 `.github/workflows/ci.yml`；部署说明见 `docs/DEPLOYMENT.md`
 
 ## 目录约定
 
@@ -66,7 +66,7 @@ scripts/                     # 验证、Git 钩子辅助与部署脚本
 ## Git 提交规范
 
 1. **分支**：禁止直推 main（GitHub 分支保护强制 PR + CI 全绿）。从最新 main 拉分支：`feat/xxx`、`fix/xxx`、`chore/xxx`，一个分支只做一件事，1–3 天内合回
-2. **提交信息**：`type: 中文描述`（首行 ≤72 字），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（`uvx pre-commit install --hook-type commit-msg` 安装）
+2. **提交信息**：`type: 中文描述`（首行 ≤72 字，不带 scope），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（安装命令见上方“构建与测试命令”CI 一节，一条命令装齐两阶段）
 3. **提交时机**：commit 可以小步多次攒在功能分支上（不必每次提交都开 PR）；**PR 是功能单位——一个 PR = 一个完整功能改动**，功能齐了才开
 4. **合并**：push 后开 PR，CI 三 job（backend/frontend/e2e）全绿后由**人手动确认合并**（AI 协作者只做到"CI 绿 + 改动摘要"，不得擅自合并）；squash merge，合并即删分支
 5. **大改动**（跨多文件或 >100 行）：按用户全局 AGENTS §6 流程（第一性原理 → 双 subagent 对抗审查 → 回归测试 → 验证证据）
