@@ -99,6 +99,10 @@ const holder = vi.hoisted(() => ({
     Promise.resolve({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 }),
   ),
   getStrategy: vi.fn(() => Promise.resolve('# 系统提示词')),
+  // 交易计划面板（左栏，策略下方）数据源：计数可断言（plan_updated 联动测试用）
+  getPlan: vi.fn(() =>
+    Promise.resolve({ content: '## BTC 做空\n入场：反弹受阻', roundId: 'r1', updatedAt: '2026-07-20T00:00:00Z' }),
+  ),
   getAgentLive: vi.fn<() => Promise<AgentLiveState>>(() => Promise.resolve(LIVE)),
 }))
 
@@ -137,8 +141,7 @@ vi.mock('../api', () => ({
     getSecretsStatus: () => Promise.resolve({ gate_key: true, llm_key: true, telegram: false }),
     resetPaperEquity: (equity: number) => Promise.resolve({ equity }),
     // 交易计划面板（左栏，策略下方）数据源
-    getPlan: () =>
-      Promise.resolve({ content: '## BTC 做空\n入场：反弹受阻', roundId: 'r1', updatedAt: '2026-07-20T00:00:00Z' }),
+    getPlan: () => holder.getPlan(),
   },
   // 写操作按钮（AgentControl/PositionsPanel 等）catch 分支做 instanceof ApiError，mock 必须透出该类
   ApiError: class ApiError extends Error {},
@@ -283,6 +286,26 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(holder.getAlerts).toHaveBeenCalledTimes(2)
     // 策略面板联动刷新（新决策轮可能由新策略版本驱动）
     expect(holder.getStrategy).toHaveBeenCalledTimes(2)
+  })
+
+  it('WS strategy_updated / plan_updated → 对应面板即时重拉（不等决策轮事件）', async () => {
+    const { rerender } = render(<ConsolePage />)
+    await screen.findByText(/账户 · PAPER/)
+    await screen.findByText(/反弹受阻/)
+    const strategyBase = holder.getStrategy.mock.calls.length
+    const planBase = holder.getPlan.mock.calls.length
+
+    // 复盘 agent 修订策略落版本即推：仅策略面板重拉，计划面板不动
+    holder.lastMessage = { type: 'strategy_updated' }
+    rerender(<ConsolePage />)
+    await waitFor(() => expect(holder.getStrategy.mock.calls.length).toBe(strategyBase + 1))
+    expect(holder.getPlan.mock.calls.length).toBe(planBase)
+
+    // 执行 agent 工具改完计划轮中即推：仅计划面板重拉，策略面板不动
+    holder.lastMessage = { type: 'plan_updated' }
+    rerender(<ConsolePage />)
+    await waitFor(() => expect(holder.getPlan.mock.calls.length).toBe(planBase + 1))
+    expect(holder.getStrategy.mock.calls.length).toBe(strategyBase + 1)
   })
 
   it('关闭配置抽屉 → 策略面板重拉（closeConfig → bumpStrategy 接线回归）', async () => {

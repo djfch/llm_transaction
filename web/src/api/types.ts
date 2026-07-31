@@ -385,6 +385,8 @@ export type WsMessage =
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'ticker'; data: { contract: string; last: number } }
+  | { type: 'plan_updated' }
+  | { type: 'strategy_updated' }
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {

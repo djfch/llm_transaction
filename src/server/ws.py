@@ -3,6 +3,8 @@
 当前广播事件（均由主程序经注入的 event_queue 放入）：
 - {"type": "round_start", ...} 决策轮开始、{"type": "round", ...} 决策轮结束
 - {"type": "ticker", "data": {"contract", "last"}} 行情推送（bootstrap 按合约节流）
+- {"type": "plan_updated"} 交易计划变更（执行 agent 工具轮中即推，无 payload，只作失效信号）
+- {"type": "strategy_updated"} 策略书变更（复盘修订/手动保存/回滚，同为失效信号）
 成交/持仓变化推送为一期未实现的扩展位：主程序往队列放任意 JSON 字典，
 pump_events 都会广播给全部连接。连接建立时先回一条 hello 握手消息。
 """

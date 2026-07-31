@@ -3,7 +3,9 @@
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读)+交易计划(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 复盘报告 → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
- * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略面板(refreshKey)；时间线与笔记各自管理分页；
+ * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略/计划面板(refreshKey)；
+ * strategy_updated/plan_updated 事件在 LLM 改完的瞬间即时重拉对应面板（不等轮末/下一轮）；
+ * 时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -39,23 +41,41 @@ function useConsoleData() {
   const equity = useApiData(() => api.getEquity(), [])
   // 当日统计走后端 /api/daily_stats（风控口径）；失败时 data 为 null，账户面板底部行降级不渲染
   const daily = useApiData(() => api.getDailyStats(), [])
-  // 策略面板刷新信号：抽屉关闭（可能保存/回滚过策略）或新决策轮（可能由新策略版本驱动）时 bump
+  // 策略面板刷新信号：抽屉关闭（可能保存/回滚过策略）、新决策轮（可能由新策略版本驱动）
+  // 或 WS strategy_updated（复盘修订/保存/回滚落版本即推）时 bump
   const [strategyTick, setStrategyTick] = useState(0)
   const bumpStrategy = useCallback(() => setStrategyTick((t) => t + 1), [])
+  // 交易计划面板刷新信号：WS plan_updated（工具轮中即推，不等轮末）或决策轮事件（兜底）时 bump
+  const [planTick, setPlanTick] = useState(0)
+  const bumpPlan = useCallback(() => setPlanTick((t) => t + 1), [])
   const { connected, lastMessage } = portfolio
   const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadAlerts } = alerts
   const { reload: reloadEquity } = equity
   const { reload: reloadDaily } = daily
   useEffect(() => {
+    if (lastMessage?.type === 'strategy_updated') bumpStrategy()
+    if (lastMessage?.type === 'plan_updated') bumpPlan()
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
     reloadOpenOrders()
     reloadAlerts() // LLM 设置/触发唤醒都伴随决策轮事件
     reloadEquity()
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
     bumpStrategy()
-  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily, bumpStrategy])
-  return { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, bumpStrategy }
+    bumpPlan()
+  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily, bumpStrategy, bumpPlan])
+  return {
+    status,
+    portfolio,
+    openOrders,
+    alerts,
+    equity,
+    daily,
+    connected,
+    strategyTick,
+    planTick,
+    bumpStrategy,
+  }
 }
 
 /** 首屏：左栏账户/权益/风控/策略(只读)/交易计划(只读) 五卡片；右栏将当前持仓、未成交挂单与价格唤醒相邻展示，便于一起核对和操作。 */
@@ -69,6 +89,7 @@ function FirstScreen({
   openOrders,
   alerts,
   strategyTick,
+  planTick,
   onPositionsChanged,
   onOpenOrdersChanged,
   onOpenConfig,
@@ -82,6 +103,7 @@ function FirstScreen({
   openOrders: OpenOrder[]
   alerts: PriceAlert[]
   strategyTick: number
+  planTick: number
   onPositionsChanged: () => void
   onOpenOrdersChanged: () => void
   onOpenConfig: () => void
@@ -93,7 +115,7 @@ function FirstScreen({
         <EquityMiniChart points={points} equityChangePct={equityChangePct} />
         <RiskPanel />
         <StrategyPanel refreshKey={strategyTick} onOpenConfig={onOpenConfig} />
-        <TradePlanPanel refreshKey={strategyTick} />
+        <TradePlanPanel refreshKey={planTick} />
       </aside>
       <div className="order-1 col-span-12 lg:order-2 lg:col-span-6">
         <LiveRoundHero />
@@ -146,7 +168,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, bumpStrategy } =
+  const { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, planTick, bumpStrategy } =
     useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   const account = portfolio.data?.account ?? null
@@ -219,6 +241,7 @@ export default function ConsolePage() {
           openOrders={openOrders.data ?? []}
           alerts={alerts.data ?? []}
           strategyTick={strategyTick}
+          planTick={planTick}
           onPositionsChanged={onPositionsChanged}
           onOpenOrdersChanged={onOpenOrdersChanged}
           onOpenConfig={() => setConfigOpen(true)}

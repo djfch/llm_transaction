@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +57,15 @@ async def build_review(
     *,
     strategy_path: Path | None = None,
     review_prompt_path: Path | None = None,
+    notify_event: Callable[[dict], None] | None = None,
 ) -> ReviewComponents:
     """创建复盘子系统组件：策略版本库播种 v1；复盘 agent 复用同一 provider/audit/repo。
 
-    路径默认取 ROOT 下运行时文件（调用期解析，测试可 monkeypatch 本模块 ROOT 隔离）。
+    路径默认取 ROOT 下运行时文件（调用期解析，测试可 monkeypatch 本模块 ROOT 隔离）；
+    notify_event 接线后，策略书任一路径变更（复盘修订/手动保存/回滚）即广播 strategy_updated。
     """
-    store = StrategyStore(strategy_path or ROOT / "system_prompt.md", repo)
+    on_change = None if notify_event is None else lambda: notify_event({"type": "strategy_updated"})
+    store = StrategyStore(strategy_path or ROOT / "system_prompt.md", repo, on_change=on_change)
     await store.seed_if_empty()
     agent = ReviewAgent(
         settings=settings,

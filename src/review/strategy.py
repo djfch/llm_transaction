@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from src.memory.models import StrategyVersion
@@ -50,9 +51,21 @@ class StrategyStore:
     与 PromptLoader.body_md5（读回文本）一致，版本↔决策 join 不断裂。
     """
 
-    def __init__(self, prompt_path: str | Path, repo: Repo) -> None:
+    def __init__(
+        self,
+        prompt_path: str | Path,
+        repo: Repo,
+        on_change: Callable[[], None] | None = None,
+    ) -> None:
         self._path = Path(prompt_path)
         self._repo = repo
+        # 策略书变更回调（revise/rollback 落版本后触发，如广播 WS 事件）；未接线为 None
+        self._on_change = on_change
+
+    def _notify_change(self) -> None:
+        """变更即通知（前端据此立即重拉策略面板）；未接线时静默跳过。"""
+        if self._on_change is not None:
+            self._on_change()
 
     async def seed_if_empty(self) -> StrategyVersion | None:
         """启动播种：版本表为空且策略书文件存在 → 记 v1（created_by='human'）。"""
@@ -79,9 +92,11 @@ class StrategyStore:
         content = content.replace("\r\n", "\n")  # 归一化后校验/md5/写盘/落库用同一份内容
         self._validate(content)
         self._atomic_write(content)
-        return await self._repo.review.save_strategy_version(
+        version = await self._repo.review.save_strategy_version(
             content, content_md5(content), created_by, reason, report_id
         )
+        self._notify_change()
+        return version
 
     async def rollback(self, version_id: int) -> StrategyVersion:
         """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。"""
@@ -90,9 +105,11 @@ class StrategyStore:
             raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
         content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
         self._atomic_write(content)
-        return await self._repo.review.save_strategy_version(
+        new_version = await self._repo.review.save_strategy_version(
             content, content_md5(content), "rollback", f"回滚到 v{version_id}"
         )
+        self._notify_change()
+        return new_version
 
     async def list_versions(self) -> list[StrategyVersion]:
         return await self._repo.review.list_strategy_versions()

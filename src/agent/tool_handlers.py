@@ -57,6 +57,7 @@ class ToolDeps:
     daily_stats_fn: DailyStatsFn
     mode: str = "paper"
     set_next_wake: Callable[[int], int] | None = None  # 返回钳制后实际生效分钟数
+    notify_event: Callable[[dict], None] | None = None  # WS 事件广播（如 plan_updated）
     round_id: str = ""
     # 无 drain_fills 钩子（真实网关）时为 True：已成交单由工具层直接落 trades 表；
     # paper 模式由决策循环 drain 统一落库，工具层不再落（防双计）
