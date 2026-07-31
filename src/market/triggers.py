@@ -6,6 +6,7 @@
 - 同一触发器最多触发一次（触发即从索引移除，防重复触发）。
 - 同一 (contract, direction, price) 的唯一性由工具层经 find() 查重保证，
   索引本身不做唯一性约束（单一事件循环内 find→add 无并发窗口）。
+- 未触发预警线全局总数不超 MAX_ALERTS（add() 硬校验，任何调用方不可绕过）。
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 Direction = Literal[">=", "<="]
+
+# 未触发预警线全局上限（跨合约合并计数）：防预警线无界累积膨胀上下文
+MAX_ALERTS = 10
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,8 @@ class TriggerManager:
     def add(self, contract: str, direction: Direction, price: Decimal) -> PriceTrigger:
         if direction not in (">=", "<="):
             raise ValueError(f"非法 direction: {direction}（可选 >= / <=）")
+        if len(self._triggers) >= MAX_ALERTS:
+            raise ValueError(f"价格预警数量已达上限（{MAX_ALERTS} 条），请先取消不需要的预警线")
         trigger = PriceTrigger(
             id=next(self._next_id),
             contract=contract,

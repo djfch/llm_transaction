@@ -30,7 +30,7 @@ async def _build_text(triggers: TriggerManager, tmp_path, alerts_n: int = 20) ->
 async def test_alerts_section_empty(tmp_path):
     text = await _build_text(TriggerManager(lambda t, p: None), tmp_path)
 
-    assert "## 价格预警线（内存·重启即失效，0 条）" in text
+    assert "## 价格预警线（内存·重启即失效，0/10 条）" in text
     assert "（无）" in text
 
 
@@ -41,7 +41,7 @@ async def test_alerts_section_lists_pending(tmp_path):
 
     text = await _build_text(triggers, tmp_path)
 
-    assert "## 价格预警线（内存·重启即失效，2 条）" in text
+    assert "## 价格预警线（内存·重启即失效，2/10 条）" in text
     assert "- BTC_USDT above 70000" in text
     assert "- ETH_USDT below 3000" in text
     # 条目带设置时间（_fmt_ts 的 MM-DD HH:MM 形态），供 LLM 判断新旧
@@ -56,7 +56,7 @@ async def test_alerts_section_truncates_to_alerts_n(tmp_path):
 
     text = await _build_text(triggers, tmp_path, alerts_n=2)
 
-    assert "## 价格预警线（内存·重启即失效，3 条）" in text  # 标题保留总数
+    assert "## 价格预警线（内存·重启即失效，3/10 条）" in text  # 标题保留总数
     assert "- BTC_USDT above 10000" in text
     assert "- BTC_USDT above 20000" in text
     assert "- BTC_USDT above 30000" not in text  # 超出部分截断

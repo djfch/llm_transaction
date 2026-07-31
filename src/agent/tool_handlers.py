@@ -20,7 +20,7 @@ from src.config import RiskConfig
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
 from src.market.intervals import GATE_CANDLE_INTERVALS
-from src.market.triggers import TriggerManager
+from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
@@ -164,6 +164,12 @@ async def set_price_alert(deps: ToolDeps, args: dict) -> ToolOutcome:
     if existing is not None:
         return ToolOutcome(
             f"该价格预警已设置：{contract} {direction} {price}（触发器 {existing.id}），无需重复创建"
+        )
+    # 全局上限预检：达标时拒绝创建，错误文本回给 LLM（TriggerManager.add 另有硬校验兜底）
+    if len(deps.triggers.list()) >= MAX_ALERTS:
+        return ToolOutcome(
+            f"错误：价格预警数量已达上限（{MAX_ALERTS} 条），未创建新预警；"
+            "请先用 cancel_price_alert 取消不需要的预警线后再设置"
         )
     trigger = deps.triggers.add(contract, sym, price)
     return ToolOutcome(f"已设置价格预警：{contract} {direction} {price}（触发器 {trigger.id}）")
