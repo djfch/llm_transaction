@@ -4,6 +4,9 @@ gate:
   testnet_host: https://api-testnet.gateapi.io/api/v4
   live_host: https://api.gateio.ws/api/v4
 llm:
+  # provider 可选：anthropic / openai_compat / openai_responses
+  # openai_responses 为 OpenAI Responses API（openai_base_url 留空走官方端点）；
+  # 注意：ZDR（零数据留存）组织 store=false，reasoning 项无法回放，当前不支持
   provider: openai_compat
   model: deepseek-v4-flash
   max_tokens: 4096

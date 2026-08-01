@@ -162,7 +162,7 @@ describe('SecretsForm(凭证管理) · 新增凭证', () => {
 
     fireEvent.change(screen.getByLabelText('name'), { target: { value: 'kimi-bak' } })
     fireEvent.change(screen.getByLabelText('provider'), { target: { value: 'openai_compat' } })
-    // openai_compat 时才出现 base_url 输入框
+    // 非 anthropic（openai_compat / openai_responses）时才出现 base_url 输入框
     const baseUrl = screen.getByLabelText('openai_base_url')
     fireEvent.change(screen.getByLabelText('model'), { target: { value: 'kimi-k2' } })
     fireEvent.change(baseUrl, { target: { value: 'https://api.moonshot.cn/v1' } })
@@ -182,6 +182,32 @@ describe('SecretsForm(凭证管理) · 新增凭证', () => {
     // 其余配置段原样透传
     expect(sent.risk).toEqual(CONFIG.risk)
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1))
+  })
+
+  it('openai_responses 同样显示 base_url 输入框，且可留空提交（走 OpenAI 官方端点）', async () => {
+    putConfig.mockResolvedValue({ saved: true, needs_restart: [], llm_configured: true, llm_error: '' })
+    render(<SecretsForm status={STATUS} config={CONFIG} onSaved={() => {}} />)
+
+    // anthropic 不显示 base_url 输入框
+    expect(screen.queryByLabelText('openai_base_url')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('name'), { target: { value: 'gpt-main' } })
+    fireEvent.change(screen.getByLabelText('provider'), { target: { value: 'openai_responses' } })
+    // openai_responses 出现 base_url 输入框，但允许留空
+    expect(screen.getByLabelText('openai_base_url')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('model'), { target: { value: 'gpt-5' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存新凭证' }))
+
+    await waitFor(() => expect(putConfig).toHaveBeenCalledTimes(1))
+    const sent = putConfig.mock.calls[0][0] as AppConfig
+    expect(sent.llm.credentials?.[2]).toEqual({
+      name: 'gpt-main',
+      provider: 'openai_responses',
+      model: 'gpt-5',
+      max_tokens: 4096,
+      openai_base_url: '',
+      api_key_env: 'LLM_KEY_GPT_MAIN',
+    })
   })
 
   it('非法名称（大写/空格）被前端拦截，不发起请求', async () => {
