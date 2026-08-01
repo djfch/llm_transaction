@@ -24,6 +24,21 @@ from src.market.feed import MarketFeed
 BTC = "BTC_USDT"
 
 
+def test_interval_seconds():
+    """周期字符串转秒数：覆盖各时间单位与非法周期拒绝。"""
+    from src.market.intervals import interval_seconds
+
+    assert interval_seconds("10s") == 10
+    assert interval_seconds("30m") == 1800
+    assert interval_seconds("4h") == 14400
+    assert interval_seconds("1d") == 86400
+    assert interval_seconds("7d") == 604800
+    assert interval_seconds("30d") == 2592000
+    assert interval_seconds("1w") == 604800
+    with pytest.raises(ValueError, match="非法 K 线周期"):
+        interval_seconds("3h")
+
+
 def _ticker(price: Decimal) -> Ticker:
     return Ticker(
         contract=BTC,

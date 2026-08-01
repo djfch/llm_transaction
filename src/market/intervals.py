@@ -27,3 +27,12 @@ GATE_CANDLE_INTERVALS: tuple[str, ...] = (
     "30d",
     "1w",
 )
+
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def interval_seconds(interval: str) -> int:
+    """周期字符串转秒数（如 4h→14400、1w→604800），供判断 K 线窗口是否已结束。"""
+    if interval not in GATE_CANDLE_INTERVALS:
+        raise ValueError(f"非法 K 线周期: {interval!r}")
+    return int(interval[:-1]) * _UNIT_SECONDS[interval[-1]]
