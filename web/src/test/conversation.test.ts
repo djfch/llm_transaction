@@ -1,6 +1,6 @@
 /**
- * buildConversation 测试：Anthropic/OpenAI 两种 llm_raw 格式的回合解析、
- * 工具结果按 seq 插入、非 JSON 与空输入降级、deny 结果携带风控信息。
+ * buildConversation 测试：Anthropic/OpenAI 兼容/OpenAI Responses 三种 llm_raw 格式的
+ * 回合解析、工具结果按 seq 插入、非 JSON 与空输入降级、deny 结果携带风控信息。
  */
 import { describe, expect, it } from 'vitest'
 import type { ToolCall } from '../api/types'
@@ -52,6 +52,42 @@ const OPENAI_RAW = [
   JSON.stringify({ choices: [{ message: { content: '开多完成。', tool_calls: null } }] }),
 ].join('\n')
 
+// OpenAI Responses 格式：顶层带 id/created_at/instructions 等元数据（不应进入对话），
+// 首回合 reasoning（跳过）+ message + function_call，次回合纯文本结论
+const RESPONSES_RAW = [
+  JSON.stringify({
+    id: 'resp_1',
+    created_at: 1785604246.0,
+    instructions: '# 策略书……',
+    output: [
+      { type: 'reasoning', summary: [] },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '先查 K 线确认趋势。' }],
+      },
+      {
+        type: 'function_call',
+        name: 'get_candlesticks',
+        arguments: '{"contract":"BTC_USDT","interval":"4h"}',
+        call_id: 'call_1',
+        id: 'fc_1',
+      },
+    ],
+  }),
+  JSON.stringify({
+    id: 'resp_2',
+    created_at: 1785604251.0,
+    output: [
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '震荡市观望，设置预警后休眠。' }],
+      },
+    ],
+  }),
+].join('\n')
+
 describe('buildConversation（完整对话构建）', () => {
   it('anthropic：text/tool_use 交错展开，工具结果按 seq 插在各自调用后，最终回合文本为结论', () => {
     const msgs = buildConversation(ANTHROPIC_RAW, [
@@ -94,6 +130,26 @@ describe('buildConversation（完整对话构建）', () => {
     // arguments 原样是带转义的 JSON 字符串，解析后应为紧凑对象文本
     expect(msgs[2].text).toBe('place_order {"contract":"BTC_USDT","size":4}')
     expect(msgs.at(-1)?.text).toBe('开多完成。')
+  })
+
+  it('responses：reasoning 跳过、output_text 提取、function_call 转调用，顶层元数据不进对话', () => {
+    const msgs = buildConversation(RESPONSES_RAW, [
+      auditCall(1, 'get_candlesticks', '返回 24 根 K 线'),
+    ])
+    expect(msgs.map((m) => `${m.role}/${m.kind}`)).toEqual([
+      'assistant/text',
+      'assistant/tool_call',
+      'user/tool_result',
+      'assistant/text',
+    ])
+    expect(msgs[0].text).toBe('先查 K 线确认趋势。')
+    // arguments 为 JSON 字符串，解析为紧凑对象摘要
+    expect(msgs[1].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"4h"}')
+    expect(msgs[2].text).toBe('返回 24 根 K 线')
+    // 最终回合文本为结论，而不是整段 Response JSON（线上 bug 回归防护）
+    expect(msgs.at(-1)?.text).toBe('震荡市观望，设置预警后休眠。')
+    expect(msgs.some((m) => m.text.includes('"instructions"'))).toBe(false)
+    expect(msgs.some((m) => m.text.includes('resp_1'))).toBe(false)
   })
 
   it('非 JSON（mock provider 原文）+ 无工具调用：降级为单条原文 text', () => {

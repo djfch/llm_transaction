@@ -3,7 +3,8 @@
  *
  * 后端事实：llm_raw = 每个 assistant 回合的原生 API 响应 JSON（单行紧凑）按 \n 连接；
  * 工具执行结果不在 llm_raw 里，而在审计 tool_calls（按 seq 顺序与回合内 tool_use 依次对应）。
- * 支持 Anthropic 原生格式与 OpenAI 兼容格式；解析失败时降级为「原文 + 工具调用链」。
+ * 支持 Anthropic 原生格式、OpenAI 兼容（chat.completions）与 OpenAI Responses（顶层
+ * output 数组）三种格式；解析失败时降级为「原文 + 工具调用链」。
  */
 import type { ToolCall } from '../api/types'
 
@@ -89,7 +90,30 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   return turn
 }
 
-/** 解析单行 JSON 为一个 assistant 回合；非法 JSON 或两种格式都不匹配返回 null */
+/** OpenAI Responses 格式：{output:[{type:'message',content:[{type:'output_text',text}]}
+ *  | {type:'function_call',name,arguments} | {type:'reasoning',...}（跳过）]} */
+function parseResponses(output: unknown[]): AssistantTurn {
+  const turn: AssistantTurn = { texts: [], calls: [] }
+  for (const item of output) {
+    if (!isRecord(item)) continue
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      for (const c of item.content) {
+        if (isRecord(c) && c.type === 'output_text' && typeof c.text === 'string' && c.text.trim()) {
+          turn.texts.push(c.text)
+        }
+      }
+    }
+    if (item.type === 'function_call') {
+      turn.calls.push({
+        name: String(item.name ?? ''),
+        argsText: openAiArgsText(item.arguments),
+      })
+    }
+  }
+  return turn
+}
+
+/** 解析单行 JSON 为一个 assistant 回合；非法 JSON 或三种格式都不匹配返回 null */
 function parseTurn(line: string): AssistantTurn | null {
   let obj: unknown
   try {
@@ -100,6 +124,7 @@ function parseTurn(line: string): AssistantTurn | null {
   if (!isRecord(obj)) return null
   if (obj.role === 'assistant' && Array.isArray(obj.content)) return parseAnthropic(obj.content)
   if (Array.isArray(obj.choices)) return parseOpenAi(obj.choices)
+  if (Array.isArray(obj.output)) return parseResponses(obj.output)
   return null
 }
 
