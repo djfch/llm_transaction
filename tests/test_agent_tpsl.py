@@ -1,5 +1,6 @@
 """止盈止损工具回归：开仓不变量、保护替换顺序与 paper 触发。"""
 
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -73,6 +74,45 @@ async def test_market_data_returns_beijing_ohlcv_table(tmp_path):
         assert "交易对：BTC_USDT；时间尺度：1h；时间：北京时间（UTC+8）" in out.text
         assert "时间（年月日时分） | 开盘价 | 收盘价 | 最高价格 | 最低价格 | 交易量" in out.text
         assert "1970-01-01 08:00 | 1 | 2 | 3 | 0.5 | 8" in out.text
+    finally:
+        await env.db.close()
+
+
+async def test_market_data_marks_unclosed_candle(tmp_path):
+    """未收盘标注：窗口未结束的最后一根尾部追加（未收盘），已收盘根不标。"""
+    now = int(time.time())
+    current_open = now - (now % 3600)  # 当前 1h 窗口的开盘时刻
+    prev_open = current_open - 3600
+    gateway = MockGateway(contracts={"BTC_USDT": _contract()})
+    gateway.candles = [
+        Candle(
+            t=prev_open,
+            o=Decimal("1"),
+            h=Decimal("3"),
+            l=Decimal("0.5"),
+            c=Decimal("2"),
+            v=Decimal("8"),
+        ),
+        Candle(
+            t=current_open,
+            o=Decimal("2"),
+            h=Decimal("4"),
+            l=Decimal("1"),
+            c=Decimal("3"),
+            v=Decimal("5"),
+        ),
+    ]
+    env = await _registry(tmp_path, gateway)
+    try:
+        env.cache.backfill(["BTC_USDT"], ["1h"], limit=2)
+        out = await env.registry.execute(
+            "get_market_data", {"contract": "BTC_USDT", "interval": "1h"}
+        )
+        rows = [ln for ln in out.text.splitlines() if ln[:1].isdigit()]
+        assert len(rows) == 2
+        assert "（未收盘）" not in rows[0]
+        assert rows[1].endswith(" （未收盘）")
+        assert out.text.count("（未收盘）") == 1
     finally:
         await env.db.close()
 

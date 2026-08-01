@@ -19,7 +19,7 @@ from typing import Any
 from src.config import RiskConfig
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
-from src.market.intervals import GATE_CANDLE_INTERVALS
+from src.market.intervals import GATE_CANDLE_INTERVALS, interval_seconds
 from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
@@ -143,11 +143,16 @@ async def get_market_data(deps: ToolDeps, args: dict) -> ToolOutcome:
     if not candles:
         lines.append("暂无 K 线数据")
         return ToolOutcome("\n".join(lines))
+    # 最后一根通常是窗口未结束的形成中 K 线（OHLCV 为截至当前的累计快照）：按
+    # 开盘时间 + 周期秒数 > 当前时刻判定并标注，避免把不完整的量/涨跌幅误读成缩量
     zone = timezone(timedelta(hours=8), name="UTC+8")
+    span = interval_seconds(interval)
+    now = time.time()
     for candle in candles:
         timestamp = datetime.fromtimestamp(candle.t, zone).strftime("%Y-%m-%d %H:%M")
+        suffix = " （未收盘）" if candle.t + span > now else ""
         lines.append(
-            f"{timestamp} | {candle.o} | {candle.c} | {candle.h} | {candle.l} | {candle.v}"
+            f"{timestamp} | {candle.o} | {candle.c} | {candle.h} | {candle.l} | {candle.v}{suffix}"
         )
     return ToolOutcome("\n".join(lines))
 
