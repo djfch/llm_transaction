@@ -37,7 +37,7 @@ class CredentialConfig(BaseModel):
     """
 
     name: str
-    provider: Literal["anthropic", "openai_compat"] = "anthropic"
+    provider: Literal["anthropic", "openai_compat", "openai_responses"] = "anthropic"
     model: str
     max_tokens: int = 4096
     openai_base_url: str = ""
@@ -62,7 +62,7 @@ class CredentialConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: str = "anthropic"  # anthropic / openai_compat
+    provider: str = "anthropic"  # anthropic / openai_compat / openai_responses
     model: str = "claude-sonnet-4-5"
     max_tokens: int = 4096
     openai_base_url: str = ""

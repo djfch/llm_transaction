@@ -230,10 +230,10 @@ export interface RiskConfig {
 /** LLM 凭证定义：llm.credentials 数组项（PUT /api/config 整体替换） */
 export interface CredentialConfig {
   name: string // 凭证名（小写字母数字连字符，如 claude-main）
-  provider: 'anthropic' | 'openai_compat'
+  provider: 'anthropic' | 'openai_compat' | 'openai_responses'
   model: string
   max_tokens: number
-  openai_base_url: string // provider=openai_compat 时的接口地址（可空）
+  openai_base_url: string // provider 为 openai_compat / openai_responses 时的接口地址（可空）
   api_key_env: string // 该凭证 key 在服务器 .env 中的变量名（如 LLM_KEY_CLAUDE_MAIN）
 }
 
@@ -241,7 +241,7 @@ export interface CredentialConfig {
 export interface AppConfig {
   mode: string // 运行模式
   llm: {
-    provider: string // anthropic / openai_compat（旧平铺字段；credentials 非空时由凭证接管）
+    provider: string // anthropic / openai_compat / openai_responses（旧平铺字段；credentials 非空时由凭证接管）
     model: string
     max_tokens: number
     openai_base_url: string
@@ -282,7 +282,7 @@ export interface PutConfigResult {
 /** 凭证配置状态：GET /api/secrets/status 的 credentials 数组项（永无明文） */
 export interface CredentialStatus {
   name: string // 凭证名
-  provider: 'anthropic' | 'openai_compat'
+  provider: 'anthropic' | 'openai_compat' | 'openai_responses'
   model: string
   api_key_env: string // 该凭证 key 在服务器 .env 中的变量名
   key_configured: boolean // 该凭证的 key 是否已配置

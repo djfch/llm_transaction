@@ -1,6 +1,6 @@
 /**
  * 新增 LLM 凭证表单：名称（小写字母数字连字符）/ provider 下拉 / model / max_tokens /
- * openai_base_url（provider 为 openai_compat 时显示）；api_key_env 由名称推导展示。
+ * openai_base_url（provider 非 anthropic 时显示）；api_key_env 由名称推导展示。
  * 保存经 PUT /api/config 提交追加后的 llm.credentials 全量列表（整体替换语义），
  * 成功后清空表单并回调 onSaved 让宿主刷新 config 与 secrets 状态。
  */
@@ -86,7 +86,7 @@ export default function NewCredentialForm({
         provider,
         model: model.trim(),
         max_tokens: Number(maxTokens),
-        openai_base_url: provider === 'openai_compat' ? baseUrl.trim() : '',
+        openai_base_url: provider !== 'anthropic' ? baseUrl.trim() : '',
         api_key_env: deriveEnv(name),
       }
       // 契约：llm.credentials 整体替换——基于服务器最新态做 read-modify-write，
@@ -141,6 +141,7 @@ export default function NewCredentialForm({
           >
             <option value="anthropic">anthropic</option>
             <option value="openai_compat">openai_compat</option>
+            <option value="openai_responses">openai_responses</option>
           </select>
         </label>
         <label className="block">
@@ -156,7 +157,7 @@ export default function NewCredentialForm({
             className={inputCls}
           />
         </label>
-        {provider === 'openai_compat' && (
+        {provider !== 'anthropic' && (
           <label className="block sm:col-span-2">
             <span className={labelCls}>openai_base_url</span>
             <input

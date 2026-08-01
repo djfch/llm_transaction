@@ -200,12 +200,15 @@ def test_credential_invalid_api_key_env_rejected():
 
 
 def test_credential_invalid_provider_rejected():
-    """provider 仅允许 anthropic / openai_compat，拼错（如 openaai）直接校验拒绝，
+    """provider 仅允许 anthropic / openai_compat / openai_responses，拼错（如 openaai）直接校验拒绝，
     避免被构造层静默当作 openai_compat。"""
     with pytest.raises(ValidationError):
         CredentialConfig(name="x", provider="openaai", model="m1")
     assert CredentialConfig(name="x", provider="openai_compat", model="m1").provider == (
         "openai_compat"
+    )
+    assert CredentialConfig(name="x", provider="openai_responses", model="m1").provider == (
+        "openai_responses"
     )
 
 

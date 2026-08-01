@@ -84,6 +84,7 @@ export default function GeneralForm({
               >
                 <option value="anthropic">anthropic</option>
                 <option value="openai_compat">openai_compat</option>
+                <option value="openai_responses">openai_responses</option>
               </select>
             </label>
 

@@ -13,6 +13,7 @@ from src.agent.providers.anthropic import AnthropicProvider
 from src.agent.providers.base import LLMError, LLMProvider
 from src.agent.providers.mock import MockProvider
 from src.agent.providers.openai_compat import OpenAICompatProvider
+from src.agent.providers.openai_responses import OpenAIResponsesProvider
 from src.audit.logger import get_logger
 from src.config import CredentialConfig, Settings
 
@@ -34,6 +35,8 @@ def create_provider(cred: CredentialConfig) -> LLMProvider:
         raise LLMError(f"缺少 {cred.api_key_env} 环境变量，无法初始化 {cred.provider} provider")
     if cred.provider == "anthropic":
         return AnthropicProvider(cred, api_key=key)
+    if cred.provider == "openai_responses":
+        return OpenAIResponsesProvider(cred, api_key=key)
     return OpenAICompatProvider(cred, api_key=key)
 
 
