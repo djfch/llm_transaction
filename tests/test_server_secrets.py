@@ -5,6 +5,9 @@
 - PUT /api/config 改 llm.provider/model/max_tokens/openai_base_url → 原地写回 + 热重建，
   响应在 {"saved","needs_restart"} 上追加 "llm_configured": bool、"llm_error": str
   （reconfigure 失败不 422，配置合法已落盘）
+- PUT /api/config 体里 llm 段的 credentials 键被剥离忽略（凭证写权收归 /api/credentials，
+  防表单旧快照整体替换静默回滚）；agents.*.credential 分配仍归 PUT 管辖并触发热重建
+- 请求体校验失败的 422 响应剔除 detail[].input（密钥铁规：明文不随校验错误回显）
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.config import ROOT, Settings
@@ -202,12 +206,25 @@ async def test_post_secrets_rejects_nul_and_cr(client: AsyncClient):
 
 
 async def _put_two_credentials(client: AsyncClient) -> None:
-    """经 PUT /api/config 登记两条凭证并分配：trader→main，reviewer→backup。"""
+    """登记两条凭证并分配：trader→main，reviewer→backup。
+
+    凭证列表只能经 POST /api/credentials 专用端点变更（PUT /api/config 会剥离
+    llm.credentials 键）；首次创建物化 default，落盘为 [default, main, backup]；
+    agents.*.credential 分配仍归 PUT /api/config 管辖。
+    """
+    r = await client.post("/api/credentials", json={"name": "main", "model": "claude-sonnet-4-5"})
+    assert r.status_code == 200
+    r = await client.post(
+        "/api/credentials",
+        json={
+            "name": "backup",
+            "provider": "openai_compat",
+            "model": "deepseek-v4-flash",
+            "openai_base_url": "https://api.example.com",
+        },
+    )
+    assert r.status_code == 200
     raw = (await client.get("/api/config")).json()
-    raw["llm"]["credentials"] = [
-        {"name": "main", "provider": "anthropic", "model": "claude-sonnet-4-5"},
-        {"name": "backup", "provider": "openai_compat", "model": "deepseek-v4-flash"},
-    ]
     raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "backup"}}
     r = await client.put("/api/config", json=raw)
     assert r.status_code == 200
@@ -246,6 +263,38 @@ async def test_post_secrets_unknown_credential_422(client: AsyncClient, deps: Se
     assert r.status_code == 422
     assert "凭证不存在" in r.json()["detail"]
     assert not deps.env_path.exists() or "sk-x" not in deps.env_path.read_text(encoding="utf-8")
+
+
+# ---------- 422 明文回显防护（密钥铁规） ----------
+
+
+def _all_strings(obj: object) -> list[str]:
+    """递归收集 JSON 结构里的全部字符串（泄漏扫描用）。"""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        return [s for v in obj.values() for s in _all_strings(v)]
+    if isinstance(obj, list):
+        return [s for v in obj for s in _all_strings(v)]
+    return []
+
+
+async def test_post_secrets_422_never_echoes_api_key(client: AsyncClient):
+    """回归（422 不回显明文）：pydantic 默认把请求原值放进 detail[].input，api_key
+    明文随 422 泄漏；全局处理器必须剔除 input 键（其余字段保留，detail 仍是数组）。"""
+    secret = "sk-逐字明文-9f27ac"
+    r = await client.post(
+        "/api/secrets", json={"anthropic_api_key": f"{secret}\nGATE_API_KEY=attacker"}
+    )
+    assert r.status_code == 422
+    assert secret not in r.text  # 逐字断言：响应体任何位置不含明文
+    detail = r.json()["detail"]
+    assert isinstance(detail, list) and detail  # detail 数组结构保持
+    for err in detail:
+        assert "input" not in err  # 明文载体被剔除
+        assert "msg" in err and "loc" in err  # 其余字段保留
+    for s in _all_strings(r.json()):
+        assert secret not in s
 
 
 # ---------- GET /api/secrets/status：credentials 数组 ----------
@@ -306,50 +355,79 @@ async def test_secrets_status_llm_key_true_with_only_llm_key_prefix(
     assert "sk-only-llm-key" not in r.text
 
 
-async def test_put_config_credentials_without_default_binding_422(client: AsyncClient):
-    """契约钉死：仅 PUT llm.credentials（不含 default 凭证、不带 agents 段）→ 422。
-
-    agents 缺省指向 default，credentials 非空后 default 不存在 → Settings 校验拦截。
-    """
-    raw = (await client.get("/api/config")).json()
-    raw["llm"]["credentials"] = [
-        {"name": "main", "provider": "anthropic", "model": "m1"},
-        {"name": "backup", "provider": "openai_compat", "model": "m2"},
-    ]
-    r = await client.put("/api/config", json=raw)
-    assert r.status_code == 422
-    assert "不存在的凭证" in r.json()["detail"]
+# ---------- PUT /api/config：agent 分配热键 ----------
 
 
-# ---------- PUT /api/config：多凭证与分配热键 ----------
-
-
-async def test_put_config_credentials_and_assignment_trigger_reconfigure(
+async def test_put_config_agent_assignment_triggers_reconfigure(
     client: AsyncClient, deps: ServerDeps
 ):
-    """llm.credentials 与 agents.*.credential 变更：原地写回 runtime 并触发热重建。"""
+    """agents.*.credential 变更：原地写回 runtime 并触发热重建（凭证登记走专用端点）。"""
     assert deps.runtime_settings is not None
-    await _put_two_credentials(client)  # 首次登记凭证 + 分配
-    assert len(deps.reconfigure_calls) == 1
+    await _put_two_credentials(client)  # 专用端点登记凭证 + PUT 分配 trader→main / reviewer→backup
     runtime = deps.runtime_settings
-    assert [c.name for c in runtime.llm.credentials] == ["main", "backup"]  # 原地生效
+    assert [c.name for c in runtime.llm.credentials] == ["default", "main", "backup"]  # 原地生效
     assert runtime.agents.trader.credential == "main"
     assert runtime.agents.reviewer.credential == "backup"
 
+    calls_before = len(deps.reconfigure_calls)
     raw = (await client.get("/api/config")).json()
     raw["agents"]["trader"]["credential"] = "backup"  # 决策 agent 改分配
     r = await client.put("/api/config", json=raw)
     assert r.status_code == 200
     assert r.json()["saved"] is True and r.json()["llm_configured"] is True
-    assert len(deps.reconfigure_calls) == 2  # 分配变化同样触发热重建
+    assert len(deps.reconfigure_calls) == calls_before + 1  # 分配变化同样触发热重建
     assert deps.runtime_settings.agents.trader.credential == "backup"
 
 
 async def test_put_config_agents_unknown_credential_422(client: AsyncClient):
-    """agent 引用不存在的凭证：PUT /api/config 映 422，配置落不了盘。"""
+    """agent 引用不存在的凭证：PUT /api/config 映 422，配置落不了盘。
+
+    （"credentials 非空但缺 default 绑定 → 422"的 Settings 级校验由
+    tests/test_config.py 锁定；本用例只锁 server 端点 422 映射。）
+    """
+    r = await client.post("/api/credentials", json={"name": "main", "model": "m1"})
+    assert r.status_code == 200  # 经专用端点登记 main（PUT 不再受理 credentials）
     raw = (await client.get("/api/config")).json()
-    raw["llm"]["credentials"] = [{"name": "main", "provider": "anthropic", "model": "m1"}]
     raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "ghost"}}
     r = await client.put("/api/config", json=raw)
     assert r.status_code == 422
     assert "不存在的凭证" in r.json()["detail"]
+
+
+async def test_put_config_ignores_llm_credentials_snapshot(client: AsyncClient, deps: ServerDeps):
+    """回归（凭证写权收归专用端点）：PUT 体 llm 段的 credentials 旧快照被剥离忽略。
+
+    表单提交 {...initial} 全量快照时，段级浅合并曾让旧快照整体替换凭证列表，静默
+    回滚专用端点的新写入。现在：磁盘与 runtime 凭证列表不变、不触发不必要热重建、
+    响应 saved=true；同请求捎带的 llm.model（仍在 PUT 管辖内的热键）正常生效。
+    """
+    r = await client.post("/api/credentials", json={"name": "main", "model": "m1"})
+    assert r.status_code == 200  # 磁盘与 runtime 凭证列表现为 [default, main]
+    calls_before = len(deps.reconfigure_calls)
+
+    # 仅 credentials 旧快照变化的 PUT：完全无副作用（saved=true，不热重建）
+    raw = (await client.get("/api/config")).json()
+    raw["llm"]["credentials"] = [{"name": "ghost", "provider": "anthropic", "model": "m9"}]
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 200
+    assert r.json() == {"saved": True, "needs_restart": []}
+    assert len(deps.reconfigure_calls) == calls_before  # 不触发不必要热重建
+    saved = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
+    assert [c["name"] for c in saved["llm"]["credentials"]] == ["default", "main"]  # 磁盘不变
+    assert deps.runtime_settings is not None
+    assert [c.name for c in deps.runtime_settings.llm.credentials] == [
+        "default",
+        "main",
+    ]  # runtime 不变
+
+    # 同请求捎带 llm.model：model 正常生效且只热重建一次，credentials 仍不动
+    raw = (await client.get("/api/config")).json()
+    raw["llm"]["credentials"] = [{"name": "ghost2", "provider": "anthropic", "model": "m9"}]
+    raw["llm"]["model"] = "claude-opus-4"
+    r = await client.put("/api/config", json=raw)
+    assert r.status_code == 200
+    assert r.json()["saved"] is True
+    assert len(deps.reconfigure_calls) == calls_before + 1
+    assert deps.runtime_settings.llm.model == "claude-opus-4"
+    saved = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
+    assert [c["name"] for c in saved["llm"]["credentials"]] == ["default", "main"]
