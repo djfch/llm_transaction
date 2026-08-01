@@ -1,7 +1,8 @@
 /**
  * 密钥配置：交易所 / Telegram 为只读状态行（仅经 .env 配置）。
  * LLM 部分按配置形态分两支：
- * - 多凭证（secrets status 含 credentials）：凭证列表（行内保存 key / 删除）+ 新增凭证表单；
+ * - 多凭证（secrets status 含 credentials）：凭证列表（内联编辑 / 删除）+ 新增凭证表单
+ *   （统一走 POST/PUT/DELETE /api/credentials 专用端点，"定义 + key"一次原子保存）；
  * - 旧版单凭证（无 credentials 或为空）：「default 凭证」引导提示 + 旧 ANTHROPIC/OPENAI 两输入框表单。
  * 响应永不包含密钥明文；error 非空（如 provider 重建失败）时展示错误条。
  * 方案 C 抽屉样式：标签只用变量名，状态等宽字体，紫色主按钮。
@@ -10,7 +11,7 @@ import { useState } from 'react'
 import { api } from '../../api'
 import type { AppConfig, SecretsStatus, SetSecretsBody, SetSecretsResult } from '../../api/types'
 import CredentialList, { SaveFeedback, StateText } from './CredentialList'
-import NewCredentialForm from './NewCredentialForm'
+import CredentialForm from './CredentialForm'
 
 const inputCls =
   'w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-violet-400/60 focus:outline-none'
@@ -140,7 +141,7 @@ export default function SecretsForm({
   onSaved,
 }: {
   status: SecretsStatus
-  /** PUT /api/config 提交载体（凭证新增/删除用）；config 尚未加载时为 null，对应按钮禁用 */
+  /** 凭证编辑初值来源（credentials 段或平铺 llm 字段）；config 尚未加载时为 null，对应按钮禁用 */
   config: AppConfig | null
   /** 保存成功后的回调（父级刷新密钥状态与配置） */
   onSaved: () => void
@@ -154,11 +155,7 @@ export default function SecretsForm({
       {credentials.length > 0 ? (
         <>
           <CredentialList credentials={credentials} config={config} onSaved={onSaved} />
-          <NewCredentialForm
-            existingNames={credentials.map((c) => c.name)}
-            config={config}
-            onSaved={onSaved}
-          />
+          <CredentialForm mode="create" existingNames={credentials.map((c) => c.name)} onSaved={onSaved} />
         </>
       ) : (
         <>

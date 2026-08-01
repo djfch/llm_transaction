@@ -442,6 +442,67 @@ export const mockApi: ApiClient = {
     }
     return reply({ saved: true, llm_configured: llmConfigured, error: '' })
   },
+  // 契约：重名 422；api_key_env 按后端规则由 name 推导（与 CredentialForm 的 deriveEnv 一致）；
+  // 密钥状态 credentials 与 config.llm.credentials 两份内存数据同步追加，保证回显自洽
+  createCredential: (body) => {
+    if (credentials.some((c) => c.name === body.name)) {
+      return Promise.reject(new ApiError(422, `凭证已存在: ${body.name}`))
+    }
+    const key = body.api_key ?? ''
+    const apiKeyEnv = `LLM_KEY_${body.name.toUpperCase().replace(/-/g, '_')}`
+    credentials.push({
+      name: body.name,
+      provider: body.provider,
+      model: body.model,
+      api_key_env: apiKeyEnv,
+      key_configured: key !== '',
+      used_by: [],
+    })
+    config.llm.credentials?.push({
+      name: body.name,
+      provider: body.provider,
+      model: body.model,
+      max_tokens: body.max_tokens,
+      openai_base_url: body.openai_base_url,
+      api_key_env: apiKeyEnv,
+    })
+    if (key !== '') llmConfigured = true
+    return reply({ saved: true, key_saved: key !== '', llm_configured: true, llm_error: '' })
+  },
+  // 契约：未知名 404；改 provider/model/max_tokens/openai_base_url，api_key_env 保持不变；
+  // api_key 空串/缺省 = 不动 key（同 setSecrets 防护），非空则视为已配置
+  updateCredential: (name, body) => {
+    const target = credentials.find((c) => c.name === name)
+    if (!target) return Promise.reject(new ApiError(404, `未知凭证: ${name}`))
+    target.provider = body.provider
+    target.model = body.model
+    const key = body.api_key ?? ''
+    if (key !== '') {
+      target.key_configured = true
+      llmConfigured = true
+    }
+    const defined = config.llm.credentials?.find((c) => c.name === name)
+    if (defined) {
+      defined.provider = body.provider
+      defined.model = body.model
+      defined.max_tokens = body.max_tokens
+      defined.openai_base_url = body.openai_base_url
+    }
+    return reply({ saved: true, key_saved: key !== '', llm_configured: true, llm_error: '' })
+  },
+  // 契约：未知名 404；被 agents 引用（used_by 非空）422；.env 里的 key 保留不删（与后端一致）
+  deleteCredential: (name) => {
+    const index = credentials.findIndex((c) => c.name === name)
+    if (index < 0) return Promise.reject(new ApiError(404, `未知凭证: ${name}`))
+    if (credentials[index].used_by.length > 0) {
+      return Promise.reject(new ApiError(422, `凭证仍被引用: ${name}`))
+    }
+    credentials.splice(index, 1)
+    if (config.llm.credentials) {
+      config.llm.credentials = config.llm.credentials.filter((c) => c.name !== name)
+    }
+    return reply({ saved: true, key_saved: false, llm_configured: true, llm_error: '' })
+  },
   setKillSwitch: (enabled) => {
     killSwitch = enabled
     return reply({ kill_switch: killSwitch })

@@ -11,6 +11,9 @@ import type {
   Candle,
   CancelOpenOrderResult,
   ClosePositionResult,
+  CredentialCreateBody,
+  CredentialMutationResult,
+  CredentialUpdateBody,
   DailyStats,
   EquitySeries,
   KillSwitchResult,
@@ -58,6 +61,17 @@ function toApiError(status: number, body: string): Error {
   try {
     const parsed = JSON.parse(body) as { detail?: unknown }
     if (typeof parsed.detail === 'string') return new ApiError(status, parsed.detail)
+    if (Array.isArray(parsed.detail)) {
+      // FastAPI 422：detail 为 [{loc, msg, type}...]，提取各项 msg 拼成可读串，避免整段 JSON 进 message
+      const msgs = parsed.detail
+        .map((item) =>
+          item !== null && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string'
+            ? (item as { msg: string }).msg
+            : null,
+        )
+        .filter((m): m is string => m !== null)
+      if (msgs.length > 0) return new ApiError(status, msgs.join('；'))
+    }
   } catch {
     // 响应体非 JSON，走通用错误
   }
@@ -478,6 +492,15 @@ export const httpApi: ApiClient = {
   getSecretsStatus: () => request<SecretsStatus>('/secrets/status'),
   setSecrets: (body: SetSecretsBody) =>
     request<SetSecretsResult>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
+  createCredential: (body: CredentialCreateBody) =>
+    request<CredentialMutationResult>('/credentials', { method: 'POST', body: JSON.stringify(body) }),
+  updateCredential: (name: string, body: CredentialUpdateBody) =>
+    request<CredentialMutationResult>(`/credentials/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteCredential: (name: string) =>
+    request<CredentialMutationResult>(`/credentials/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   setKillSwitch: (enabled) =>
     request<KillSwitchResult>('/kill_switch', {
       method: 'POST',

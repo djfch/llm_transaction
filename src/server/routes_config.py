@@ -32,7 +32,9 @@ from src.server.deps import ServerDeps
 # - paper.slippage：PaperGateway 每次市价撮合时读取
 # - llm.provider/model/max_tokens/openai_base_url：写回后经 llm_reconfigure 重建 provider
 #   并热替换（set_provider），下轮决策即生效；重建失败保留旧 provider 且诚实回报 llm_error
-# - llm.credentials / agents.*.credential：多凭证与按 agent 分配，写回后同样经热重建生效
+# - llm.credentials：PUT 体中的该键被剥离忽略（只能经 /api/credentials 变更，见 put_config），
+#   专用端点落盘后自行原地写回（routes_credentials._save_credentials），此键仅防手写文件路径
+# - agents.*.credential：按 agent 分配（仍归 PUT 管辖），写回后同样经热重建生效
 # - review.*：ReviewScheduler 每次巡检 tick 时读 settings.review（热开关/改触发时间即生效）
 # 其余字段（mode/gate 等）在 gateway/server 构造期绑定，须重启生效。
 _RUNTIME_KEYS = frozenset(
@@ -146,6 +148,19 @@ def _merge_body(raw: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _strip_llm_credentials(body: dict[str, Any]) -> dict[str, Any]:
+    """剥掉 PUT 体 llm 段的 credentials 键：凭证列表只能经 /api/credentials 专用端点变更。
+
+    段级浅合并下，表单提交 {...initial} 全量快照会让 credentials 旧快照整体替换生效列表，
+    静默回滚专用端点刚写入的新凭证（窗口期竞态）；服务端强制剥离，前端无法绕过。
+    剥后 llm 段为空 dict 也安全：浅合并不产生任何变化，磁盘与 runtime 凭证列表不动。
+    """
+    llm = body.get("llm")
+    if isinstance(llm, dict) and "credentials" in llm:
+        return {**body, "llm": {k: v for k, v in llm.items() if k != "credentials"}}
+    return body
+
+
 async def _run_llm_reconfigure(deps: ServerDeps) -> dict[str, Any]:
     """调用主程序注入的 LLM 热重建回调；未接线时诚实标注 agent 未接线。"""
     if deps.llm_reconfigure is None:
@@ -172,6 +187,13 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.put("/config")
     async def put_config(body: dict[str, Any]) -> dict[str, Any]:
+        """整体保存配置（段级浅合并，未提交的段/键原样保留）。
+
+        body 里 llm 段的 credentials 键被强制忽略（见 _strip_llm_credentials）：
+        凭证列表只能经 /api/credentials 专用端点变更，防表单旧快照整体替换静默回滚；
+        agents.*.credential 分配与 llm.model 等热键仍归本端点管辖。
+        """
+        body = _strip_llm_credentials(body)
         try:
             old = load_settings(deps.config_path)
         except ValueError:

@@ -312,6 +312,27 @@ export interface SetSecretsResult {
   error: string // 错误信息（如 provider 重建失败，空串 = 正常）
 }
 
+/** 新建 LLM 凭证请求体：POST /api/credentials（定义 + key 一次原子保存） */
+export interface CredentialCreateBody {
+  name: string // 凭证名（小写字母数字连字符，创建后不可改）
+  provider: 'anthropic' | 'openai_compat' | 'openai_responses'
+  model: string
+  max_tokens: number
+  openai_base_url: string // provider 为 openai_compat / openai_responses 时的接口地址（可空）
+  api_key?: string // 凭证 key 明文（仅传输，后端写 .env 后不落响应；空串/缺省 = 不写 .env）
+}
+
+/** 更新 LLM 凭证请求体：PUT /api/credentials/{name}（路径参数即身份，故无 name；api_key_env 保持不变） */
+export type CredentialUpdateBody = Omit<CredentialCreateBody, 'name'>
+
+/** 凭证增/改/删统一响应：POST/PUT/DELETE /api/credentials（永不含密钥明文） */
+export interface CredentialMutationResult {
+  saved: boolean // 凭证定义是否已写入 config.yaml
+  key_saved: boolean // 本次是否携带了非空 api_key 并已写入 .env
+  llm_configured: boolean // 热重建后 LLM 是否已配置可用
+  llm_error: string // provider 重建错误（空串 = 正常）
+}
+
 /** kill_switch 操作响应：POST /api/kill_switch */
 export interface KillSwitchResult {
   kill_switch: boolean
@@ -422,6 +443,12 @@ export interface ApiClient {
   putWatchlist(list: Watchlist): Promise<Watchlist>
   getSecretsStatus(): Promise<SecretsStatus>
   setSecrets(body: SetSecretsBody): Promise<SetSecretsResult>
+  /** 新建 LLM 凭证（定义 + key 一次原子保存）；重名 422 经 ApiError 抛出。 */
+  createCredential(body: CredentialCreateBody): Promise<CredentialMutationResult>
+  /** 更新指定凭证（api_key_env 不变）；未知名 404 经 ApiError 抛出。 */
+  updateCredential(name: string, body: CredentialUpdateBody): Promise<CredentialMutationResult>
+  /** 删除指定凭证；未知名 404、被 agents 引用中 422 经 ApiError 抛出。 */
+  deleteCredential(name: string): Promise<CredentialMutationResult>
   setKillSwitch(enabled: boolean): Promise<KillSwitchResult>
   /** 复盘报告分页列表（最新在前）；reportMd 截断 200 字符。 */
   getReviewReports(offset: number, limit: number): Promise<ReviewReportsPage>

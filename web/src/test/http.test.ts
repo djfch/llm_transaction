@@ -3,7 +3,7 @@
  * 必须转成 number（回归：字符串进 fmtNum 会让主页整页崩溃白屏）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { httpApi } from '../api/http'
+import { ApiError, httpApi } from '../api/http'
 
 /** 构造一个按路径返回固定 JSON 的假 fetch */
 function stubFetch(routes: Record<string, unknown>) {
@@ -195,5 +195,56 @@ describe('http 适配层（数字字符串 → number）', () => {
     expect(rounds.items[0].wake_source).toBe('timer:60min')
     expect(new Date(rounds.items[0].started_at).getTime()).toBe(1784375288000)
     expect(rounds.items[0].pnl_after).toBeUndefined()
+  })
+})
+
+/** 构造一个对所有路径返回固定非 2xx 响应体的假 fetch */
+function stubFetchError(status: number, body: unknown) {
+  return vi.fn(async () => new Response(JSON.stringify(body), { status }))
+}
+
+describe('toApiError（非 2xx 响应 detail 提取）', () => {
+  it('字符串 detail：原样提取为 ApiError', async () => {
+    vi.stubGlobal('fetch', stubFetchError(422, { detail: '超过单日下单上限' }))
+    const err = await httpApi.getStatus().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(422)
+    expect((err as ApiError).message).toBe('超过单日下单上限')
+  })
+
+  it('FastAPI 422 数组 detail：提取各项 msg 以「；」拼接，不把整段 JSON 拼进 message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetchError(422, {
+        detail: [
+          { loc: ['body', 'name'], msg: '凭证名仅允许小写字母、数字与连字符', type: 'value_error' },
+          { loc: ['body', 'model'], msg: 'model 不能为空', type: 'value_error' },
+        ],
+      }),
+    )
+    const err = await httpApi.getStatus().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(422)
+    expect((err as ApiError).message).toBe('凭证名仅允许小写字母、数字与连字符；model 不能为空')
+    expect((err as ApiError).message).not.toContain('loc') // 不泄漏校验项内部结构
+  })
+
+  it('数组 detail 中无 msg 的项被跳过；全部无 msg 时回落通用错误', async () => {
+    vi.stubGlobal('fetch', stubFetchError(422, { detail: [{ msg: '仅此项可读' }, { loc: ['body'] }, 'x'] }))
+    const err = await httpApi.getStatus().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).message).toBe('仅此项可读')
+
+    vi.stubGlobal('fetch', stubFetchError(422, { detail: [{ loc: ['body'] }] }))
+    const err2 = await httpApi.getStatus().catch((e: unknown) => e)
+    expect(err2).not.toBeInstanceOf(ApiError)
+    expect((err2 as Error).message).toContain('请求失败 422')
+  })
+
+  it('非字符串非数组 detail（对象）：维持现状走通用错误', async () => {
+    vi.stubGlobal('fetch', stubFetchError(500, { detail: { reason: 'x' } }))
+    const err = await httpApi.getStatus().catch((e: unknown) => e)
+    expect(err).not.toBeInstanceOf(ApiError)
+    expect((err as Error).message).toContain('请求失败 500')
   })
 })

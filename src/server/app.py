@@ -9,13 +9,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.server.deps import ServerDeps
 from src.server.routes_config import create_config_router
+from src.server.routes_credentials import create_credentials_router
 from src.server.routes_plans import create_plans_router
 from src.server.routes_review import create_review_router
 from src.server.routes_status import create_status_router
@@ -24,6 +29,20 @@ from src.server.ws import ConnectionManager, pump_events, register_ws_route
 
 # 前端 Vite dev server 来源
 _DEV_ORIGINS = ["http://localhost:17576"]
+
+
+def _safe_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """剔除每个 error 的 input 键（密钥铁规：pydantic 默认把请求原值放进 detail[].input，
+    api_key 等敏感字段会随 422 响应明文回显）；其余字段（type/loc/msg/url/ctx）保留。
+    ctx 可能含异常对象（自定义校验器的 ValueError），经 custom_encoder 兜底序列化。
+    """
+    return [
+        jsonable_encoder(
+            {k: v for k, v in err.items() if k != "input"},
+            custom_encoder={ValueError: str},
+        )
+        for err in exc.errors()
+    ]
 
 
 def create_app(deps: ServerDeps) -> FastAPI:
@@ -42,6 +61,14 @@ def create_app(deps: ServerDeps) -> FastAPI:
                 await task
 
     app = FastAPI(title="LLM 交易监控", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """全局 422 处理器：保持 422 状态与 detail 数组结构，剥离 input 明文（密钥铁规）。"""
+        return JSONResponse(status_code=422, content={"detail": _safe_validation_errors(exc)})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
@@ -50,6 +77,7 @@ def create_app(deps: ServerDeps) -> FastAPI:
     )
     app.include_router(create_status_router(deps))
     app.include_router(create_config_router(deps))
+    app.include_router(create_credentials_router(deps))
     app.include_router(create_trading_router(deps))
     app.include_router(create_review_router(deps))
     app.include_router(create_plans_router(deps))

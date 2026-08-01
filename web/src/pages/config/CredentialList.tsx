@@ -1,16 +1,17 @@
 /**
  * LLM 凭证列表：每条凭证一张卡片——名称 / provider / model / api_key_env / key 状态 /
- * 被引用 agent 徽标；行内 password 输入 + 「保存 key」按钮（POST /api/secrets 的
- * credential/api_key 形式）；删除按钮仅未被任何 agent 引用（used_by 为空）且配置已加载时可用，
- * 删除经 PUT /api/config 提交移除该条后的 llm.credentials 全量列表。
+ * 被引用 agent 徽标；「编辑」按钮在卡片下方内联展开 CredentialForm（edit 模式，初值从
+ * config.llm.credentials 按 name 查找，查不到即 default 合成凭证时回退 config.llm 平铺字段）；
+ * 删除走 DELETE /api/credentials（服务端原子处理 + 热生效），仅未被任何 agent 引用
+ * （used_by 为空）且配置已加载时可用；删除已生效但热重建失败（llm_error）的警告提升到
+ * 列表级展示——行内 state 会随刷新后卡片卸载而丢失（回归 P3-L2）。
  * 本文件同时导出 StateText / SaveFeedback 供 SecretsForm（旧表单路径）复用，保持单向依赖。
  */
 import { useState } from 'react'
 import { api } from '../../api'
 import type { AppConfig, CredentialStatus, SetSecretsResult } from '../../api/types'
+import CredentialForm, { type CredentialEditInitial } from './CredentialForm'
 
-const inputCls =
-  'w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-violet-400/60 focus:outline-none'
 const btnCls =
   'shrink-0 rounded-lg border border-violet-400/50 bg-violet-400/10 px-3 py-1.5 text-xs text-violet-300 transition hover:bg-violet-400/20 disabled:opacity-40'
 
@@ -69,53 +70,58 @@ function UsedByBadges({ usedBy }: { usedBy: string[] }) {
   )
 }
 
-/** 单条凭证卡片：行内保存 key + 删除（引用中禁用） */
+/**
+ * 解析编辑初值：优先从 config.llm.credentials 按 name 取完整定义；
+ * 查不到（credentials 为空、后端合成 default 凭证）时回退 config.llm 平铺字段。
+ */
+function resolveEditInitial(cred: CredentialStatus, config: AppConfig): CredentialEditInitial {
+  const defined = config.llm.credentials?.find((c) => c.name === cred.name)
+  if (defined) {
+    return {
+      name: defined.name,
+      provider: defined.provider,
+      model: defined.model,
+      max_tokens: defined.max_tokens,
+      openai_base_url: defined.openai_base_url,
+    }
+  }
+  return {
+    name: cred.name,
+    provider: config.llm.provider as CredentialEditInitial['provider'],
+    model: config.llm.model,
+    max_tokens: config.llm.max_tokens,
+    openai_base_url: config.llm.openai_base_url,
+  }
+}
+
+/** 单条凭证卡片：内联展开编辑表单 + 删除（引用中禁用） */
 function CredentialRow({
   cred,
   config,
   onSaved,
+  onDeleteError,
 }: {
   cred: CredentialStatus
-  /** PUT /api/config 提交载体；null 时删除不可用 */
+  /** 编辑初值来源（credentials 段或平铺 llm 字段）；null 时编辑/删除不可用 */
   config: AppConfig | null
   onSaved: () => void
+  /** 删除已生效但热重建失败时上报列表级展示（本卡片随后随刷新卸载，行内 state 留不住） */
+  onDeleteError: (msg: string) => void
 }) {
-  const [key, setKey] = useState('')
+  const [editing, setEditing] = useState(false)
   const [pending, setPending] = useState(false)
-  const [result, setResult] = useState<SetSecretsResult | null>(null)
-  const [error, setError] = useState<string | null>(null) // 请求级失败或删除/热重建错误
+  const [error, setError] = useState<string | null>(null) // 删除的请求级失败（卡片仍在，行内展示）
 
   const canDelete = cred.used_by.length === 0 && config !== null
 
-  const handleSaveKey = async () => {
-    setPending(true)
-    setResult(null)
-    setError(null)
-    try {
-      const res = await api.setSecrets({ credential: cred.name, api_key: key })
-      setResult(res)
-      if (!res.error) {
-        setKey('')
-        onSaved()
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPending(false)
-    }
-  }
-
   const handleDelete = async () => {
-    if (!config || !window.confirm(`确认删除凭证「${cred.name}」？`)) return
+    if (!window.confirm(`确认删除凭证「${cred.name}」？`)) return
     setPending(true)
     setError(null)
     try {
-      // 契约：llm.credentials 整体替换——基于服务器最新态移除本条，
-      // 避免 config prop 旧快照在连续删除/慢网下静默丢凭证（回归 M4）
-      const fresh = await api.getConfig()
-      const remaining = (fresh.llm.credentials ?? []).filter((c) => c.name !== cred.name)
-      const res = await api.putConfig({ ...fresh, llm: { ...fresh.llm, credentials: remaining } })
-      if (res.llm_error) setError(res.llm_error)
+      // 专用端点服务端原子处理（删除 + 热重建），无需前端 read-modify-write
+      const res = await api.deleteCredential(cred.name)
+      if (res.llm_error) onDeleteError(res.llm_error)
       onSaved()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -137,17 +143,14 @@ function CredentialRow({
         {cred.provider} · {cred.model} · {cred.api_key_env}
       </p>
       <div className="flex items-center gap-2">
-        <input
-          type="password"
-          autoComplete="new-password"
-          aria-label={`${cred.name} 的 API Key`}
-          value={key}
-          placeholder={cred.key_configured ? '已配置，输入以更换' : '未配置'}
-          onChange={(e) => setKey(e.target.value)}
-          className={inputCls}
-        />
-        <button type="button" disabled={pending || key === ''} onClick={handleSaveKey} className={btnCls}>
-          保存 key
+        <button
+          type="button"
+          disabled={pending || config === null}
+          title={config === null ? '配置尚未加载，暂不可编辑' : undefined}
+          onClick={() => setEditing((v) => !v)}
+          className={btnCls}
+        >
+          编辑
         </button>
         <button
           type="button"
@@ -159,6 +162,15 @@ function CredentialRow({
           删除
         </button>
       </div>
+      {editing && config !== null && (
+        <CredentialForm
+          mode="edit"
+          initial={resolveEditInitial(cred, config)}
+          keyConfigured={cred.key_configured}
+          onSaved={onSaved}
+          onCancel={() => setEditing(false)}
+        />
+      )}
       {error && (
         <p
           role="alert"
@@ -167,12 +179,11 @@ function CredentialRow({
           {error}
         </p>
       )}
-      {result && <SaveFeedback result={result} />}
     </li>
   )
 }
 
-/** 凭证列表：卡片按名称作 key，后台刷新保活行内输入状态 */
+/** 凭证列表：卡片按名称作 key，编辑展开状态各卡片独立；删除热重建失败的警告在列表级常驻 */
 export default function CredentialList({
   credentials,
   config,
@@ -182,12 +193,28 @@ export default function CredentialList({
   config: AppConfig | null
   onSaved: () => void
 }) {
+  // 删除已生效但热重建失败的警告：被删卡片随 onSaved 刷新卸载后，警告仍在此处可见
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   return (
     <div className="space-y-2 border-t border-white/5 pt-4">
       <h3 className="text-xs text-zinc-300">LLM 凭证</h3>
+      {deleteError && (
+        <p
+          role="alert"
+          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+        >
+          凭证已删除，但 LLM 热重建失败：{deleteError}
+        </p>
+      )}
       <ul className="space-y-2">
         {credentials.map((cred) => (
-          <CredentialRow key={cred.name} cred={cred} config={config} onSaved={onSaved} />
+          <CredentialRow
+            key={cred.name}
+            cred={cred}
+            config={config}
+            onSaved={onSaved}
+            onDeleteError={setDeleteError}
+          />
         ))}
       </ul>
     </div>
