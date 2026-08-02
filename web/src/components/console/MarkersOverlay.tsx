@@ -2,6 +2,8 @@
  * K线买卖点覆盖层：保留原圆形 b/s 徽标，并把标记限制在主价格绘图区。
  * 坐标随图表可视范围重算；越过时间轴或主价格区边界时直接隐藏，
  * 不进入成交量区域，也不影响图表纵轴自动缩放。
+ * 数据：当前合约成交（getTrades 带合约过滤）；WS trades_updated 事件触发重拉；
+ * 无归属决策轮（roundId 空串）的标记照常绘制但渲染为不可点击。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts'
@@ -31,13 +33,14 @@ interface MarkersOverlayProps {
 
 function useTradeMarkers(contract: string): TradeMarker[] {
   const query = useApiData(
-    () => (contract ? api.getTrades(0, 100) : Promise.resolve(null)),
+    () => (contract ? api.getTrades(0, 100, contract) : Promise.resolve(null)),
     [contract],
   )
+  // WS trades_updated 事件：仅作失效信号，重拉当前合约的成交标记
   const { lastMessage } = useWs()
   const { reload } = query
   useEffect(() => {
-    if (lastMessage?.type === 'round') reload()
+    if (lastMessage?.type === 'trades_updated') reload()
   }, [lastMessage, reload])
   return useMemo(
     () => buildTradeMarkers(query.data?.items ?? [], contract),
@@ -45,12 +48,14 @@ function useTradeMarkers(contract: string): TradeMarker[] {
   )
 }
 
-function markerClass(side: 'buy' | 'sell'): string {
+/** 标记样式：interactive=false（无归属决策轮）时无 hover 放大、不可点击 */
+function markerClass(side: 'buy' | 'sell', interactive: boolean): string {
   const base =
-    'pointer-events-auto absolute z-10 flex h-4 w-4 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border font-mono text-[10px] font-bold leading-none transition hover:scale-125'
+    'pointer-events-auto absolute z-10 flex h-4 w-4 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border font-mono text-[10px] font-bold leading-none'
+  const inter = interactive ? ' transition hover:scale-125' : ''
   return side === 'buy'
-    ? `${base} border-emerald-300/70 bg-emerald-500/25 text-emerald-300`
-    : `${base} border-rose-400/70 bg-rose-500/25 text-rose-300`
+    ? `${base}${inter} border-emerald-300/70 bg-emerald-500/25 text-emerald-300`
+    : `${base}${inter} border-rose-400/70 bg-rose-500/25 text-rose-300`
 }
 
 function markerInsidePlot(
@@ -164,8 +169,25 @@ export default function MarkersOverlay({
       data-testid="markers-overlay"
     >
       {positioned.map((marker) => {
-        const action = marker.side === 'buy' ? '买入/开多' : '卖出/平多'
-        const label = `${action} @ ${marker.price} · 点击定位决策轮 ${marker.roundId}`
+        const action = marker.side === 'buy' ? '买入成交' : '卖出成交'
+        const clickable = marker.roundId !== ''
+        const label = clickable
+          ? `${action} @ ${marker.price} · 点击定位决策轮 ${marker.roundId}`
+          : `${action} @ ${marker.price} · 无归属决策轮`
+        // 无归属决策轮的成交（历史/强平/止盈止损等）：照常绘制但不可点击
+        if (!clickable) {
+          return (
+            <span
+              key={marker.id}
+              aria-label={label}
+              title={label}
+              className={markerClass(marker.side, false)}
+              style={{ left: marker.x, top: marker.y }}
+            >
+              {marker.side === 'buy' ? 'b' : 's'}
+            </span>
+          )
+        }
         return (
           <button
             key={marker.id}
@@ -173,7 +195,7 @@ export default function MarkersOverlay({
             aria-label={label}
             title={label}
             onClick={() => focus(marker.roundId)}
-            className={markerClass(marker.side)}
+            className={markerClass(marker.side, true)}
             style={{ left: marker.x, top: marker.y }}
           >
             {marker.side === 'buy' ? 'b' : 's'}

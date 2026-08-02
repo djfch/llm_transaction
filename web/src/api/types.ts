@@ -395,9 +395,10 @@ export interface RollbackResult {
 /**
  * WS 推送消息：/ws → {type, data}
  * 一期实际契约：后端广播 hello / round_start(data={wake_source}) /
- * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}）；
- * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），只作失效信号——
- * 消费方应据事件重拉 REST，勿把 payload 当摘要直接渲染；
+ * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}） /
+ * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数)；
+ * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），trades_updated
+ * 也不携带成交明细，两者均只作失效信号——消费方应据事件重拉 REST，勿把 payload 当数据直接渲染；
  * trade/position 为预留类型，后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
  */
 export type WsMessage =
@@ -406,6 +407,7 @@ export type WsMessage =
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'ticker'; data: { contract: string; last: number } }
+  | { type: 'trades_updated'; data: { contracts: string[]; count: number } }
   | { type: 'plan_updated' }
   | { type: 'strategy_updated' }
 

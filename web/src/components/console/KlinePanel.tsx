@@ -6,7 +6,7 @@
  * WS ticker 驱动末根实时跳动（mergeTick 合成）+ 末根 MA20 实时延伸（liveMaValue）；
  * 成交量无 ticker 数据源，histogram 不随 tick 更新（待下次数据重建刷新）。
  * 表头涨跌幅为真 24h 口径（changePct24h，与图表同源的 sortedUnique memo）；买卖点标记由
- * 圆形覆盖层渲染买卖点（点击定位决策轮，移出主价格绘图区时隐藏）。
+ * 圆形覆盖层渲染买卖点（有归属决策轮的标记可点击定位，无归属仅展示；移出主价格绘图区时隐藏）。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -275,8 +275,8 @@ export default function KlinePanel() {
 
       <footer className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
         <span>
-          <span className="font-mono font-bold text-emerald-400">b</span> 买入/开多 ·{' '}
-          <span className="font-mono font-bold text-rose-400">s</span> 卖出/平多（点击标记跳转决策轮）
+          <span className="font-mono font-bold text-emerald-400">b</span> 买入成交 ·{' '}
+          <span className="font-mono font-bold text-rose-400">s</span> 卖出成交（有归属决策轮的标记可点击跳转）
         </span>
         <span className="ml-auto font-mono">⟷ 拖拽 / 滚轮平移</span>
       </footer>

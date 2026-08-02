@@ -183,6 +183,7 @@ async def _save_inline_trade(
     Gate 下单响应不含手续费与已实现盈亏：fee/pnl 先落 0（精确口径以交易所账单为准，
     待成交回报对账补齐）；close 单请求 size=0，实际成交张数取下单前持仓的反向
     （无持仓为 0 即无成交：跳过落库，同 #21）；source：close/reduce_only→llm_close，否则 llm_open，trade_source 可覆盖。
+    落库成功后发 trades_updated 失效信号（deps.notify_event，未接线则跳过）。
     """
     size = req.size
     if req.close:
@@ -200,6 +201,10 @@ async def _save_inline_trade(
         pnl=Decimal(0),
         source=trade_source or ("llm_close" if req.close or req.reduce_only else "llm_open"),
     )
+    if deps.notify_event is not None:
+        deps.notify_event(
+            {"type": "trades_updated", "data": {"contracts": [req.contract], "count": 1}}
+        )
 
 
 # ---------- 工具执行函数 ----------

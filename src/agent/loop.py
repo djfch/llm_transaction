@@ -266,11 +266,18 @@ class DecisionLoop:
         与 manual_close 共用 _persist_fills_lock：用户平仓直接消费缓冲落库，
         轮末 drain 不会重复落库（双计防护见 manual_close.execute_manual_close）。
         source 标注：强平 → liquidation，fill.is_close → llm_close，其余 → llm_open。
+        落库成功 ≥1 笔时经 persist_fills 发 trades_updated 失效信号。
         """
         if self._drain_fills is None:
             return
         async with self._persist_fills_lock:
-            await persist_fills(self._repo, self._settings.mode, round_id, self._drain_fills())
+            await persist_fills(
+                self._repo,
+                self._settings.mode,
+                round_id,
+                self._drain_fills(),
+                notify_event=self._deps.notify_event,
+            )
 
     async def manual_close(self, contract: str) -> dict:
         """用户手动平仓（监控界面）：与 LLM 平仓同一风控路径，成交标注 source=user_close。
