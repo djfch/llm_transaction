@@ -36,7 +36,7 @@ target-version = "py311"
 extend-select = ["C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
-# 阈值 13 为存量基线（update_tpsl 压线），重构后应逐步收紧到 10
+# 阈值 13 覆盖当前最高复杂度函数 update_tpsl
 max-complexity = 13
 
 [tool.ruff.lint.per-file-ignores]

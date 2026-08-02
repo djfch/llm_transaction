@@ -1,5 +1,5 @@
 /**
- * LLM 凭证管理测试（新契约：POST/PUT/DELETE /api/credentials 专用端点）：
+ * LLM 凭证管理测试（POST/PUT/DELETE /api/credentials 专用端点）：
  * - 列表渲染：名称 / provider·model·env 文本 / used_by 中文徽标 / key 状态；
  * - create：统一表单一次提交"定义 + key"（提交体逐字核对），名称非法与重名前端拦截
  *   （不发请求），成功清空表单，llm_error 非空显示琥珀警告条；
@@ -7,8 +7,7 @@
  *   平铺 llm 字段），name 锁定无输入框，api_key 留空时提交体不含该键，保存成功收起；
  * - delete：confirm 确认后调 deleteCredential(name)，used_by 非空禁用；
  * - 旧配置分支：credentials 为空时渲染旧两输入框表单，不显示新增表单。
- * 注：旧版 B1（前端物化 default 凭证）/ M4（read-modify-write 防丢数据）回归注释已随
- * 逻辑移至后端专用端点而移除——服务端原子处理，前端不再承担该契约。
+ * 服务端专用端点协调凭证变更，前端不物化 default 凭证，也不执行 read-modify-write。
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
@@ -355,8 +354,7 @@ describe('SecretsForm(凭证管理) · 删除凭证', () => {
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
     deleteCredential.mockResolvedValue({ ...OK, key_saved: false, llm_error: 'provider 重建失败' })
 
-    // 模拟真实接线：onSaved 重新拉取状态，被删凭证从 props 消失（回归假绿：旧用例
-    // onSaved 为空 fn，行内 error state 随卡片卸载而丢失的问题暴露不出来）
+    // onSaved 重新拉取状态，被删凭证从 props 消失；错误提示必须提升到列表级保留
     function Harness() {
       const [status, setStatus] = useState(STATUS)
       return (

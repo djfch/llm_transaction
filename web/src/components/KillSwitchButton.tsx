@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 
 /**
- * kill_switch(紧急停止) 熔断按钮（方案 C 顶栏样式）：紧凑的 ⏻ 熔断 KILL。
+ * kill_switch(紧急停止) 熔断按钮：紧凑的 ⏻ 熔断 KILL。
  * 两段确认防误触：第一次点击进入"待确认"状态（3 秒内有效），第二次点击才真正切换。
  * 熔断已触发时以实心红色呈现，点击可复位（同样两段确认）。失败时展示原因。
  */

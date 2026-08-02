@@ -16,7 +16,7 @@ from .feed import CandleHandler, TickerHandler, maybe_await
 
 logger = get_logger(__name__)
 
-# Gate REST candlesticks 单次上限（实现计划附录，已核实）
+# Gate REST candlesticks 单次最多返回 2000 根（当前 SDK docstring）
 REST_CANDLE_LIMIT = 2000
 
 

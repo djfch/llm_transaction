@@ -24,7 +24,7 @@ class _FakeOutputItem(SimpleNamespace):
     def model_dump(self, exclude_none: bool = False) -> dict:
         data = dict(self.__dict__)
         # 与 pydantic model_dump(exclude_none=True) 行为对齐：剔除 None 字段，
-        # 否则"None 字段泄漏进回放"这类回归无法被测试捕捉
+        # 保持回放夹具与实际请求序列化一致，才能验证 None 字段不会进入请求
         return {k: v for k, v in data.items() if v is not None} if exclude_none else data
 
 
@@ -207,7 +207,7 @@ def test_to_input_replays_three_message_forms():
 
 
 def test_base_url_passed_to_client():
-    """openai_base_url 非空时传入 AsyncOpenAI（留空走官方端点，构造回归兜底）。"""
+    """openai_base_url 非空时传入 AsyncOpenAI，留空时使用官方端点。"""
     provider = OpenAIResponsesProvider(
         _cred(openai_base_url="https://proxy.example.com/v1"), api_key="sk-test"
     )

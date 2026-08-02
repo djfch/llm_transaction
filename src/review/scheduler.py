@@ -1,4 +1,4 @@
-"""复盘调度：按间隔天数定时触发 + 手动触发，asyncio.Lock 防重入（设计 spec §2）。
+"""复盘调度：按间隔天数定时触发 + 手动触发，asyncio.Lock 防重入。
 
 - run_forever：每 60s 巡检一次（镜像 bootstrap._funding_loop），到点且距上次复盘
   已满 interval_days 则触发「最近 interval_days 天（对齐当日 00:00）」区间；

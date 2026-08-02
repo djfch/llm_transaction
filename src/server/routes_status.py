@@ -209,8 +209,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     async def get_round(round_id: str) -> dict[str, Any]:
         """决策轮详情：round 字段展平到顶层 + 工具调用 args/result 解析为对象。
 
-        响应形态与前端 RoundDetail 类型逐字对齐（此前嵌套 round/args_json 的形态
-        会让前端读顶层字段时崩页，契约测试锁定本形态）。
+        响应形态与前端 RoundDetail 类型逐字对齐，契约测试锁定本形态。
         """
         if deps.audit_trail is None:
             raise HTTPException(status_code=503, detail="审计追踪未配置")

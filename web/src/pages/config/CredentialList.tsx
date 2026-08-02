@@ -2,9 +2,9 @@
  * LLM 凭证列表：每条凭证一张卡片——名称 / provider / model / api_key_env / key 状态 /
  * 被引用 agent 徽标；「编辑」按钮在卡片下方内联展开 CredentialForm（edit 模式，初值从
  * config.llm.credentials 按 name 查找，查不到即 default 合成凭证时回退 config.llm 平铺字段）；
- * 删除走 DELETE /api/credentials（服务端原子处理 + 热生效），仅未被任何 agent 引用
+ * 删除走 DELETE /api/credentials（服务端保存定义列表后尝试热重建），仅未被任何 agent 引用
  * （used_by 为空）且配置已加载时可用；删除已生效但热重建失败（llm_error）的警告提升到
- * 列表级展示——行内 state 会随刷新后卡片卸载而丢失（回归 P3-L2）。
+ * 列表级展示——行内 state 会随刷新后卡片卸载而丢失，因此错误状态提升到列表层。
  * 本文件同时导出 StateText / SaveFeedback 供 SecretsForm（旧表单路径）复用，保持单向依赖。
  */
 import { useState } from 'react'
@@ -119,7 +119,7 @@ function CredentialRow({
     setPending(true)
     setError(null)
     try {
-      // 专用端点服务端原子处理（删除 + 热重建），无需前端 read-modify-write
+      // 专用端点负责保存删除结果并尝试热重建，前端无需 read-modify-write
       const res = await api.deleteCredential(cred.name)
       if (res.llm_error) onDeleteError(res.llm_error)
       onSaved()

@@ -280,8 +280,7 @@ def _all_strings(obj: object) -> list[str]:
 
 
 async def test_post_secrets_422_never_echoes_api_key(client: AsyncClient):
-    """回归（422 不回显明文）：pydantic 默认把请求原值放进 detail[].input，api_key
-    明文随 422 泄漏；全局处理器必须剔除 input 键（其余字段保留，detail 仍是数组）。"""
+    """422 不得回显明文：剔除 detail[].input，其余字段与数组结构保持不变。"""
     secret = "sk-逐字明文-9f27ac"
     r = await client.post(
         "/api/secrets", json={"anthropic_api_key": f"{secret}\nGATE_API_KEY=attacker"}
@@ -395,11 +394,10 @@ async def test_put_config_agents_unknown_credential_422(client: AsyncClient):
 
 
 async def test_put_config_ignores_llm_credentials_snapshot(client: AsyncClient, deps: ServerDeps):
-    """回归（凭证写权收归专用端点）：PUT 体 llm 段的 credentials 旧快照被剥离忽略。
+    """PUT /api/config 忽略 llm.credentials，只让专用凭证端点拥有写权。
 
-    表单提交 {...initial} 全量快照时，段级浅合并曾让旧快照整体替换凭证列表，静默
-    回滚专用端点的新写入。现在：磁盘与 runtime 凭证列表不变、不触发不必要热重建、
-    响应 saved=true；同请求捎带的 llm.model（仍在 PUT 管辖内的热键）正常生效。
+    磁盘与 runtime 凭证列表不变、不触发不必要热重建、响应 saved=true；
+    同请求中的 llm.model（仍由 PUT 管辖的热键）正常生效。
     """
     r = await client.post("/api/credentials", json={"name": "main", "model": "m1"})
     assert r.status_code == 200  # 磁盘与 runtime 凭证列表现为 [default, main]

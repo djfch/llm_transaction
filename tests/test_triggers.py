@@ -122,7 +122,7 @@ def test_other_contract_not_affected():
 
 
 def test_callback_exception_keeps_fire_once_semantics(caplog):
-    """回调抛错不再外抛（记日志），但触发器已失效、不会重发。"""
+    """回调异常只记日志且不外抛；触发器保持单次触发语义。"""
 
     def boom(trigger, price):
         raise RuntimeError("回调故障")

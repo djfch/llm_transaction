@@ -146,7 +146,7 @@ describe('buildConversation（完整对话构建）', () => {
     // arguments 为 JSON 字符串，解析为紧凑对象摘要
     expect(msgs[1].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"4h"}')
     expect(msgs[2].text).toBe('返回 24 根 K 线')
-    // 最终回合文本为结论，而不是整段 Response JSON（线上 bug 回归防护）
+    // 最终回合文本只取结论，不展示整段 Response JSON
     expect(msgs.at(-1)?.text).toBe('震荡市观望，设置预警后休眠。')
     expect(msgs.some((m) => m.text.includes('"instructions"'))).toBe(false)
     expect(msgs.some((m) => m.text.includes('resp_1'))).toBe(false)

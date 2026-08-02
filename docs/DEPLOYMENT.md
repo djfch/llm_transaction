@@ -42,6 +42,7 @@ $EDITOR .env
 cp config.example.yaml config.yaml
 cp watchlist.example.yaml watchlist.yaml
 cp system_prompt.example.md system_prompt.md
+cp review_prompt.example.md review_prompt.md
 uv sync
 
 # systemd user service；先按文件头注释替换路径占位符。
@@ -75,6 +76,6 @@ curl http://127.0.0.1:17577/api/status
 ## 部署前检查
 
 - `main` 分支 CI 已全部通过，并由人确认可以部署；工作流会忽略界面选择的其他 ref，始终构建 `main`。
-- 服务器工作目录的 `config.yaml`、`watchlist.yaml`、`system_prompt.md` 和 `.env` 已正确配置。
+- 服务器工作目录的 `config.yaml`、`watchlist.yaml`、`system_prompt.md`、`review_prompt.md` 和 `.env` 已正确配置。
 - `llm-transaction.service` 中的工作目录、启动命令和环境符合服务器实际路径。
 - 监控 API 默认无鉴权；在加入鉴权与 TLS 前，只监听回环地址或放在受控反向代理后。

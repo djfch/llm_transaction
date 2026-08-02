@@ -1,5 +1,5 @@
 /**
- * AgentControl 测试（M1 回归）：启动单击生效、停止两段确认、失败展示原因。
+ * AgentControl 测试：启动单击生效、停止两段确认、失败展示原因。
  * onToggle 直接以 prop 注入，无需 mock api 模块。
  */
 import { fireEvent, render, screen } from '@testing-library/react'

@@ -121,8 +121,7 @@ async def test_llm_reconfigure_short_circuits_in_mock(build_ctx):
 
 
 async def test_skip_round_still_drains_fills(no_llm_key, build_ctx):
-    """provider=None 跳轮也先泄放成交缓冲（回归：早期 return 曾跳过 drain，
-    paper 强平/挂单成交在 LLM 未配置期间滞留不落库）。"""
+    """provider=None 跳轮也先泄放成交缓冲，避免未配置 LLM 时成交滞留。"""
     from decimal import Decimal
 
     from src.gateway.base import OrderRequest, Ticker

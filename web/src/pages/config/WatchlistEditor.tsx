@@ -1,6 +1,6 @@
 /**
  * 交易对白名单编辑：chips 展示 + 添加/删除，保存整体 PUT。
- * 方案 C 抽屉样式：紫色 chips + 虚线添加按钮。
+ * 使用紫色 chips + 虚线添加按钮。
  */
 import { useState } from 'react'
 import type { Watchlist } from '../../api/types'

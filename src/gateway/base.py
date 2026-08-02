@@ -1,6 +1,6 @@
 """交易所网关抽象接口（Protocol）与共享数据模型。
 
-Gate 永续已核实事实（实现计划附录，禁止猜测）：
+Gate 永续业务接口约定（调用 SDK 时必须按其当前参数名完成适配）：
 - size 为张数（非币数），正=开多/买入，负=开空/卖出；币数换算用 Contract.quanto_multiplier
 - 市价单 = price="0" + tif="ioc"；单仓模式平仓 = size="0" + close=true
 - enable_decimal=false 的合约 size 必须整数

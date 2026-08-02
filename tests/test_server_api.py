@@ -381,7 +381,7 @@ async def test_secrets_status_never_leaks_plaintext(client: AsyncClient, monkeyp
 
     monkeypatch.setenv("GATE_API_KEY", "明文-gate-key-xyz")
     monkeypatch.setenv("GATE_API_SECRET", "明文-gate-secret-xyz")
-    # 默认凭证为 anthropic：llm_key 由 ANTHROPIC_API_KEY 决定（M3 后按生效凭证的 api_key_env 判定）；
+    # 默认凭证为 anthropic：llm_key 按生效凭证的 api_key_env 读取 ANTHROPIC_API_KEY；
     # OPENAI_API_KEY 一并设置，额外验证不出现在响应里
     monkeypatch.setenv("ANTHROPIC_API_KEY", "明文-ant-key-xyz")
     monkeypatch.setenv("OPENAI_API_KEY", "明文-openai-key-xyz")

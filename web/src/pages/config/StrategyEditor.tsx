@@ -1,5 +1,5 @@
 /**
- * system_prompt.md 在线编辑：等宽 textarea + 保存（方案 C 抽屉样式）。
+ * system_prompt.md 在线编辑：等宽 textarea + 保存按钮。
  * initial 变化（宿主重拉策略全文，如版本回滚）时同步覆盖编辑区。
  */
 import { useEffect, useState } from 'react'

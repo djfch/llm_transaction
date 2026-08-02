@@ -228,7 +228,7 @@ def test_agent_binding_unknown_credential_rejected():
 
 
 def test_agent_binding_defaults_point_to_default_credential():
-    """缺省 agents：trader/reviewer 都指向 default（旧配置行为不变）。"""
+    """缺省 agents 时 trader/reviewer 都指向 default。"""
     settings = Settings()
     assert settings.agents.trader.credential == "default"
     assert settings.agents.reviewer.credential == "default"

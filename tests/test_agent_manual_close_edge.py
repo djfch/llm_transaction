@@ -1,4 +1,4 @@
-"""manual_close paper 路径边界回归（对抗性审查必修项）。
+"""manual_close paper 路径边界测试。
 
 覆盖：
 - paper 无持仓平仓：文本「当前无持仓」，不落 trades 行

@@ -1,4 +1,4 @@
-"""止盈止损工具回归：开仓不变量、保护替换顺序与 paper 触发。"""
+"""止盈止损工具测试：开仓不变量、保护替换顺序与 paper 触发。"""
 
 import time
 from decimal import Decimal

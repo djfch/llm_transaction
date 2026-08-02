@@ -109,7 +109,7 @@ async def test_revise_collects_all_reasons(tmp_path, repo):
 
 
 async def test_revise_normalizes_crlf_content(store, repo, prompt_path):
-    """CRLF 归一化回归：CRLF 提交内容落盘为纯 LF（文件字节无 \r），且版本行
+    """CRLF 提交内容落盘为纯 LF（文件字节无 \r），且版本行
     md5 == hashlib.md5(归一化内容) == PromptLoader.body_md5()（版本↔决策 join 不断裂）。"""
     content = "新策略书：\r\n" + "顺势加仓，严格止损。\r\n" * 10
     v = await store.revise(content, "Windows 编辑器提交", created_by="human")

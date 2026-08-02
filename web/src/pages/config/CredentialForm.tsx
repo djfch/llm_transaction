@@ -4,7 +4,7 @@
  * - edit：名称锁定为只读文本（name 是 agents 引用外键与 api_key_env 推导来源，改名走删除重建）。
  * 共用字段：provider 下拉 / model / max_tokens / openai_base_url（provider 非 anthropic 时显示，
  * openai_compat 必填）/ api_key（password，留空 = 不写 .env）。
- * 提交走专用端点（服务端原子完成"定义 + key"保存并热生效）：
+ * 提交走专用端点（服务端顺序保存定义与 key，再尝试热重建；失败会报告已完成部分）：
  * create → POST /api/credentials；edit → PUT /api/credentials/{name}（请求体无 name）。
  * 反馈条组件内自渲染：请求异常玫瑰条 / llm_error 非空琥珀条 / 成功 emerald 提示；
  * 成功后 create 清空表单、edit 经 onCancel 收起，并回调 onSaved 让宿主刷新状态。

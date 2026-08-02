@@ -1,4 +1,4 @@
-"""DecisionLoop.manual_close（用户手动平仓）回归：与 LLM 平仓同一风控路径，成交标注 user_close。
+"""DecisionLoop.manual_close（用户手动平仓）测试：与 LLM 平仓同一风控路径，成交标注 user_close。
 
 覆盖：
 - paper 全链路（build_app）：手动平仓落 trades(source=user_close)、orders(is_close=1)，

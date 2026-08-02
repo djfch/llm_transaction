@@ -1,6 +1,6 @@
 /**
  * K 线派生统计纯函数（与图表库解耦，供 KlinePanel 消费、单测直接覆盖）：
- * - sortedUnique / toCandlePoint / toVolumePoint / ma20Points：序列装配（自 KlinePanel 迁入，集中可测）
+ * - sortedUnique / toCandlePoint / toVolumePoint / ma20Points：可独立测试的序列装配
  * - changePct24h：真 24h 涨跌幅（基准=最后一根 t ≤ t_last−86400 的 bar）
  * - liveMaValue：末根 MA20 实时延伸（最近 19 根历史收盘 + live close）
  */

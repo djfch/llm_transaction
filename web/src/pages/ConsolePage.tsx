@@ -1,5 +1,5 @@
 /**
- * AI 大脑观察舱 · 单页装配（设计基准 design_proposals/scheme-c-agent.html）：
+ * AI 大脑观察舱单页装配：
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读)+交易计划(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
  * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 复盘报告 → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；

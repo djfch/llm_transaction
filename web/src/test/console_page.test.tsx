@@ -308,7 +308,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(holder.getStrategy.mock.calls.length).toBe(strategyBase + 1)
   })
 
-  it('关闭配置抽屉 → 策略面板重拉（closeConfig → bumpStrategy 接线回归）', async () => {
+  it('关闭配置抽屉 → 策略面板重拉（closeConfig → bumpStrategy）', async () => {
     render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
 
@@ -319,7 +319,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '关闭配置中心' }))
 
-    // 关闭走 closeConfig → bumpStrategy：策略面板重拉（+1），抽屉关闭本身不再发请求
+    // 关闭走 closeConfig → bumpStrategy：策略面板重拉（+1），抽屉自身不额外请求
     await waitFor(() => expect(holder.getStrategy.mock.calls.length).toBe(beforeClose + 1))
   })
 
@@ -363,7 +363,7 @@ describe('ConsolePage 挂单刷新', () => {
 })
 
 
-  it('paper 重置权益 → account/positions/equity/dailyStats 四路联动刷新（回归 M3）', async () => {
+  it('paper 重置权益 → account/positions/equity/dailyStats 四路联动刷新', async () => {
     render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
     expect(holder.getDailyStats).toHaveBeenCalledTimes(1)

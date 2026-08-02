@@ -1,6 +1,6 @@
 /**
  * http 适配层测试：后端 Decimal 序列化为数字字符串时，getAccount/getPositions
- * 必须转成 number（回归：字符串进 fmtNum 会让主页整页崩溃白屏）。
+ * 必须转成 number，保证下游格式化与计算接收稳定类型。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, httpApi } from '../api/http'

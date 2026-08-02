@@ -1,7 +1,7 @@
 /**
  * 成交记录面板（console）测试：round 徽标渲染（#短号 / 空归属灰「-」）、
  * 行点击触发 RoundFocus 定位（空归属行不触发）、watchlist 驱动的合约筛选传参、
- * WS round 事件 → 失效重拉当前页（回归 M2）。
+ * WS round 事件 → 失效重拉当前页。
  * ApiClient 全量 mock（不依赖 mock.ts 内存态）；WS 经 wsHolder.lastMessage 可控派发。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -146,7 +146,7 @@ describe('TradesTable(成交记录)', () => {
     expect(holder.getTrades).toHaveBeenLastCalledWith(0, 20, 'ETH_USDT')
   })
 
-  it('WS round 事件 → 失效重拉当前页（回归 M2：新轮成交需及时上表）', async () => {
+  it('WS round 事件 → 失效重拉当前页，让新轮成交及时上表', async () => {
     const { rerender } = renderTable()
     await screen.findByText('#a1b2c3d4')
     expect(holder.getTrades).toHaveBeenCalledTimes(1)

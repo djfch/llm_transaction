@@ -2,10 +2,10 @@
  * 密钥配置：交易所 / Telegram 为只读状态行（仅经 .env 配置）。
  * LLM 部分按配置形态分两支：
  * - 多凭证（secrets status 含 credentials）：凭证列表（内联编辑 / 删除）+ 新增凭证表单
- *   （统一走 POST/PUT/DELETE /api/credentials 专用端点，"定义 + key"一次原子保存）；
+ *   （统一走 POST/PUT/DELETE /api/credentials 专用端点，定义与 key 按顺序保存）；
  * - 旧版单凭证（无 credentials 或为空）：「default 凭证」引导提示 + 旧 ANTHROPIC/OPENAI 两输入框表单。
  * 响应永不包含密钥明文；error 非空（如 provider 重建失败）时展示错误条。
- * 方案 C 抽屉样式：标签只用变量名，状态等宽字体，紫色主按钮。
+ * 使用技术配置键标签、等宽状态文字和紫色主按钮。
  */
 import { useState } from 'react'
 import { api } from '../../api'
@@ -17,7 +17,7 @@ const inputCls =
   'w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-violet-400/60 focus:outline-none'
 const labelCls = 'mb-1 block text-[10px] text-zinc-500'
 
-// 只读状态行：LLM 已改为下方表单在线配置，此处仅剩交易所与 Telegram
+// 只读状态行只展示交易所与 Telegram；LLM 由下方表单在线配置
 const READONLY_ITEMS: Array<{ key: 'gate_key' | 'telegram'; label: string }> = [
   { key: 'gate_key', label: 'gate_key' },
   { key: 'telegram', label: 'telegram' },

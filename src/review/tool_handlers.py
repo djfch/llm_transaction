@@ -3,7 +3,7 @@
 约定：
 - 参数校验失败抛本地 ToolArgError，由 ReviewToolRegistry 统一转错误文本（不向上抛）；
 - 所有 handler 返回中文纯文本（str），供 LLM 直接阅读；
-- 只经 Repo / StrategyStore 读写，无任何 Gateway 依赖（安全不变量，spec §7.1）；
+- 只经 Repo / StrategyStore 读写，无任何 Gateway 依赖；
 - 参数校验辅助与 src/agent/tool_handlers.py 同风格、本地实现（本包不 import src/agent/*）。
 """
 

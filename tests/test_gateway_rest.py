@@ -1,6 +1,6 @@
 """GateRestGateway 单元测试：monkeypatch mock 掉 gate_api.FuturesApi 方法，不触网。
 
-重点覆盖下单超时回查语义（防重单，已确认缺陷 P1-#11）：
+重点覆盖下单超时回查语义（防重单）：
 - 首次调用网络异常 → 按 text 回查
 - 回查到订单 → 返回该订单
 - 回查确认未创建（ORDER_NOT_FOUND）→ ORDER_TIMEOUT_NOT_CREATED，可安全重试
@@ -167,7 +167,7 @@ def make_sdk_position() -> SimpleNamespace:
 
 
 def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):
-    """回归：SDK 的 update_contract_position_leverage 不接受 x_gate_exptime（testnet 实测）。
+    """当前 SDK 的 update_contract_position_leverage 不接受 x_gate_exptime。
 
     用严格签名（无 **kwargs）的 stub：若实现多传任何关键字参数会立刻 TypeError。
     """

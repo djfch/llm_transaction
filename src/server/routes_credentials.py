@@ -1,7 +1,8 @@
-"""LLM 凭证管理端点：单条凭证的增/改/删（定义 + key 一次请求原子完成）。
+"""LLM 凭证管理端点：单条凭证的增、改、删。
 
 凭证定义存 config.yaml（llm.credentials 列表），key 明文只存 .env（按 api_key_env
-变量名落盘）；两处分离是密钥铁规，任何 API 响应/日志永不包含 key 明文。
+变量名落盘）；一次请求先保存定义、再按需写 key，跨文件不保证原子，失败时会明确
+报告已保存的部分。两处分离是密钥铁规，任何 API 响应/日志永不包含 key 明文。
 编辑时 name 锁定（name 是 agents 引用外键 + api_key_env 推导来源；改名走"删除重建"）。
 llm.credentials 为空时经 resolve_credentials() 物化 default 再增改（零迁移双轨制）。
 凭证写权收归本模块端点：PUT /api/config 会剥离 body 里 llm 段的 credentials 键
