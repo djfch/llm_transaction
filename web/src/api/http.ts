@@ -414,7 +414,7 @@ async function fetchRounds(offset: number, limit: number): Promise<RoundsPageRes
   return adaptRounds(await request<RawRoundsPage>(`/rounds?${qs.toString()}`))
 }
 
-/** GET /api/notes 适配：默认保留旧调用的前 20 条行为，同时返回分页元数据。 */
+/** GET /api/notes 适配：默认返回前 20 条笔记，同时返回分页元数据。 */
 async function fetchNotes(offset = 0, limit = 20): Promise<NotesPageResult> {
   const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
   return adaptNotes(await request<RawNotesPage>(`/notes?${qs.toString()}`))

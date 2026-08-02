@@ -1,7 +1,5 @@
 /**
- * 配置抽屉集成测试（回归）：回滚成功后提示可见、策略编辑器内容同步为目标版本。
- * 旧行为：DrawerSection 在 strategyQ.reload 期间以「加载中…」卸载 children，
- * 回滚成功提示随 StrategyVersions 销毁一闪即灭（独立渲染的单测发现不了）。
+ * 配置抽屉集成测试：回滚成功后提示可见、策略编辑器内容同步为目标版本。
  * 不变量：抽屉内表单数据已就绪时，后台刷新不得销毁用户可见状态（提示/已保存标记/未保存编辑）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -103,7 +101,6 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     const strategyCallsBefore = holder.getStrategy.mock.calls.length
 
     // 回滚触发的 strategyQ.reload 挂起：让「后台刷新中」窗口可观察
-    // （旧实现此时以「加载中…」卸载 children，成功提示随之销毁）
     let resolveStrategy: ((value: string) => void) | null = null
     holder.getStrategy.mockImplementationOnce(
       () =>
@@ -118,7 +115,7 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     await waitFor(() => expect(holder.rollbackStrategy).toHaveBeenCalledWith(1))
     await waitFor(() => expect(holder.getStrategy).toHaveBeenCalledTimes(strategyCallsBefore + 1))
 
-    // 核心回归断言：strategyQ 刷新尚未完成，成功提示必须仍然可见
+    // strategyQ 刷新尚未完成时，成功提示必须仍然可见
     expect(screen.getByText('已回滚到 v1（生成新版本 v3）')).toBeInTheDocument()
 
     // 刷新完成后：编辑器同步为目标版本内容，提示依然在；版本列表 v3（rollback）置顶标当前
@@ -131,7 +128,7 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     expect(screen.getAllByText('当前')).toHaveLength(1)
   })
 
-  it('保存并热更新成功：版本历史立即重拉，新版本行可见（回归：旧行为要等下一次请求）', async () => {
+  it('保存并热更新成功：版本历史立即重拉，新版本行可见', async () => {
     render(<ConfigDrawer open onClose={() => {}} />)
 
     // 等策略小节就绪：编辑器初值 + 版本列表渲染
@@ -145,7 +142,7 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存并热更新' }))
 
     await waitFor(() => expect(holder.putStrategy).toHaveBeenCalledWith('策略书 v3 手改全文'))
-    // 核心回归断言：保存后版本列表查询被再次触发
+    // 保存后版本列表查询必须再次触发
     await waitFor(() =>
       expect(holder.getStrategyVersions.mock.calls.length).toBeGreaterThan(versionCallsBefore),
     )

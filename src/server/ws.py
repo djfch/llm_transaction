@@ -7,8 +7,8 @@
 - {"type": "strategy_updated"} 策略书变更（复盘修订/手动保存/回滚，同为失效信号）
 - {"type": "trades_updated", "data": {"contracts", "count"}} 成交落库成功
   （paper drain/手动平仓与真实网关 inline 落库统一发射；只作失效信号，成交数据仍走 REST）
-持仓变化推送为一期未实现的扩展位：主程序往队列放任意 JSON 字典，
-pump_events 都会广播给全部连接。连接建立时先回一条 hello 握手消息。
+当前主程序不生产 trade/position 事件；event_queue 接受任意 JSON 字典，pump_events
+会原样广播给全部连接。连接建立时先回一条 hello 握手消息。
 """
 
 from __future__ import annotations

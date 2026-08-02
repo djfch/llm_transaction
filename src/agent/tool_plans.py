@@ -4,7 +4,7 @@
 不下单、不产生敞口，故不经 RiskEngine（真正下单仍走 tool_trading 的风控路径）；
 调用照常进入统一审计（registry.execute → audit.record_tool_call），
 清空原因经工具参数随审计留痕。
-从 tool_handlers 拆出以控制单文件行数；校验辅助与 ToolDeps 经 tool_handlers 共享。
+本模块独立维护计划工具以控制文件体量；校验辅助与 ToolDeps 经 tool_handlers 共享。
 """
 
 from __future__ import annotations

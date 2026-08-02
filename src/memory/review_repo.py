@@ -1,4 +1,4 @@
-"""复盘子仓库：策略书版本 / 复盘报告 / 复盘统计取数三组存取方法（从 repo.py 拆出）。
+"""复盘子仓库：策略书版本、复盘报告与复盘统计取数三组存取方法。
 
 子仓库模式：ReviewRepo 与 Repo 共享同一 Database（同一连接、同一事务语义），由
 Repo.__init__ 挂载为 repo.review，复盘相关调用一律走 repo.review.xxx；
@@ -175,7 +175,7 @@ class ReviewRepo:
         """区间内成交（[start, end)，按 id 正序），LEFT JOIN decisions 支持按策略版本过滤。
 
         mode 必填过滤；strategy_md5/contract 非空时分别加对应过滤。
-        口径（spec §6）：无 strategy_md5 过滤时基础样本只按 source/mode 过滤，孤儿平仓成交
+        当前统计口径：无 strategy_md5 过滤时基础样本只按 source/mode 过滤，孤儿平仓成交
         （round_id=''，decisions 无匹配，如 LLM 未配置期间 drain 的强平/止盈止损）也计入；
         仅按策略统计时无 join 匹配的成交不参与（decisions.strategy_md5=? 自然排除 NULL 行，
         与 INNER JOIN 语义一致）。

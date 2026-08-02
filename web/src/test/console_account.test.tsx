@@ -1,7 +1,7 @@
 /**
  * 账户面板测试：equity 大数字 + 累计涨跌行（正绿 ▲ / 负红 ▼ / 缺省不渲染）
  * + 底部「今日已实现 / 当日开仓单」行（着色与降级，口径与后端 /api/daily_stats 一致）；
- * 回归：paper 权益重置已挪入配置抽屉，面板内不再出现「设置金额」。
+ * paper 权益重置位于配置抽屉，账户面板不显示「设置金额」。
  */
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -17,7 +17,7 @@ describe('AccountPanel(账户面板)', () => {
     expect(screen.getByText('加载中…')).toBeInTheDocument()
   })
 
-  it('累计涨跌行：正数 ▲ 绿色；权益重置不再内嵌', () => {
+  it('累计涨跌行：正数 ▲ 绿色；账户面板无权益重置入口', () => {
     render(<AccountPanel account={ACCOUNT} mode="paper" equityChangePct={2.8456} />)
     expect(screen.getByText('账户 · PAPER')).toBeInTheDocument()
     expect(screen.getByText('账户权益')).toBeInTheDocument()
@@ -27,7 +27,7 @@ describe('AccountPanel(账户面板)', () => {
     const line = screen.getByText(/· 累计/)
     expect(line.textContent).toBe('▲ +2.85% · 累计')
     expect(line.className).toContain('text-emerald-400')
-    // 回归：权益重置已挪入配置抽屉
+    // 账户面板不提供权益重置入口
     expect(screen.queryByRole('button', { name: /设置金额/ })).not.toBeInTheDocument()
   })
 

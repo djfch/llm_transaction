@@ -131,7 +131,7 @@ async def test_wake_now_deferred_during_round(config: SchedulerConfig):
     assert sched.wake_now("trigger:first") is True
     await asyncio.wait_for(entered.wait(), 1)
     assert sched.in_round is True
-    assert sched.wake_now("trigger:second") is True  # 轮内抢醒被接受为 pending（不再丢弃）
+    assert sched.wake_now("trigger:second") is True  # 轮内抢醒进入 pending
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert rec.sources == ["trigger:first"]  # 轮内不立即唤醒
@@ -165,7 +165,7 @@ async def test_pending_wakes_merged_into_one(config: SchedulerConfig):
 
 
 async def test_pending_wake_dropped_when_stopped_during_round(config: SchedulerConfig):
-    """决策轮内 stop：pending 抢醒不再补唤醒（调度器已停）。"""
+    """决策轮内 stop：调度器停止后丢弃 pending 抢醒。"""
     entered = asyncio.Event()
     release_round = asyncio.Event()
     rec = WakeRecorder()

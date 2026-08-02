@@ -1,6 +1,6 @@
-"""bootstrap 接线回归测试：DecisionLoop 依赖注入、server runtime 同步、资金费周期、预警生命周期。
+"""bootstrap 接线测试：DecisionLoop 依赖注入、server runtime 同步、资金费周期、预警生命周期。
 
-覆盖第三波修复的接线层缺陷：
+覆盖以下接线不变量：
 - paper 模式注入 drain_fills；真实网关为 None（工具层 inline 落 trade，二者互斥）
 - persist_kill_switch 写回 config.yaml；audit 与 server 共用同一实例
 - ServerDeps.runtime_settings / runtime_watchlist 与决策循环共享同一对象
@@ -67,7 +67,7 @@ def _ticker(price: Decimal) -> Ticker:
 
 
 async def test_paper_mode_injects_drain_fills(build_ctx):
-    """paper 模式：drain_fills 接 PaperGateway.drain_fills，工具层不再 inline 落库。"""
+    """paper 模式：drain_fills 接 PaperGateway.drain_fills，工具层不 inline 落库。"""
     ctx = await build_ctx()
     assert isinstance(ctx.gateway, PaperGateway)
     assert ctx.loop._drain_fills == ctx.gateway.drain_fills  # bound method 同 func+self 即相等
@@ -162,7 +162,7 @@ async def test_triggers_not_rebuilt_on_restart(build_ctx):
     assert ctx2.triggers.list() == []
 
 
-# ---------- server 写操作接线（监控界面改进） ----------
+# ---------- server 写操作接线 ----------
 
 
 async def test_server_deps_wires_trading_callbacks(build_ctx):
@@ -222,7 +222,7 @@ async def test_status_provider_includes_in_round(build_ctx):
 
 async def test_on_wake_pushes_round_start_then_round(build_ctx):
     """决策轮事件序：round_start（轮开始）先于 round（轮结束）入队——
-    前端实时决策卡靠 round_start 进入"决策中"轮询态（稳态可达性回归）。"""
+    前端实时决策卡依靠 round_start 进入"决策中"轮询态。"""
     ctx = await build_ctx()  # fixture 默认 mock_llm + mock_market
     await ctx.scheduler.start()
     try:

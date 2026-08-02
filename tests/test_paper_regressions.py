@@ -1,8 +1,5 @@
-"""对抗性审查确认缺陷的回归测试：每个用例对应一个已复现问题编号。
-
-覆盖：翻仓半执行(#2)、挂单触价余额不足抛异常(#3)、订单 ID 撞主键(#7)、
-total_realized 口径不一致(#17)、无持仓 close 假成交(#21/#35)、drain_fills 接口。
-"""
+"""模拟撮合测试：翻仓原子性、挂单余额不足、订单 ID 唯一性、已实现盈亏口径、
+无持仓 close 不产生假成交，以及 drain_fills 接口。"""
 
 import re
 from decimal import Decimal
@@ -51,7 +48,7 @@ def close_all(gw: PaperGateway):
 
 
 def test_flip_insufficient_balance_is_atomic():
-    """#2：翻仓开仓余额不足时整单拒绝，持仓/余额/成交记录与下单前完全一致。"""
+    """翻仓开仓余额不足时整单拒绝，持仓/余额/成交记录与下单前完全一致。"""
     gw = make_gateway()
     buy(gw, 10)  # 多 10 张：保证金 1000，可用 8999.5，手续费 0.5
     fills_before = len(gw.account.fills)
@@ -66,7 +63,7 @@ def test_flip_insufficient_balance_is_atomic():
 
 
 def test_flip_still_works_when_affordable():
-    """#2 对照：余额足够的翻仓仍正常执行（先平后开）。"""
+    """余额足够时翻仓正常执行（先平后开）。"""
     gw = make_gateway()
     buy(gw, 10)
     result = buy(gw, -20)  # 平 10 多、开 10 空：需 1000 保证金 + 1 费，足够
@@ -76,7 +73,7 @@ def test_flip_still_works_when_affordable():
 
 
 def test_resting_order_insufficient_balance_cancelled_not_raised():
-    """#3：挂单触价但余额不足 → on_price 不抛、挂单被撤、后续 tick 正常、强平照常。"""
+    """挂单触价但余额不足时撤单且不抛异常，后续 tick 与强平检查继续执行。"""
     gw = make_gateway(taker="0")
     gw.set_leverage(BTC, 10)
     buy(gw, 10)  # 保证金 100，可用 9900
@@ -96,7 +93,7 @@ def test_resting_order_insufficient_balance_cancelled_not_raised():
 
 
 def test_order_ids_globally_unique_across_instances():
-    """#7：订单 ID 全局唯一（t- + 26 位 hex），两个实例先后下单不撞主键。"""
+    """订单 ID 全局唯一（t- + 26 位 hex），两个实例先后下单不撞主键。"""
     gw1 = make_gateway()
     gw2 = make_gateway()
     r1, r2 = buy(gw1, 1), buy(gw2, 1)
@@ -106,7 +103,7 @@ def test_order_ids_globally_unique_across_instances():
 
 
 def test_total_realized_capped_on_bankrupt_liquidation():
-    """#17：穿仓强平时 total_realized 以保证金为限，与余额实际变动口径一致。"""
+    """穿仓强平时 total_realized 以保证金为限，与余额实际变动口径一致。"""
     gw = make_gateway(taker="0")
     gw.set_leverage(BTC, 10)
     buy(gw, 10)  # 保证金 100，可用 9900
@@ -117,7 +114,7 @@ def test_total_realized_capped_on_bankrupt_liquidation():
 
 
 def test_reduce_realized_capped_at_released_margin():
-    """#17：账本层平仓亏损以释放保证金为限，FillRecord 与余额同口径。"""
+    """账本层平仓亏损以释放保证金为限，FillRecord 与余额同口径。"""
     acc = PaperAccount(D("10000"))
     acc.apply_fill("o1", BTC, D("10"), D("100"), D("1"), D("10"), D("0"), False)
     rec = acc.apply_fill("o2", BTC, D("-10"), D("80"), D("1"), D("10"), D("0"), False)
@@ -127,7 +124,7 @@ def test_reduce_realized_capped_at_released_margin():
 
 
 def test_close_without_position_returns_no_position():
-    """#21：无持仓 close 不伪装成交：无 FillRecord、fill_price=0、标记 no_position。"""
+    """无持仓 close 不伪装成交：无 FillRecord、fill_price=0、标记 no_position。"""
     gw = make_gateway()
     result = close_all(gw)
     assert result.status == "finished"
@@ -137,7 +134,7 @@ def test_close_without_position_returns_no_position():
 
 
 def test_close_without_position_needs_no_market_data():
-    """#35：无行情且无持仓时 close 正常返回，不抛 NO_MARKET_DATA。"""
+    """无行情且无持仓时 close 正常返回，不抛 NO_MARKET_DATA。"""
     cfg = PaperConfig(initial_equity=10000.0)
     gw = PaperGateway(cfg, contracts={BTC: make_contract()})
     result = close_all(gw)  # 从未 on_price

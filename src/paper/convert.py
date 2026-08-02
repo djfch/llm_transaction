@@ -1,4 +1,4 @@
-"""PaperGateway 的内部数据结构与模型转换（从 engine 拆出以控制单文件行数）。"""
+"""PaperGateway 的内部数据结构与共享模型转换。"""
 
 from __future__ import annotations
 

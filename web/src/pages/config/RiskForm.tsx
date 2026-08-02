@@ -1,12 +1,12 @@
 /**
  * 风控参数表单：字符串录入 + 即时校验，保存时合并回 RiskConfig（保留 kill_switch）。
- * 方案 C 抽屉样式：微型标签 + 等宽数字输入 + 紫色主按钮。
+ * 使用微型技术标签、等宽数字输入和紫色主按钮。
  */
 import { useMemo, useState } from 'react'
 import type { RiskConfig } from '../../api/types'
 import { parseRisk, validateRisk, type RiskFormValues } from './validate'
 
-/** 字段元数据：标签直接用变量名（方案 C 对齐，不带括号注释） */
+/** 字段元数据：技术配置键直接作为标签，不追加括号注释。 */
 const FIELDS: Array<{ key: keyof RiskFormValues; label: string }> = [
   { key: 'max_position_pct', label: 'max_position_pct' },
   { key: 'max_total_position_pct', label: 'max_total_position_pct' },

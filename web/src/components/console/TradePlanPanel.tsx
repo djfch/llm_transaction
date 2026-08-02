@@ -26,7 +26,7 @@ export default function TradePlanPanel({ refreshKey }: { refreshKey: number }) {
         )}
       </header>
 
-      {/* loading 门控 data === null：后台重拉（WS 决策轮）期间保留旧全文，不闪烁（同 StrategyPanel 保活先例） */}
+      {/* loading 门控 data === null：后台重拉（WS 决策轮）期间保留旧全文，不闪烁 */}
       <StateHint loading={planQ.loading && plan === null} error={planQ.error} empty={empty}>
         <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-[12px] leading-6 text-zinc-300">
           {plan?.content}

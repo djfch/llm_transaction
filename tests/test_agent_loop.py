@@ -241,7 +241,7 @@ async def test_full_round_audited(env: SimpleNamespace):
     orders = await env.repo.list_orders(result.round_id)
     assert len(orders) == 1 and orders[0].status == "finished"
     assert (await env.repo.recent_notes(1))[0].content == "BTC 走强，开多 1 张"
-    assert len(env.triggers.list("BTC_USDT")) == 1  # 内存唯一存储（不再落 alerts 表）
+    assert len(env.triggers.list("BTC_USDT")) == 1  # 预警仅存于内存 TriggerManager
     assert env.wake_calls == [(30, 30)]  # 请求值与钳制后生效值
 
     decisions = await env.repo.list_decisions()

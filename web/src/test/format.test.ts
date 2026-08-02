@@ -1,5 +1,5 @@
 /**
- * format 工具防御测试：undefined/NaN 输入显示 '-'（回归：fmtNum(undefined) 曾让主页白屏）。
+ * format 工具防御测试：undefined/NaN 输入统一显示 '-'。
  */
 import { describe, expect, it } from 'vitest'
 import { fmtNum, fmtPrice, fmtSigned, shortRoundId } from '../utils/format'

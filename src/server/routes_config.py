@@ -232,7 +232,7 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
     async def put_strategy(request: Request) -> str:
         """保存策略书：接线后经 deps.strategy_save 走 StrategyStore（校验 + 版本落库），
         校验失败映 422（detail 为全部未过原因）；响应契约保持 PlainText 原文不变。
-        未接线（测试 fake deps）时维持直写文件的旧行为。"""
+        未接线（测试 fake deps）时直接写入策略文件。"""
         body = (await request.body()).decode("utf-8")
         if deps.strategy_save is not None:
             try:

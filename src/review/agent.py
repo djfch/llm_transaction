@@ -1,4 +1,4 @@
-"""复盘 agent：多轮工具调用循环，最终文本即复盘报告（设计 spec §2/§4）。
+"""复盘 agent：多轮工具调用循环，最终文本即复盘报告。
 
 不变量：
 - provider 为 None（LLM 未配置）→ 直接返回失败，不落审计、不落报告；
@@ -6,7 +6,7 @@
   代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本落 review_reports →
   有修订则版本↔报告互相关联 → 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 失败告警，返回 {'ok': False}，
-  绝不向上抛（复盘失败交易决策循环零感知，spec §7.3）；
+  绝不向上抛，确保复盘失败不影响交易决策循环；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
   src.agent.providers.base.LLMProvider 协议一致，生产由 bootstrap 复用同一实例）。
 """
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 AlertCallback = Callable[[str], Awaitable[None] | None]
 
-_ALERT_LIMIT = 500  # 通知摘要长度上限（spec §7.5）
+_ALERT_LIMIT = 500  # 通知摘要长度上限
 
 
 class _ProviderProtocol(Protocol):
@@ -55,7 +55,7 @@ def _fmt_time(ts: float) -> str:
 
 
 def _escape_alert(text: str, limit: int = _ALERT_LIMIT) -> str:
-    """通知摘要安全处理：html.escape 后 ≤limit 字符（spec §7.5，防 HTML 注入）。
+    """通知摘要安全处理：html.escape 后 ≤limit 字符，防止 HTML 注入。
 
     超长时在转义后文本上截断，并回退到完整 HTML 实体边界（避免截出半个 &amp;）。
     """

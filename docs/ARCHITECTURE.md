@@ -29,7 +29,7 @@ flowchart LR
 - 金额、价格和数量在后端业务链路使用 `Decimal(十进制定点数)`；SQLite 以 TEXT 保存其字符串，避免二进制浮点误差。
 - `Gateway(交易网关接口)` 隔离业务层与 Gate SDK；paper、testnet、live 对上层暴露同一组交易语义。
 - 被工具层标记为 `is_close(平仓或减仓)` 的意图会豁免多数开仓限制；限价减仓仍受委托价偏离规则约束。当前改单方向识别存在已知边界，见“风控边界”。
-- LLM 决策轮、工具调用、风控结论和决策异常必须可审计；人工 API 操作至少保留对应业务记录，是否纳入统一审计是后续扩展边界。
+- LLM 决策轮、工具调用、风控结论和决策异常进入统一审计；人工 API 操作保留对应业务记录，但当前不写入 LLM 工具审计链。
 
 ## 2. 系统全景
 
@@ -71,7 +71,7 @@ flowchart LR
 
     Market <-->|"MarketFeed：WebSocket"| Gate["Gate.io"]
     Gateway <-->|"交易与 K 线 REST"| Gate
-    Provider -->|"AnthropicProvider / OpenAICompatProvider"| LLMAPI["外部 Anthropic / OpenAI 兼容 API"]
+    Provider -->|"AnthropicProvider / OpenAICompatProvider / OpenAIResponsesProvider"| LLMAPI["外部 Anthropic / OpenAI API"]
     Provider -.->|"MockProvider"| MockLLM["进程内测试响应"]
     Notify --> Telegram["Telegram API"]
 ```
@@ -217,9 +217,10 @@ sequenceDiagram
     Queue->>Hub: pump_events(广播事件)
 ```
 
-当前 LLM 工具分为三类：
+当前决策 Agent 有 13 个工具，分为四类：
 
 - 读取：`get_market_data(读取行情)`、`get_history(读取历史)`。
+- 计算：`calc(精确计算)`。
 - 交易：`place_order(下单)`、`update_tpsl(更新止盈止损)`、`amend_order(改单)`、`cancel_order(撤单)`。
 - 自主管理：`set_price_alert(设置价格预警)`、`cancel_price_alert(取消价格预警)`、`set_next_wakeup(安排下次唤醒)`、`write_note(跨轮笔记)`、`update_trade_plan(全文覆盖更新交易计划)`、`clear_trade_plan(清空交易计划)`。
 
@@ -229,7 +230,7 @@ sequenceDiagram
 
 工具异常会被转换为可读结果返回给 LLM，使其有机会在本轮修正参数；工具内部异常仍写日志，但不会直接击穿整轮循环。
 
-复盘 agent 使用独立的工具组，与上述决策工具零交集：7 个只读工具（`get_review_stats`、`list_decision_rounds`、`get_decision_detail`、`get_tool_call_chain`、`list_trades`、`get_round_context`、`get_strategy_versions`）只经 `Repo` 与审计表查询历史；`submit_strategy_revision(提交策略修订)` 是唯一写出口，提交的策略书新文本经 `StrategyStore` 校验后才生效。
+复盘 agent 使用独立注册表：7 个查询工具（`get_review_stats`、`list_decision_rounds`、`get_decision_detail`、`get_tool_call_chain`、`list_trades`、`get_round_context`、`get_strategy_versions`）只经 `Repo` 与审计表查询历史，`calc(精确计算)` 只处理数学表达式；`submit_strategy_revision(提交策略修订)` 是唯一业务写出口，提交的策略书新文本经 `StrategyStore` 校验后才生效。该注册表不含任何交易工具。
 
 ### 复盘链路
 
@@ -250,7 +251,7 @@ sequenceDiagram
 | `risk.max_orders_per_day(日开仓单数上限)` | 当日可新增的开仓订单数量 | 校验 | 豁免 |
 | `risk.max_deviation(委托价偏离上限)` | 限价相对标记价的最大偏离 | 校验 | 限价减仓仍校验；`close=true(全部平仓)` 按市价执行 |
 
-当前实现有两个需要在后续风控改动中处理的边界：
+当前风控实现存在两个明确边界：
 
 - `risk.max_position_pct` 当前只检查本次意图的名义价值，不聚合同一合约的已有仓位；同一合约多次加仓主要由 `risk.max_total_position_pct(总持仓权益占比上限)` 兜底。若产品要求“单合约最终净仓上限”，应另行修改规则、前端标签并补回归测试。
 - `amend_order(改单)` 当前仅根据新订单方向是否与持仓相反来推断 `is_close`，没有校验反向数量是否超过现有仓位。在 paper 模式中，超量反向改单成交后可能先平仓再翻向开仓，却仍使用平仓豁免。修复时应先补超量反向改单回归测试，再收紧方向与数量判定。
@@ -271,9 +272,10 @@ LLM Provider 通过统一接口接入：
 
 - `AnthropicProvider(Anthropic 模型适配器)`。
 - `OpenAICompatProvider(OpenAI 兼容接口适配器)`。
+- `OpenAIResponsesProvider(OpenAI Responses API 适配器)`。
 - `MockProvider(测试适配器)`。
 
-LLM key 或模型配置更新后可以热重建 Provider；`mode(运行模式)`、Gate 主机和服务监听地址等构造期配置需要重启。
+LLM key 或模型配置更新后会尝试热重建 Provider；成功则下一轮生效，失败会保留旧 Provider 并返回错误。`mode(运行模式)`、Gate 主机和服务监听地址等构造期配置需要重启。
 
 ## 8. HTTP、WebSocket 与前端
 
@@ -281,12 +283,13 @@ FastAPI 路由按职责拆分：
 
 - `routes_status.py`：运行状态、账户、持仓、决策轮、成交、权益和笔记。
 - `routes_plans.py`：当前交易计划（`GET /api/plan`，全局唯一一份，无计划时 content 为空串）。
-- `routes_config.py`：配置、策略、白名单、LLM 密钥状态和 `kill_switch(开仓总闸)`。
-- `routes_review.py`：复盘报告分页列表与详情（`GET /api/review/reports`、`GET /api/review/reports/{id}`）、手动触发昨日区间复盘（`POST /api/review/run`，回调未接线或 LLM 未配置 503、复盘进行中 409）、策略版本列表与详情（`GET /api/strategy/versions`、`GET /api/strategy/versions/{id}`）、两版本 unified diff（`GET /api/strategy/diff?from=&to=`，纯文本）与回滚（`POST /api/strategy/rollback/{id}`，未接线 503、版本不存在 404）。
+- `routes_config.py`：配置、策略、白名单、LLM 密钥状态、兼容密钥写入和 `kill_switch(开仓总闸)`。
+- `routes_credentials.py`：LLM 凭证新增、编辑与删除；凭证定义写入 `config.yaml`，key 明文只写服务器 `.env`。
+- `routes_review.py`：复盘报告分页列表与详情（`GET /api/review/reports`、`GET /api/review/reports/{id}`）、手动触发最近 `review.interval_days` 天或指定历史区间复盘（`POST /api/review/run`，回调未接线或 LLM 未配置 503、复盘进行中 409、区间非法 422）、策略版本列表与详情（`GET /api/strategy/versions`、`GET /api/strategy/versions/{id}`）、两版本 unified diff（`GET /api/strategy/diff?from=&to=`，纯文本）与回滚（`POST /api/strategy/rollback/{id}`，未接线 503、版本不存在 404）。
 - `routes_trading.py`：未成交挂单、手动撤单、手动平仓、paper 重置、Agent 启停和 K 线。
 - `ws.py`：广播 `ticker(实时价格)`、`round_start(决策开始)` 和 `round(决策结束)` 等事件。
 
-`PUT /api/strategy` 行为变化：接线后改走 `StrategyStore`（与复盘改写同一路径），保存即记策略版本；strip 后不足 100 字符或 UTF-8 体积超 32KB 返回 422（detail 为全部未过原因），仅“与当前版本无差异”视为幂等成功（不产新版本）；响应契约保持 `PlainText` 原文不变。
+`PUT /api/strategy` 通过 `StrategyStore` 保存并记录策略版本，与复盘改写使用同一路径；strip 后不足 100 字符或 UTF-8 体积超 32KB 返回 422（detail 为全部未过原因），仅“与当前版本无差异”视为幂等成功（不产新版本）；响应契约为 `PlainText` 原文。
 
 前端是单页控制台：
 
@@ -313,7 +316,7 @@ flowchart LR
 | `orders(订单记录)` | 本地下单记录，以及已显式同步的改单/撤单状态 | `side_size(带方向张数)`、`is_close(是否平仓)` |
 | `trades(成交记录)` | 成交、手续费和已实现盈亏 | `source(成交来源)`、`pnl(已实现盈亏)` |
 | `notes(Agent 笔记)` | 跨决策轮传递的判断要点 | `content(笔记正文)` |
-| `wakeup(预留唤醒记录)` | 已建表并提供 Repo 写入方法，但当前调度器和工具均未接线 | `scheduled_at(计划时间)`、`source(来源)` |
+| `wakeup(未接线的唤醒记录)` | 表和 Repo 写入方法存在，但当前调度器和工具不读写此表 | `scheduled_at(计划时间)`、`source(来源)` |
 | `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)` |
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |

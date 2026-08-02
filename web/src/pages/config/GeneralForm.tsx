@@ -1,6 +1,6 @@
 /**
  * 常规设置表单：运行模式、LLM provider/model、通知开关。
- * 方案 C 抽屉样式：微型标签 + 紫色主按钮，标签直接用变量名。
+ * 使用微型技术标签、等宽输入和紫色主按钮。
  */
 import { useState } from 'react'
 import type { AppConfig } from '../../api/types'
@@ -21,7 +21,7 @@ export default function GeneralForm({
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // 多凭证配置下，provider/model/max_tokens/openai_base_url 已迁入凭证管理，此处隐藏；
+  // 多凭证配置由凭证管理维护 provider/model/max_tokens/openai_base_url，此处隐藏；
   // llm.credentials 与 agents 在提交时被剔除（见 handleSave），不由本表单回写
   const hasCredentials = (initial.llm.credentials?.length ?? 0) > 0
 
@@ -36,7 +36,7 @@ export default function GeneralForm({
     try {
       // 剔除本表单从不编辑的两段：llm.credentials（凭证管理）与 agents（凭证分配）。
       // 后端 _merge_body 只覆盖提及的段——不提及即保留服务端现值；
-      // 若全量提交挂载时的旧快照，会静默回写覆盖凭证管理/分配表单已保存的变更（回归 H1）。
+      // 全量提交挂载时的快照会静默覆盖凭证管理/分配表单已保存的变更
       const payload: AppConfig = { ...form, llm: { ...form.llm } }
       delete payload.llm.credentials
       delete payload.agents

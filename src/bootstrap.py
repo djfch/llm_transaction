@@ -280,7 +280,7 @@ async def build_app(
 
     async def on_wake(wake_source: str) -> None:  # 晚绑定 loop：启动后才会被调度器调用
         # 轮开始先推 round_start：前端实时决策卡据此立即进入"决策中"轮询态
-        # （此前只在轮末推 round，稳态下卡片永远只能看到"上轮决策"）
+        # round_start 让前端在轮开始时立即进入“决策中”轮询态
         await event_queue.put({"type": "round_start", "data": {"wake_source": wake_source}})
         result = await loop.run_once(wake_source)
         await event_queue.put(

@@ -660,7 +660,7 @@ async def _seed_review_trades(repo: Repo) -> None:
 async def test_trades_for_review_filters(repo: Repo):
     """trades_for_review：LEFT JOIN decisions；mode 必填；[start, end)；按 id 正序。
 
-    口径（spec §6）：无 strategy_md5 过滤时孤儿成交（无 decisions 行）仍计入基础样本；
+    当前口径：无 strategy_md5 过滤时孤儿成交（无 decisions 行）仍计入基础样本；
     按策略过滤时无 join 匹配的成交不参与（与 INNER JOIN 语义一致）。
     """
     await _seed_review_trades(repo)
@@ -684,8 +684,7 @@ async def test_trades_for_review_filters(repo: Repo):
 
 
 async def test_trades_for_review_keeps_orphan_closes_without_strategy_filter(repo: Repo):
-    """口径回归（spec §6）：round_id='' 的孤儿平仓成交（LLM 未配置期间 drain 的
-    强平/手动平仓，无 decisions 行）无过滤时计入基础统计样本；按策略过滤时排除。"""
+    """round_id='' 的孤儿平仓成交在无过滤时计入基础统计，按策略过滤时排除。"""
     await repo.save_trade(
         "",
         "paper",

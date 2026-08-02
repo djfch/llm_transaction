@@ -1,7 +1,7 @@
 """复盘子系统装配：StrategyStore/ReviewAgent/ReviewScheduler 创建 + 策略版本库播种。
 
-从 src/bootstrap.py 拆出（文件体量红线）：bootstrap 只做编排，复盘组件创建与策略书
-写回调（strategy_save/strategy_rollback，供 server 端点注入）集中在这里。
+bootstrap 只做编排；复盘组件创建与策略书写回调（strategy_save/strategy_rollback，
+供 server 端点注入）集中在这里。
 """
 
 from __future__ import annotations

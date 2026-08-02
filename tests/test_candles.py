@@ -67,7 +67,7 @@ async def test_close_rolls_to_next_bar():
     await source.push_candle(BTC, "1m", make_candle(120, "102"), closed=False)
     recent = cache.get_recent(BTC, "1m", 10)
     assert [c.t for c in recent] == [60, 120]
-    assert recent[0].c == Decimal("101")  # 收盘终值不再被覆盖
+    assert recent[0].c == Decimal("101")  # 已完成 K 线保留收盘终值
     assert recent[1].c == Decimal("102")
 
 

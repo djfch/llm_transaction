@@ -72,7 +72,7 @@ export default function StrategyPanel({
             <p className="py-4 text-center text-xs text-rose-400">加载失败：{detailQ.error}</p>
           )}
           {/* id 守卫：useApiData 重拉期间保留旧 data，只有数据与选中版本一致才渲染，
-              避免加载窗口/失败终态下陈旧版本全文与下拉选中错配（同 StrategyVersions 拉 diff 前清空的防误读先例） */}
+              避免加载窗口/失败终态下陈旧版本全文与下拉选中错配 */}
           {detailQ.data !== null && detailQ.data.id === selectedId && (
             <>
               <div className="mb-2 flex flex-wrap items-center gap-1.5">
@@ -95,7 +95,7 @@ export default function StrategyPanel({
         </>
       ) : (
         // loading 门控 data === null：后台重拉（WS 决策轮/抽屉关闭）期间保留旧全文，
-        // 不闪烁「加载中…」（同 ConfigDrawer 的 DrawerSection 保活先例）
+        // 不闪烁「加载中…」
         <StateHint loading={currentQ.loading && currentQ.data === null} error={currentQ.error} empty={currentQ.data === ''}>
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-5 text-zinc-300">
             {currentQ.data}
