@@ -122,7 +122,7 @@ describe('StrategyPanel(策略面板)', () => {
     expect(onOpenConfig).toHaveBeenCalledTimes(1)
   })
 
-  it('切换版本的加载窗口内不残留上一版本的全文与徽标（回归 M1：防陈旧内容误读）', async () => {
+  it('切换版本的加载窗口内不残留上一版本的全文与徽标', async () => {
     // v3 详情请求挂起（deferred），复现慢后端加载窗口；初始空操作保证 TS 不把变量窄化为 null
     let resolveV3: (value: StrategyVersionDetail) => void = () => {}
     holder.getStrategyVersion.mockImplementation((id: number) => {
@@ -153,7 +153,7 @@ describe('StrategyPanel(策略面板)', () => {
     expect(await screen.findByText(/v3 新策略全文/)).toBeInTheDocument()
   })
 
-  it('版本详情加载失败：错误提示不与上一版本全文并列（回归 M1：失败终态防误读）', async () => {
+  it('版本详情加载失败：错误提示不与上一版本全文并列', async () => {
     holder.getStrategyVersion.mockImplementation((id: number) => {
       if (id === 3) return Promise.reject(new Error('net-fail'))
       const version = VERSIONS.find((v) => v.id === id)
@@ -173,7 +173,7 @@ describe('StrategyPanel(策略面板)', () => {
     expect(screen.queryByText('v2')).not.toBeInTheDocument()
   })
 
-  it('refreshKey 重拉期间保留当前策略全文（回归 L1：后台刷新不闪烁「加载中…」）', async () => {
+  it('refreshKey 重拉期间保留当前策略全文，后台刷新不闪烁「加载中…」', async () => {
     // 第二次 getStrategy 挂起，复现 WS 决策轮事件触发的后台重拉窗口
     holder.getStrategy
       .mockImplementationOnce(() => Promise.resolve(CURRENT))
@@ -183,7 +183,7 @@ describe('StrategyPanel(策略面板)', () => {
 
     rerender(<StrategyPanel refreshKey={1} onOpenConfig={() => {}} />)
 
-    // 重拉已发起，但旧全文必须保留在屏幕上（ConfigDrawer「后台 reload 保活 children」先例）
+    // 重拉已发起，但旧全文必须保留在屏幕上
     await waitFor(() => expect(holder.getStrategy).toHaveBeenCalledTimes(2))
     expect(screen.getByText(/保本优先/)).toBeInTheDocument()
     expect(screen.queryByText('加载中…')).not.toBeInTheDocument()

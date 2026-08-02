@@ -1,4 +1,4 @@
-"""复盘统计：纯函数口径实现（代码算，LLM 只看不算，见设计 spec §6）。
+"""复盘统计：由代码计算固定口径，LLM 只读取结果。
 
 口径假设（固化，勿漂移）：
 - 统计样本 = trades 中 source ∈ {llm_close, tpsl_close, user_close, liquidation} 的平仓成交；
@@ -6,7 +6,7 @@
   一 round_id 对应一条 decisions 行，join 不会重复计数；
 - 胜率 = 盈利笔数（pnl>0）/ 样本笔数，样本为 0 时为 None；
 - 盈亏比 = 总盈利 / |总亏损|，总亏损为 0 时为 None；
-- 金额一律 Decimal，Python 侧合计（沿用 daily_stats 反浮点先例）。
+- 金额一律 Decimal，并在 Python 侧合计，与 daily_stats 保持相同的定点数口径。
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _div(numerator: Decimal, denominator: Decimal, quantum: Decimal) -> Decimal 
 
 
 def compute_review_stats(trades: list[Trade]) -> ReviewStats:
-    """按 spec §6 口径统计平仓成交。入参已过滤/去重（见模块docstring假设）。"""
+    """按模块定义的固定口径统计平仓成交；入参已过滤并去重。"""
     sample = [t for t in trades if t.source in CLOSE_SOURCES]
     wins = [t.pnl for t in sample if t.pnl > 0]
     losses = [t.pnl for t in sample if t.pnl < 0]

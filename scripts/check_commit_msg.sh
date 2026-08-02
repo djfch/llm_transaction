@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# commit-msg 钩子：校验提交信息首行格式（对齐仓库历史风格 "type: 中文描述"）。
+# commit-msg 钩子：校验提交信息首行使用 "type: 中文描述" 格式。
 # pre-commit commit-msg 阶段会把提交信息文件路径作为第一个参数传入。
 set -u
 

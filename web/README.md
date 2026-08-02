@@ -5,7 +5,7 @@ Vite + React + TypeScript + Tailwind CSS + lightweight-charts，监控 Gate.io �
 ## 常用命令
 
 ```bash
-npm install        # 安装依赖
+npm ci             # 按 package-lock.json 安装依赖
 npm run dev        # 开发服务器（端口 17576，/api、/ws 自动 proxy 到 http://127.0.0.1:17577）
 npm run lint       # ESLint（flat config）
 npx tsc --noEmit   # 类型检查
@@ -28,11 +28,12 @@ src/
   components/console/ 观察舱面板（TopBar、AccountPanel、LiveRoundHero、KlinePanel、RoundTimeline、
                 TradesTable、NotesPanel、PositionsPanel、EquityMiniChart、ReviewPanel、
                 StrategyPanel(策略只读视图)、ConfigDrawer 等）
-  hooks/        useApiData（数据获取）、useWs（WS 订阅）、useRoundFocus（决策轮定位联动）
+  hooks/        useApiData（数据获取）、useWs（WS 订阅）、useLivePortfolio（实时组合刷新）、
+                usePageState（分页状态）、useRoundFocus（决策轮定位联动）
   pages/        ConsolePage（AI 大脑观察舱单页，路由「/」）
-  pages/config/ 配置表单（RiskForm、GeneralForm、WatchlistEditor、StrategyEditor、SecretsForm、validate）
-  utils/        format.ts（数字/时间格式化）、candleLive / klineMarkers / conversation 纯函数
+  pages/config/ 配置表单（风控、常规配置、白名单、策略版本、凭证管理与校验）
+  utils/        数字/时间、K 线实时合成与指标、成交标记、LLM 对话解析纯函数
   test/         Vitest 测试（console_* 面板用例、config、secrets、agentcontrol、http、format 等）
 ```
 
-约定：字段展示使用 `变量名(含义)` 格式（如 `unrealised_pnl(未实现盈亏)`）；单文件 ≤300 行；中文 UI 与注释。
+约定：用户可见的英文键或枚举标签只显示中文释义；独立技术标识、合约代码、单位和原始值保持不变。内部接口字段、类型与提交值不翻译；单文件目标 ≤300 行；注释与文档使用中文。

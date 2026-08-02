@@ -2,8 +2,8 @@
 
 - src/ 下 .py 文件 >500 行：失败（exit 1，必须拆分）
 - 300–500 行：仅警告（提示按规范逐步拆分，不阻塞）
-- 存量豁免清单 BASELINE_OVERSIZE：建立门禁时已超标的文件，处置计划为拆分；
-  清单只允许缩小不允许新增，且豁免文件行数不得继续增长（超过登记值即失败）
+- 基线豁免清单 BASELINE_OVERSIZE：登记启用门禁时已超标的文件；清单只允许缩小
+  不允许新增，且豁免文件行数不得继续增长（超过登记值即失败）
 
 用法：uv run python scripts/check_file_size.py
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 SOFT_LIMIT = 300  # 规范目标值：超出仅警告
 HARD_LIMIT = 500  # 硬上限：超出即失败
 
-# 存量豁免：路径 -> 建立门禁时的行数（处置计划：拆分后从清单移除）
+# 基线豁免：路径 -> 启用门禁时的行数；文件降到硬上限内后从清单移除
 BASELINE_OVERSIZE = {
     "src/paper/engine.py": 543,
 }

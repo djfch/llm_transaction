@@ -1,4 +1,4 @@
-"""已确认缺陷修复的回归测试（与 test_server_api.py 并列，控制单文件行数）。
+"""服务端配置、WebSocket 与状态接口测试（与 test_server_api.py 并列控制体量）。
 
 覆盖：PUT /api/config 运行时原地写回与 needs_restart 诚实标注、
 /api/status 的 kill_switch 取运行时内存值、/api/equity 基准按模式选取与分位舍入、
@@ -239,7 +239,7 @@ async def test_ws_connection_cleans_up_on_unexpected_error():
 
 
 async def test_ws_connection_cleans_up_on_disconnect():
-    """正常断开同样清理（回归保护：finally 不破坏既有行为）。"""
+    """正常断开同样从连接集合清理。"""
     manager = ConnectionManager()
     ws = _FakeWS(WebSocketDisconnect())
     await ws_connection(ws, manager)
@@ -249,8 +249,7 @@ async def test_ws_connection_cleans_up_on_disconnect():
 async def test_put_config_merges_preserves_untouched_sections(
     deps: ServerDeps, client: AsyncClient
 ):
-    """PUT 只提交字段子集时，未提及的段/键必须原样保留（回归：整体写回曾把
-    gate/paper/server 等段静默重置为默认值）。"""
+    """PUT 只提交字段子集时，未提及的段/键必须原样保留。"""
     raw = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
     raw["paper"]["initial_equity"] = 23456
     raw["gate"]["testnet_host"] = "https://custom.example.com"

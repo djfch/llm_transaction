@@ -1,9 +1,8 @@
 /**
  * GeneralForm 渲染分支测试：
  * - 旧配置（llm 无 credentials）：provider/model/max_tokens/openai_base_url 四个字段照常渲染；
- * - 多凭证配置：四个字段隐藏（已迁入凭证管理），max_consecutive_failures 保留；
- * - 保存时提交体不携带 llm.credentials 与 agents（本表单从不编辑这两段，
- *   全量提交旧快照会静默回写覆盖凭证管理与凭证分配的结果——回归 H1）。
+ * - 多凭证配置：凭证管理维护的四个字段隐藏，max_consecutive_failures 保留；
+ * - 保存时提交体不携带 llm.credentials 与 agents，本表单不拥有这两段的写权。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -81,7 +80,7 @@ describe('GeneralForm(常规设置) · 渲染分支', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存常规设置' }))
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
     const sent = onSave.mock.calls[0][0] as AppConfig
-    // 回归 H1：本表单从不编辑这两段，全量提交旧快照会静默回写覆盖
+    // 本表单不编辑这两段，因此提交体不得携带对应快照
     expect('credentials' in sent.llm).toBe(false)
     expect('agents' in sent).toBe(false)
     // 本表单负责的字段照常提交

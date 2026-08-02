@@ -33,13 +33,13 @@ from .base import (
     Ticker,
 )
 
-_EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒（计划附录）
+_EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
 _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤旧单
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
 
-# Gate 私有错误 label -> 自定义异常（计划附录：异常按 label 分类）
+# Gate 私有错误 label -> 自定义异常
 _LABEL_EXCEPTIONS: dict[str, type[GatewayError]] = {
     "ORDER_NOT_FOUND": OrderNotFound,
     "POSITION_NOT_FOUND": PositionNotFound,
@@ -48,7 +48,7 @@ _LABEL_EXCEPTIONS: dict[str, type[GatewayError]] = {
 
 
 def gen_client_order_id() -> str:
-    """生成 text 自定义订单 ID：t- 前缀 + 26 位，总长 28 字节（计划附录）。"""
+    """生成 text 自定义订单 ID：t- 前缀 + 26 位，总长 28 字节。"""
     return f"t-{uuid.uuid4().hex[:26]}"
 
 
@@ -391,7 +391,11 @@ class GateRestGateway:
         from_ts: int | None = None,
         to_ts: int | None = None,
     ) -> list[Candle]:
-        """K 线查询。计划附录：limit 与 from/to 互斥，单次 ≤2000 点。"""
+        """K 线查询：limit 路径可用，单次最多 2000 点。
+
+        公开参数 from_ts/to_ts 对应 SDK 的 _from/to；当前区间关键字尚未正确映射，
+        传入历史区间会被 gate-api 拒绝，修复前不要依赖该路径。
+        """
         if limit is not None and (from_ts is not None or to_ts is not None):
             raise ValueError("limit 与 from/to 互斥，不能同时传")
         if limit is not None and not 1 <= limit <= 2000:
@@ -416,7 +420,7 @@ class GateRestGateway:
             raise wrap_gate_exception(exc) from exc
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
-        """新接口调杠杆：margin_mode（isolated/cross）必填；禁用旧接口（计划附录）。"""
+        """通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数。"""
         if margin_mode not in ("isolated", "cross"):
             raise ValueError(f"非法 margin_mode: {margin_mode}（可选 isolated/cross）")
         try:

@@ -1,4 +1,4 @@
-"""行情链防护与 K 线回补接线回归测试（P1-#3、P1-#10、P3-#26）。
+"""行情链防护与 K 线回补接线测试。
 
 覆盖：
 - bootstrap on_ticker 总闸：paper 撮合与触发器检查的异常各记各的日志，不外抛进 WS 任务
@@ -98,7 +98,7 @@ async def build_ctx(tmp_path: Path) -> AsyncIterator[Callable[..., AppContext]]:
         await ctx.db.close()
 
 
-# ---------- bootstrap on_ticker 总闸（P1-#3） ----------
+# ---------- bootstrap on_ticker 总闸 ----------
 
 
 async def test_on_ticker_match_error_logged_not_raised(build_ctx, caplog):
@@ -130,7 +130,7 @@ async def test_on_ticker_trigger_error_logged_not_raised(build_ctx, caplog):
     assert len(ctx.gateway.get_tickers()) == 1  # 行情快照已写入（撮合不受影响）
 
 
-# ---------- MarketFeed 回调防护（P3-#26） ----------
+# ---------- MarketFeed 回调防护 ----------
 
 
 async def test_feed_ticker_callback_error_logged_not_raised(caplog):
@@ -174,7 +174,7 @@ async def test_feed_candle_callback_error_logged_not_raised(caplog):
 
 
 async def test_feed_error_ack_logged_not_silent(caplog):
-    """订阅/推送 ACK 报错：记 warning 不静默（此前直接 return，订阅被拒不可见）。"""
+    """订阅/推送 ACK 报错时记录 warning，确保订阅拒绝可观测。"""
     feed = MarketFeed([BTC], ["1h"])
     resp = _Response([])
     resp.error = {"message": "invalid interval"}  # type: ignore[assignment]
@@ -184,7 +184,7 @@ async def test_feed_error_ack_logged_not_silent(caplog):
     assert sum("ACK" in r.message for r in caplog.records) == 2
 
 
-# ---------- K 线启动回补（P1-#10） ----------
+# ---------- K 线启动回补 ----------
 
 
 def _fake_provider(contract, interval, limit, from_ts, to_ts):
@@ -201,13 +201,13 @@ async def test_build_app_backfills_candles_with_injected_provider(build_ctx):
     recent = ctx.candles.get_recent(BTC, "1h", 200)
     assert [c.t for c in recent] == [3600 * i for i in range(1, 11)]
     assert len(ctx.gateway.get_candlesticks(BTC, "1h", 5)) == 10  # provider 已注入 paper 网关
-    # 全周期回补：LLM 可查任意周期（回归：此前只有 1h，4h/15m 查得"无 K 线数据"）
+    # 全周期回补：LLM 可查询 GATE_CANDLE_INTERVALS 中的任意周期
     assert ctx.candles.get_recent(BTC, "4h", 5)
     assert ctx.candles.get_recent(BTC, "1w", 5)
 
 
 async def test_backfill_single_interval_failure_isolated(build_ctx, caplog):
-    """单个周期回补失败不影响其他周期（回归：15 周期下一败全停，1h 都会被拖没）。"""
+    """单个周期回补失败不影响其他周期。"""
 
     def only_10s_fails(contract, interval, limit, from_ts, to_ts):
         if interval == "10s":
@@ -280,7 +280,7 @@ async def test_on_ticker_broadcast_error_logged_not_raised(build_ctx, caplog):
     assert any("广播异常" in r.message for r in caplog.records)
 
 
-# ---------- K 线周期单一数据源（回归：LLM 查 4h/15m 曾"无 K 线数据"） ----------
+# ---------- K 线周期单一数据源 ----------
 
 
 def test_candle_intervals_single_source():

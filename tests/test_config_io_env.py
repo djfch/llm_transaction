@@ -114,7 +114,7 @@ def test_whitelist_allows_llm_key_prefix(env_file: Path):
 
 
 def test_whitelist_allows_builtin_llm_keys(env_file: Path):
-    """ANTHROPIC_API_KEY / OPENAI_API_KEY 在白名单内（旧行为不变）。"""
+    """ANTHROPIC_API_KEY / OPENAI_API_KEY 均在允许写入的白名单内。"""
     written = set_env_keys({"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, env_file)
     assert written == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 

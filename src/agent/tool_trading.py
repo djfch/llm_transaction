@@ -1,7 +1,7 @@
 """交易类工具（place_order / update_tpsl / amend_order / cancel_order）。
 
 硬规范：任何到达网关的交易动作必须先过 RiskEngine——风控拒绝返回理由文本，绝不放行。
-从 tool_handlers 拆出以控制单文件行数；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
+本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
 
 落库约定：
 - 订单落 orders 表（is_close 置位供 daily_stats 排除平仓单）；改单更新原行不重复计数
@@ -182,7 +182,7 @@ async def _save_inline_trade(
 
     Gate 下单响应不含手续费与已实现盈亏：fee/pnl 先落 0（精确口径以交易所账单为准，
     待成交回报对账补齐）；close 单请求 size=0，实际成交张数取下单前持仓的反向
-    （无持仓为 0 即无成交：跳过落库，同 #21）；source：close/reduce_only→llm_close，否则 llm_open，trade_source 可覆盖。
+    （无持仓为 0 即无成交：跳过落库）；source：close/reduce_only→llm_close，否则 llm_open，trade_source 可覆盖。
     """
     size = req.size
     if req.close:
@@ -399,7 +399,8 @@ def _amend_direction(
 ) -> tuple[bool, Decimal]:
     """推断改后（是否平仓方向, 参与风控的有效张数）。
 
-    size 给定时按与持仓的符号关系判断（反向即减仓，平仓豁免同 place_order）；
+    size 给定时当前仅按与持仓的符号关系判断；反向数量超过持仓时可能翻仓，
+    但仍会被标为平仓并获得豁免，这是尚未修复的安全边界；
     未给 size 时方向不可知，保守按开仓处理（不豁免），张数取挂单剩余量评估占比。
     """
     pos = next((p for p in deps.gateway.list_positions() if p.contract == contract), None)

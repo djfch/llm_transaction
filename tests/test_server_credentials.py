@@ -197,8 +197,7 @@ def _all_strings(obj: object) -> list[str]:
 
 
 async def test_post_credential_422_never_echoes_api_key(client: AsyncClient):
-    """回归（422 不回显明文，密钥铁规）：pydantic 默认把请求原值放进 detail[].input，
-    api_key 明文随 422 泄漏；全局处理器必须剔除 input 键（detail 仍是数组）。"""
+    """422 响应不得回显明文：全局处理器必须剔除 detail[].input 并保留数组结构。"""
     secret = "sk-凭证明文-51db08"
     r = await client.post(
         "/api/credentials",

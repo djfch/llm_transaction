@@ -1,6 +1,6 @@
 /**
  * 复盘/策略版本 mock：独立内存态（复盘报告、策略版本表）+ 7 个 ApiClient 方法实现，
- * 由 mock.ts 经 createReviewMock 装配进 mockApi（自 mock.ts 拆出，控制单文件行数）。
+ * 由 mock.ts 经 createReviewMock 装配进 mockApi，本模块独立维护复盘模拟状态。
  * 与后端契约对齐：报告列表 reportMd 截断 200 字符、版本列表不含 content、
  * 手动复盘立即出一份「未调整」报告、回滚 = 写回历史内容 + 记 rollback 新版本。
  */

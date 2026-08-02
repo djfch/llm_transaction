@@ -1,6 +1,6 @@
 /**
  * 决策时间线卡片：摘要行（短号/唤醒来源徽标/策略版本徽标/已完成徽标/时间/summary），点击展开审计详情。
- * 归属笔记的轮在 summary 下嵌引文块（紫色左边条 + 斜体，方案 C 同款）。
+ * 归属笔记的轮在 summary 下嵌紫色左边条 + 斜体引文块。
  * 策略版本徽标由父级注入的 resolveStrategyVersion 按 strategyMd5 join（vN · 来源；空串/无匹配显示「—」）；
  * 展开后 lazy 拉取 getRound（卡片生命周期内缓存），渲染两个折叠区：
  * 「工具调用详情」→ ToolSteps(compact)；「完整对话」→ ConversationThread（自带折叠）。
@@ -97,7 +97,7 @@ export default function TimelineCard({
   const [detail, setDetail] = useState<RoundDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [toolsOpen, setToolsOpen] = useState(true) // 展开默认打开工具区（对齐设计稿跳转行为）
+  const [toolsOpen, setToolsOpen] = useState(true) // 展开默认打开工具区，便于定位工具调用
 
   // 展开时 lazy 拉取审计详情（detail 即缓存，卡片不卸载则不重拉）。
   // 注意：loading 不能进 deps —— setLoading 触发的重渲染会执行上一次 effect 的清理（alive=false），
@@ -142,7 +142,7 @@ export default function TimelineCard({
           <span className="font-mono text-sm font-bold text-zinc-200">#{shortRoundId(round.round_id)}</span>
           <span className={wakeBadgeClass(round.wake_source)}>{round.wake_source}</span>
           <StrategyVersionBadge version={resolveStrategyVersion(round.strategyMd5)} />
-          {/* 历史轮都是已完成（静态文案，方案 C 同款灰字小徽标） */}
+          {/* 历史轮都是已完成，使用灰字小徽标 */}
           <span className="text-[11px] text-zinc-600">已完成</span>
           <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
             {fmtTime(round.started_at)}
@@ -162,7 +162,7 @@ export default function TimelineCard({
         />
       </div>
 
-      {/* 归属笔记引文：紫色左边条 + 斜体（方案 C 同款）；引文只读，超长按 5 行折叠 */}
+      {/* 归属笔记引文：紫色左边条 + 斜体；引文只读，超长按 5 行折叠 */}
       {note && (
         <blockquote className="mt-3 border-l-2 border-violet-400/50 pl-3 text-[13px] italic leading-6 text-violet-200/80">
           <ClampText text={`“${note.content}”`} clampClass="line-clamp-5" />
@@ -188,7 +188,7 @@ export default function TimelineCard({
               >
                 <ToolSteps toolCalls={detail.tool_calls} compact />
               </FoldSection>
-              {/* 完整对话：ConversationThread 自带折叠（默认收起），不再外包 FoldSection */}
+              {/* 完整对话由 ConversationThread 自身折叠，默认收起 */}
               <div className="mt-2">
                 <ConversationThread llmRaw={detail.llm_raw} toolCalls={detail.tool_calls} />
               </div>

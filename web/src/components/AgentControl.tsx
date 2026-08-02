@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 
 /**
- * agent(交易代理) 启停控件（方案 C 顶栏样式）：状态指示灯 + 文字 + 紧凑切换按钮。
+ * agent(交易代理) 启停控件：状态指示灯 + 文字 + 紧凑切换按钮。
  * 启动单击即生效；停止需两段确认（3 秒内第二次点击才执行）。
  * 失败时在控件下方展示原因。
  */

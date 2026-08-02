@@ -1,6 +1,6 @@
 """src/review/stats.py 统计口径测试：纯函数，Trade 直接构造（不入库）。
 
-口径（设计 spec §6）：样本=平仓来源成交；胜率=pnl>0 笔数/样本笔数（样本 0 → None）；
+当前口径：样本=平仓来源成交；胜率=pnl>0 笔数/样本笔数（样本 0 → None）；
 盈亏比=总盈利/|总亏损|（总亏损 0 → None）；全 Decimal。
 """
 
@@ -52,7 +52,7 @@ def test_all_losses():
 
 
 def test_all_wins_profit_factor_none():
-    """全盈：总亏损为 0 → 盈亏比 None（spec §6 唯一 null 条件）。"""
+    """全盈：总亏损为 0 → 盈亏比 None（当前唯一的 null 条件）。"""
     stats = compute_review_stats([_trade("10"), _trade("20")])
     assert stats.win_rate == Decimal(1)
     assert stats.profit_factor is None

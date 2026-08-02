@@ -1,8 +1,5 @@
-"""第二波对抗性审查回归（工具层）：amend 过风控、声明杠杆真实生效、落库失败禁止重试、
-close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移。
-
-覆盖缺陷：P1-#4、P1-#5、P1-#6、P3-#24、P2-#22、P0-#1（真实网关直接落 trade）。
-"""
+"""工具层测试：amend 过风控、声明杠杆真实生效、落库失败禁止重试、
+close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移。"""
 
 from __future__ import annotations
 
@@ -90,7 +87,7 @@ async def _open_limit_order(env: SimpleNamespace, size: int = 1, price: int = 59
     return next(o.id for o in env.gateway.orders.values() if o.status == "open")
 
 
-# ---------- P1-#4 amend_order 必须先过风控 ----------
+# ---------- amend_order 必须先过风控 ----------
 
 
 async def test_amend_order_over_position_limit_denied(tmp_path):
@@ -169,7 +166,7 @@ async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
         await env.db.close()
 
 
-# ---------- P1-#5 place_order 声明杠杆真实生效 ----------
+# ---------- place_order 声明杠杆真实生效 ----------
 
 
 async def test_place_order_declared_leverage_over_limit_denied(tmp_path):
@@ -207,7 +204,7 @@ async def test_place_order_declared_leverage_applied(tmp_path):
         await env.db.close()
 
 
-# ---------- P1-#6 下单成功但本地落库失败：禁止重试 ----------
+# ---------- 下单成功但本地落库失败：禁止重试 ----------
 
 
 async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatch):
@@ -228,7 +225,7 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
         await env.db.close()
 
 
-# ---------- P0-#1 真实网关路径（无 drain 钩子）：finished 单直接落 trade ----------
+# ---------- 真实网关路径（无 drain 钩子）：finished 单直接落 trade ----------
 
 
 async def test_finished_order_saved_inline_without_drain(tmp_path):
@@ -247,7 +244,7 @@ async def test_finished_order_saved_inline_without_drain(tmp_path):
         await env.db.close()
 
 
-# ---------- P2-#22 reduce_only 平仓单不计入 orders_today + is_close 迁移 ----------
+# ---------- reduce_only 平仓单不计入 orders_today + is_close 迁移 ----------
 
 
 async def test_reduce_only_order_not_counted_in_orders_today(tmp_path):
@@ -300,7 +297,7 @@ async def test_orders_is_close_column_migration(tmp_path):
         await db.close()
 
 
-# ---------- P3-#24 close 单豁免价格偏离（其余规则照查） ----------
+# ---------- close 单豁免价格偏离（其余规则照查） ----------
 
 
 async def test_close_order_skips_price_deviation(tmp_path):

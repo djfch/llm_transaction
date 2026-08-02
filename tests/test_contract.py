@@ -28,9 +28,6 @@
 - POST /api/paper/reset → equity；POST /api/positions/{contract}/close → contract/status/fill_price/text
 - POST /api/secrets → saved/llm_configured/error；PUT /api/config → saved/needs_restart
 
-历史注：/api/rounds/{id} 曾是 {round: 嵌套, tool_calls: 未解析 dump} 形态（前端读顶层会崩页），
-已修复为展平 + 解析形态，本表即冻结契约。
-
 安全护栏：全部响应原始文本（JSON 即全量递归）不得含 "GATE_API_SECRET" 及注入的假 key 值。
 """
 

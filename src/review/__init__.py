@@ -6,5 +6,5 @@ scheduler（按 interval_days 定时 + 手动触发）。
 
 解耦约束：本包不 import src/agent/* 任何模块（LLMProvider 协议、工具说明渲染等
 以鸭子类型/本地实现消化，允许少量重复）；只依赖 src/memory、src/audit、src/config、
-src/utils。安全不变量见 docs/superpowers/specs/2026-07-27-review-agent-design.md §7。
+src/utils。复盘 Agent 仅注册查询、计算和策略修订工具，不注册交易工具。
 """

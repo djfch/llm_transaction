@@ -2,7 +2,7 @@
  * 复盘/策略版本端点 http 适配测试：
  * snake_case → camelCase、created_at(Unix秒) → ISO、stats_json 保留原文、
  * diff 纯文本透传（不经 JSON 解析）、409/404/422 经 ApiError.detail 抛出；
- * 另补 /api/rounds(+{id}) 的 strategy_md5 → strategyMd5 适配（契约新增列）。
+ * 同时覆盖 /api/rounds(+{id}) 的 strategy_md5 → strategyMd5 适配。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, httpApi } from '../api/http'
@@ -209,7 +209,7 @@ describe('PUT /api/strategy 校验失败', () => {
   })
 })
 
-describe('rounds 的 strategy_md5 适配（契约新增列）', () => {
+describe('rounds 的 strategy_md5 适配', () => {
   it('getRounds：items[].strategy_md5 → strategyMd5', async () => {
     vi.stubGlobal(
       'fetch',

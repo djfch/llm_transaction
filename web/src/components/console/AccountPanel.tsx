@@ -1,7 +1,7 @@
 /**
- * 账户面板（方案 C 换皮）：equity(账户权益) 大数字 + 累计涨跌行 + available / unrealised_pnl 双格
+ * 账户面板：equity(账户权益) 大数字 + 累计涨跌行 + available / unrealised_pnl 双格
  * + 底部「今日已实现 / 当日开仓单」行，等宽数字 tabular-nums，盈亏正绿负红。
- * paper 权益重置已挪入配置抽屉（ConfigDrawer），本面板只读展示。
+ * paper 权益重置入口位于配置抽屉（ConfigDrawer），本面板只读展示。
  * 数据由父级装配层下发（哑组件）；当日统计为后端 /api/daily_stats 风控口径。
  */
 import type { AccountInfo, DailyStats } from '../../api/types'

@@ -1,6 +1,6 @@
-"""成交来源（trades.source）标注回归：drain 三态 + 真实网关 inline 两态。
+"""成交来源（trades.source）标注测试：drain 三态 + 真实网关 inline 两态。
 
-监控界面改进（agent 决策层）：
+当前 agent 决策层口径：
 - paper 模式决策循环 drain 落库时按 FillRecord 标注：强平（order_id=="liquidation"）
   → liquidation；fill.is_close → llm_close；其余 → llm_open
 - 真实网关（无 drain 钩子）工具层 inline 落库按请求标注：close/reduce_only → llm_close，
@@ -220,7 +220,7 @@ async def test_inline_reduce_only_source_llm_close(tmp_path):
 
 
 async def test_inline_close_no_position_no_ghost_trade(tmp_path):
-    """无持仓 close 单（LLM 路径）：无真实成交不得落幽灵 trades 行（不变量#21 同语义）。"""
+    """无持仓 close 单（LLM 路径）：无真实成交不得写入 trades 行。"""
     env = await _make_inline_env(tmp_path)
     try:
         out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})

@@ -1,5 +1,5 @@
 /**
- * 配置抽屉（方案 C 换皮）：右侧滑出，固定定位、宽 480px、滑入动画、遮罩点击 / ESC 关闭。
+ * 配置抽屉：右侧滑出，固定定位、宽 480px、滑入动画、遮罩点击 / ESC 关闭。
  * 内部完整复用 pages/config 六个表单（SecretsForm/AgentCredentialsForm/GeneralForm/RiskForm/
  * WatchlistEditor/StrategyEditor）及 StrategyVersions 版本历史；表单为 props 驱动，
  * 数据由本抽屉在打开时统一拉取。仅在 open 时挂载表单主体：关闭不发起请求，每次打开拉取最新配置。

@@ -132,7 +132,7 @@ def test_reduce_only_same_direction_long_rejected(gw: MockGateway):
 
 
 def test_reduce_only_same_direction_short_rejected(gw: MockGateway):
-    """空仓 + reduce_only 卖单会同向加仓，必须拒绝（已确认缺陷 P3-#25）。"""
+    """空仓 + reduce_only 卖单会同向加仓，必须拒绝。"""
     gw.place_order(OrderRequest(contract=BTC, size=Decimal(-2)))  # 空仓
     with pytest.raises(GatewayError) as excinfo:
         gw.place_order(OrderRequest(contract=BTC, size=Decimal(-1), reduce_only=True))

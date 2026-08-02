@@ -227,7 +227,7 @@ export interface RiskConfig {
   kill_switch: boolean // 总开关（此处只读回显，操作走 /api/kill_switch）
 }
 
-/** LLM 凭证定义：llm.credentials 数组项（PUT /api/config 整体替换） */
+/** LLM 凭证定义：llm.credentials 数组项；增改删只经 /api/credentials 专用端点。 */
 export interface CredentialConfig {
   name: string // 凭证名（小写字母数字连字符，如 claude-main）
   provider: 'anthropic' | 'openai_compat' | 'openai_responses'
@@ -312,7 +312,7 @@ export interface SetSecretsResult {
   error: string // 错误信息（如 provider 重建失败，空串 = 正常）
 }
 
-/** 新建 LLM 凭证请求体：POST /api/credentials（定义 + key 一次原子保存） */
+/** 新建 LLM 凭证请求体：POST /api/credentials 在一次请求中顺序保存定义与 key。 */
 export interface CredentialCreateBody {
   name: string // 凭证名（小写字母数字连字符，创建后不可改）
   provider: 'anthropic' | 'openai_compat' | 'openai_responses'
@@ -394,11 +394,11 @@ export interface RollbackResult {
 
 /**
  * WS 推送消息：/ws → {type, data}
- * 一期实际契约：后端广播 hello / round_start(data={wake_source}) /
+ * 当前契约：后端广播 hello / round_start(data={wake_source}) /
  * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}）；
  * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），只作失效信号——
  * 消费方应据事件重拉 REST，勿把 payload 当摘要直接渲染；
- * trade/position 为预留类型，后端就绪前其 data 形态不作保证，消费 payload 前需按后端实际推送适配。
+ * 后端当前不生产 trade/position；类型仅供 mock 使用，真实消费前必须按后端实际事件接线。
  */
 export type WsMessage =
   | { type: 'round_start'; data: { wake_source: string } }
@@ -443,7 +443,7 @@ export interface ApiClient {
   putWatchlist(list: Watchlist): Promise<Watchlist>
   getSecretsStatus(): Promise<SecretsStatus>
   setSecrets(body: SetSecretsBody): Promise<SetSecretsResult>
-  /** 新建 LLM 凭证（定义 + key 一次原子保存）；重名 422 经 ApiError 抛出。 */
+  /** 新建 LLM 凭证；定义先落 config.yaml，key 再写 .env，重名 422 经 ApiError 抛出。 */
   createCredential(body: CredentialCreateBody): Promise<CredentialMutationResult>
   /** 更新指定凭证（api_key_env 不变）；未知名 404 经 ApiError 抛出。 */
   updateCredential(name: string, body: CredentialUpdateBody): Promise<CredentialMutationResult>

@@ -1,8 +1,4 @@
-"""第二波对抗性审查回归（loop 侧）：成交落库、审计双轨合一、失败轮审计痕迹、风控锁持久化。
-
-覆盖缺陷：P0-#1（trades 表恒空）、P2-#14（AuditTrail 零调用）、
-P2-#16（context.build 失败无审计）、P1-#9（风控锁只写内存）。
-"""
+"""决策循环测试：成交落库、审计双轨合一、失败轮审计痕迹与风控锁持久化。"""
 
 from __future__ import annotations
 
@@ -113,7 +109,7 @@ async def _make_loop(
     return SimpleNamespace(db=db, repo=repo, gateway=gateway, loop=loop, settings=settings)
 
 
-# ---------- P0-#1 paper 全链路：成交经 drain_fills 落 trades 表 ----------
+# ---------- paper 全链路：成交经 drain_fills 落 trades 表 ----------
 
 
 async def test_paper_fills_persisted_to_trades(tmp_path):
@@ -149,13 +145,13 @@ async def test_paper_fills_persisted_to_trades(tmp_path):
         assert len(trades) == 2  # 开/平各一笔；drain 落库，不发生双计
         assert all(t.round_id == result.round_id and t.mode == "paper" for t in trades)
         stats = await env.repo.daily_stats("paper", 0.0)
-        assert stats.realized_pnl != 0  # 滑点使平仓产生非零已实现盈亏，rule_daily_loss 不再失明
+        assert stats.realized_pnl != 0  # 滑点平仓的已实现盈亏必须进入 rule_daily_loss 统计
         assert stats.realized_pnl == sum((t.pnl for t in trades), Decimal(0))
     finally:
         await env.db.close()
 
 
-# ---------- P0-#1 default_daily_stats 走 repo 公共方法（按 mode 过滤） ----------
+# ---------- default_daily_stats 走 repo 公共方法（按 mode 过滤） ----------
 
 
 async def test_default_daily_stats_via_repo(tmp_path):
@@ -191,7 +187,7 @@ async def test_default_daily_stats_via_repo(tmp_path):
         await db.close()
 
 
-# ---------- P2-#14 审计双轨合一：一轮决策生成 JSON 全文快照 ----------
+# ---------- 审计双轨合一：一轮决策生成 JSON 全文快照 ----------
 
 
 async def test_round_writes_audit_json_snapshot(tmp_path):
@@ -221,7 +217,7 @@ async def test_round_writes_audit_json_snapshot(tmp_path):
         await env.db.close()
 
 
-# ---------- P2-#16 context.build 失败也留审计痕迹 ----------
+# ---------- context.build 失败也留审计痕迹 ----------
 
 
 async def test_context_build_failure_leaves_audit_trace(tmp_path):
@@ -241,7 +237,7 @@ async def test_context_build_failure_leaves_audit_trace(tmp_path):
         await env.db.close()
 
 
-# ---------- P1-#9 风控锁写回 config.yaml（经注入回调，tmp_path 隔离） ----------
+# ---------- 风控锁写回 config.yaml（经注入回调，tmp_path 隔离） ----------
 
 
 async def test_lock_persists_kill_switch_to_config_yaml(tmp_path):
