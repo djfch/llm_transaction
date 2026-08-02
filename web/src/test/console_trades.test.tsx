@@ -1,7 +1,7 @@
 /**
  * 成交记录面板（console）测试：round 徽标渲染（#短号 / 空归属灰「-」）、
  * 行点击触发 RoundFocus 定位（空归属行不触发）、watchlist 驱动的合约筛选传参、
- * WS round 事件 → 失效重拉当前页。
+ * WS trades_updated 事件 → 失效重拉当前页（round 事件不再触发）。
  * ApiClient 全量 mock（不依赖 mock.ts 内存态）；WS 经 wsHolder.lastMessage 可控派发。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -146,19 +146,35 @@ describe('TradesTable(成交记录)', () => {
     expect(holder.getTrades).toHaveBeenLastCalledWith(0, 20, 'ETH_USDT')
   })
 
-  it('WS round 事件 → 失效重拉当前页，让新轮成交及时上表', async () => {
+  it('WS trades_updated 事件 → 失效重拉当前页（成交落库即上表）', async () => {
     const { rerender } = renderTable()
     await screen.findByText('#a1b2c3d4')
     expect(holder.getTrades).toHaveBeenCalledTimes(1)
 
-    // 后端广播轮结束：仅作失效信号，重拉当前页（保持 offset/筛选口径）
+    // 后端成交落库成功：仅作失效信号，重拉当前页（保持 offset/筛选口径）
+    wsHolder.lastMessage = {
+      type: 'trades_updated',
+      data: { contracts: ['BTC_USDT'], count: 1 },
+    }
+    rerender(tableUi())
+
+    await waitFor(() => expect(holder.getTrades).toHaveBeenCalledTimes(2))
+    expect(holder.getTrades).toHaveBeenLastCalledWith(0, 20, undefined)
+  })
+
+  it('WS round 事件不再触发成交表重拉（trades_updated 已接管失效信号）', async () => {
+    const { rerender } = renderTable()
+    await screen.findByText('#a1b2c3d4')
+    expect(holder.getTrades).toHaveBeenCalledTimes(1)
+
     wsHolder.lastMessage = {
       type: 'round',
       data: { round_id: 'r-new', ok: true, wake_source: '价格触发' },
     }
     rerender(tableUi())
 
-    await waitFor(() => expect(holder.getTrades).toHaveBeenCalledTimes(2))
-    expect(holder.getTrades).toHaveBeenLastCalledWith(0, 20, undefined)
+    // 等一拍确保 effect 有机会执行：round 不应触发重拉
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(holder.getTrades).toHaveBeenCalledTimes(1)
   })
 })

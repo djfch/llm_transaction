@@ -34,7 +34,7 @@ describe('tradeTimeSec(成交时间换算)', () => {
 })
 
 describe('buildTradeMarkers(成交→标记映射)', () => {
-  it('仅保留当前合约且 round_id 非空的成交', () => {
+  it('仅保留当前合约的成交；round_id 空串保留（roundId 为 ""，覆盖层渲染为不可点击）', () => {
     const ms = buildTradeMarkers(
       [
         trade({ id: 1, contract: 'BTC_USDT' }),
@@ -43,8 +43,9 @@ describe('buildTradeMarkers(成交→标记映射)', () => {
       ],
       'BTC_USDT',
     )
-    expect(ms.map((m) => m.id)).toEqual([1])
+    expect(ms.map((m) => m.id)).toEqual([1, 3])
     expect(ms[0].roundId).toBe('r1')
+    expect(ms[1].roundId).toBe('')
     expect(ms[0].price).toBe(100)
     expect(ms[0].timeSec).toBe(1_704_067_200)
   })

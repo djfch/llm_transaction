@@ -1,8 +1,9 @@
 """用户手动平仓（监控界面「一键平仓」）与成交落库来源标注。
 
-本模块两件事：
+本模块三件事：
 1. 成交落库标注（trade_source_of / persist_fills）：DecisionLoop 轮末 drain 与
-   manual_close 共用的 trades 落库路径，source 枚举见 src/memory/models.Trade
+   manual_close 共用的 trades 落库路径，source 枚举见 src/memory/models.Trade；
+   批次落库成功 ≥1 笔即发 trades_updated WS 失效信号（前端成交表/K线标记据此即时重拉）
 2. 手动平仓（close_position / execute_manual_close）：DecisionLoop.manual_close 的
    实现体（单独成文控制 loop.py 行数），与 LLM 平仓（place_order close 分支）
    同一风控判定（_risk_check，is_close=True）与同一落库路径（_record_order）
@@ -46,14 +47,20 @@ async def persist_fills(
     round_id: str,
     fills: list[FillRecord],
     source_override: str = "",
+    *,
+    notify_event: Callable[[dict], None] | None = None,
 ) -> int:
     """把成交记录逐笔落 trades 表；source_override 非空时覆盖标注（manual_close 用）。
 
     单笔落库失败不中断：剩余成交继续落，失败落日志（成交已在网关账本，
     缺失可事后对账，重试反而可能双计）。返回落库失败笔数——轮末 drain 忽略；
     manual_close 据以在响应 text 回填警告（同步用户请求不应静默丢记录）。
+
+    本批落库成功 ≥1 笔且 notify_event 非空时，批次结束发一次 trades_updated
+    失效信号（contracts=成功合约去重，count=成功笔数）；全部失败不发。
     """
     failures = 0
+    saved_contracts: set[str] = set()
     for fill in fills:
         try:
             await repo.save_trade(
@@ -66,9 +73,20 @@ async def persist_fills(
                 pnl=fill.realized_pnl,
                 source=source_override or trade_source_of(fill),
             )
+            saved_contracts.add(fill.contract)
         except Exception:
             failures += 1
             logger.exception("成交落库失败 round=%s order=%s", round_id[:8], fill.order_id)
+    if saved_contracts and notify_event is not None:
+        notify_event(
+            {
+                "type": "trades_updated",
+                "data": {
+                    "contracts": sorted(saved_contracts),
+                    "count": len(fills) - failures,
+                },
+            }
+        )
     return failures
 
 
@@ -145,8 +163,17 @@ async def execute_manual_close(
         mine = [f for f in fills if f.order_id == cr.order_id]
         others = [f for f in fills if f.order_id != cr.order_id]
         # 夹带 fill 失败走 drain 语义（仅日志）；本单失败必须让用户知情
-        await persist_fills(deps.repo, deps.mode, deps.round_id, others)
-        failed = await persist_fills(deps.repo, deps.mode, deps.round_id, mine, "user_close")
+        await persist_fills(
+            deps.repo, deps.mode, deps.round_id, others, notify_event=deps.notify_event
+        )
+        failed = await persist_fills(
+            deps.repo,
+            deps.mode,
+            deps.round_id,
+            mine,
+            "user_close",
+            notify_event=deps.notify_event,
+        )
         if failed:
             text += f"；警告：{failed} 笔平仓成交仅本地记录失败（成交已生效，勿重复平仓）"
     return {

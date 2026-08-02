@@ -4,7 +4,7 @@
  * source 徽标：llm_open 绿 / llm_close 蓝 / user_close 灰 / liquidation 红 / tpsl_close 紫；
  * round 徽标：round_id 非空显示 #短号(前8位)，空串灰显「-」；
  * 整行可点击（round_id 非空时 hover 高亮+指针）→ useRoundFocus().focus(round_id) 定位决策轮；
- * WS round 事件仅作失效信号 → 重拉当前页（保持 offset/筛选口径，新轮成交及时上表）。
+ * WS trades_updated 事件仅作失效信号 → 重拉当前页（保持 offset/筛选口径，新成交及时上表）。
  */
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
@@ -85,11 +85,11 @@ export default function TradesTable() {
     [page, contract],
   )
 
-  // WS round 事件：仅作失效信号，重拉当前页（payload 不是成交数据，见 api/types.ts 契约）
+  // WS trades_updated 事件：仅作失效信号，重拉当前页（payload 不是成交数据，见 api/types.ts 契约）
   const { lastMessage } = useWs()
   const { reload } = query
   useEffect(() => {
-    if (lastMessage?.type === 'round') reload()
+    if (lastMessage?.type === 'trades_updated') reload()
   }, [lastMessage, reload])
 
   const items = query.data?.items ?? []
