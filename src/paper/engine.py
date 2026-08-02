@@ -108,7 +108,7 @@ class PaperGateway:
     def drain_fills(self) -> list[FillRecord]:
         """取走自上次调用以来的全部成交记录（含强平记录）并清空缓冲。
 
-        供决策循环每轮结束后落库 trades 表；返回 list[FillRecord]，按成交时间升序。
+        供轮末兜底/行情即时 drain/手动平仓取走，按成交时间升序；drain 与落库须在锁内。
         """
         fills = self.account.fills
         self.account.fills = []

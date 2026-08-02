@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from src.bootstrap import AppContext, _make_on_ticker, build_app
+from src.agent.ticker_fanout import make_on_ticker
+from src.bootstrap import AppContext, build_app
 from src.config import Settings, Watchlist
 from src.gateway.base import Candle, Ticker
 from src.market.feed import MarketFeed
@@ -110,7 +111,7 @@ async def test_on_ticker_match_error_logged_not_raised(build_ctx, caplog):
 
     ctx.gateway.on_price = boom  # type: ignore[method-assign]
     ctx.triggers.add(BTC, ">=", Decimal("60000"))
-    with caplog.at_level(logging.ERROR, logger="src.bootstrap"):
+    with caplog.at_level(logging.ERROR, logger="src.agent.ticker_fanout"):
         await ctx.source.push_ticker(_ticker(Decimal("60000")))  # type: ignore[attr-defined]
     assert any("撮合异常" in r.message for r in caplog.records)
     assert ctx.triggers.list(BTC) == []  # 触发器检查未被撮合异常拖垮（已触发并失效）
@@ -124,7 +125,7 @@ async def test_on_ticker_trigger_error_logged_not_raised(build_ctx, caplog):
         raise RuntimeError("触发器故障")
 
     ctx.triggers.check = boom  # type: ignore[method-assign]
-    with caplog.at_level(logging.ERROR, logger="src.bootstrap"):
+    with caplog.at_level(logging.ERROR, logger="src.agent.ticker_fanout"):
         await ctx.source.push_ticker(_ticker(Decimal("60000")))  # type: ignore[attr-defined]
     assert any("触发器检查异常" in r.message for r in caplog.records)
     assert len(ctx.gateway.get_tickers()) == 1  # 行情快照已写入（撮合不受影响）
@@ -261,7 +262,7 @@ async def test_on_ticker_broadcast_interval_zero_sends_all(build_ctx):
     """broadcast_interval=0 关闭节流：逐条广播（验证节流窗口语义本身生效）。"""
     ctx = await build_ctx()
     sent: list[dict] = []
-    handler = _make_on_ticker(ctx.gateway, ctx.triggers, sent.append, broadcast_interval=0)
+    handler = make_on_ticker(ctx.gateway, ctx.triggers, sent.append, broadcast_interval=0)
     handler(_ticker(Decimal("1")))
     handler(_ticker(Decimal("2")))
     assert [e["data"]["last"] for e in sent] == [1.0, 2.0]
@@ -274,8 +275,8 @@ async def test_on_ticker_broadcast_error_logged_not_raised(build_ctx, caplog):
     def boom(msg: dict) -> None:
         raise RuntimeError("广播故障")
 
-    handler = _make_on_ticker(ctx.gateway, ctx.triggers, boom)
-    with caplog.at_level(logging.ERROR, logger="src.bootstrap"):
+    handler = make_on_ticker(ctx.gateway, ctx.triggers, boom)
+    with caplog.at_level(logging.ERROR, logger="src.agent.ticker_fanout"):
         handler(_ticker(Decimal("60000")))
     assert any("广播异常" in r.message for r in caplog.records)
 
