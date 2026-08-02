@@ -1,12 +1,11 @@
-"""用户手动平仓（监控界面「一键平仓」）与成交落库来源标注。
+"""用户手动平仓（监控界面「一键平仓」）。
 
-本模块三件事：
-1. 成交落库标注（trade_source_of / persist_fills）：DecisionLoop 轮末 drain 与
-   manual_close 共用的 trades 落库路径，source 枚举见 src/memory/models.Trade；
-   批次落库成功 ≥1 笔即发 trades_updated WS 失效信号（前端成交表/K线标记据此即时重拉）
-2. 手动平仓（close_position / execute_manual_close）：DecisionLoop.manual_close 的
-   实现体（单独成文控制 loop.py 行数），与 LLM 平仓（place_order close 分支）
-   同一风控判定（_risk_check，is_close=True）与同一落库路径（_record_order）
+本模块两件事：
+1. 程序化平仓（close_position）：与 LLM 平仓（place_order close 分支）同一风控
+   判定（_risk_check，is_close=True）与同一落库路径（_record_order）
+2. 手动平仓（execute_manual_close）：DecisionLoop.manual_close 的实现体（单独
+   成文控制 loop.py 行数）；持 FillPersister 锁覆盖「平仓→drain→落库」全程，
+   本单成交标 user_close；成交归属继承/标注规则/失效信号见 fill_persist.py
 """
 
 from __future__ import annotations
@@ -15,11 +14,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from src.agent.fill_persist import FillPersister
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.agent.tool_trading import _record_order, _resolve_leverage, _risk_check
 from src.audit.logger import get_logger
 from src.gateway.base import OrderRequest
-from src.memory.repo import Repo
 from src.paper.account import FillRecord
 
 logger = get_logger(__name__)
@@ -27,67 +26,6 @@ logger = get_logger(__name__)
 
 class ManualCloseRiskDenied(Exception):
     """manual_close 被风控拒绝：消息即风控理由，由 server 层映射 HTTP 422。"""
-
-
-# ---------- 成交落库来源标注（drain / manual_close 共用） ----------
-
-
-def trade_source_of(fill: FillRecord) -> str:
-    """drain 落库时的 source 推导：强平 > LLM 平仓 > LLM 开仓（user_close 由调用方覆盖）。"""
-    if fill.order_id == "liquidation":
-        return "liquidation"
-    if fill.order_id.startswith("tpsl-"):
-        return "tpsl_close"
-    return "llm_close" if fill.is_close else "llm_open"
-
-
-async def persist_fills(
-    repo: Repo,
-    mode: str,
-    round_id: str,
-    fills: list[FillRecord],
-    source_override: str = "",
-    *,
-    notify_event: Callable[[dict], None] | None = None,
-) -> int:
-    """把成交记录逐笔落 trades 表；source_override 非空时覆盖标注（manual_close 用）。
-
-    单笔落库失败不中断：剩余成交继续落，失败落日志（成交已在网关账本，
-    缺失可事后对账，重试反而可能双计）。返回落库失败笔数——轮末 drain 忽略；
-    manual_close 据以在响应 text 回填警告（同步用户请求不应静默丢记录）。
-
-    本批落库成功 ≥1 笔且 notify_event 非空时，批次结束发一次 trades_updated
-    失效信号（contracts=成功合约去重，count=成功笔数）；全部失败不发。
-    """
-    failures = 0
-    saved_contracts: set[str] = set()
-    for fill in fills:
-        try:
-            await repo.save_trade(
-                round_id=round_id,
-                mode=mode,
-                contract=fill.contract,
-                size=fill.size,
-                price=fill.price,
-                fee=fill.fee,
-                pnl=fill.realized_pnl,
-                source=source_override or trade_source_of(fill),
-            )
-            saved_contracts.add(fill.contract)
-        except Exception:
-            failures += 1
-            logger.exception("成交落库失败 round=%s order=%s", round_id[:8], fill.order_id)
-    if saved_contracts and notify_event is not None:
-        notify_event(
-            {
-                "type": "trades_updated",
-                "data": {
-                    "contracts": sorted(saved_contracts),
-                    "count": len(fills) - failures,
-                },
-            }
-        )
-    return failures
 
 
 # ---------- 程序化平仓执行（manual_close 用） ----------
@@ -141,11 +79,14 @@ async def execute_manual_close(
     contract: str,
     *,
     drain_fills: Callable[[], list[FillRecord]] | None,
+    persister: FillPersister,
 ) -> dict:
     """manual_close 实现体：平仓 → 成交落库（source=user_close）→ 返回 API 响应字典。
 
     风控拒绝抛 ManualCloseRiskDenied；网关错误（如合约不存在）以 GatewayError 上抛。
-    调用方（DecisionLoop.manual_close）须持有落库锁（与轮末 drain 同一把）。
+    全程持 FillPersister 锁：close_position 内 place_order 同步产生 fill，此后若
+    释放锁，行情即时 drain 可能抢先落库并把本单标成 llm_close；持锁到底保证
+    本函数 drain 到该笔并标 user_close。锁不可重入，锁内只能调 persist_locked。
 
     paper 双计处理（直接消费）：成交后立即取走网关缓冲中的全部 fill——本单成交
     按 user_close 落库；缓冲里夹带的其他 fill（同轮 LLM 已下未落库的成交、轮间
@@ -153,29 +94,21 @@ async def execute_manual_close(
     真实网关无缓冲：trades 由 close_position 经 _record_order 内联落库
     （trade_source 覆盖为 user_close）。
     """
-    cr = await close_position(deps, contract, trade_source="user_close")
-    if cr.outcome.risk_verdict == "deny":
-        logger.warning("手动平仓被风控拒绝 contract=%s：%s", contract, cr.outcome.risk_reason)
-        raise ManualCloseRiskDenied(cr.outcome.risk_reason or cr.outcome.text)
-    text = cr.outcome.text
-    if drain_fills is not None:
-        fills = drain_fills()
-        mine = [f for f in fills if f.order_id == cr.order_id]
-        others = [f for f in fills if f.order_id != cr.order_id]
-        # 夹带 fill 失败走 drain 语义（仅日志）；本单失败必须让用户知情
-        await persist_fills(
-            deps.repo, deps.mode, deps.round_id, others, notify_event=deps.notify_event
-        )
-        failed = await persist_fills(
-            deps.repo,
-            deps.mode,
-            deps.round_id,
-            mine,
-            "user_close",
-            notify_event=deps.notify_event,
-        )
-        if failed:
-            text += f"；警告：{failed} 笔平仓成交仅本地记录失败（成交已生效，勿重复平仓）"
+    async with persister.lock:
+        cr = await close_position(deps, contract, trade_source="user_close")
+        if cr.outcome.risk_verdict == "deny":
+            logger.warning("手动平仓被风控拒绝 contract=%s：%s", contract, cr.outcome.risk_reason)
+            raise ManualCloseRiskDenied(cr.outcome.risk_reason or cr.outcome.text)
+        text = cr.outcome.text
+        if drain_fills is not None:
+            fills = drain_fills()
+            mine = [f for f in fills if f.order_id == cr.order_id]
+            others = [f for f in fills if f.order_id != cr.order_id]
+            # 夹带 fill 失败走 drain 语义（仅日志）；本单失败必须让用户知情
+            await persister.persist_locked(others)
+            failed = await persister.persist_locked(mine, source_override="user_close")
+            if failed:
+                text += f"；警告：{failed} 笔平仓成交仅本地记录失败（成交已生效，勿重复平仓）"
     return {
         "contract": contract,
         "status": cr.status,

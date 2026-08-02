@@ -2,7 +2,8 @@
 
 契约：{"type": "trades_updated", "data": {"contracts": [...], "count": N}}
 （本批落库成功的合约去重 + 成功笔数；仅 ≥1 笔成功才发，全部失败/无成交不发）。
-覆盖两个落库点：persist_fills（paper drain / 手动平仓）与 _save_inline_trade（真实网关）。
+覆盖两个落库点：FillPersister（轮末 drain / 手动平仓 / 行情即时 drain）与
+_save_inline_trade（真实网关）。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from src.agent import DecisionLoop, LLMResponse, PromptLoader, ToolCall
-from src.agent.manual_close import persist_fills
+from src.agent.fill_persist import FillPersister
 from src.agent.tool_handlers import ToolDeps
 from src.agent.tools import ToolRegistry
 from src.config import AuditConfig, PaperConfig, RiskConfig, Settings
@@ -93,10 +94,10 @@ async def _make_repo(tmp_path) -> SimpleNamespace:
     return SimpleNamespace(db=db, repo=Repo(db))
 
 
-# ---------- persist_fills 单元层：事件发射与失败语义 ----------
+# ---------- FillPersister 单元层：事件发射与失败语义 ----------
 
 
-async def test_persist_fills_emits_once_with_payload(tmp_path):
+async def test_persister_emits_once_with_payload(tmp_path):
     """一批 3 笔（2 合约）全部落库成功 → 发一次事件，contracts 去重排序、count=3。"""
     env = await _make_repo(tmp_path)
     events: list[dict] = []
@@ -106,7 +107,9 @@ async def test_persist_fills_emits_once_with_payload(tmp_path):
             _fill("o2", "ETH_USDT", 2),
             _fill("o3", "BTC_USDT", -1, True),
         ]
-        failures = await persist_fills(env.repo, "paper", "r1", fills, notify_event=events.append)
+        failures = await FillPersister(env.repo, "paper", events.append).drain_persist(
+            lambda: fills
+        )
         assert failures == 0
         assert events == [
             {
@@ -119,7 +122,7 @@ async def test_persist_fills_emits_once_with_payload(tmp_path):
         await env.db.close()
 
 
-async def test_persist_fills_all_fail_no_event(tmp_path, monkeypatch):
+async def test_persister_all_fail_no_event(tmp_path, monkeypatch):
     """全部落库失败 → 不发事件（失败仅记日志，不重试）。"""
     env = await _make_repo(tmp_path)
     events: list[dict] = []
@@ -129,8 +132,8 @@ async def test_persist_fills_all_fail_no_event(tmp_path, monkeypatch):
 
     monkeypatch.setattr(env.repo, "save_trade", _fail_save)
     try:
-        failures = await persist_fills(
-            env.repo, "paper", "r1", [_fill("o1", "BTC_USDT", 1)], notify_event=events.append
+        failures = await FillPersister(env.repo, "paper", events.append).drain_persist(
+            lambda: [_fill("o1", "BTC_USDT", 1)]
         )
         assert failures == 1
         assert events == []
@@ -138,7 +141,7 @@ async def test_persist_fills_all_fail_no_event(tmp_path, monkeypatch):
         await env.db.close()
 
 
-async def test_persist_fills_partial_failure_payload(tmp_path, monkeypatch):
+async def test_persister_partial_failure_payload(tmp_path, monkeypatch):
     """部分失败：count=成功笔数、contracts 仅含成功合约（失败笔不进事件）。"""
     env = await _make_repo(tmp_path)
     events: list[dict] = []
@@ -156,7 +159,9 @@ async def test_persist_fills_partial_failure_payload(tmp_path, monkeypatch):
             _fill("o2", "ETH_USDT", 2),
             _fill("o3", "BTC_USDT", -1, True),
         ]
-        failures = await persist_fills(env.repo, "paper", "r1", fills, notify_event=events.append)
+        failures = await FillPersister(env.repo, "paper", events.append).drain_persist(
+            lambda: fills
+        )
         assert failures == 1
         assert events == [
             {"type": "trades_updated", "data": {"contracts": ["BTC_USDT"], "count": 2}}
@@ -166,23 +171,25 @@ async def test_persist_fills_partial_failure_payload(tmp_path, monkeypatch):
         await env.db.close()
 
 
-async def test_persist_fills_without_notify_event_compatible(tmp_path):
-    """不传 notify_event（旧调用方式）→ 正常落库不报错。"""
+async def test_persister_without_notify_event_compatible(tmp_path):
+    """不传 notify_event → 正常落库不报错。"""
     env = await _make_repo(tmp_path)
     try:
-        failures = await persist_fills(env.repo, "paper", "r1", [_fill("o1", "BTC_USDT", 1)])
+        failures = await FillPersister(env.repo, "paper").drain_persist(
+            lambda: [_fill("o1", "BTC_USDT", 1)]
+        )
         assert failures == 0
         assert len(await env.repo.trades_between(0.0, time.time() + 1)) == 1
     finally:
         await env.db.close()
 
 
-async def test_persist_fills_empty_batch_no_event(tmp_path):
-    """空批次（轮末 drain 无成交）→ 不发事件。"""
+async def test_persister_empty_batch_no_event(tmp_path):
+    """空批次（drain 无成交）→ 不发事件。"""
     env = await _make_repo(tmp_path)
     events: list[dict] = []
     try:
-        failures = await persist_fills(env.repo, "paper", "r1", [], notify_event=events.append)
+        failures = await FillPersister(env.repo, "paper", events.append).drain_persist(list)
         assert failures == 0
         assert events == []
     finally:

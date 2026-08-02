@@ -13,15 +13,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from src.agent.context import AgentContext, ContextBuilder
+from src.agent.fill_persist import FillPersister
 from src.agent.manual_cancel import execute_manual_cancel
-from src.agent.manual_close import execute_manual_close, persist_fills
+from src.agent.manual_close import execute_manual_close
 from src.agent.prompts import PromptLoader
 from src.agent.providers.base import LLMProvider, ToolCall
 from src.agent.tool_handlers import DailyStatsFn, ToolDeps, ToolOutcome
@@ -70,6 +70,8 @@ class DecisionLoop:
     可选依赖：
     - drain_fills：paper 网关成交缓冲泄放钩子（PaperGateway.drain_fills）；
       为 None（真实网关）时工具层下单直接落 trades（save_fills_inline）
+    - fill_persister：统一成交写入入口（轮末兜底 drain / manual_close / 行情即时
+      drain 三方共用，见 fill_persist.py）；缺省时按 repo/mode/notify_event 自建
     - persist_kill_switch：风控锁写回 config.yaml 的回调（保持 agent 层不碰 config_io）
     - audit：共享 AuditTrail；缺省时按 settings.audit 自建（快照目录一致）
     """
@@ -92,6 +94,7 @@ class DecisionLoop:
         drain_fills: Callable[[], list] | None = None,
         persist_kill_switch: Callable[[bool], None] | None = None,
         notify_event: Callable[[dict], None] | None = None,
+        fill_persister: FillPersister | None = None,
         audit: AuditTrail | None = None,
         max_turns: int = 8,
     ) -> None:
@@ -104,7 +107,7 @@ class DecisionLoop:
         self._consecutive_failures = 0
         self._risk_locked = False
         self._drain_fills = drain_fills
-        self._persist_fills_lock = asyncio.Lock()  # drain 与 manual_close 的落库临界区
+        self._persister = fill_persister or FillPersister(repo, settings.mode, notify_event)
         self._persist_kill_switch = persist_kill_switch
         self._audit = audit or AuditTrail(repo, settings.audit)
         self._deps = ToolDeps(
@@ -146,7 +149,7 @@ class DecisionLoop:
         if self._provider is None:
             # LLM 未配置（缺 key）：跳过本轮，不落审计、不计连续失败；
             # 但先泄放成交缓冲——paper 强平/挂单成交与 LLM 无关，跳轮不得滞留丢失
-            await self._drain_round_fills("")
+            await self._drain_round_fills()
             logger.warning("LLM 未配置，跳过本轮决策")
             return RoundResult(round_id="", ok=False, wake_source=wake_source, error="LLM 未配置")
         prompt, prompt_md5 = self._prompts.system_prompt(self._registry.specs)
@@ -182,7 +185,7 @@ class DecisionLoop:
                 tool_calls=n_calls,
                 text=text,
             )
-        await self._drain_round_fills(round_id)
+        await self._drain_round_fills()
         return result
 
     async def _chat_loop(
@@ -260,37 +263,29 @@ class DecisionLoop:
             await self._engage_lock()
         return RoundResult(round_id=round_id, ok=False, wake_source=wake_source, error=error)
 
-    async def _drain_round_fills(self, round_id: str) -> None:
+    async def _drain_round_fills(self) -> None:
         """paper 网关成交缓冲落 trades 表（真实网关无此钩子，由工具层直接落库）。
 
-        与 manual_close 共用 _persist_fills_lock：用户平仓直接消费缓冲落库，
-        轮末 drain 不会重复落库（双计防护见 manual_close.execute_manual_close）。
-        source 标注：强平 → liquidation，fill.is_close → llm_close，其余 → llm_open。
-        落库成功 ≥1 笔时经 persist_fills 发 trades_updated 失效信号。
+        经 FillPersister 与 manual_close、行情即时 drain 互斥：缓冲只被 drain 走
+        一次，轮末兜底不会重复落库（归属继承与标注规则见 fill_persist.py）。
         """
         if self._drain_fills is None:
             return
-        async with self._persist_fills_lock:
-            await persist_fills(
-                self._repo,
-                self._settings.mode,
-                round_id,
-                self._drain_fills(),
-                notify_event=self._deps.notify_event,
-            )
+        await self._persister.drain_persist(self._drain_fills)
 
     async def manual_close(self, contract: str) -> dict:
         """用户手动平仓（监控界面）：与 LLM 平仓同一风控路径，成交标注 source=user_close。
 
         - 风控拒绝抛 ManualCloseRiskDenied（消息为风控理由，server 层映射 HTTP 422）；
           网关错误（如合约不存在）以 GatewayError 原样上抛
-        - 决策轮进行中也可调用（用户操作优先）：与轮末 drain 共用 _persist_fills_lock，
-          paper 成交缓冲由本方法直接消费落库，drain 不再重复落库
+        - 决策轮进行中也可调用（用户操作优先）：FillPersister 锁由 execute_manual_close
+          内部持有，覆盖「下单→drain→落库」全程，行情即时 drain 抢不走其成交
         - 返回 {"contract", "status", "fill_price", "text"} 供 API 响应
           （fill_price 为 Decimal，序列化由 server 层处理）
         """
-        async with self._persist_fills_lock:
-            return await execute_manual_close(self._deps, contract, drain_fills=self._drain_fills)
+        return await execute_manual_close(
+            self._deps, contract, drain_fills=self._drain_fills, persister=self._persister
+        )
 
     async def manual_cancel_order(self, contract: str, order_id: str) -> dict:
         # 将监控 API 的手动撤单请求转交给统一撤单执行器。

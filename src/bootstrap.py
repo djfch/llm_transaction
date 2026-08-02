@@ -16,16 +16,18 @@ from pathlib import Path
 
 import uvicorn
 
+from src.agent.fill_persist import FillPersister
 from src.agent.loop import DecisionLoop
 from src.agent.prompts import PromptLoader
 from src.agent.providers.base import LLMError, LLMProvider
 from src.agent.providers.factory import build_provider, create_provider, resolve_agent_credential
 from src.agent.providers.mock import MockProvider
+from src.agent.ticker_fanout import make_on_ticker
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
 from src.config import ROOT, Settings, Watchlist
 from src.config_io import read_settings_raw, write_settings
-from src.gateway.base import Candle, Contract, Gateway, Ticker
+from src.gateway.base import Candle, Contract, Gateway
 from src.gateway.gate_rest import GateRestGateway
 from src.market.candles import CandleCache, ManualPriceSource, PriceSource
 from src.market.feed import MarketFeed
@@ -172,47 +174,6 @@ def _backfill_candles(candles: CandleCache, contracts: list[str], *, skip: bool)
         logger.warning("K 线历史回补失败，WS 将逐根积累", exc_info=True)
 
 
-def _make_on_ticker(
-    gateway: Gateway,
-    triggers: TriggerManager,
-    broadcast: Callable[[dict], None] | None = None,
-    *,
-    broadcast_interval: float = 1.0,
-) -> Callable[[Ticker], None]:
-    """ticker 总闸：paper 撮合、触发器检查、WS 行情广播各自捕获异常记日志，不外抛（护住 WS 任务）。
-
-    broadcast：每合约按 broadcast_interval 秒节流后推 {"type":"ticker",...}（前端实时价）；
-    last 转 float（Decimal 无法被 ws send_json 序列化）。
-    """
-    last_sent: dict[str, float] = {}
-
-    def on_ticker(ticker: Ticker) -> None:
-        if isinstance(gateway, PaperGateway):
-            try:
-                gateway.on_price(ticker.contract, ticker.mark_price, ticker.last, ticker.last)
-            except Exception:
-                logger.exception("paper 撮合异常（%s）", ticker.contract)
-        try:
-            triggers.check(ticker.contract, ticker.last)
-        except Exception:
-            logger.exception("触发器检查异常（%s）", ticker.contract)
-        if broadcast is not None:
-            now = time.monotonic()
-            if now - last_sent.get(ticker.contract, float("-inf")) >= broadcast_interval:
-                last_sent[ticker.contract] = now
-                try:
-                    broadcast(
-                        {
-                            "type": "ticker",
-                            "data": {"contract": ticker.contract, "last": float(ticker.last)},
-                        }
-                    )
-                except Exception:
-                    logger.exception("ticker 广播异常（%s）", ticker.contract)
-
-    return on_ticker
-
-
 def _build_loop(
     settings: Settings,
     watchlist: Watchlist,
@@ -226,6 +187,7 @@ def _build_loop(
     cfg_path: Path,
     audit: AuditTrail,
     notify_event: Callable[[dict], None] | None = None,
+    fill_persister: FillPersister | None = None,
 ) -> DecisionLoop:
     """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。
 
@@ -254,6 +216,7 @@ def _build_loop(
         drain_fills=gateway.drain_fills if isinstance(gateway, PaperGateway) else None,
         persist_kill_switch=persist_kill_switch,
         notify_event=notify_event,  # 工具层变更事件（如 plan_updated）直推 WS 广播队列
+        fill_persister=fill_persister,  # 与 on_ticker 即时 drain 共用同一实例（锁互斥）
         audit=audit,  # 与 server 共用同一实例
     )
 
@@ -297,9 +260,15 @@ async def build_app(
         lambda t, price: scheduler.wake_now(f"price_trigger:{t.contract}@{price}")
     )
     event_queue: asyncio.Queue = asyncio.Queue()
+    fill_persister = FillPersister(repo, settings.mode, event_queue.put_nowait)
     # ticker 广播进 WS 事件流：on_ticker 经 maybe_await 在事件循环线程同步调用，put_nowait 安全
     source.set_handlers(
-        on_ticker=_make_on_ticker(gateway, triggers, lambda msg: event_queue.put_nowait(msg))
+        on_ticker=make_on_ticker(
+            gateway,
+            triggers,
+            lambda msg: event_queue.put_nowait(msg),
+            fill_persister=fill_persister,
+        )
     )
     # 每个 agent 按其绑定凭证各自构造 provider（同一凭证也各自建实例：互不阻塞、可独立热重建）；
     # mock 模式共享同一 MockProvider 实例
@@ -320,6 +289,7 @@ async def build_app(
         audit=audit,
         cfg_path=config_path or ROOT / "config.yaml",
         notify_event=event_queue.put_nowait,
+        fill_persister=fill_persister,
     )
     ctx = AppContext(
         settings=settings,

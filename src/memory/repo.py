@@ -216,6 +216,12 @@ class Repo:
         )
         return [_order_from_row(r) for r in await cur.fetchall()]
 
+    async def order_round_id(self, order_id: str) -> str | None:
+        """按订单 id 查 round_id（成交归属继承用）；订单不存在返回 None。"""
+        cur = await self._conn.execute("SELECT round_id FROM orders WHERE id=?", (order_id,))
+        row = await cur.fetchone()
+        return row[0] if row is not None else None
+
     # ---------- trades ----------
 
     async def save_trade(
