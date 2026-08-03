@@ -41,10 +41,8 @@ async def _zero_daily() -> DailyStats:
     return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
 
-async def _make_tools(
-    tmp_path, *, extra_contracts: tuple = (), save_fills_inline: bool = False
-) -> SimpleNamespace:
-    """组装工具注册表（MockGateway + tmp_path SQLite）。save_fills_inline 仅需要时透传。"""
+async def _make_tools(tmp_path, *, extra_contracts: tuple = ()) -> SimpleNamespace:
+    """组装工具注册表（MockGateway + tmp_path SQLite）。"""
     db = Database()
     await db.open(tmp_path / "tools.db")
     repo = Repo(db)
@@ -52,9 +50,6 @@ async def _make_tools(
     for name in extra_contracts:
         contracts[name] = _contract(name, "0.001", "60000")
     gateway = MockGateway(contracts=contracts)
-    kwargs = {}
-    if save_fills_inline:
-        kwargs["save_fills_inline"] = True
     deps = ToolDeps(
         gateway=gateway,
         risk_engine=RiskEngine(),
@@ -66,7 +61,6 @@ async def _make_tools(
         daily_stats_fn=_zero_daily,
         mode="paper",
         round_id="r-test",
-        **kwargs,
     )
     return SimpleNamespace(
         db=db, repo=repo, gateway=gateway, deps=deps, registry=ToolRegistry(deps)
@@ -208,7 +202,7 @@ async def test_place_order_declared_leverage_applied(tmp_path):
 
 
 async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatch):
-    env = await _make_tools(tmp_path, save_fills_inline=True)
+    env = await _make_tools(tmp_path)
     try:
 
         async def _boom(**kwargs):
@@ -221,25 +215,6 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
         assert "禁止重试" in out.text
         assert "内部错误" not in out.text
         assert len(env.gateway.placed) == 1  # 订单已真实提交到网关
-    finally:
-        await env.db.close()
-
-
-# ---------- 真实网关路径（无 drain 钩子）：finished 单直接落 trade ----------
-
-
-async def test_finished_order_saved_inline_without_drain(tmp_path):
-    env = await _make_tools(tmp_path, save_fills_inline=True)
-    try:
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )
-        assert "下单成功" in out.text
-        trades = await env.repo.list_trades()
-        assert len(trades) == 1
-        trade = trades[0]
-        assert trade.price == Decimal("60000") and trade.size == Decimal(1)  # price=fill_price
-        assert trade.fee == 0 and trade.pnl == 0  # 下单回报不含 fee/盈亏，先落 0 并注明
     finally:
         await env.db.close()
 

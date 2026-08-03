@@ -2,8 +2,8 @@
 
 契约：{"type": "trades_updated", "data": {"contracts": [...], "count": N}}
 （本批落库成功的合约去重 + 成功笔数；仅 ≥1 笔成功才发，全部失败/无成交不发）。
-覆盖两个落库点：FillPersister（轮末 drain / 手动平仓 / 行情即时 drain）与
-_save_inline_trade（真实网关）。
+本文件覆盖 FillPersister（轮末 drain / 手动平仓 / 行情即时 drain）；
+真实网关 ExchangeFillSync 路径见 test_agent_fill_sync.py。
 """
 
 from __future__ import annotations
@@ -15,18 +15,14 @@ from types import SimpleNamespace
 
 from src.agent import DecisionLoop, LLMResponse, PromptLoader, ToolCall
 from src.agent.fill_persist import FillPersister
-from src.agent.tool_handlers import ToolDeps
-from src.agent.tools import ToolRegistry
-from src.config import AuditConfig, PaperConfig, RiskConfig, Settings
+from src.config import AuditConfig, PaperConfig, Settings
 from src.gateway.base import Contract
-from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
 from src.memory import Database, Repo
 from src.paper.account import FillRecord
 from src.paper.engine import PaperGateway
 from src.risk.engine import RiskEngine
-from src.risk.models import DailyStats
 
 
 class SeqProvider:
@@ -82,10 +78,6 @@ def _fill(order_id: str, contract: str, size: int, is_close: bool = False) -> Fi
         maker=False,
         is_close=is_close,
     )
-
-
-async def _zero_daily() -> DailyStats:
-    return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
 
 async def _make_repo(tmp_path) -> SimpleNamespace:
@@ -283,65 +275,5 @@ async def test_manual_close_emits_event(tmp_path):
         assert events == [
             {"type": "trades_updated", "data": {"contracts": ["BTC_USDT"], "count": 1}}
         ]
-    finally:
-        await env.db.close()
-
-
-# ---------- 真实网关 inline 路径 ----------
-
-
-async def _make_inline_env(tmp_path, events: list[dict]) -> SimpleNamespace:
-    """MockGateway + save_fills_inline=True + notify_event 捕获。"""
-    db = Database()
-    await db.open(tmp_path / "tools.db")
-    repo = Repo(db)
-    gateway = MockGateway(contracts={"BTC_USDT": _contract("BTC_USDT", "0.001", "60000")})
-    deps = ToolDeps(
-        gateway=gateway,
-        risk_engine=RiskEngine(),
-        risk_config=RiskConfig(),
-        watchlist=["BTC_USDT"],
-        repo=repo,
-        candles=CandleCache(gateway, ManualPriceSource()),
-        triggers=TriggerManager(lambda t, p: None),
-        daily_stats_fn=_zero_daily,
-        mode="testnet",
-        round_id="r-test",
-        save_fills_inline=True,
-        notify_event=events.append,
-    )
-    return SimpleNamespace(
-        db=db, repo=repo, gateway=gateway, deps=deps, registry=ToolRegistry(deps)
-    )
-
-
-async def test_inline_place_order_emits_event(tmp_path):
-    """inline 路径：开仓成交发一次，平仓成交再发一次。"""
-    events: list[dict] = []
-    env = await _make_inline_env(tmp_path, events)
-    try:
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )
-        assert out.risk_verdict == "allow", out.text
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
-        assert out.risk_verdict == "allow", out.text
-        assert events == [
-            {"type": "trades_updated", "data": {"contracts": ["BTC_USDT"], "count": 1}},
-            {"type": "trades_updated", "data": {"contracts": ["BTC_USDT"], "count": 1}},
-        ]
-    finally:
-        await env.db.close()
-
-
-async def test_inline_close_no_position_no_event(tmp_path):
-    """无持仓 close：无成交不落库（不变量#21），也不发事件。"""
-    events: list[dict] = []
-    env = await _make_inline_env(tmp_path, events)
-    try:
-        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
-        assert out.risk_verdict == "allow", out.text
-        assert await env.repo.trades_between(0.0, time.time() + 1) == []
-        assert events == []
     finally:
         await env.db.close()

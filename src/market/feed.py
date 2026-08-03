@@ -77,6 +77,7 @@ class MarketFeed:
         intervals: list[str],
         settle: str = "usdt",
         testnet: bool = False,
+        ws_host: str = "",  # testnet 专用 WS 地址覆盖（SDK 内置 testnet 地址已失效）
         on_ticker: TickerHandler | None = None,
         on_candle: CandleHandler | None = None,
     ) -> None:
@@ -84,6 +85,7 @@ class MarketFeed:
         self._intervals = list(intervals)
         self._settle = settle
         self._testnet = testnet
+        self._ws_host = ws_host
         self._on_ticker = on_ticker
         self._on_candle = on_candle
         self._conn: Connection | None = None
@@ -105,9 +107,17 @@ class MarketFeed:
         if self._running:
             return
         self._running = True
-        # Connection 须在运行中的事件循环内创建（gatews 取当前 loop）
+        # Connection 须在运行中的事件循环内创建（gatews 取当前 loop）；
+        # host 仅 testnet 生效：SDK 内置 testnet 地址（fx-ws-testnet.gateio.ws）已 502 失效，
+        # 由 gate.testnet_ws_host 配置提供；live 留空走 SDK 默认
         self._conn = Connection(
-            Configuration(app="futures", settle=self._settle, test_net=self._testnet, max_retry=1)
+            Configuration(
+                app="futures",
+                settle=self._settle,
+                test_net=self._testnet,
+                host=self._ws_host if self._testnet else "",
+                max_retry=1,
+            )
         )
         ticker_ch = FuturesTickerChannel(self._conn, self._handle_ticker)
         candle_ch = FuturesCandlesticksChannel(self._conn, self._handle_candle)

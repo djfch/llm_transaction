@@ -47,8 +47,8 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     风控语义与 LLM 平仓一致（is_close=True：白名单/仓位/杠杆/日亏/日单数/kill_switch
     均豁免，仅价格偏离约束——市价平仓 price=None 亦豁免）。风控拒绝不抛异常，
     返回 outcome.risk_verdict="deny"，由调用方决定（LLM 工具层转文本；
-    manual_close 转 ManualCloseRiskDenied）。trade_source 非空时覆盖真实网关
-    inline 落库的 trades.source（默认 close → llm_close）。
+    manual_close 转 ManualCloseRiskDenied）。trade_source 非空时透传给 orders.trade_source
+    （manual_close 传 user_close，供交易所真实成交回报分类归属）。
     """
     positions = deps.gateway.list_positions()
     had_position = any(p.contract == contract for p in positions)  # 下单前快照（防文本谎称）
@@ -60,7 +60,7 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
         return CloseResult(outcome=deny)
     req = OrderRequest(contract=contract, size=Decimal(0), close=True)
     result = deps.gateway.place_order(req)
-    warning = await _record_order(deps, result, req, positions, trade_source=trade_source)
+    warning = await _record_order(deps, result, req, trade_source=trade_source)
     if not had_position or result.finish_as == "no_position":
         # 无真实成交（paper 报 no_position；mock/真实网关无持仓 close 为 no-op），不谎称成交均价
         text = f"手动平仓：{contract} 当前无持仓"
@@ -91,8 +91,8 @@ async def execute_manual_close(
     paper 双计处理（直接消费）：成交后立即取走网关缓冲中的全部 fill——本单成交
     按 user_close 落库；缓冲里夹带的其他 fill（同轮 LLM 已下未落库的成交、轮间
     强平等）按标准标注一并落库。缓冲已清空，轮末 drain 无货可落，天然无双计。
-    真实网关无缓冲：trades 由 close_position 经 _record_order 内联落库
-    （trade_source 覆盖为 user_close）。
+    真实网关无缓冲：trades 由 ExchangeFillSync 按交易所真实成交回报落库，订单行
+    已带 trade_source=user_close 供归属判定。
     """
     async with persister.lock:
         cr = await close_position(deps, contract, trade_source="user_close")

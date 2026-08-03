@@ -3,6 +3,8 @@ gate:
   settle: usdt
   testnet_host: https://api-testnet.gateapi.io/api/v4
   live_host: https://api.gateio.ws/api/v4
+  # SDK 内置 testnet WS 地址（fx-ws-testnet.gateio.ws）已失效，testnet 必须显式配置；须与 settle 匹配
+  testnet_ws_host: wss://ws-testnet.gate.com/v4/ws/futures/usdt
 llm:
   # provider 可选：anthropic / openai_compat / openai_responses
   # openai_responses 为 OpenAI Responses API（openai_base_url 留空走官方端点）；

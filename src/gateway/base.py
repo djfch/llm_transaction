@@ -125,6 +125,34 @@ class TpslOrder(BaseModel):
     trigger_price: Decimal
 
 
+class ExchangeTrade(BaseModel):
+    """交易所真实成交（my_trades REST / usertrades WS 推送归一化后的内部结构）。
+
+    id/order_id 为 Gate 侧 id 的字符串形式；size 正多负空；text 为 Gate 侧标记
+    （客户端订单 id 或系统来源文本）。仅后端对账用，不进前端响应。
+    """
+
+    id: str  # 交易所成交 id（去重键）
+    order_id: str  # 交易所订单 id（归属/分类键）
+    contract: str
+    size: Decimal
+    price: Decimal
+    fee: Decimal
+    role: str = ""  # taker/maker
+    text: str = ""
+    create_time: float
+
+
+class PositionCloseRecord(BaseModel):
+    """平仓盈亏历史条目（position_close）：平仓成交的 pnl 回填来源。"""
+
+    time: float
+    contract: str
+    pnl: Decimal
+    accum_size: Decimal
+    text: str = ""
+
+
 class Candle(BaseModel):
     """K 线。t 为秒级时间戳；v 为成交量（张数）。"""
 

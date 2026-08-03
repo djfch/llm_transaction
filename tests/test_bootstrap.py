@@ -1,7 +1,7 @@
 """bootstrap 接线测试：DecisionLoop 依赖注入、server runtime 同步、资金费周期、预警生命周期。
 
 覆盖以下接线不变量：
-- paper 模式注入 drain_fills；真实网关为 None（工具层 inline 落 trade，二者互斥）
+- paper 模式注入 drain_fills；真实网关为 None（trades 由 fill_sync 按交易所成交回报落库）
 - persist_kill_switch 写回 config.yaml；audit 与 server 共用同一实例
 - ServerDeps.runtime_settings / runtime_watchlist 与决策循环共享同一对象
 - 资金费按合约 funding_interval 结算（8h 周期，1 小时内不重复结算）
@@ -67,18 +67,18 @@ def _ticker(price: Decimal) -> Ticker:
 
 
 async def test_paper_mode_injects_drain_fills(build_ctx):
-    """paper 模式：drain_fills 接 PaperGateway.drain_fills，工具层不 inline 落库。"""
+    """paper 模式：drain_fills 接 PaperGateway.drain_fills；不建私有成交订阅。"""
     ctx = await build_ctx()
     assert isinstance(ctx.gateway, PaperGateway)
     assert ctx.loop._drain_fills == ctx.gateway.drain_fills  # bound method 同 func+self 即相等
-    assert ctx.loop._deps.save_fills_inline is False
+    assert ctx.trade_feed is None
 
 
 async def test_real_gateway_mode_has_no_drain_fills(build_ctx):
-    """真实网关（testnet）：无 drain_fills 钩子，工具层下单时 inline 落 trade。"""
+    """真实网关（testnet）：无 drain_fills 钩子；mock_market 下不建私有成交订阅。"""
     ctx = await build_ctx(Settings(mode="testnet"))
     assert ctx.loop._drain_fills is None
-    assert ctx.loop._deps.save_fills_inline is True
+    assert ctx.trade_feed is None  # mock_market=True 时不接私有 WS（真实装配见 build_app）
 
 
 async def test_persist_kill_switch_writes_config(tmp_path: Path, build_ctx):

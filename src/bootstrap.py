@@ -17,6 +17,8 @@ from pathlib import Path
 import uvicorn
 
 from src.agent.fill_persist import FillPersister
+from src.agent.fill_sync import ExchangeFillSync
+from src.agent.fill_sync_setup import build_trade_sync
 from src.agent.loop import DecisionLoop
 from src.agent.prompts import PromptLoader
 from src.agent.providers.base import LLMError, LLMProvider
@@ -32,6 +34,7 @@ from src.gateway.gate_rest import GateRestGateway
 from src.market.candles import CandleCache, ManualPriceSource, PriceSource
 from src.market.feed import MarketFeed
 from src.market.intervals import GATE_CANDLE_INTERVALS
+from src.market.private_feed import PrivateTradeFeed
 from src.market.triggers import TriggerManager
 from src.memory.db import Database
 from src.memory.repo import Repo
@@ -69,6 +72,9 @@ class AppContext:
     started_at: float = field(default_factory=time.time)
     server: uvicorn.Server | None = None
     server_deps: ServerDeps | None = None
+    # 交易所成交回报对账（testnet/live 且非 mock 行情时装配；paper/mock 为 None）
+    trade_feed: PrivateTradeFeed | None = None
+    trade_sync: ExchangeFillSync | None = None
 
 
 def _default_contract(name: str, mark: Decimal) -> Contract:
@@ -160,6 +166,7 @@ def _build_source(settings: Settings, watchlist: Watchlist, mock_market: bool) -
         CANDLE_INTERVALS,
         settle=settings.gate.settle,
         testnet=settings.mode == "testnet",
+        ws_host=settings.gate.testnet_ws_host,
     )
 
 
@@ -189,7 +196,7 @@ def _build_loop(
     notify_event: Callable[[dict], None] | None = None,
     fill_persister: FillPersister | None = None,
 ) -> DecisionLoop:
-    """创建决策循环：paper 网关接 drain_fills；真实网关 None（工具层 inline 落 trade）。
+    """创建决策循环：paper 网关接 drain_fills；真实网关 None（trades 由 fill_sync 落库）。
 
     provider 由 build_app 按 trader 绑定凭证构造传入（与复盘 agent 各自独立实例）。
     """
@@ -308,6 +315,12 @@ async def build_app(
         watchlist=watchlist.contracts,
     )
     ctx.server, ctx.server_deps = _build_server(ctx, audit, mock_llm=mock_llm)
+    if not mock_market:  # mock 行情不接私有 WS（测试/冒烟可离线运行）
+        pair = build_trade_sync(
+            settings, gateway, db, event_queue.put_nowait, build_notifier(settings.notify).send
+        )
+        if pair is not None:
+            ctx.trade_feed, ctx.trade_sync = pair
     return ctx
 
 
@@ -422,6 +435,9 @@ async def run_app(
     """启动并运行应用；duration 为 None 时长驻（Ctrl+C 退出），否则到时自动关闭。"""
     assert ctx.server is not None
     await ctx.source.start()
+    if ctx.trade_feed is not None and ctx.trade_sync is not None:
+        await ctx.trade_feed.start()
+        await ctx.trade_sync.catch_up()  # 启动补漏：离线期间成交经 REST 补齐（REST 在子线程）
     if ctx.settings.scheduler.autostart:
         await ctx.scheduler.start()
     else:
@@ -431,6 +447,10 @@ async def run_app(
     server_task = asyncio.create_task(ctx.server.serve())
     pusher_task = asyncio.create_task(price_pusher(ctx)) if price_pusher else None
     funding_task = asyncio.create_task(_funding_loop(ctx))
+    # 成交补漏低频安全网（gatews 静默重连绕过 on_reconnected，秒级断线窗口靠它兜底）
+    safety_task = (
+        asyncio.create_task(ctx.trade_sync.run_safety_net()) if ctx.trade_sync is not None else None
+    )
     # 复盘巡检无论 enabled 与否都创建：scheduler 每 tick 读 settings.review.enabled（热开关）
     review_task = asyncio.create_task(ctx.review.scheduler.run_forever())
     logger.info(
@@ -445,7 +465,7 @@ async def run_app(
         else:
             await asyncio.Event().wait()  # 长驻，Ctrl+C 退出
     finally:
-        await shutdown(ctx, server_task, pusher_task, funding_task, review_task)
+        await shutdown(ctx, server_task, pusher_task, funding_task, review_task, safety_task)
 
 
 async def shutdown(
@@ -454,11 +474,19 @@ async def shutdown(
     pusher_task: asyncio.Task | None,
     funding_task: asyncio.Task,
     review_task: asyncio.Task,
+    safety_task: asyncio.Task | None = None,
 ) -> None:
     """优雅退出：停调度与行情，关 HTTP，收尾数据库。"""
     logger.info("正在关闭应用…")
     await ctx.scheduler.stop()
     await ctx.source.stop()
+    if safety_task is not None:  # 先停安全网：防止 shutdown 途中又调度新的回填任务
+        safety_task.cancel()
+        await asyncio.gather(safety_task, return_exceptions=True)
+    if ctx.trade_feed is not None:
+        await ctx.trade_feed.stop()
+    if ctx.trade_sync is not None:
+        await ctx.trade_sync.aclose()  # 取消失漏 pnl 回填任务，须在 db.close 前
     if ctx.server is not None:
         ctx.server.should_exit = True
         await asyncio.gather(server_task, return_exceptions=True)

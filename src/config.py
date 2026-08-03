@@ -25,6 +25,8 @@ class GateConfig(BaseModel):
     settle: str = "usdt"
     testnet_host: str = "https://api-testnet.gateapi.io/api/v4"
     live_host: str = "https://api.gateio.ws/api/v4"
+    # SDK 内置 testnet WS 地址已 502 失效，必须单独可配；须与 settle 匹配
+    testnet_ws_host: str = "wss://ws-testnet.gate.com/v4/ws/futures/usdt"
 
 
 class CredentialConfig(BaseModel):

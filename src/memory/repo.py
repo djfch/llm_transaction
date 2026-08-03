@@ -140,11 +140,14 @@ class Repo:
         status: str = "open",
         finish_as: str = "",
         is_close: bool = False,
+        trade_source: str = "",
     ) -> OrderRecord:
+        """落 orders 行。trade_source 非空时标记下单方（manual_close 传 user_close，
+        成交对账据以分类；LLM 单保持 ''，由 is_close 推导 llm_open/llm_close）。"""
         ts = _now()
         await self._conn.execute(
             "INSERT INTO orders(id,round_id,mode,contract,side_size,price,tif,text,"
-            "status,finish_as,is_close,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "status,finish_as,is_close,trade_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 order_id,
                 round_id,
@@ -157,6 +160,7 @@ class Repo:
                 status,
                 finish_as,
                 int(is_close),
+                trade_source,
                 ts,
             ),
         )

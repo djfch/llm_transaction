@@ -22,12 +22,14 @@ from .base import (
     Candle,
     Contract,
     ContractNotFound,
+    ExchangeTrade,
     GatewayError,
     OrderNotFound,
     OrderRequest,
     OrderResult,
     OrderStateUnknown,
     Position,
+    PositionCloseRecord,
     PositionNotFound,
     TpslOrder,
     Ticker,
@@ -36,6 +38,7 @@ from .base import (
 _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
 _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤旧单
+_FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
 
@@ -212,6 +215,32 @@ def _to_tpsl(order: gate_api.FuturesPriceTriggeredOrder) -> TpslOrder | None:
     )
 
 
+def _to_exchange_trade(t: gate_api.MyFuturesTrade) -> ExchangeTrade:
+    """SDK 个人成交 -> 内部结构；id/order_id 归一为字符串（推送侧同为字符串键）。"""
+    return ExchangeTrade(
+        id=str(t.id),
+        order_id=str(t.order_id or ""),
+        contract=t.contract,
+        size=_dec(t.size),
+        price=_dec(t.price),
+        fee=_dec(t.fee),
+        role=t.role or "",
+        text=t.text or "",
+        create_time=float(t.create_time),
+    )
+
+
+def _to_position_close_record(r: gate_api.PositionClose) -> PositionCloseRecord:
+    """SDK 平仓盈亏历史 -> 内部结构（pnl 回填来源）。"""
+    return PositionCloseRecord(
+        time=float(r.time),
+        contract=r.contract,
+        pnl=_dec(r.pnl),
+        accum_size=_dec(r.accum_size),
+        text=r.text or "",
+    )
+
+
 class GateRestGateway:
     """真实网关：只做 SDK 调用与异常/超时处理，下单语义由 build_order_payload 组装。"""
 
@@ -343,6 +372,32 @@ class GateRestGateway:
         try:
             orders = self._api.list_price_triggered_orders(self._settle, "open", contract=contract)
             return [mapped for raw in orders if (mapped := _to_tpsl(raw)) is not None]
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+
+    def list_my_trades(self, contract: str | None = None, limit: int = 100) -> list[ExchangeTrade]:
+        """个人成交历史（补漏用）：按时间倒序拉最近 limit 条，调用方按水线自行过滤。"""
+        try:
+            kwargs: dict[str, object] = {"limit": limit, "_request_timeout": _FILLS_TIMEOUT_S}
+            if contract is not None:
+                kwargs["contract"] = contract
+            return [_to_exchange_trade(t) for t in self._api.get_my_trades(self._settle, **kwargs)]
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+
+    def list_position_close(
+        self, contract: str, from_ts: float, to_ts: float
+    ) -> list[PositionCloseRecord]:
+        """平仓盈亏历史（pnl 回填用）：[from_ts, to_ts] 时间窗内按合约过滤。"""
+        try:
+            rows = self._api.list_position_close(
+                self._settle,
+                contract=contract,
+                _from=int(from_ts),
+                to=int(to_ts),
+                _request_timeout=_FILLS_TIMEOUT_S,
+            )
+            return [_to_position_close_record(r) for r in rows]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
