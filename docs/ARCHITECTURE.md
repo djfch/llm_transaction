@@ -86,10 +86,10 @@ flowchart LR
 | `src/bootstrap.py` | 创建并连接全部运行时组件 | 项目的组合根；具体依赖在此选择 |
 | `src/config.py` / `src/config_io.py` | 配置模型、读取、校验与安全写回 | 运行时 YAML 与密钥环境变量分离 |
 | `src/gateway/` | 交易所领域模型、Protocol、Gate REST 与 mock | 业务层不直接依赖 Gate SDK 类型 |
-| `src/market/` | WebSocket 行情、K 线缓存、价格触发器 | 行情接入与交易决策解耦 |
+| `src/market/` | WebSocket 行情、K 线缓存、价格触发器、私有成交订阅（testnet/live） | 行情接入与交易决策解耦 |
 | `src/paper/` | 模拟账户、撮合、资金费与强平 | 实现与真实网关相同的接口 |
 | `src/risk/` | 无状态风控引擎与纯函数规则 | 下单/改单调用 RiskEngine；撤单不调用；设置杠杆由 Agent 工具层独立校验上限 |
-| `src/agent/` | 上下文构造、LLM Provider、决策循环和工具 | LLM 只能经 ToolRegistry 影响系统 |
+| `src/agent/` | 上下文构造、LLM Provider、决策循环、工具和成交落库/对账 | LLM 只能经 ToolRegistry 影响系统 |
 | `src/scheduler/` | 定时、手动和价格告警唤醒 | 保证同一时间最多执行一轮决策 |
 | `src/review/` | 复盘 LLM 循环、只读工具集、策略版本管理与每日调度 | 无任何交易工具、不持有 Gateway；唯一写出口经 StrategyStore 校验 |
 | `src/memory/` | SQLite 建表、模型与 Repo | 业务层不直接写 SQL |
@@ -266,7 +266,7 @@ sequenceDiagram
 | `testnet(测试网模式)` | Gate 测试网行情 | `GateRestGateway(真实 REST 网关)` 指向测试网 | 带密钥的交易闭环联调 |
 | `live(实盘模式)` | Gate 正式行情 | `GateRestGateway(真实 REST 网关)` 指向正式环境 | 用户显式开启后的真实交易 |
 
-paper 模式会处理滑点、挂单成交、资金费和强平等模拟账户行为。testnet/live 共用 `GateRestGateway`，根据 mode 选择不同主机；两者读取相同名称的 `GATE_API_KEY(交易所访问密钥)`、`GATE_API_SECRET(交易所签名密钥)`，变量值必须与目标环境匹配。
+paper 模式会处理滑点、挂单成交、资金费和强平等模拟账户行为；成交经 `FillPersister(统一成交写入入口)` 三路（行情即时 drain / 手动平仓 / 轮末兜底 drain）在同一把锁内落库，天然无双计。testnet/live 共用 `GateRestGateway`，根据 mode 选择不同主机；成交不再由下单响应推断，改由 `ExchangeFillSync(成交同步器)` 对账：私有 WS（usertrades/autoorders/liquidates）推送幂等落库，启动与断线重连按水线重叠窗口补漏，另有 5 分钟一次幂等安全网兜底 gatews 静默重连窗口，平仓 pnl 经 position_close 延迟回填（字段均以 testnet 实测校准，见 `src/agent/fill_sync.py` 模块说明与 `scripts/verify_private_feed.py`）。testnet 的 WS 地址须显式配置 `gate.testnet_ws_host(测试网WS地址)`（SDK 内置地址已失效，须与 settle 匹配）；两种模式读取相同名称的 `GATE_API_KEY(交易所访问密钥)`、`GATE_API_SECRET(交易所签名密钥)`，变量值必须与目标环境匹配。
 
 LLM Provider 通过统一接口接入：
 
@@ -313,8 +313,8 @@ flowchart LR
 | 表 | 具体含义 | 关键字段 |
 | --- | --- | --- |
 | `decisions(决策记录)` | 每轮最终决策摘要与 LLM 原始输出 | `round_id(决策轮标识)`、`wake_source(唤醒来源)`、`strategy_md5(策略书原文摘要)` |
-| `orders(订单记录)` | 本地下单记录，以及已显式同步的改单/撤单状态 | `side_size(带方向张数)`、`is_close(是否平仓)` |
-| `trades(成交记录)` | 成交、手续费和已实现盈亏 | `source(成交来源)`、`pnl(已实现盈亏)` |
+| `orders(订单记录)` | 本地下单记录，以及已显式同步的改单/撤单状态 | `side_size(带方向张数)`、`is_close(是否平仓)`、`trade_source(成交来源标记)` |
+| `trades(成交记录)` | 成交、手续费和已实现盈亏 | `source(成交来源)`、`pnl(已实现盈亏)`、`exchange_trade_id(交易所成交ID幂等键)` |
 | `notes(Agent 笔记)` | 跨决策轮传递的判断要点 | `content(笔记正文)` |
 | `wakeup(未接线的唤醒记录)` | 表和 Repo 写入方法存在，但当前调度器和工具不读写此表 | `scheduled_at(计划时间)`、`source(来源)` |
 | `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)` |

@@ -19,11 +19,11 @@ src/
   config.py / config_io.py   # 配置模型与读写校验
   utils.py                   # 跨层共享小工具（无业务依赖）
   gateway/                   # 交易所网关（Protocol + Gate 实现 + mock）
-  market/                    # WS 行情、K线缓存、价格触发器
+  market/                    # WS 行情、K线缓存、价格触发器、私有成交订阅（testnet/live）
   memory/                    # SQLite 持久化
   risk/                      # 风控引擎（纯代码，LLM 不可绕过）
   paper/                     # 模拟撮合（实现 Gateway 同一接口）
-  agent/                     # LLM 循环、Provider 抽象、工具集（交易类工具在 tool_trading）
+  agent/                     # LLM 循环、Provider 抽象、工具集（交易类工具在 tool_trading）、成交落库与对账（fill_persist/fill_sync）
   audit/                     # 审计溯源与日志
   scheduler/                 # 唤醒调度
   review/                    # 复盘 agent：只读工具 + 策略版本化

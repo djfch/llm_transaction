@@ -70,4 +70,5 @@ uv run python scripts/smoke_paper.py 300      # paper + mock LLM 冒烟（参数
 uv run python scripts/check_gateway_public.py # Gate 公共 REST 连通性（无签名）
 uv run python scripts/check_feed.py           # WS 行情实连：30 秒 ticker + 全周期 K 线订阅核对
 uv run python scripts/testnet_roundtrip.py    # testnet 开平仓+调杠杆闭环（需 .env 配 testnet key）
+uv run python scripts/verify_private_feed.py  # testnet 私有 WS 成交回报 + 平仓盈亏接口字段实测（需 .env 配 testnet key）
 ```
