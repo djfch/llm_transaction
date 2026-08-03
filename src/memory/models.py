@@ -47,8 +47,9 @@ class Trade(BaseModel):
 
     source 成交来源（全项目统一枚举）：
     - 'llm_open': LLM 开仓；'llm_close': LLM 决策平仓；'user_close': 用户手动平仓
-    - 'liquidation': 强平；'tpsl_close': paper 止盈止损保护触发并落库；'': 历史/未知
-    testnet/live 的 Gate 异步保护单成交当前尚未同步到本地 trades 表。
+    - 'liquidation': 强平；'tpsl_close': 止盈止损保护触发；'': 历史/未知
+    testnet/live 成交经 Gate 私有推送 + 事件驱动对账同步（fill_sync），exchange_trade_id
+    列仅后端去重用，不进本模型、不进 /api/trades 响应。
     """
 
     id: int

@@ -181,3 +181,95 @@ def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):
     pos = gateway.set_leverage(BTC, 2, "isolated")
     assert pos.contract == BTC
     assert pos.leverage == Decimal("2")
+
+
+# ---------- 成交回报对账 REST：list_my_trades / list_position_close ----------
+
+
+def make_sdk_my_trade() -> SimpleNamespace:
+    """模拟 SDK 返回的 MyFuturesTrade（仅 _to_exchange_trade 读取的字段）。"""
+    return SimpleNamespace(
+        id=987,
+        order_id=12345,
+        contract=BTC,
+        size="-2",
+        price="50000.5",
+        fee="0.05",
+        role="taker",
+        text="t-test",
+        create_time=1700.25,
+    )
+
+
+def test_list_my_trades_maps_fields_and_default_args(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    get_my_trades = Mock(return_value=[make_sdk_my_trade()])
+    monkeypatch.setattr(gateway._api, "get_my_trades", get_my_trades)
+
+    [trade] = gateway.list_my_trades()
+
+    get_my_trades.assert_called_once_with(
+        gateway._settle, limit=100, _request_timeout=10
+    )  # 无 contract 不传该参数
+    assert trade.id == "987" and trade.order_id == "12345"  # id 归一为字符串
+    assert trade.size == Decimal("-2") and trade.price == Decimal("50000.5")
+    assert trade.fee == Decimal("0.05") and trade.role == "taker"
+    assert trade.create_time == 1700.25
+
+
+def test_list_my_trades_with_contract_and_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    get_my_trades = Mock(return_value=[])
+    monkeypatch.setattr(gateway._api, "get_my_trades", get_my_trades)
+    assert gateway.list_my_trades(BTC, limit=50) == []
+    get_my_trades.assert_called_once_with(
+        gateway._settle, limit=50, contract=BTC, _request_timeout=10
+    )
+
+    monkeypatch.setattr(
+        gateway._api, "get_my_trades", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.list_my_trades()
+    assert excinfo.value.label == "INVALID_PARAM"
+
+
+def make_sdk_position_close() -> SimpleNamespace:
+    """模拟 SDK 返回的 PositionClose（仅 _to_position_close_record 读取的字段）。"""
+    return SimpleNamespace(
+        time=1700.75,
+        contract=BTC,
+        side="long",
+        pnl="-3.5",
+        pnl_pnl="-3.4",
+        pnl_fee="-0.1",
+        text="t-close",
+        accum_size="2",
+        first_open_time=1600.0,
+    )
+
+
+def test_list_position_close_maps_fields_and_int_window(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    list_position_close = Mock(return_value=[make_sdk_position_close()])
+    monkeypatch.setattr(gateway._api, "list_position_close", list_position_close)
+
+    [record] = gateway.list_position_close(BTC, 1600.9, 1701.1)
+
+    # _from/to 取整（SDK 要求 int 秒）；带超时（悬挂会卡死启动/泄漏回填任务）
+    list_position_close.assert_called_once_with(
+        gateway._settle, contract=BTC, _from=1600, to=1701, _request_timeout=10
+    )
+    assert record.time == 1700.75 and record.contract == BTC
+    assert record.pnl == Decimal("-3.5") and record.accum_size == Decimal("2")
+    assert record.text == "t-close"
+
+
+def test_list_position_close_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gateway._api, "list_position_close", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.list_position_close(BTC, 0.0, 1.0)
+    assert excinfo.value.label == "INVALID_PARAM"

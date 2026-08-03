@@ -4,9 +4,10 @@
 本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
 
 落库约定：
-- 订单落 orders 表（is_close 置位供 daily_stats 排除平仓单）；改单更新原行不重复计数
-- 无 drain_fills 钩子（真实网关）时，已成交单按下单回报直接落 trades 表；
-  paper 模式由决策循环 drain 成交缓冲统一落库（二者互斥，由 save_fills_inline 区分）
+- 订单落 orders 表（is_close 置位供 daily_stats 排除平仓单；trade_source 标记下单方，
+  manual_close 传 user_close，供交易所真实成交回报分类归属）；改单更新原行不重复计数
+- trades 表不由本模块写入：paper 模式由决策循环/行情 drain 成交缓冲统一落库；
+  testnet/live 模式由 ExchangeFillSync 按交易所真实成交回报落库（见 agent/fill_sync）
 """
 
 from __future__ import annotations
@@ -135,17 +136,19 @@ async def _record_order(
     deps: ToolDeps,
     result: OrderResult,
     req: OrderRequest,
-    positions: list[Position],
     *,
     trade_source: str = "",
 ) -> str:
-    """落 orders 表（必要时直接落 trades）；本地落库失败返回告警文本，成功返回空串。
+    """落 orders 表；本地落库失败返回告警文本，成功返回空串。
 
     订单已提交到交易所：本地记录失败绝不向上抛异常（LLM 看到"内部错误"会重试，
     重试即重单），返回文本明确"禁止重试"。
-    trade_source 非空时覆盖 inline 落库的 trades.source（manual_close 传 user_close）。
+    trade_source 透传给 orders.trade_source（manual_close 传 user_close），
+    供成交回报分类归属；trades 表由 fill_persist/fill_sync 两条路径写入，此处不落。
     """
     try:
+        # 不变量：网关同步返回与本入队之间不得插入 await——aiosqlite 单连接 FIFO
+        # 保证 orders 行先于任何成交归属查询（fill_sync 乱序分类）可见
         await deps.repo.save_order(
             order_id=result.id,
             round_id=deps.round_id,
@@ -158,9 +161,8 @@ async def _record_order(
             status=result.status,
             finish_as=result.finish_as,
             is_close=req.close or req.reduce_only,
+            trade_source=trade_source,
         )
-        if deps.save_fills_inline and result.status == "finished":
-            await _save_inline_trade(deps, result, req, positions, trade_source=trade_source)
     except Exception as e:
         logger.exception("订单 %s 本地落库失败", result.id)
         return (
@@ -168,43 +170,6 @@ async def _record_order(
             f"仅本地记录失败（{type(e).__name__}: {e}），禁止重试"
         )
     return ""
-
-
-async def _save_inline_trade(
-    deps: ToolDeps,
-    result: OrderResult,
-    req: OrderRequest,
-    positions: list[Position],
-    *,
-    trade_source: str = "",
-) -> None:
-    """真实网关路径：已成交单按下单回报直接落 trade。
-
-    Gate 下单响应不含手续费与已实现盈亏：fee/pnl 先落 0（精确口径以交易所账单为准，
-    待成交回报对账补齐）；close 单请求 size=0，实际成交张数取下单前持仓的反向
-    （无持仓为 0 即无成交：跳过落库）；source：close/reduce_only→llm_close，否则 llm_open，trade_source 可覆盖。
-    落库成功后发 trades_updated 失效信号（deps.notify_event，未接线则跳过）。
-    """
-    size = req.size
-    if req.close:
-        prev = next((p for p in positions if p.contract == req.contract), None)
-        size = -prev.size if prev is not None else Decimal(0)
-        if size == 0:
-            return  # 无持仓 close 单：无成交不落 trades 行
-    await deps.repo.save_trade(
-        round_id=deps.round_id,
-        mode=deps.mode,
-        contract=req.contract,
-        size=size,
-        price=result.fill_price,
-        fee=Decimal(0),
-        pnl=Decimal(0),
-        source=trade_source or ("llm_close" if req.close or req.reduce_only else "llm_open"),
-    )
-    if deps.notify_event is not None:
-        deps.notify_event(
-            {"type": "trades_updated", "data": {"contracts": [req.contract], "count": 1}}
-        )
 
 
 # ---------- 工具执行函数 ----------
@@ -264,7 +229,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         take_profit_price=take_profit,
     )
     result = deps.gateway.place_order(req)
-    warning = await _record_order(deps, result, req, positions)
+    warning = await _record_order(deps, result, req)
     kind = "市价" if price is None else f"限价 {price}"
     text = (
         f"下单成功：{contract} size={size} {kind}，订单号 {result.id}，"

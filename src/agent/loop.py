@@ -6,7 +6,8 @@
 - 每次工具调用都落审计（入参/风控判定/结果/耗时），轮结束写 JSON 全文快照
 - LLM 调用或输出解析失败 → 本轮不再执行任何工具调用（不交易），失败落审计
 - 每轮结束（含失败轮）经 drain_fills 把 paper 网关成交落 trades 表；
-  真实网关无此钩子，由工具层下单时直接落库（见 tool_trading.save_fills_inline）
+  真实网关无此钩子，trades 由 ExchangeFillSync 按交易所真实成交回报落库
+  （见 agent/fill_sync.py）
 - 连续失败达 LLMConfig.max_consecutive_failures → 风控锁（kill_switch）：
   内存置位 + 经注入回调写回 config.yaml + 告警一次（不重复骚扰）
 """
@@ -69,7 +70,7 @@ class DecisionLoop:
 
     可选依赖：
     - drain_fills：paper 网关成交缓冲泄放钩子（PaperGateway.drain_fills）；
-      为 None（真实网关）时工具层下单直接落 trades（save_fills_inline）
+      真实网关为 None（trades 由 fill_sync 按交易所成交回报落库，不经工具层）
     - fill_persister：统一成交写入入口（轮末兜底 drain / manual_close / 行情即时
       drain 三方共用，见 fill_persist.py）；缺省时按 repo/mode/notify_event 自建
     - persist_kill_switch：风控锁写回 config.yaml 的回调（保持 agent 层不碰 config_io）
@@ -122,7 +123,6 @@ class DecisionLoop:
             mode=settings.mode,
             set_next_wake=set_next_wake,
             notify_event=notify_event,
-            save_fills_inline=drain_fills is None,
         )
         self._registry = ToolRegistry(self._deps)
         self._context = ContextBuilder(gateway, repo, candles, triggers, watchlist)

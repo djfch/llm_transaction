@@ -3,7 +3,8 @@
 覆盖：
 - paper 全链路（build_app）：手动平仓落 trades(source=user_close)、orders(is_close=1)，
   成交缓冲被直接消费，轮末 drain 不再重复落库（无双计）
-- 真实网关路径（无 drain 钩子）：inline 落 trades(source=user_close)
+- 真实网关路径（无 drain 钩子）：工具层不写 trades；orders 行带 trade_source=user_close，
+  供 ExchangeFillSync 成交回报分类归属（成交落库见 test_agent_fill_sync.py）
 - 风控拒绝（账户权益非正）→ 抛 ManualCloseRiskDenied（server 层映射 422），且未下单
 - 平仓豁免语义与 LLM close 一致：白名单外合约持仓可平、kill_switch 下可平
 - 合约不存在 → GatewayError 原样上抛
@@ -69,7 +70,7 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 async def _make_loop(tmp_path, *, gateway: MockGateway, watchlist: list[str]) -> SimpleNamespace:
-    """MockGateway 决策循环（无 drain 钩子 → 工具层 inline 落 trades，真实网关路径）。"""
+    """MockGateway 决策循环（无 drain 钩子 → 工具层不写 trades，真实网关路径）。"""
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -93,6 +94,12 @@ async def _make_loop(tmp_path, *, gateway: MockGateway, watchlist: list[str]) ->
 async def _close_order_flags(repo: Repo) -> list[int]:
     """orders 表全部行的 is_close 标记（list_orders 模型不含该列，直查 SQL）。"""
     cur = await repo._conn.execute("SELECT is_close FROM orders ORDER BY created_at, id")
+    return [row[0] for row in await cur.fetchall()]
+
+
+async def _trade_source_flags(repo: Repo) -> list[str]:
+    """orders 表全部行的 trade_source 标记（直查 SQL，模型不含该列）。"""
+    cur = await repo._conn.execute("SELECT trade_source FROM orders ORDER BY created_at, id")
     return [row[0] for row in await cur.fetchall()]
 
 
@@ -136,10 +143,12 @@ async def test_manual_close_paper_full_chain(tmp_path):
         await ctx.db.close()
 
 
-# ---------- 真实网关路径（无 drain 钩子）：inline 落 trades(source=user_close) ----------
+# ---------- 真实网关路径（无 drain 钩子）：orders.trade_source=user_close ----------
 
 
-async def test_manual_close_inline_path_user_close(tmp_path):
+async def test_manual_close_marks_order_trade_source_user_close(tmp_path):
+    """真实网关路径：工具层不写 trades（成交由 fill_sync 按交易所回报落库）；
+    本单 orders 行标 trade_source=user_close，供成交回报分类归属。"""
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     gateway.place_order(OrderRequest(contract=BTC, size=Decimal(1)))  # 制造持仓
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
@@ -148,10 +157,9 @@ async def test_manual_close_inline_path_user_close(tmp_path):
 
         assert result["status"] == "finished"
         assert result["fill_price"] == Decimal("60000")
-        trades = await env.repo.trades_between(0.0, time.time() + 1)
-        assert len(trades) == 1 and trades[0].source == "user_close"
-        assert trades[0].size == Decimal(-1)  # close 单实际成交张数取持仓反向
+        assert await env.repo.trades_between(0.0, time.time() + 1) == []  # 工具层不落 trades
         assert await _close_order_flags(env.repo) == [1]
+        assert await _trade_source_flags(env.repo) == ["user_close"]
     finally:
         await env.db.close()
 
@@ -322,7 +330,7 @@ async def test_manual_close_unknown_contract_raises_gateway_error(tmp_path):
 # ---------- 无持仓平仓：不落幽灵成交行、不谎称成交均价（重复调用幂等） ----------
 
 
-async def test_manual_close_inline_no_position_no_ghost_row(tmp_path):
+async def test_manual_close_no_position_no_ghost_row(tmp_path):
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})  # 无持仓
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
     try:

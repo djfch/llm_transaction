@@ -59,9 +59,6 @@ class ToolDeps:
     set_next_wake: Callable[[int], int] | None = None  # 返回钳制后实际生效分钟数
     notify_event: Callable[[dict], None] | None = None  # WS 事件广播（如 plan_updated）
     round_id: str = ""
-    # 无 drain_fills 钩子（真实网关）时为 True：已成交单由工具层直接落 trades 表；
-    # paper 模式仅由决策循环 drain 统一落库，工具层不做 inline 写入（防双计）
-    save_fills_inline: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 

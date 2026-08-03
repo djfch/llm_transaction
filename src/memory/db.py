@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL,
     finish_as TEXT NOT NULL DEFAULT '',
     is_close INTEGER NOT NULL DEFAULT 0,
+    trade_source TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trades (
@@ -45,6 +46,8 @@ CREATE TABLE IF NOT EXISTS trades (
     fee TEXT NOT NULL,
     pnl TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT '',
+    exchange_trade_id TEXT,
+    exchange_order_id TEXT,
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS notes (
@@ -152,18 +155,38 @@ class Database:
         - decisions/audit_rounds.strategy_md5：历史数据无策略书原文 md5 可循，
           保持默认 ''（不与任何版本关联），不回填。
           strategy_versions/review_reports 为新增表，由 CREATE TABLE IF NOT EXISTS 覆盖。
+        - orders.trade_source：历史订单来源无法可靠推断，保持默认 ''（成交分类按
+          is_close 推导 llm_open/llm_close），不回填。
+        - trades.exchange_trade_id：历史成交无交易所成交 id，保持 NULL（部分唯一索引
+          不约束 NULL）；索引只在迁移末尾建（旧库须先补列，SCHEMA 阶段建会因缺列报错）。
+        - trades.exchange_order_id：历史成交无交易所订单 id，保持 NULL（乱序补正
+          只能跳过这些旧行，属可接受残留），不回填。
         """
         cur = await self._conn.execute("PRAGMA table_info(orders)")
-        if "is_close" not in {row["name"] for row in await cur.fetchall()}:
+        order_cols = {row["name"] for row in await cur.fetchall()}
+        if "is_close" not in order_cols:
             await self._conn.execute(
                 "ALTER TABLE orders ADD COLUMN is_close INTEGER NOT NULL DEFAULT 0"
             )
             await self._conn.execute("UPDATE orders SET is_close=1 WHERE side_size='0'")
+        if "trade_source" not in order_cols:
+            await self._conn.execute(
+                "ALTER TABLE orders ADD COLUMN trade_source TEXT NOT NULL DEFAULT ''"
+            )
         cur = await self._conn.execute("PRAGMA table_info(trades)")
-        if "source" not in {row["name"] for row in await cur.fetchall()}:
+        trade_cols = {row["name"] for row in await cur.fetchall()}
+        if "source" not in trade_cols:
             await self._conn.execute(
                 "ALTER TABLE trades ADD COLUMN source TEXT NOT NULL DEFAULT ''"
             )
+        if "exchange_trade_id" not in trade_cols:
+            await self._conn.execute("ALTER TABLE trades ADD COLUMN exchange_trade_id TEXT")
+        if "exchange_order_id" not in trade_cols:
+            await self._conn.execute("ALTER TABLE trades ADD COLUMN exchange_order_id TEXT")
+        await self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_exchange_id "
+            "ON trades(exchange_trade_id) WHERE exchange_trade_id IS NOT NULL"
+        )
         for table in ("decisions", "audit_rounds"):
             cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
             if "strategy_md5" not in {row["name"] for row in await cur.fetchall()}:
