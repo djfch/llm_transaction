@@ -1,0 +1,12 @@
+# 指标短名单：每轮注入执行 agent 上下文的技术指标键（从指标注册表中选取）
+# - 去重后 1~8 个（上限 8，保证上下文有界），顺序即注入顺序
+# - 键只允许小写字母/数字/下划线，且必须在指标注册表内（注册表见 market 层）
+# - 运行时会由 IndicatorConfigStore 版本化管理并写回本文件：历史版本存 SQLite
+#   （indicator_config_versions 表），可回滚可 diff，勿手动入库本文件的副本
+shortlist:
+  - ema20
+  - ema50
+  - rsi14
+  - macd
+  - atr14
+  - oi

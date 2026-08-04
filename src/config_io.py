@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .config import ENV_KEY_PREFIX, ENV_KEY_WHITELIST, ROOT, Settings, Watchlist
+from .config import ENV_KEY_PREFIX, ENV_KEY_WHITELIST, ROOT, IndicatorConfig, Settings, Watchlist
 
 
 class ConfigError(ValueError):
@@ -122,3 +122,19 @@ def write_watchlist(data: dict, path: Path | None = None) -> Watchlist:
         encoding="utf-8",
     )
     return watchlist
+
+
+def write_indicator_config(path: Path, cfg: IndicatorConfig | dict) -> IndicatorConfig:
+    """校验并写回 indicator_config.yaml（内容为 shortlist 键列表），返回校验后的模型。
+
+    接受已校验的 IndicatorConfig 或待校验 dict；形状校验（去重/长度/字符集）走模型本身。
+    """
+    try:
+        config = cfg if isinstance(cfg, IndicatorConfig) else IndicatorConfig(**cfg)
+    except ValidationError as exc:
+        raise ConfigError(str(exc)) from exc
+    path.write_text(
+        yaml.safe_dump(config.model_dump(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return config

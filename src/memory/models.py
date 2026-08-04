@@ -120,6 +120,22 @@ class StrategyVersion(BaseModel):
     created_at: float
 
 
+class IndicatorConfigVersion(BaseModel):
+    """指标短名单版本：content 为 indicator_config.yaml 完整原文，md5 与原文内容关联。
+
+    created_by 取值：human（人工修改/初始播种）/ review_agent（复盘 agent 改写）/ rollback（回滚）。
+    report_id 指向触发本版本的复盘报告（人工版本为 None）。
+    """
+
+    id: int
+    content: str
+    md5: str
+    created_by: str
+    reason: str
+    report_id: int | None = None
+    created_at: float
+
+
 class ReviewReport(BaseModel):
     """复盘报告：period 为统计区间（Unix 秒），stats_json 为代码侧统计结果。
 

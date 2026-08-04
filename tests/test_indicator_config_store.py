@@ -1,0 +1,205 @@
+"""src/review/indicator_config.py 指标短名单版本管理测试：tmp_path 配置文件 + tmp_path 真实 SQLite。
+
+覆盖：校验拒绝（未知键/超 8 个/空 reason/非法字符/与当前无差异）、重复键去重、
+revise 成功（原子写文件/版本落库/md5 与文件一致/on_change 触发）、rollback
+（回写历史 + 新版本 created_by='rollback'）、seed_if_empty 两分支（无文件播种基线/
+有文件记 v1）、load_indicator_config 文件缺失返回默认基线、子仓库直连接入。
+"""
+
+import hashlib
+
+import pytest
+import yaml
+
+from src.config import DEFAULT_INDICATOR_SHORTLIST, load_indicator_config
+from src.memory import Database, Repo
+from src.review.indicator_config import IndicatorConfigStore, IndicatorConfigValidationError
+from src.review.strategy import content_md5
+
+# 样例合法键集合（真实注册表在 market 层，由外部注入；本层只认注入集合）
+VALID_KEYS = frozenset(
+    {"ema20", "ema50", "ema200", "rsi14", "macd", "atr14", "oi", "adx14", "vol", "bb20"}
+)
+_NEW_SHORTLIST = ["rsi14", "adx14"]
+
+
+@pytest.fixture
+async def repo(tmp_path):
+    db = Database()
+    await db.open(tmp_path / "test.db")
+    yield Repo(db)
+    await db.close()
+
+
+@pytest.fixture
+def config_path(tmp_path):
+    return tmp_path / "indicator_config.yaml"
+
+
+@pytest.fixture
+async def store(config_path, repo):
+    return IndicatorConfigStore(config_path, repo, VALID_KEYS)
+
+
+def _file_shortlist(path) -> list[str]:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["shortlist"]
+
+
+# ---------- 校验拒绝 ----------
+
+
+async def test_revise_rejects_unknown_key(store, repo, config_path):
+    with pytest.raises(IndicatorConfigValidationError) as exc_info:
+        await store.revise(["ema20", "nope"], "review_agent", "换指标")
+    assert any("未知指标键" in r and "nope" in r for r in exc_info.value.reasons)
+    assert not config_path.exists()  # 原文件不动（本例中文件尚未创建）
+    assert await repo.indicator_config.list_versions() == []  # 无新版本
+
+
+async def test_revise_rejects_too_many(store, repo):
+    nine = ["ema20", "ema50", "ema200", "rsi14", "macd", "atr14", "oi", "adx14", "vol"]
+    with pytest.raises(IndicatorConfigValidationError) as exc_info:
+        await store.revise(nine, "review_agent", "加太多")
+    assert any("1~8 个" in r for r in exc_info.value.reasons)
+    assert await repo.indicator_config.list_versions() == []
+
+
+async def test_revise_rejects_empty_reason(store, repo, config_path):
+    with pytest.raises(IndicatorConfigValidationError) as exc_info:
+        await store.revise(_NEW_SHORTLIST, "review_agent", "   ")  # strip 后为空
+    assert any("reason 不能为空" in r for r in exc_info.value.reasons)
+    assert not config_path.exists()
+    assert await repo.indicator_config.list_versions() == []
+
+
+async def test_revise_rejects_bad_charset(store, repo):
+    """形状校验在 config 层：大写/非法字符键被拒绝（不进 valid_keys 判定）。"""
+    with pytest.raises(IndicatorConfigValidationError) as exc_info:
+        await store.revise(["EMA20"], "review_agent", "大写键")
+    assert any("小写字母/数字/下划线" in r for r in exc_info.value.reasons)
+    assert await repo.indicator_config.list_versions() == []
+
+
+async def test_revise_rejects_no_diff(store, repo, config_path):
+    await store.seed_if_empty()  # 当前配置 = 默认基线
+    with pytest.raises(IndicatorConfigValidationError) as exc_info:
+        await store.revise(list(DEFAULT_INDICATOR_SHORTLIST), "review_agent", "原样提交")
+    assert exc_info.value.reasons == ["与当前指标短名单无差异"]
+    assert exc_info.value.no_diff_only is True
+    assert len(await repo.indicator_config.list_versions()) == 1  # 只有播种的 v1
+
+
+async def test_revise_dedupes_keys(store, repo, config_path):
+    """重复键去重保序后照常落盘/落版本。"""
+    v = await store.revise(["rsi14", "ema20", "rsi14"], "review_agent", "带重复键")
+    assert _file_shortlist(config_path) == ["rsi14", "ema20"]
+    assert store.load_current().shortlist == ["rsi14", "ema20"]
+    assert v.md5 == content_md5(config_path.read_text(encoding="utf-8"))
+
+
+# ---------- revise 成功 ----------
+
+
+async def test_revise_success_atomic_persist_and_notify(config_path, repo):
+    calls: list[int] = []
+    store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
+    v = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", report_id=7)
+    content = config_path.read_text(encoding="utf-8")
+    assert v.content == content  # 版本行 content 与落盘文本同源
+    assert v.md5 == hashlib.md5(config_path.read_bytes()).hexdigest()  # md5 与文件一致
+    assert v.created_by == "review_agent" and v.reason == "复盘改进" and v.report_id == 7
+    assert not config_path.with_suffix(".tmp").exists()  # 原子替换后无临时文件残留
+    assert calls == [1]  # on_change 触发一次
+    assert await repo.indicator_config.latest_md5() == v.md5
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+
+
+# ---------- rollback ----------
+
+
+async def test_rollback_writes_back_and_records(store, repo, config_path):
+    v1 = await store.seed_if_empty()
+    v2 = await store.revise(_NEW_SHORTLIST, "review_agent", "改进")
+    v3 = await store.rollback(v1.id)
+    assert config_path.read_text(encoding="utf-8") == v1.content  # 内容回写
+    assert v3.created_by == "rollback" and v3.reason == f"回滚到 v{v1.id}"
+    assert v3.md5 == v1.md5  # 回写内容与原版本同 md5
+    versions = await repo.indicator_config.list_versions()
+    assert [v.id for v in versions] == [v3.id, v2.id, v1.id]  # 最新在前
+
+
+async def test_rollback_missing_version(store):
+    with pytest.raises(IndicatorConfigValidationError, match="不存在"):
+        await store.rollback(999)
+
+
+# ---------- 播种 ----------
+
+
+async def test_seed_creates_baseline_when_file_missing(store, repo, config_path):
+    v = await store.seed_if_empty()
+    assert v is not None
+    assert v.id == 1 and v.created_by == "human" and v.reason == "初始基线"
+    assert config_path.exists()  # 无文件时用默认基线写文件
+    assert _file_shortlist(config_path) == DEFAULT_INDICATOR_SHORTLIST
+    assert v.md5 == hashlib.md5(config_path.read_bytes()).hexdigest()
+    # 幂等：版本表非空后不再播种
+    assert await store.seed_if_empty() is None
+    assert len(await repo.indicator_config.list_versions()) == 1
+
+
+async def test_seed_uses_existing_file(store, repo, config_path):
+    config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")
+    v = await store.seed_if_empty()
+    assert v is not None and v.id == 1 and v.created_by == "human"
+    assert v.content == "shortlist:\n- adx14\n"  # 以文件原文记 v1
+    assert config_path.read_text(encoding="utf-8") == v.content  # 文件不动
+    assert store.load_current().shortlist == ["adx14"]
+
+
+# ---------- load_indicator_config 默认基线 ----------
+
+
+async def test_load_indicator_config_missing_returns_default(tmp_path):
+    cfg = load_indicator_config(tmp_path / "nope.yaml")
+    assert cfg.shortlist == DEFAULT_INDICATOR_SHORTLIST
+
+
+# ---------- 子仓库直连接入 ----------
+
+
+async def test_store_accepts_sub_repo_directly(config_path, repo):
+    """构造参数 repo 也接受子仓库本身（细粒度接线/测试用）。"""
+    store = IndicatorConfigStore(config_path, repo.indicator_config, VALID_KEYS)
+    v = await store.revise(_NEW_SHORTLIST, "human", "直连子仓库")
+    assert v.md5 == content_md5(config_path.read_text(encoding="utf-8"))
+
+
+# ---------- on_change 不触发的路径 ----------
+
+
+async def test_on_change_not_fired_on_validation_failure(config_path, repo):
+    calls: list[int] = []
+    store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
+    v1 = await store.seed_if_empty()
+    assert calls == []  # 播种不算变更
+    await store.revise(_NEW_SHORTLIST, "review_agent", "改进")
+    assert len(calls) == 1
+    await store.rollback(v1.id)
+    assert len(calls) == 2
+    with pytest.raises(IndicatorConfigValidationError):
+        await store.revise(["nope"], "review_agent", "未知键")  # 校验拒绝：不触发
+    with pytest.raises(IndicatorConfigValidationError):
+        await store.rollback(999)  # 版本不存在：不触发
+    assert len(calls) == 2
+
+
+# ---------- repo 子仓库：版本↔报告关联 ----------
+
+
+async def test_attach_report_to_version(repo):
+    """版本先落库、报告后落库：attach_report_to_version 回填 report_id（对齐策略版本模式）。"""
+    v = await repo.indicator_config.save_version("shortlist: [ema20]", "md5-1", "review_agent", "r")
+    assert v.report_id is None
+    await repo.indicator_config.attach_report_to_version(v.id, 7)
+    assert (await repo.indicator_config.get_version(v.id)).report_id == 7
