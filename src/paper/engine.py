@@ -46,6 +46,7 @@ class PaperGateway:
         maintenance_rate: Decimal = Decimal("0.005"),
         candle_provider: Callable[..., list[Candle]] | None = None,
         ticker_provider: Callable[[], list[Ticker]] | None = None,
+        oi_provider: Callable[[str], Decimal | None] | None = None,
     ) -> None:
         self._cfg = config
         self._contracts = dict(contracts or {})
@@ -53,6 +54,7 @@ class PaperGateway:
         self._maintenance: dict[str, Decimal] = {}  # 可按合约覆盖（risk_limit_tiers 注入点）
         self._candle_provider = candle_provider
         self._ticker_provider = ticker_provider
+        self._oi_provider = oi_provider  # 公共行情网关委托（paper 非 mock 行情时注入真实 OI 源）
         self.account = PaperAccount(Decimal(str(config.initial_equity)))
         self._snaps: dict[str, PriceSnap] = {}
         self._leverages: dict[str, Decimal] = {}
@@ -106,19 +108,15 @@ class PaperGateway:
         return self.account.equity(marks, quantos)
 
     def drain_fills(self) -> list[FillRecord]:
-        """取走自上次调用以来的全部成交记录（含强平记录）并清空缓冲。
-
-        供轮末兜底/行情即时 drain/手动平仓取走，按成交时间升序；drain 与落库须在锁内。
-        """
+        """取走全部成交记录（含强平）并清空缓冲，按时间升序；drain 与落库须在锁内。"""
         fills = self.account.fills
         self.account.fills = []
         return fills
 
     def reset_account(self, equity: Decimal) -> None:
-        """重置模拟账户：按新权益新建账本（重置即清空模拟仓位与挂单）。
+        """重置模拟账户：清空全部持仓、未成交挂单、成交缓冲与强平记录。
 
-        清空：全部持仓、未成交挂单（_open 及其在 _results 中的 open 记录）、
-        成交缓冲 fills、强平事件记录；已完成订单历史、杠杆设置与行情快照保留。
+        已完成订单历史、杠杆设置与行情快照保留。
         """
         self.account = PaperAccount(equity)
         self._open.clear()
@@ -271,10 +269,11 @@ class PaperGateway:
     def get_tickers(self) -> list[Ticker]:
         if self._ticker_provider is not None:
             return self._ticker_provider()
-        return [
-            synth_ticker(name, snap, self._contracts.get(name))
-            for name, snap in self._snaps.items()
-        ]
+        return [synth_ticker(n, s, self._contracts.get(n)) for n, s in self._snaps.items()]
+
+    def fetch_open_interest(self, contract: str) -> Decimal | None:
+        """持仓量：已注入公共行情源（paper 非 mock 行情）则委托真实数据；纯离线 mock 返回 None。"""
+        return self._oi_provider(contract) if self._oi_provider is not None else None
 
     def _market_order(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
         snap = self._snap(req.contract)
@@ -326,8 +325,7 @@ class PaperGateway:
     def _match_resting(self, contract: str) -> None:
         """行情更新后扫描挂单：价格穿透即按对手价成交（maker），不做部分成交。
 
-        触价时余额不足的挂单直接撤销（不向外抛异常），避免 on_price 每 tick
-        重复报错并跳过后续强平检查。
+        触价余额不足的挂单直接撤销（不抛异常），避免阻塞后续强平检查。
         """
         for order in list(self._open.values()):
             if order.contract != contract or not self._crossed(order):

@@ -474,6 +474,17 @@ class GateRestGateway:
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
+    def fetch_open_interest(self, contract: str) -> Decimal | None:
+        """持仓量（张数）：contract_stats 最新一条（limit=1 依 API 默认取最近记录）。"""
+        try:
+            stats = self._api.list_contract_stats(self._settle, contract, limit=1)
+        except GateApiException as exc:
+            raise wrap_gate_exception(exc) from exc
+        if not stats:
+            return None
+        latest = max(stats, key=lambda s: int(s.time or 0))
+        return _dec(latest.open_interest)
+
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
         """通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数。"""
         if margin_mode not in ("isolated", "cross"):

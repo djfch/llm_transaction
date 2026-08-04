@@ -273,3 +273,37 @@ def test_list_position_close_wraps_error(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(GatewayError) as excinfo:
         gateway.list_position_close(BTC, 0.0, 1.0)
     assert excinfo.value.label == "INVALID_PARAM"
+
+
+# ---------- 持仓量：fetch_open_interest（contract_stats） ----------
+
+
+def test_fetch_open_interest_takes_latest_stat(monkeypatch: pytest.MonkeyPatch):
+    """按 time 取最新一条的 open_interest（str -> Decimal），不依赖响应排序。"""
+    gateway = make_gateway()
+    list_stats = Mock(
+        return_value=[
+            SimpleNamespace(time=100, open_interest="111"),
+            SimpleNamespace(time=200, open_interest="999"),
+        ]
+    )
+    monkeypatch.setattr(gateway._api, "list_contract_stats", list_stats)
+
+    assert gateway.fetch_open_interest(BTC) == Decimal("999")
+    list_stats.assert_called_once_with(gateway._settle, BTC, limit=1)
+
+
+def test_fetch_open_interest_empty_returns_none(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    monkeypatch.setattr(gateway._api, "list_contract_stats", Mock(return_value=[]))
+    assert gateway.fetch_open_interest(BTC) is None
+
+
+def test_fetch_open_interest_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gateway._api, "list_contract_stats", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.fetch_open_interest(BTC)
+    assert excinfo.value.label == "INVALID_PARAM"
