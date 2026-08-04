@@ -47,10 +47,12 @@ class MockGateway:
         contracts: dict[str, Contract] | None = None,
         account: Account | None = None,
         positions: dict[str, Position] | None = None,
+        open_interest: Decimal = Decimal("123456"),
     ) -> None:
         self.contracts = contracts or {}
         self.account = account or Account(available=Decimal("10000"), unrealised_pnl=Decimal(0))
         self.positions = positions or {}
+        self.open_interest = open_interest
         self.tickers: list[Ticker] = []
         self.candles: list[Candle] = []
         self.orders: dict[str, OrderResult] = {}
@@ -302,6 +304,10 @@ class MockGateway:
 
     def get_tickers(self) -> list[Ticker]:
         return list(self.tickers)
+
+    def fetch_open_interest(self, contract: str) -> Decimal | None:
+        """mock 固定持仓量：构造时可注入，默认 123456。"""
+        return self.open_interest
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
         if margin_mode not in ("isolated", "cross"):

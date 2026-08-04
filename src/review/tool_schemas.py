@@ -1,13 +1,20 @@
 """复盘工具的 JSON Schema 定义（中性格式，provider 各自转换为厂商格式）。
 
-7 个只读工具 + 1 个写工具（submit_strategy_revision 为唯一写出口），无任何交易工具。
+10 个只读工具 + 2 个写工具（submit_strategy_revision / submit_indicator_config
+为唯二写出口），无任何交易工具。
 schema 只描述参数形状供 LLM 参考；真正的校验在执行函数内完成
-（校验失败返回错误文本而非抛异常，见 tool_handlers）。
+（校验失败返回错误文本而非抛异常，见 tool_handlers / tool_indicators）。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from src.market.intervals import GATE_CANDLE_INTERVALS
+from src.review.tool_indicators import indicator_menu_items
+
+# 可选指标菜单（模块 import 时由指标注册表动态生成，与 get_indicator_config 输出同源）
+_INDICATOR_MENU = "；".join(indicator_menu_items())
 
 _START_END_PROPS = {
     "start_ts": {"type": "number", "description": "统计起点（Unix 秒，含）"},
@@ -137,7 +144,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "submit_strategy_revision": {
         "description": (
-            "提交策略书修订（唯一写出口）：new_prompt_md 为策略书完整新文本（全文重写）。"
+            "提交策略书修订（策略书写出口）：new_prompt_md 为策略书完整新文本（全文重写）。"
             "服务端校验（≥100 字符、≤32KB、与当前版本有差异），通过则生成新版本 vN 并于"
             "下一轮决策生效；拒绝则返回原因列表，修正后可重试。无实质收获时不要调用"
         ),
@@ -151,6 +158,54 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "reason": {"type": "string", "description": "修订理由（引用复盘证据）"},
             },
             "required": ["new_prompt_md", "reason"],
+        },
+    },
+    "get_indicators": {
+        "description": (
+            "查看指定合约的当前技术指标面板（全部注册指标逐行列出当前值，数据不足显示"
+            " 无数据）；合约必须在 watchlist 内"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {"type": "string", "description": "合约代码，如 BTC_USDT"},
+                "interval": {
+                    "type": "string",
+                    "enum": list(GATE_CANDLE_INTERVALS),
+                    "description": "K 线周期，默认 1h",
+                },
+            },
+            "required": ["contract"],
+        },
+    },
+    "get_indicator_config": {
+        "description": (
+            "查看当前生效的指标短名单（执行 agent 每轮注入上下文的技术指标键）与"
+            "可选指标全集菜单（key=名称/分组）"
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "submit_indicator_config": {
+        "description": (
+            "提交指标短名单改写（全文替换，不是增量叠加）：shortlist 为完整新名单"
+            f"（去重后 1~8 个；可选键：{_INDICATOR_MENU}）。服务端校验（未知键/数量越界/"
+            "与当前无差异/reason 为空），通过则生成新版本 vN 并于下一轮决策生效；拒绝则"
+            "返回原因列表，修正后可重试。无实质复盘依据不要调用"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "shortlist": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": '指标键完整新列表（1~8 个），如 ["ema20", "rsi14", "macd"]',
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "改写依据（引用具体成交/轮次等复盘证据）",
+                },
+            },
+            "required": ["shortlist", "reason"],
         },
     },
 }

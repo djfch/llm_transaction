@@ -4,7 +4,7 @@
 - provider 为 None（LLM 未配置）→ 直接返回失败，不落审计、不落报告；
 - 正常路径：wake_source='review' 开审计轮 → 中文简报（区间 + 当前策略全文 +
   代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本落 review_reports →
-  有修订则版本↔报告互相关联 → 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
+  有修订则版本↔报告互相关联（策略书与指标短名单各自判空关联）→ 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 失败告警，返回 {'ok': False}，
   绝不向上抛，确保复盘失败不影响交易决策循环；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -16,13 +16,15 @@ from __future__ import annotations
 import html
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Protocol
 
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
 from src.config import Settings
+from src.market.indicator_service import IndicatorService
 from src.memory.repo import Repo
+from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader, render_tool_docs
 from src.review.stats import compute_review_stats, format_stats_text
 from src.review.strategy import StrategyStore
@@ -82,6 +84,9 @@ class ReviewAgent:
         prompt_loader: ReviewPromptLoader,
         on_alert: AlertCallback | None = None,
         max_turns: int = 12,
+        indicator_service: IndicatorService | None = None,
+        indicator_config_store: IndicatorConfigStore | None = None,
+        watchlist: Iterable[str] | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -91,6 +96,12 @@ class ReviewAgent:
         self._prompts = prompt_loader
         self._on_alert = on_alert
         self._max_turns = max(1, max_turns)
+        # 指标三件套默认 None/空（未装配）：指标工具降级为中文提示，其余工具不受影响
+        self._indicator_service = indicator_service
+        self._indicator_config_store = indicator_config_store
+        # watchlist 保留活引用（装配传入与执行 agent 共享的同一 list，前端改名单原地生效），
+        # 每轮 run 构造 deps 时才拍快照，避免固化启动时名单（热更新后复盘看不到新合约）
+        self._watchlist = watchlist
 
     def set_provider(self, provider: _ProviderProtocol) -> None:
         """热替换 LLM provider（与 DecisionLoop 同模式，配置重建后即生效）。"""
@@ -102,7 +113,14 @@ class ReviewAgent:
             logger.warning("LLM 未配置，跳过本次复盘")
             return {"ok": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
         # 每次 run 新建 deps/registry（轻量）：created_version_id 不复用、不串场
-        deps = ReviewToolDeps(repo=self._repo, store=self._store, mode=self._settings.mode)
+        deps = ReviewToolDeps(
+            repo=self._repo,
+            store=self._store,
+            mode=self._settings.mode,
+            indicator_service=self._indicator_service,
+            indicator_config_store=self._indicator_config_store,
+            watchlist=tuple(self._watchlist or ()),  # 每轮对活名单拍快照，跟随热更新
+        )
         registry = ReviewToolRegistry(deps)
         full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
         round_id = await self._audit.begin_round(self._settings.mode, "review", full_prompt)
@@ -123,6 +141,10 @@ class ReviewAgent:
             )
             if deps.created_version_id is not None:
                 await self._repo.review.attach_report_to_version(deps.created_version_id, report.id)
+            if deps.indicator_config_version_id is not None:  # 指标短名单版本同模式关联
+                await self._repo.indicator_config.attach_report_to_version(
+                    deps.indicator_config_version_id, report.id
+                )
             await self._audit.end_round(round_id, "\n".join(raw_parts))
         except Exception as e:
             return await self._fail(round_id, raw_parts, period_start, period_end, e)

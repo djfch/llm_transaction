@@ -16,6 +16,8 @@ import type {
   CredentialUpdateBody,
   DailyStats,
   EquitySeries,
+  IndicatorConfig,
+  IndicatorSeriesResponse,
   KillSwitchResult,
   NotesPageResult,
   PaperResetResult,
@@ -450,6 +452,87 @@ async function fetchCandles(contract: string, interval: string, limit = 200): Pr
   return raw.items
 }
 
+/** 后端原始指标点：value 为数字字符串或 null（Decimal 序列化），time 为 Unix 秒 */
+interface RawIndicatorPoint {
+  time: number
+  value: number | string | null
+}
+
+/** 后端原始指标序列条目：kind 契约恒为 overlay/pane/scalar（可选仅防御历史后端） */
+interface RawIndicatorEntry {
+  label: string
+  kind?: string
+  fields?: Record<string, RawIndicatorPoint[]>
+  current?: number | string | null
+}
+
+/** 后端指标 kind → 前端 IndicatorKind：未知值降级 pane（独立副图渲染，不污染主图） */
+function adaptIndicatorKind(kind: string | undefined): 'overlay' | 'pane' | 'scalar' {
+  if (kind === 'overlay' || kind === 'scalar') return kind
+  return 'pane'
+}
+
+/** 后端指标点 → 前端：value 数字字符串转 number（null 保持），time 保持 Unix 秒 */
+function adaptIndicatorPoint(raw: RawIndicatorPoint): { time: number; value: number | null } {
+  return { time: Number(raw.time), value: raw.value == null ? null : Number(raw.value) }
+}
+
+/** 后端指标条目 → 前端 IndicatorSeriesEntry：fields 各序列逐点适配 */
+function adaptIndicatorEntry(raw: RawIndicatorEntry): IndicatorSeriesResponse['series'][string] {
+  const fields: Record<string, Array<{ time: number; value: number | null }>> = {}
+  for (const [name, points] of Object.entries(raw.fields ?? {})) {
+    fields[name] = (points ?? []).map(adaptIndicatorPoint)
+  }
+  return {
+    label: raw.label ?? '',
+    kind: adaptIndicatorKind(raw.kind),
+    fields,
+    current: raw.current == null ? null : Number(raw.current),
+  }
+}
+
+/** GET /api/indicators/series 适配：keys 以逗号拼接；series 各条目数字字符串转 number */
+async function fetchIndicatorSeries(
+  contract: string,
+  interval: string,
+  keys: string[],
+  limit = 200,
+): Promise<IndicatorSeriesResponse> {
+  const qs = new URLSearchParams({ contract, interval, limit: String(limit), keys: keys.join(',') })
+  const raw = await request<{
+    contract: string
+    interval: string
+    series: Record<string, RawIndicatorEntry>
+  }>(`/indicators/series?${qs.toString()}`)
+  const series: IndicatorSeriesResponse['series'] = {}
+  for (const [key, entry] of Object.entries(raw.series ?? {})) {
+    series[key] = adaptIndicatorEntry(entry)
+  }
+  return { contract: raw.contract, interval: raw.interval, series }
+}
+
+/** 后端 /api/indicator_config 原始项：kind 契约恒为 overlay/pane/scalar（可选仅防御） */
+interface RawIndicatorAvailable {
+  key: string
+  label: string
+  kind?: string
+  fields?: string[]
+}
+
+/** GET /api/indicator_config 适配：kind 归一化，fields 缺省补空数组 */
+async function fetchIndicatorConfig(): Promise<IndicatorConfig> {
+  const raw = await request<{ shortlist: string[]; available: RawIndicatorAvailable[] }>('/indicator_config')
+  return {
+    shortlist: raw.shortlist ?? [],
+    available: (raw.available ?? []).map((item) => ({
+      key: String(item.key),
+      label: item.label ?? '',
+      kind: adaptIndicatorKind(item.kind),
+      fields: item.fields ?? [],
+    })),
+  }
+}
+
 export const httpApi: ApiClient = {
   getStatus: () => request<StatusInfo>('/status'),
   getAccount: async () => adaptAccount(await request<RawAccount>('/account')),
@@ -465,6 +548,8 @@ export const httpApi: ApiClient = {
   getAgentLive: () => request<AgentLiveState>('/agent/live'),
   getTrades: fetchTrades,
   getCandles: fetchCandles,
+  getIndicatorConfig: fetchIndicatorConfig,
+  getIndicatorSeries: fetchIndicatorSeries,
   closePosition: (contract) =>
     request<ClosePositionResult>(`/positions/${encodeURIComponent(contract)}/close`, {
       method: 'POST',

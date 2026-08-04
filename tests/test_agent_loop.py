@@ -147,7 +147,7 @@ async def _make_env(tmp_path, *, max_failures: int = 3) -> SimpleNamespace:
     return env
 
 
-def _make_loop(env: SimpleNamespace, provider: MockProvider) -> DecisionLoop:
+def _make_loop(env: SimpleNamespace, provider: MockProvider, **kwargs) -> DecisionLoop:
     return DecisionLoop(
         settings=env.settings,
         watchlist=env.watchlist,
@@ -161,6 +161,7 @@ def _make_loop(env: SimpleNamespace, provider: MockProvider) -> DecisionLoop:
         set_next_wake=env.set_next_wake,
         on_alert=env.alerts.append,
         daily_stats_fn=env.daily_stats_fn,
+        **kwargs,
     )
 
 
@@ -511,3 +512,25 @@ async def test_prompt_hot_reload(tmp_path):
     p2, md5_2 = loader.system_prompt([spec])
     assert "版本B" in p2 and "版本A" not in p2
     assert md5_1 != md5_2
+
+
+# ---------- 指标短名单转发 ----------
+
+
+async def test_indicator_shortlist_forwarded_to_context(env: SimpleNamespace):
+    """indicator_shortlist 回调经 DecisionLoop 转发给 ContextBuilder：指标行随回调重读变化。"""
+
+    class _Svc:
+        """指标服务 stub：只实现上下文行接口，回显收到的键列表（直观察觉短名单来源）。"""
+
+        def shortlist_line(self, contract: str, interval: str, keys: list[str]) -> str:
+            return f"{contract} 指标({interval}): 键={','.join(keys)}"
+
+    keys = ["rsi14"]
+    provider = MockProvider([_resp("观望一", [], "r1"), _resp("观望二", [], "r2")])
+    loop = _make_loop(env, provider, indicator_service=_Svc(), indicator_shortlist=lambda: keys)
+    await loop.run_once("timer")
+    assert "键=rsi14" in provider.calls[0]["messages"][0]["content"]
+    keys[:] = ["macd"]  # 每次构建重读回调：短名单修订后下一轮上下文即生效
+    await loop.run_once("timer")
+    assert "键=macd" in provider.calls[1]["messages"][0]["content"]

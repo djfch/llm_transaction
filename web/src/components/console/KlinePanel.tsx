@@ -7,6 +7,9 @@
  * 成交量无 ticker 数据源，histogram 不随 tick 更新（待下次数据重建刷新）。
  * 表头涨跌幅为真 24h 口径（changePct24h，与图表同源的 sortedUnique memo）；买卖点标记由
  * 圆形覆盖层渲染买卖点（有归属决策轮的标记可点击定位，无归属仅展示；移出主价格绘图区时隐藏）。
+ * 策略指标（useIndicatorSeries 拉数、useIndicatorChart 挂图）：短名单 overlay 线挂主图（EMA/BOLL 等）、
+ * pane 指标经 chart.addPane() 建独立副图（RSI/MACD 等）、scalar 当前值进头部徽标条（StrategyIndicatorsBar）；
+ * 短名单变更经 WS indicator_config_updated 重拉，ticker 节流刷新序列（15s 最小间隔，不开轮询）。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -22,11 +25,14 @@ import {
 } from 'lightweight-charts'
 import { api } from '../../api'
 import { useApiData } from '../../hooks/useApiData'
+import { useIndicatorChart } from '../../hooks/useIndicatorChart'
+import { useIndicatorSeries } from '../../hooks/useIndicatorSeries'
 import { useWs } from '../../hooks/useWs'
 import { barStart, intervalToSec, mergeTick, type LiveBar } from '../../utils/candleLive'
 import { fmtPrice, fmtSignedPct } from '../../utils/format'
 import { changePct24h, liveMaValue, ma20Points, sortedUnique, toCandlePoint, toVolumePoint } from '../../utils/klineStats'
 import MarkersOverlay from './MarkersOverlay'
+import StrategyIndicatorsBar from './StrategyIndicatorsBar'
 
 /** 可选周期 */
 const INTERVALS = ['15m', '1h', '4h', '1d'] as const
@@ -101,6 +107,10 @@ export default function KlinePanel() {
   const bars = useMemo(() => candlesQ.data ?? [], [candlesQ.data])
   // 排序去重后的唯一数据源：图表重建、24h 涨跌幅、实时延伸历史共用同一 memo
   const sortedBars = useMemo(() => sortedUnique(bars), [bars])
+
+  // 策略指标：短名单驱动（数据拉取与图表挂接分别在两个 hook 内，本组件只透传结果）
+  const indicators = useIndicatorSeries(contract, interval, sortedBars, INTERVAL_LIMIT[interval])
+  useIndicatorChart(chartApi, indicators.overlays, indicators.panes)
 
   // 表头涨跌幅（0-1 比例）：真 24h 口径（基准=最后一根 t ≤ t_last−86400 的 bar）；
   // 窗口不足/基准为 0 → null 不显示
@@ -246,6 +256,8 @@ export default function KlinePanel() {
           </div>
         </div>
       </header>
+
+      <StrategyIndicatorsBar names={indicators.shortlist} badges={indicators.badges} error={indicators.error} />
 
       <div className="relative mt-3">
         <div ref={chartBoxRef} className="w-full" data-testid="kline-chart" />

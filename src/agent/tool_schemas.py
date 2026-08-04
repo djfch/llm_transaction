@@ -33,6 +33,24 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["contract"],
         },
     },
+    "get_indicators": {
+        "description": (
+            "获取合约全部技术指标当前值（EMA/MACD/RSI/KDJ/ROC/ATR/BOLL/量比/OBV/持仓量），"
+            "逐行中文文本返回；指标按各自所需深度计算，与 get_market_data 的 limit 无关"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {"type": "string", "description": "合约名，如 BTC_USDT"},
+                "interval": {
+                    "type": "string",
+                    "enum": _INTERVALS,
+                    "description": "K 线周期，默认 1h",
+                },
+            },
+            "required": ["contract"],
+        },
+    },
     "place_order": {
         "description": (
             "下单（开仓/平仓）。size 为张数：正=开多/买入，负=开空/卖出；"

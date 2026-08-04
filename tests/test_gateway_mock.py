@@ -298,3 +298,9 @@ def test_wrap_gate_exception_labels():
     assert not_found.status == 400
     unknown = wrap_gate_exception(make("SOME_NEW_LABEL"))
     assert type(unknown) is GatewayError
+
+
+def test_fetch_open_interest_default_and_injected():
+    """mock 持仓量：默认 123456，构造可注入固定值。"""
+    assert MockGateway().fetch_open_interest(BTC) == Decimal("123456")
+    assert MockGateway(open_interest=Decimal("42")).fetch_open_interest(BTC) == Decimal("42")

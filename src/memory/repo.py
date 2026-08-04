@@ -12,6 +12,7 @@ from decimal import Decimal
 import aiosqlite
 
 from src.memory.db import Database
+from src.memory.indicator_config_repo import IndicatorConfigRepo
 from src.memory.models import AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
 from src.memory.plans_repo import PlansRepo
 from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
@@ -56,6 +57,8 @@ class Repo:
         self.review = ReviewRepo(db)
         # 交易计划子仓库：trade_plans 读写走 repo.plans.xxx（见 src/memory/plans_repo.py）
         self.plans = PlansRepo(db)
+        # 指标短名单版本子仓库（见 src/memory/indicator_config_repo.py）
+        self.indicator_config = IndicatorConfigRepo(db)
 
     @property
     def _conn(self) -> aiosqlite.Connection:

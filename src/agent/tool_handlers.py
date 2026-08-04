@@ -19,6 +19,7 @@ from typing import Any
 from src.config import RiskConfig
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
+from src.market.indicator_service import IndicatorService
 from src.market.intervals import GATE_CANDLE_INTERVALS, interval_seconds
 from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
@@ -54,6 +55,7 @@ class ToolDeps:
     repo: Repo
     candles: CandleCache
     triggers: TriggerManager
+    indicator_service: IndicatorService | None  # None=未接入：get_indicators 如实回报不可用
     daily_stats_fn: DailyStatsFn
     mode: str = "paper"
     set_next_wake: Callable[[int], int] | None = None  # 返回钳制后实际生效分钟数
@@ -151,6 +153,31 @@ async def get_market_data(deps: ToolDeps, args: dict) -> ToolOutcome:
         lines.append(
             f"{timestamp} | {candle.o} | {candle.c} | {candle.h} | {candle.l} | {candle.v}{suffix}"
         )
+    return ToolOutcome("\n".join(lines))
+
+
+async def get_indicators(deps: ToolDeps, args: dict) -> ToolOutcome:
+    """全部技术指标当前值（中文逐行文本）；指标服务异常转错误文本，不向上抛。"""
+    contract = _need_str(args, "contract")
+    if contract not in deps.watchlist:
+        raise ToolArgError(f"合约 {contract} 不在白名单（当前白名单：{', '.join(deps.watchlist)}）")
+    interval = _opt_enum(args, "interval", set(GATE_CANDLE_INTERVALS)) or "1h"
+    if deps.indicator_service is None:
+        return ToolOutcome("错误：指标服务未接入，暂无法获取技术指标")
+    try:
+        panel = deps.indicator_service.full_panel(contract, interval)
+    except Exception as e:  # 服务未就绪/缓存异常：如实回报，不拖垮本轮决策
+        return ToolOutcome(f"错误：指标计算失败（{type(e).__name__}: {e}）")
+    lines = [f"{contract} 技术指标（{interval}，按指标各自所需深度计算）:"]
+    for item in panel["indicators"].values():
+        values = item["values"]
+        if all(v is None for v in values.values()):
+            lines.append(f"{item['label']}: 无数据")
+        elif len(values) == 1:
+            lines.append(f"{item['label']}: {next(iter(values.values()))}")
+        else:  # 多值指标一行列子字段；个别字段缺失如实标 无数据
+            fields = ", ".join(f"{k}={v if v is not None else '无数据'}" for k, v in values.items())
+            lines.append(f"{item['label']}: {fields}")
     return ToolOutcome("\n".join(lines))
 
 

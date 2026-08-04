@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.market.indicator_service import IndicatorService
 from src.memory.repo import Repo
+from src.review.indicator_config import IndicatorConfigStore
 from src.review.stats import compute_review_stats, format_stats_text
 from src.review.strategy import StrategyStore, StrategyValidationError
 from src.utils import calc_expression
@@ -34,12 +36,21 @@ class ReviewToolDeps:
 
     created_version_id：submit_strategy_revision 成功时置位，供 ReviewAgent
     在轮末判定 strategy_action 并做版本↔报告关联。
+    indicator_config_version_id：submit_indicator_config 成功时置位，轮末由
+    ReviewAgent 经 repo.indicator_config.attach_report_to_version 关联到报告。
+    indicator_service / indicator_config_store：指标工具依赖（见
+    tool_indicators.py），None（未装配）时指标工具返回「指标功能未配置」降级提示；
+    watchlist 为空（未接线）时 get_indicators 不做合约归属限制。
     """
 
     repo: Repo
     store: StrategyStore
     mode: str
     created_version_id: int | None = None
+    indicator_service: IndicatorService | None = None
+    indicator_config_store: IndicatorConfigStore | None = None
+    watchlist: tuple[str, ...] = ()
+    indicator_config_version_id: int | None = None
 
 
 # ---------- 参数校验辅助 ----------

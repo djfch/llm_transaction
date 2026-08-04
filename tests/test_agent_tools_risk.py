@@ -58,6 +58,7 @@ async def _make_tools(tmp_path, *, extra_contracts: tuple = ()) -> SimpleNamespa
         repo=repo,
         candles=CandleCache(gateway, ManualPriceSource()),
         triggers=TriggerManager(lambda t, p: None),
+        indicator_service=None,
         daily_stats_fn=_zero_daily,
         mode="paper",
         round_id="r-test",

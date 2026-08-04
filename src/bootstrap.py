@@ -33,6 +33,7 @@ from src.gateway.base import Candle, Contract, Gateway
 from src.gateway.gate_rest import GateRestGateway
 from src.market.candles import CandleCache, ManualPriceSource, PriceSource
 from src.market.feed import MarketFeed
+from src.market.indicators_setup import IndicatorComponents, setup_indicators
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.market.private_feed import PrivateTradeFeed
 from src.market.triggers import TriggerManager
@@ -40,6 +41,7 @@ from src.memory.db import Database
 from src.memory.repo import Repo
 from src.notify.telegram import build_notifier
 from src.paper.engine import PaperGateway
+from src.paper.funding_patrol import funding_loop
 from src.review.setup import ReviewComponents, build_review
 from src.risk.engine import RiskEngine
 from src.scheduler.wakeup import WakeupScheduler
@@ -103,8 +105,7 @@ def _build_gateway(
     candle_provider: Callable[..., list[Candle]] | None,
 ) -> Gateway:
     """按运行模式创建网关：paper→模拟撮合；testnet/live→真实 REST。
-    paper 模式注入 candle_provider（K 线来源）：显式注入优先，否则用公共 REST 网关（无签名）。
-    """
+    paper 模式 candle_provider 显式注入优先，否则用公共 REST 网关（无签名，合约/K线/持仓量同源委托）。"""
     if settings.mode != "paper":
         return GateRestGateway(
             settings.gate,
@@ -112,14 +113,14 @@ def _build_gateway(
             api_key=os.environ.get("GATE_API_KEY", ""),
             api_secret=os.environ.get("GATE_API_SECRET", ""),
         )
-    provider = candle_provider
+    public = None if mock_market else GateRestGateway(settings.gate, testnet=False)
     if mock_market:
         contracts = [_default_contract(name, Decimal("60000")) for name in watchlist.contracts]
     else:
-        public = GateRestGateway(settings.gate, testnet=False)
         contracts = [public.get_contract(name) for name in watchlist.contracts]
-        provider = provider or public.get_candlesticks
-    gateway = PaperGateway(settings.paper, candle_provider=provider)
+    provider = candle_provider or (public.get_candlesticks if public else None)
+    oi = public.fetch_open_interest if public else None
+    gateway = PaperGateway(settings.paper, candle_provider=provider, oi_provider=oi)
     for contract in contracts:
         gateway.upsert_contract(contract)
     return gateway
@@ -195,6 +196,7 @@ def _build_loop(
     audit: AuditTrail,
     notify_event: Callable[[dict], None] | None = None,
     fill_persister: FillPersister | None = None,
+    indicators: IndicatorComponents | None = None,
 ) -> DecisionLoop:
     """创建决策循环：paper 网关接 drain_fills；真实网关 None（trades 由 fill_sync 落库）。
 
@@ -225,6 +227,8 @@ def _build_loop(
         notify_event=notify_event,  # 工具层变更事件（如 plan_updated）直推 WS 广播队列
         fill_persister=fill_persister,  # 与 on_ticker 即时 drain 共用同一实例（锁互斥）
         audit=audit,  # 与 server 共用同一实例
+        indicator_service=None if indicators is None else indicators.service,
+        indicator_shortlist=None if indicators is None else indicators.shortlist_keys,
     )
 
 
@@ -250,7 +254,6 @@ async def build_app(
 
     async def on_wake(wake_source: str) -> None:  # 晚绑定 loop：启动后才会被调度器调用
         # 轮开始先推 round_start：前端实时决策卡据此立即进入"决策中"轮询态
-        # round_start 让前端在轮开始时立即进入“决策中”轮询态
         await event_queue.put({"type": "round_start", "data": {"wake_source": wake_source}})
         result = await loop.run_once(wake_source)
         await event_queue.put(
@@ -284,6 +287,7 @@ async def build_app(
     else:
         trader_provider = build_provider(settings, mock_llm, settings.agents.trader.credential)
         reviewer_provider = build_provider(settings, mock_llm, settings.agents.reviewer.credential)
+    indicators = await setup_indicators(repo, gateway, candles, watchlist.contracts, event_queue)
     loop = _build_loop(
         settings,
         watchlist,
@@ -297,6 +301,7 @@ async def build_app(
         cfg_path=config_path or ROOT / "config.yaml",
         notify_event=event_queue.put_nowait,
         fill_persister=fill_persister,
+        indicators=indicators,
     )
     ctx = AppContext(
         settings=settings,
@@ -305,16 +310,23 @@ async def build_app(
         gateway=gateway,
         source=source,
         loop=loop,
-        review=await build_review(
-            settings, repo, audit, reviewer_provider, notify_event=event_queue.put_nowait
-        ),  # 复盘子系统装配（策略变更即广播 strategy_updated）
+        review=await build_review(  # 复盘子系统装配（策略变更即广播 strategy_updated）
+            settings,
+            repo,
+            audit,
+            reviewer_provider,
+            notify_event=event_queue.put_nowait,
+            indicator_service=indicators.service,
+            indicator_config_store=indicators.store,
+            watchlist=watchlist.contracts,
+        ),
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,
         triggers=triggers,
         watchlist=watchlist.contracts,
     )
-    ctx.server, ctx.server_deps = _build_server(ctx, audit, mock_llm=mock_llm)
+    ctx.server, ctx.server_deps = _build_server(ctx, audit, indicators, mock_llm=mock_llm)
     if not mock_market:  # mock 行情不接私有 WS（测试/冒烟可离线运行）
         pair = build_trade_sync(
             settings, gateway, db, event_queue.put_nowait, build_notifier(settings.notify).send
@@ -325,7 +337,7 @@ async def build_app(
 
 
 def _build_server(
-    ctx: AppContext, audit: AuditTrail, *, mock_llm: bool = False
+    ctx: AppContext, audit: AuditTrail, indicators: IndicatorComponents, *, mock_llm: bool = False
 ) -> tuple[uvicorn.Server, ServerDeps]:
     """创建监控 HTTP 服务（与 agent 同进程运行）；runtime_* 与决策循环共享同一实例。"""
     settings = ctx.settings
@@ -391,39 +403,13 @@ def _build_server(
         strategy_rollback=ctx.review.strategy_rollback,
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
+        indicators=indicators,
     )
     app = create_app(deps)
     config = uvicorn.Config(
         app, host=settings.server.host, port=settings.server.port, log_level="warning"
     )
     return uvicorn.Server(config), deps
-
-
-def settle_due_funding(
-    gateway: PaperGateway, last_settled: dict[str, float], now: float
-) -> list[str]:
-    """对到达 funding_interval 的持仓合约结算一次资金费，返回本次结算的合约名。"""
-    settled: list[str] = []
-    for position in gateway.list_positions():
-        contract = gateway.get_contract(position.contract)
-        last = last_settled.get(position.contract)
-        if last is not None and now - last < contract.funding_interval:
-            continue  # 未到该合约结算周期
-        gateway.settle_funding(position.contract, contract.funding_rate)
-        last_settled[position.contract] = now
-        settled.append(position.contract)
-    return settled
-
-
-async def _funding_loop(ctx: AppContext) -> None:
-    """paper 模式资金费结算：按各合约 funding_interval 周期结算（Gate 惯例 8h）。"""
-    gateway = ctx.gateway
-    if not isinstance(gateway, PaperGateway):
-        return
-    last_settled: dict[str, float] = {}
-    while True:
-        await asyncio.sleep(60)  # 每分钟巡检是否到达各合约结算周期
-        settle_due_funding(gateway, last_settled, time.monotonic())
 
 
 async def run_app(
@@ -446,7 +432,7 @@ async def run_app(
         )
     server_task = asyncio.create_task(ctx.server.serve())
     pusher_task = asyncio.create_task(price_pusher(ctx)) if price_pusher else None
-    funding_task = asyncio.create_task(_funding_loop(ctx))
+    funding_task = asyncio.create_task(funding_loop(ctx.gateway))
     # 成交补漏低频安全网（gatews 静默重连绕过 on_reconnected，秒级断线窗口靠它兜底）
     safety_task = (
         asyncio.create_task(ctx.trade_sync.run_safety_net()) if ctx.trade_sync is not None else None
@@ -490,7 +476,7 @@ async def shutdown(
     if ctx.server is not None:
         ctx.server.should_exit = True
         await asyncio.gather(server_task, return_exceptions=True)
-    for task in (pusher_task, funding_task, review_task):
+    for task in (pusher_task, funding_task, review_task, ctx.server_deps.indicators.oi_task):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

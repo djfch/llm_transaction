@@ -32,6 +32,7 @@ from src.audit.trail import AuditTrail
 from src.config import Settings
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
+from src.market.indicator_service import IndicatorService
 from src.market.triggers import TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
@@ -75,6 +76,10 @@ class DecisionLoop:
       drain 三方共用，见 fill_persist.py）；缺省时按 repo/mode/notify_event 自建
     - persist_kill_switch：风控锁写回 config.yaml 的回调（保持 agent 层不碰 config_io）
     - audit：共享 AuditTrail；缺省时按 settings.audit 自建（快照目录一致）
+    - indicator_service：技术指标服务（get_indicators 工具与上下文短名单行共用）；
+      None 时工具如实回报未接入、上下文省略指标行
+    - indicator_shortlist：上下文指标行短名单来源回调（每次构建重读，复盘修订
+      短名单后下一轮即生效）；None 时 ContextBuilder 回退内置基线
     """
 
     def __init__(
@@ -97,6 +102,8 @@ class DecisionLoop:
         notify_event: Callable[[dict], None] | None = None,
         fill_persister: FillPersister | None = None,
         audit: AuditTrail | None = None,
+        indicator_service: IndicatorService | None = None,
+        indicator_shortlist: Callable[[], list[str]] | None = None,
         max_turns: int = 8,
     ) -> None:
         self._settings = settings
@@ -119,13 +126,22 @@ class DecisionLoop:
             repo=repo,
             candles=candles,
             triggers=triggers,
+            indicator_service=indicator_service,
             daily_stats_fn=daily_stats_fn or (lambda: default_daily_stats(repo, settings.mode)),
             mode=settings.mode,
             set_next_wake=set_next_wake,
             notify_event=notify_event,
         )
         self._registry = ToolRegistry(self._deps)
-        self._context = ContextBuilder(gateway, repo, candles, triggers, watchlist)
+        self._context = ContextBuilder(
+            gateway,
+            repo,
+            candles,
+            triggers,
+            watchlist,
+            indicator_service=indicator_service,
+            indicator_shortlist=indicator_shortlist,
+        )
 
     @property
     def consecutive_failures(self) -> int:

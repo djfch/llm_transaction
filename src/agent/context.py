@@ -8,15 +8,21 @@ summary 为一行摘要，落 decisions.context_summary。
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from src.audit.logger import get_logger
+from src.config import DEFAULT_INDICATOR_SHORTLIST
 from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
+from src.market.indicator_service import IndicatorService
 from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
+
+logger = get_logger(__name__)
 
 
 def compute_equity(account: Account, positions: list[Position]) -> Decimal:
@@ -79,6 +85,8 @@ class ContextBuilder:
         alerts_n: int = 20,
         notes_n: int = 10,
         trades_n: int = 20,
+        indicator_service: IndicatorService | None = None,
+        indicator_shortlist: Callable[[], list[str]] | None = None,
     ) -> None:
         self._gateway = gateway
         self._repo = repo
@@ -90,6 +98,11 @@ class ContextBuilder:
         self._alerts_n = alerts_n
         self._notes_n = notes_n
         self._trades_n = trades_n
+        self._indicator_service = indicator_service
+        # 短名单来源由装配层注入（读 indicator_config.yaml）；缺省回退内置基线
+        self._indicator_shortlist = indicator_shortlist or (
+            lambda: list(DEFAULT_INDICATOR_SHORTLIST)
+        )
 
     async def build(self, wake_source: str) -> AgentContext:
         account = self._gateway.get_account()
@@ -135,7 +148,25 @@ class ContextBuilder:
             lines.append(self._ticker_line(contract, tickers.get(contract)))
             candles = self._candles.get_recent(contract, self._interval, self._candle_n)
             lines.append(summarize_candles(contract, self._interval, candles))
+            indicator_line = self._indicator_line(contract)
+            if indicator_line is not None:
+                lines.append(indicator_line)
         return "\n".join(lines)
+
+    def _indicator_line(self, contract: str) -> str | None:
+        """短名单指标单行（每合约第三行，紧随 K 线摘要行）。
+
+        服务未接入返回 None（整行省略，不留痕迹）；服务未就绪/数据异常降级为
+        提示文本（同 _ticker_line 风格），不拖垮其余 section。
+        """
+        if self._indicator_service is None:
+            return None
+        try:
+            keys = self._indicator_shortlist()
+            return self._indicator_service.shortlist_line(contract, self._interval, keys)
+        except Exception as e:
+            logger.warning("指标短名单行生成失败（%s）：%s", contract, e)
+            return f"{contract} 指标({self._interval}): 暂不可用"
 
     def _ticker_line(self, contract: str, ticker) -> str:
         if ticker is not None:

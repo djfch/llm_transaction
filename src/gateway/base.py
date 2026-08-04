@@ -224,6 +224,9 @@ class Gateway(Protocol):
 
     def get_tickers(self) -> list[Ticker]: ...
 
+    # 持仓量（张数）：无该数据的实现（如 paper）返回 None；查询失败抛 GatewayError。
+    def fetch_open_interest(self, contract: str) -> Decimal | None: ...
+
     def set_leverage(
         self, contract: str, leverage: int, margin_mode: str = "isolated"
     ) -> Position: ...

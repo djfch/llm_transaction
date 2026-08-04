@@ -217,6 +217,34 @@ class Watchlist(BaseModel):
     contracts: list[str]
 
 
+# 指标短名单默认基线：文件缺失/首次运行时的兜底配置（去重后 1~8 个，键为小写字母/数字/下划线）
+DEFAULT_INDICATOR_SHORTLIST = ["ema20", "ema50", "rsi14", "macd", "atr14", "oi"]
+
+
+class IndicatorConfig(BaseModel):
+    """指标短名单（indicator_config.yaml）：每轮注入执行 agent 上下文的技术指标键列表。
+
+    本层只校验形状：去重后 1~8 个、键只允许小写字母/数字/下划线；
+    键是否在指标注册表内（语义有效性）由 store 层按注入的 valid_keys 校验。
+    """
+
+    shortlist: list[str]
+
+    @model_validator(mode="after")
+    def _check_shortlist(self) -> IndicatorConfig:
+        deduped: list[str] = []
+        for key in self.shortlist:
+            if key not in deduped:
+                deduped.append(key)  # 去重保序
+        if not 1 <= len(deduped) <= 8:
+            raise ValueError(f"shortlist 去重后须 1~8 个，当前 {len(deduped)} 个")
+        for key in deduped:
+            if not re.fullmatch(r"[a-z0-9_]+", key):
+                raise ValueError(f"指标键只允许小写字母/数字/下划线: {key!r}")
+        self.shortlist = deduped
+        return self
+
+
 def _load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -231,3 +259,11 @@ def load_settings(config_path: Path | None = None) -> Settings:
 
 def load_watchlist(path: Path | None = None) -> Watchlist:
     return Watchlist(**_load_yaml(path or ROOT / "watchlist.yaml"))
+
+
+def load_indicator_config(path: Path | None = None) -> IndicatorConfig:
+    """加载指标短名单；文件不存在返回默认基线（首次运行零配置可用）。"""
+    target = path or ROOT / "indicator_config.yaml"
+    if not target.exists():
+        return IndicatorConfig(shortlist=list(DEFAULT_INDICATOR_SHORTLIST))
+    return IndicatorConfig(**_load_yaml(target))

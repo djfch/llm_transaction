@@ -3,6 +3,7 @@
  * 数据为内存态，PUT/POST 会修改内存副本（刷新页面后复原）。
  */
 import { ApiError } from './http'
+import { createIndicatorMock } from './mockIndicators'
 import { createReviewMock } from './mockReview'
 import type {
   AgentLiveState,
@@ -169,6 +170,10 @@ const reviewMock = createReviewMock(reply, {
 
 /** 版本表 md5 快照（最新在前）：决策轮 strategyMd5 关联演示用 */
 const VERSION_MD5S = reviewMock.versionMd5s()
+
+// 指标 mock 域（短名单配置 + 由 buildCandles 确定性计算的序列）拆分到 mockIndicators.ts；
+// buildCandles 为函数声明会提升，此处引用安全。
+const indicatorMock = createIndicatorMock(reply, buildCandles)
 
 const watchlist = { settle: 'usdt', contracts: ['BTC_USDT', 'ETH_USDT'] }
 
@@ -337,6 +342,9 @@ export const mockApi: ApiClient = {
     return reply({ items: list.slice(offset, offset + limit), total: list.length, offset, limit })
   },
   getCandles: (contract, interval, limit = 200) => reply(buildCandles(contract, interval, limit)),
+  // 指标配置与序列由 mockIndicators.ts 实现（同一 ApiClient 契约形态）
+  getIndicatorConfig: indicatorMock.getIndicatorConfig,
+  getIndicatorSeries: indicatorMock.getIndicatorSeries,
   closePosition: (contract) => {
     const idx = positions.findIndex((p) => p.contract === contract)
     if (idx < 0) return Promise.reject(new ApiError(404, `无持仓: ${contract}`))

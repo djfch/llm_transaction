@@ -18,11 +18,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.bootstrap import AppContext, _default_contract, build_app, settle_due_funding
+from src.bootstrap import AppContext, _default_contract, build_app
 from src.config import Settings, Watchlist
 from src.config_io import write_settings
 from src.gateway.base import OrderRequest, Ticker
 from src.paper.engine import PaperGateway
+from src.paper.funding_patrol import settle_due_funding
 from src.review.strategy import StrategyValidationError
 
 BTC = "BTC_USDT"

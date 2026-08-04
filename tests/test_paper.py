@@ -253,3 +253,12 @@ def test_close_without_position_is_noop():
     result = close_all(gw)
     assert result.status == "finished" and result.finish_as == "no_position"
     assert result.left == D("0") and gw.account.fills == []  # 无持仓不记假成交
+
+
+def test_open_interest_delegation():
+    # 未注入公共行情源（纯离线 mock 行情）：诚实降级 None
+    assert make_gateway().fetch_open_interest(BTC) is None
+    # 注入公共行情网关的 fetch_open_interest：委托真实数据（paper 非 mock 行情接线）
+    cfg = PaperConfig(initial_equity=10000.0)
+    gw = PaperGateway(cfg, contracts={BTC: make_contract()}, oi_provider=lambda c: D("123456"))
+    assert gw.fetch_open_interest(BTC) == D("123456")

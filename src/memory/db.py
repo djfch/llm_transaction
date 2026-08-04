@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     report_id INTEGER,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS indicator_config_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    report_id INTEGER,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS review_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     period_start REAL NOT NULL,
@@ -154,7 +163,8 @@ class Database:
         - trades.source：历史成交无法可靠推断来源，保持默认 ''（历史/未知），不回填。
         - decisions/audit_rounds.strategy_md5：历史数据无策略书原文 md5 可循，
           保持默认 ''（不与任何版本关联），不回填。
-          strategy_versions/review_reports 为新增表，由 CREATE TABLE IF NOT EXISTS 覆盖。
+          strategy_versions/review_reports/indicator_config_versions 为新增表，
+          由 CREATE TABLE IF NOT EXISTS 覆盖。
         - orders.trade_source：历史订单来源无法可靠推断，保持默认 ''（成交分类按
           is_close 推导 llm_open/llm_close），不回填。
         - trades.exchange_trade_id：历史成交无交易所成交 id，保持 NULL（部分唯一索引
