@@ -25,14 +25,16 @@ npm run build      # 类型检查 + 产出 dist/
 src/
   api/          API 客户端层（types 契约 / http 真实实现 / mock 假数据 / ws 推送 / index 开关）
   components/   通用组件（Card、Badge、StateHint、AgentControl、KillSwitchButton、PaperEquitySetter）
-  components/console/ 观察舱面板（TopBar、AccountPanel、LiveRoundHero、KlinePanel、RoundTimeline、
+  components/console/ 观察舱面板（TopBar、AccountPanel、LiveRoundHero、KlinePanel（含短名单指标叠加/副图）、
+                StrategyIndicatorsBar（当前策略指标徽标条）、RoundTimeline、
                 TradesTable、NotesPanel、PositionsPanel、EquityMiniChart、ReviewPanel、
                 StrategyPanel(策略只读视图)、ConfigDrawer 等）
   hooks/        useApiData（数据获取）、useWs（WS 订阅）、useLivePortfolio（实时组合刷新）、
-                usePageState（分页状态）、useRoundFocus（决策轮定位联动）
+                usePageState（分页状态）、useRoundFocus（决策轮定位联动）、
+                useIndicatorSeries/useIndicatorChart（指标序列获取与挂图）
   pages/        ConsolePage（AI 大脑观察舱单页，路由「/」）
   pages/config/ 配置表单（风控、常规配置、白名单、策略版本、凭证管理与校验）
-  utils/        数字/时间、K 线实时合成与指标、成交标记、LLM 对话解析纯函数
+  utils/        数字/时间、K 线实时合成与指标、indicatorSeries（指标图型装配）、成交标记、LLM 对话解析纯函数
   test/         Vitest 测试（console_* 面板用例、config、secrets、agentcontrol、http、format 等）
 ```
 

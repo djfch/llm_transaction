@@ -126,6 +126,9 @@ vi.mock('../api', () => ({
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
     getCandles: () => Promise.resolve([]),
+    // 指标面板数据源：空短名单（K线不叠加指标线、徽标条不渲染）
+    getIndicatorConfig: () => Promise.resolve({ shortlist: [], available: [] }),
+    getIndicatorSeries: () => Promise.resolve({ contract: 'BTC_USDT', interval: '1h', series: {} }),
     // 配置抽屉数据源与 paper 重置（重置联动测试用）；策略面板复用 getStrategy/getStrategyVersions
     getStrategy: () => holder.getStrategy(),
     getStrategyVersion: (id: number) =>
@@ -182,6 +185,11 @@ vi.mock('lightweight-charts', () => ({
     subscribeClick: vi.fn(),
     unsubscribeClick: vi.fn(),
     remove: vi.fn(),
+    // 指标挂接（useIndicatorChart）使用的系列/副图管理方法
+    removeSeries: vi.fn(),
+    addPane: () => ({ paneIndex: () => 1, setStretchFactor: vi.fn() }),
+    panes: () => [{}],
+    removePane: vi.fn(),
   }),
 }))
 

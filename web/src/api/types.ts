@@ -152,6 +152,44 @@ export interface Candle {
   v: number // 成交量
 }
 
+/** 指标展示方式：overlay=主图叠加线 / pane=独立副图 / scalar=仅徽标数值 */
+export type IndicatorKind = 'overlay' | 'pane' | 'scalar'
+
+/** 指标序列数据点：time 为 Unix 秒（与 K 线一致），value 由数字字符串适配而来（该根无值为 null） */
+export interface IndicatorSeriesPoint {
+  time: number
+  value: number | null
+}
+
+/** 单个指标的序列条目：label 为后端展示名（如 'EMA20（指数均线）'）；scalar 的 fields 可为空、当前值在 current */
+export interface IndicatorSeriesEntry {
+  label: string
+  kind: IndicatorKind
+  fields: Record<string, IndicatorSeriesPoint[]> // 字段名 → 序列（如 macd 的 dif/dea/hist）
+  current?: number | null // scalar 指标当前值（如 oi 持仓量；缺失/无数据显示「无数据」）
+}
+
+/** 指标序列响应：GET /api/indicators/series?contract=&interval=&limit=&keys= */
+export interface IndicatorSeriesResponse {
+  contract: string
+  interval: string
+  series: Record<string, IndicatorSeriesEntry> // key（如 ema20）→ 序列条目
+}
+
+/** 可用指标定义：GET /api/indicator_config 的 available 数组项 */
+export interface IndicatorAvailable {
+  key: string // 指标 key（如 ema20 / macd / oi）
+  label: string // 展示名（如 'EMA20（指数均线）'）
+  kind: IndicatorKind
+  fields: string[] // 序列字段名（overlay/pane 有意义；scalar 为空或单字段）
+}
+
+/** 指标配置：GET /api/indicator_config（shortlist=当前策略短名单 key 列表，保持后端顺序） */
+export interface IndicatorConfig {
+  shortlist: string[]
+  available: IndicatorAvailable[]
+}
+
 /** 手动平仓结果：POST /api/positions/{contract}/close */
 export interface ClosePositionResult {
   contract: string
@@ -410,6 +448,7 @@ export type WsMessage =
   | { type: 'trades_updated'; data: { contracts: string[]; count: number } }
   | { type: 'plan_updated' }
   | { type: 'strategy_updated' }
+  | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {
@@ -426,6 +465,15 @@ export interface ApiClient {
   getAgentLive(): Promise<AgentLiveState>
   getTrades(offset: number, limit: number, contract?: string): Promise<TradesPageResult>
   getCandles(contract: string, interval: string, limit?: number): Promise<Candle[]>
+  /** 当前策略指标短名单与可用指标全集（kind：overlay=主图叠加 / pane=副图 / scalar=徽标数值）。 */
+  getIndicatorConfig(): Promise<IndicatorConfig>
+  /** 批量拉取指标序列；前端始终显式传 keys（短名单里的非 scalar 项），scalar 当前值随响应一并返回。 */
+  getIndicatorSeries(
+    contract: string,
+    interval: string,
+    keys: string[],
+    limit?: number,
+  ): Promise<IndicatorSeriesResponse>
   closePosition(contract: string): Promise<ClosePositionResult>
   /** 撤销指定合约和订单 ID；已终态订单由调用方刷新列表。 */
   cancelOpenOrder(contract: string, orderId: string): Promise<CancelOpenOrderResult>
