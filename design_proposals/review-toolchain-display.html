@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>复盘工具调用链 · 展示位设计（方案 A）</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --card: #131a22;
+    --card2: #182230;
+    --border: #263242;
+    --text: #dbe4ee;
+    --dim: #8b9bb0;
+    --faint: #5b6b80;
+    --review: #b07cff;      /* 复盘域：紫 */
+    --cyan: #6ee7e7;        /* 人工/信号：青 */
+    --tool: #a5f3fc;        /* 工具名：亮青 */
+    --ok: #3fca8b;
+    --danger: #f0564a;
+    --warn: #f5a524;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.7; padding-bottom: 80px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+  code { font-family: ui-monospace, Consolas, monospace; }
+
+  header { text-align: center; padding: 48px 24px 28px; }
+  header h1 { font-size: 30px; letter-spacing: 1px; }
+  header h1 .accent { color: var(--review); }
+  header p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
+  .badge {
+    background: var(--card2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 14px; font-size: 12px; color: var(--dim);
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+
+  section.card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px 24px; margin-top: 26px;
+  }
+  section.card h2 { font-size: 17px; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  section.card .sub { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
+  .tag { font-size: 11px; border-radius: 6px; padding: 2px 8px; font-weight: 600; }
+  .tag-danger { background: rgba(240,86,74,.12); color: var(--danger); border: 1px solid rgba(240,86,74,.4); }
+  .tag-ok { background: rgba(63,202,139,.12); color: var(--ok); border: 1px solid rgba(63,202,139,.4); }
+  .tag-warn { background: rgba(245,165,36,.12); color: var(--warn); border: 1px solid rgba(245,165,36,.4); }
+
+  /* —— 面板复刻（与线上 zinc 深色风格一致） —— */
+  .panel { background: #0d1219; border: 1px solid #1e2936; border-radius: 12px; padding: 16px; }
+  .panel-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .panel-head h3 { font-size: 14px; }
+  .panel-head .hint { font-size: 12px; color: var(--faint); }
+  .panel-head .count { margin-left: auto; font-size: 12px; color: var(--faint); }
+  .btn-review {
+    border: 1px solid rgba(176,124,255,.5); background: rgba(176,124,255,.1);
+    color: #d3b8ff; border-radius: 8px; padding: 5px 12px; font-size: 12px; cursor: default;
+  }
+
+  .report {
+    background: rgba(24,34,48,.55); border: 1px solid #223041;
+    border-radius: 10px; padding: 14px 16px; margin-top: 10px;
+  }
+  .report-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .report-row .time { font-family: ui-monospace, Consolas, monospace; color: var(--faint); font-size: 11px; }
+  .chip {
+    border: 1px solid #2b3a4d; background: rgba(24,34,48,.6);
+    border-radius: 6px; padding: 1px 8px; font-size: 10px; color: var(--dim);
+  }
+  .chip-violet { border-color: rgba(176,124,255,.4); background: rgba(176,124,255,.1); color: #d3b8ff; }
+  .caret { margin-left: auto; color: var(--faint); font-size: 10px; }
+  .report-summary { margin-top: 6px; font-size: 13px; color: var(--dim); }
+
+  .expand-zone { margin-top: 12px; border-top: 1px solid #1e2936; padding-top: 12px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { background: #0a0e13; border: 1px solid #1c2734; border-radius: 8px; padding: 8px 10px; }
+  .stat dt { font-size: 10px; color: var(--faint); }
+  .stat dd { font-family: ui-monospace, Consolas, monospace; font-size: 14px; margin-top: 2px; }
+  .neg { color: #fb8a80; }
+
+  .report-full {
+    margin-top: 10px; background: #0a0e13; border: 1px solid #1c2734; border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; color: var(--text); white-space: pre-wrap;
+  }
+
+  /* 折叠区（FoldSection 复刻） */
+  .fold { margin-top: 10px; }
+  .fold-title { font-size: 12px; color: var(--dim); cursor: default; display: flex; align-items: center; gap: 6px; }
+  .fold-title .arrow { display: inline-block; transition: transform .15s; }
+  .fold-title.open .arrow { transform: rotate(90deg); }
+  .fold-title .n { color: var(--faint); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+
+  /* ToolSteps 复刻 */
+  ol.steps { margin-top: 8px; }
+  ol.steps li { position: relative; padding: 0 0 12px 32px; list-style: none; }
+  ol.steps li:last-child { padding-bottom: 0; }
+  ol.steps li .line {
+    position: absolute; left: 9.5px; top: 24px; bottom: 0; width: 1px;
+    background: linear-gradient(to bottom, rgba(110,231,231,.4), rgba(176,124,255,.2), transparent);
+  }
+  ol.steps li:last-child .line { display: none; }
+  .dot {
+    position: absolute; left: 0; top: 4px; width: 20px; height: 20px; border-radius: 50%;
+    border: 1px solid rgba(110,231,231,.6); background: rgba(110,231,231,.15);
+    color: var(--cyan); font-size: 10px; display: flex; align-items: center; justify-content: center;
+  }
+  .step {
+    border: 1px solid rgba(255,255,255,.06); background: rgba(255,255,255,.02);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .seq { font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: var(--faint); }
+  .tool-name { font-family: ui-monospace, Consolas, monospace; font-size: 13px; font-weight: 600; color: var(--tool); }
+  .risk-badge {
+    margin-left: auto; font-size: 10px; border-radius: 5px; padding: 1px 7px;
+    border: 1px solid #2b3a4d; background: rgba(24,34,48,.5); color: var(--dim);
+  }
+  .dur { font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: var(--faint); }
+  .args {
+    margin-top: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+    color: var(--faint); word-break: break-all;
+  }
+  .result-toggle { margin-top: 4px; font-size: 11px; color: var(--faint); }
+
+  /* 实时进度条（问题 1 联动） */
+  .live-strip {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px dashed rgba(176,124,255,.45); background: rgba(176,124,255,.06);
+    border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #d3b8ff; margin-bottom: 4px;
+  }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--review); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  .degrade {
+    margin-top: 10px; border: 1px dashed #2b3a4d; border-radius: 8px;
+    padding: 10px 12px; font-size: 12px; color: var(--faint);
+  }
+
+  /* 标注 */
+  .mk {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; border-radius: 50%;
+    background: rgba(176,124,255,.15); border: 1px solid rgba(176,124,255,.5);
+    color: #d3b8ff; font-size: 11px; font-weight: 700; padding: 0 4px;
+  }
+  .legend { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .legend div { display: flex; gap: 8px; font-size: 12.5px; color: var(--dim); margin-top: 6px; }
+  .legend .mk { flex-shrink: 0; margin-top: 2px; }
+
+  .note { font-size: 12.5px; margin-top: 12px; }
+  .note.danger { color: #fb8a80; }
+
+  /* 数据链路 */
+  .flow { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin-top: 8px; }
+  .flow .node {
+    flex: 1; min-width: 170px; background: var(--card2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; font-size: 12.5px;
+  }
+  .flow .node b { display: block; font-size: 13px; margin-bottom: 2px; }
+  .flow .node .free { color: var(--ok); font-size: 11px; }
+  .flow .node .cost { color: var(--warn); font-size: 11px; }
+  .flow .arrow { display: flex; align-items: center; padding: 0 8px; color: var(--faint); font-size: 16px; }
+
+  table.reject { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
+  table.reject td { border-top: 1px solid var(--border); padding: 8px 10px 8px 0; vertical-align: top; color: var(--dim); }
+  table.reject td:first-child { white-space: nowrap; color: var(--text); font-weight: 600; width: 200px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>复盘工具调用链 · <span class="accent">展示位设计</span></h1>
+  <p>解决「复盘 agent 没有历史工具调用内容」—— 推荐方案 A：内嵌复盘报告展开区（待你确认后开工）</p>
+  <div class="badges">
+    <span class="badge">状态：<b>待评审</b></span>
+    <span class="badge">推荐：<b>方案 A · 报告内嵌</b></span>
+    <span class="badge">前端：<b>复用 ToolSteps + ConversationThread，零新组件</b></span>
+    <span class="badge">后端：<b>报告表加 1 列 round_id，零新接口</b></span>
+  </div>
+</header>
+
+<!-- ============ 现状 ============ -->
+<section class="card">
+  <h2><span class="tag tag-danger">现状</span> 报告展开后只有「统计 + 全文」</h2>
+  <p class="sub">工具调用其实每次都实时写进了数据库（和执行 agent 同一本台账），但报告没记台账编号、面板也没做展示位 —— 所以看不到。</p>
+
+  <div class="panel">
+    <div class="report">
+      <div class="report-row">
+        <span class="time">2026/8/4 08:05:09</span>
+        <span class="chip">区间 2026/08/03 ~ 2026/08/04</span>
+        <span class="chip chip-violet">改策略 → v6</span>
+        <span class="caret">▾</span>
+      </div>
+      <div class="expand-zone">
+        <dl class="stats">
+          <div class="stat"><dt>总盈亏</dt><dd class="neg">-12.35</dd></div>
+          <div class="stat"><dt>胜率</dt><dd>42.9%</dd></div>
+          <div class="stat"><dt>盈亏比</dt><dd>0.81</dd></div>
+        </dl>
+        <div class="report-full">本期 3 笔交易全部止损离场，集中在 8/3 晚间 BTC 假突破区间。主要问题：入场过于急切，两次在 4h 未收稳 64000 前提前入场。已修订策略 v6：多头入场必须等 4h 收盘确认 + 15m 回踩不破，禁止追突破单。</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="note danger">✕ 问题：这 6 次工具调用（查了哪些数据、凭什么改策略）在界面上完全没有痕迹，报告结论无法溯源。</p>
+</section>
+
+<!-- ============ 方案 A ============ -->
+<section class="card">
+  <h2><span class="tag tag-ok">方案 A · 推荐</span> 工具链内嵌报告展开区</h2>
+  <p class="sub">与「决策时间线」卡片完全同款的交互和组件，你已经在时间线里用过这个样式，零学习成本。顺序：结论在前（统计 + 全文），证据在后（工具链 + 对话）。</p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h3>复盘报告 <span class="hint">— 复盘结论与策略自进化留痕</span></h3>
+      <span class="count">共 12 条复盘</span>
+      <button class="btn-review">立即复盘</button>
+    </div>
+
+    <!-- ④ 实时进度条：问题 1 修复后的展示位 -->
+    <div class="live-strip">
+      <span class="pulse"></span>
+      <span>复盘进行中 · 已调用 3 个工具 · 最近：<code>get_decision_detail</code></span>
+      <span style="margin-left:auto" class="hint">每 3 秒自动刷新</span>
+      <span class="mk">④</span>
+    </div>
+
+    <div class="report">
+      <div class="report-row">
+        <span class="time">2026/8/4 08:05:09</span>
+        <span class="chip">区间 2026/08/03 ~ 2026/08/04</span>
+        <span class="chip chip-violet">改策略 → v6</span>
+        <span class="caret">▾</span>
+      </div>
+
+      <div class="expand-zone">
+        <dl class="stats">
+          <div class="stat"><dt>总盈亏</dt><dd class="neg">-12.35</dd></div>
+          <div class="stat"><dt>胜率</dt><dd>42.9%</dd></div>
+          <div class="stat"><dt>盈亏比</dt><dd>0.81</dd></div>
+        </dl>
+
+        <div class="report-full">本期 3 笔交易全部止损离场，集中在 8/3 晚间 BTC 假突破区间。主要问题：入场过于急切，两次在 4h 未收稳 64000 前提前入场。已修订策略 v6：多头入场必须等 4h 收盘确认 + 15m 回踩不破，禁止追突破单。</div>
+
+        <!-- ① 新增工具调用详情折叠区（默认展开示意） -->
+        <div class="fold">
+          <div class="fold-title open">
+            <span class="arrow">▸</span>
+            <span>工具调用详情 · tool_calls（<b>6</b> 步）</span>
+            <span class="mk">①</span>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <span class="line"></span><span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 1</span>
+                  <span class="tool-name">get_review_stats</span>
+                  <span class="risk-badge">免判(未入风控)</span><span class="mk">②</span>
+                  <span class="dur">245ms</span>
+                </div>
+                <div class="args">{"start_ts": 1754188800, "end_ts": 1754275200}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+            <li>
+              <span class="line"></span><span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 2</span>
+                  <span class="tool-name">list_decision_rounds</span>
+                  <span class="risk-badge">免判(未入风控)</span>
+                  <span class="dur">132ms</span>
+                </div>
+                <div class="args">{"limit": 20, "offset": 0}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+            <li>
+              <span class="line"></span><span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 3</span>
+                  <span class="tool-name">get_decision_detail</span>
+                  <span class="risk-badge">免判(未入风控)</span>
+                  <span class="dur">187ms</span>
+                </div>
+                <div class="args">{"round_id": "0ae854b9-…"}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+            <li>
+              <span class="line"></span><span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 4</span>
+                  <span class="tool-name">get_tool_call_chain</span>
+                  <span class="risk-badge">免判(未入风控)</span>
+                  <span class="dur">154ms</span>
+                </div>
+                <div class="args">{"round_id": "0ae854b9-…"}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+            <li>
+              <span class="line"></span><span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 5</span>
+                  <span class="tool-name">get_strategy_versions</span>
+                  <span class="risk-badge">免判(未入风控)</span>
+                  <span class="dur">96ms</span>
+                </div>
+                <div class="args">{"limit": 5}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+            <li>
+              <span class="dot">✓</span>
+              <div class="step">
+                <div class="step-head">
+                  <span class="seq">seq 6</span>
+                  <span class="tool-name">submit_strategy_revision</span>
+                  <span class="risk-badge">免判(未入风控)</span>
+                  <span class="dur">423ms</span>
+                </div>
+                <div class="args">{"change_note": "收敛追高条件：4h 收盘确认 + 15m 回踩", "new_content_md": "…（策略全文）"}</div>
+                <div class="result-toggle">▸ 执行结果</div>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="fold">
+          <div class="fold-title">
+            <span class="arrow">▸</span>
+            <span>完整对话 · agent loop</span>
+            <span class="n">14 条消息</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><span class="mk">①</span><span>新增「工具调用详情」折叠区，<b>默认收起</b>（报告全文是主角；时间线卡片默认打开是因为轮次过程才是主角）。步数写在标题上，不展开也知道这轮干了多少活。</span></div>
+    <div><span class="mk">②</span><span>复盘步骤的徽标固定为「免判(未入风控)」—— 复盘是只读工具、不过风控引擎，和交易步骤的「风控放行/拒绝」一眼区分。</span></div>
+    <div><span class="mk">④</span><span>（联动项，可分开做）问题 1 修复后的展示位：复盘运行期间面板顶部出现进度条，跑完自动消失并刷新报告列表。</span></div>
+  </div>
+</section>
+
+<!-- ============ 降级态 ============ -->
+<section class="card">
+  <h2><span class="tag tag-warn">降级态</span> 功能上线前的老报告没有台账编号</h2>
+  <p class="sub">老报告的 round_id 为空，工具区位置显示一句灰字提示，不让用户以为是 bug：</p>
+  <div class="panel">
+    <div class="report">
+      <div class="report-row">
+        <span class="time">2026/7/28 09:12:44</span>
+        <span class="chip">区间 2026/07/27 ~ 2026/07/28</span>
+        <span class="chip">未调整</span>
+        <span class="caret">▾</span>
+      </div>
+      <div class="expand-zone">
+        <div class="report-full">本期无交易，行情区间震荡，维持现有策略不变。</div>
+        <div class="degrade">该报告早于工具链留痕功能，无工具调用记录 <span class="mk">③</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <div><span class="mk">③</span><span>老数据优雅降级：有编号就显示工具链，没有就显示这句提示，界面不出错、不留白。</span></div>
+  </div>
+</section>
+
+<!-- ============ 数据链路 ============ -->
+<section class="card">
+  <h2>数据链路（为什么这个方案最省）</h2>
+  <p class="sub">台账（audit_tool_calls）和查台账的接口（/api/rounds/{id}）都是现成的，缺的只是「报告 → 台账编号」这根线：</p>
+  <div class="flow">
+    <div class="node"><b>① 报告表加 1 列</b>复盘报告落库时记下自己那轮的 round_id<span class="cost">唯一 schema 改动</span></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>② 报告详情透出编号</b>现有详情接口的返回里多带一个字段<span class="cost">改几行</span></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>③ 前端按编号拉详情</b>调现成的 /api/rounds/{round_id}（通用接口，不按类型过滤）<span class="free">零改动</span></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>④ 组件原样复用</b>ToolSteps + ConversationThread，与时间线卡片同款<span class="free">零新组件</span></div>
+  </div>
+</section>
+
+<!-- ============ 被否方案 ============ -->
+<section class="card">
+  <h2>被否方案（简要）</h2>
+  <table class="reject">
+    <tr>
+      <td>方案 B · 并入决策时间线</td>
+      <td>时间线的语义是「交易决策」，复盘不是交易决策，混进去会稀释列表；且报告和证据被拆到两个面板，想对照「这轮复盘看了什么 → 写出了什么报告」要来回翻。后端还要合并两套分页数据源，复杂度最高。</td>
+    </tr>
+    <tr>
+      <td>方案 C · 独立「复盘运行」面板</td>
+      <td>一次复盘变成两条目（报告列表一条、运行面板一条），信息重复；页面多占一整块地方；用户仍要两个面板对照。</td>
+    </tr>
+  </table>
+</section>
+
+</div>
+</body>
+</html>
