@@ -4,7 +4,8 @@
  * error 非空的行以红字展示失败原因（该次复盘只落错误记录，不影响交易循环）。
  * 点击展开详情：lazy 拉取全文（列表 reportMd 截断 200 字符，详情给全文），
  * statsJson 解析出 总盈亏/胜率/盈亏比 小表格（字段缺失时降级不渲染该行）
- * + reportMd 全文（whitespace-pre-wrap 原样展示，不引 markdown 库）。
+ * + reportMd 全文（whitespace-pre-wrap 原样展示，不引 markdown 库）
+ * + 关联审计轮的工具调用链（roundId 空串 = 功能上线前的老报告，灰字降级提示）。
  * 409（复盘进行中）/ 503（LLM 未配置或未接线）经 ApiError.detail 提示。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -15,6 +16,7 @@ import { usePageState } from '../../hooks/usePageState'
 import { fmtNum, fmtPct2, fmtSigned, fmtTime, pnlClass } from '../../utils/format'
 import StateHint from '../StateHint'
 import PaginationControls from './PaginationControls'
+import ReviewToolChain from './ReviewToolChain'
 
 /** 复盘报告每页条数（与决策时间线一致的交互口径）。 */
 const PAGE_SIZE = 5
@@ -164,6 +166,12 @@ function ReportItem({
                 <div className="mt-3 whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-[13px] leading-6 text-zinc-300">
                   {detail.reportMd}
                 </div>
+              )}
+              {/* 工具调用链：roundId 非空时内嵌该轮复盘审计详情；空串 = 老报告，灰字降级 */}
+              {detail.roundId !== '' ? (
+                <ReviewToolChain roundId={detail.roundId} />
+              ) : (
+                <p className="mt-3 text-xs text-zinc-600">该报告早于工具链留痕功能，无工具调用记录</p>
               )}
             </>
           )}

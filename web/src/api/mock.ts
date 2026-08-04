@@ -331,8 +331,15 @@ export const mockApi: ApiClient = {
   getRounds: (offset, limit) =>
     reply({ items: rounds.slice(offset, offset + limit), total: rounds.length, offset, limit }),
   getRound: (roundId) => {
-    const meta = rounds.find((r) => r.round_id === roundId)
-    if (!meta) return Promise.reject(new Error(`决策轮不存在: ${roundId}`))
+    // 复盘报告/手动复盘引用的审计轮不在决策轮假数据内（演示 ID 如 9f3ab2…/rv-mock-N）：
+    // 回退到通用观望叙事构造详情而非报错，保证复盘工具链内嵌演示可用
+    const meta = rounds.find((r) => r.round_id === roundId) ?? {
+      round_id: roundId,
+      started_at: new Date(Date.now() - 3600_000).toISOString(),
+      wake_source: '复盘',
+      summary: '复盘审计轮（演示数据）：无归属成交，按观望叙事构造通用工具链。',
+      strategyMd5: '',
+    }
     return reply(buildRoundDetail(meta))
   },
   // 样例：一条已完成决策轮（3 次工具调用），in_round=false 对应"上轮决策"展示

@@ -1,19 +1,20 @@
 /**
  * 复盘报告面板测试：列表渲染（时间/复盘区间/动作徽标/error 红字）、展开详情
  * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」成功刷新
- * 与 409/503 的 ApiError.detail 提示、服务端分页。
+ * 与 409/503 的 ApiError.detail 提示、服务端分页、工具调用链内嵌
+ * （roundId 非空 lazy 拉取 getRound；空串 = 老报告灰字降级且不拉取）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
-import type { ReviewReport, ReviewReportSummary } from '../api/types'
+import type { ReviewReport, ReviewReportSummary, RoundDetail } from '../api/types'
 import ReviewPanel from '../components/console/ReviewPanel'
 
 const iso = (unixSec: number) => new Date(unixSec * 1000).toISOString()
 
 /**
- * 7 条报告覆盖两页（最新在前）：id7 失败红字行；id6 改策略（统计三键齐全）；
- * id5~1 未调整（statsJson 仅 total_pnl，用于降级形态）。
+ * 7 条报告覆盖两页（最新在前）：id7 失败红字行；id6 改策略（统计三键齐全，
+ * roundId 非空，演示工具链内嵌）；id5~1 未调整（statsJson 仅 total_pnl，roundId 空串降级）。
  */
 const REPORTS: ReviewReportSummary[] = [
   {
@@ -25,6 +26,7 @@ const REPORTS: ReviewReportSummary[] = [
     strategyAction: 'none',
     newVersionId: null,
     error: 'LLM 响应超时',
+    roundId: '',
     time: iso(1784600000),
   },
   {
@@ -36,6 +38,7 @@ const REPORTS: ReviewReportSummary[] = [
     strategyAction: 'rewrite',
     newVersionId: 3,
     error: '',
+    roundId: 'rvw-round-6',
     time: iso(1784510000),
   },
   ...Array.from({ length: 5 }, (_, i) => {
@@ -49,20 +52,57 @@ const REPORTS: ReviewReportSummary[] = [
       strategyAction: 'none' as const,
       newVersionId: null,
       error: '',
+      roundId: '',
       time: iso(1784420000 - i * 3600),
     }
   }),
 ]
 
+/** id6 关联的复盘审计轮详情：2 条工具调用 + Anthropic 原生格式 llm_raw */
+const ROUND_DETAIL: RoundDetail = {
+  round_id: 'rvw-round-6',
+  prompt_snapshot: 'prompt 快照',
+  llm_raw: JSON.stringify({
+    role: 'assistant',
+    content: [
+      { type: 'text', text: '先拉取区间平仓统计，再核对当前策略。' },
+      { type: 'tool_use', id: 'toolu_rvw_1', name: 'get_review_stats', input: { hours: 24 } },
+    ],
+  }),
+  tool_calls: [
+    {
+      seq: 1,
+      tool: 'get_review_stats',
+      args: { hours: 24 },
+      risk_verdict: '',
+      risk_reason: '',
+      result: '{"close_count":5,"total_pnl":"-32.10"}',
+      duration_ms: 8,
+    },
+    {
+      seq: 2,
+      tool: 'get_strategy',
+      args: {},
+      risk_verdict: '',
+      risk_reason: '',
+      result: '策略书原文',
+      duration_ms: 5,
+    },
+  ],
+  strategyMd5: '',
+}
+
 const holder = vi.hoisted(() => ({
   getReviewReports: vi.fn(),
   getReviewReport: vi.fn(),
+  getRound: vi.fn(),
   runReview: vi.fn(),
 }))
 vi.mock('../api', () => ({
   api: {
     getReviewReports: (offset: number, limit: number) => holder.getReviewReports(offset, limit),
     getReviewReport: (id: number) => holder.getReviewReport(id),
+    getRound: (roundId: string) => holder.getRound(roundId),
     runReview: () => holder.runReview(),
   },
 }))
@@ -90,6 +130,8 @@ beforeEach(() => {
       error: '',
     }),
   )
+  // 默认给任意 roundId 返回同一份审计详情（id6 展开即触发）
+  holder.getRound.mockResolvedValue(ROUND_DETAIL)
 })
 
 describe('ReviewPanel(复盘报告)', () => {
@@ -133,6 +175,40 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(screen.queryByText('总盈亏')).not.toBeInTheDocument()
     expect(screen.queryByText('胜率')).not.toBeInTheDocument()
     expect(screen.queryByText('盈亏比')).not.toBeInTheDocument()
+  })
+
+  it('工具链内嵌：roundId 非空的报告展开后 lazy 拉取 getRound 并展示工具调用详情', async () => {
+    render(<ReviewPanel />)
+    const preview = await screen.findByText(/本区间亏损。/)
+
+    fireEvent.click(preview)
+    await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('rvw-round-6'))
+
+    expect(await screen.findByText('工具调用详情 · tool_calls（2 步）')).toBeInTheDocument()
+
+    // 默认收起（设计规格）：工具步骤默认不在文档中，点击标题展开后可见
+    // （锚点用 seq N 而非工具名：ConversationThread 的 details 内容始终在 DOM，会命中工具名）
+    expect(screen.queryByText('seq 1')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('工具调用详情 · tool_calls（2 步）'))
+    expect(await screen.findByText('seq 1')).toBeInTheDocument()
+  })
+
+  it('工具链降级：roundId 空串的老报告展开后灰字提示，且不拉取 getRound', async () => {
+    render(<ReviewPanel />)
+    const preview = await screen.findByText(/第 5 份报告/)
+
+    fireEvent.click(preview)
+    await waitFor(() => expect(holder.getReviewReport).toHaveBeenCalledWith(5))
+
+    expect(await screen.findByText('该报告早于工具链留痕功能，无工具调用记录')).toBeInTheDocument()
+    expect(holder.getRound).not.toHaveBeenCalled()
+  })
+
+  it('工具链 lazy：不展开任何报告时不拉取 getRound', async () => {
+    render(<ReviewPanel />)
+    await screen.findByText(/第 5 份报告/)
+
+    expect(holder.getRound).not.toHaveBeenCalled()
   })
 
   it('立即复盘成功：提示成功并刷新列表', async () => {

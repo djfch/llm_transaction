@@ -574,18 +574,21 @@ async def test_attach_report_to_version(repo: Repo):
 async def test_review_report_roundtrip_and_page(repo: Repo):
     await repo.review.save_review_report(1000.0, 2000.0, '{"win_rate":0.5}', "# 报告一", "none")
     r2 = await repo.review.save_review_report(
-        2000.0, 3000.0, "{}", "# 报告二", "rewrite", new_version_id=3
+        2000.0, 3000.0, "{}", "# 报告二", "rewrite", new_version_id=3, round_id="rv-round-2"
     )
     r3 = await repo.review.save_review_report(3000.0, 4000.0, "{}", "", "none", error="LLM 超时")
     items, total = await repo.review.list_review_reports_page(limit=2, offset=0)
     assert [r.id for r in items] == [r3.id, r2.id]  # 最新在前
     assert total == 3
+    assert items[0].round_id == "" and items[1].round_id == "rv-round-2"  # 列表带出 round_id
     empty_items, empty_total = await repo.review.list_review_reports_page(limit=2, offset=10)
     assert empty_items == [] and empty_total == 3  # 越界页仍保留总数
     got = await repo.review.get_review_report(r2.id)
     assert got is not None and got.strategy_action == "rewrite" and got.new_version_id == 3
+    assert got.round_id == "rv-round-2"  # 详情带出保存的审计轮 id
     failed = await repo.review.get_review_report(r3.id)
     assert failed is not None and failed.error == "LLM 超时"
+    assert failed.round_id == ""  # 省略参数默认 ''（无关联）
     assert await repo.review.get_review_report(999) is None
 
 

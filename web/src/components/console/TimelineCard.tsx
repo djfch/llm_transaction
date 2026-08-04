@@ -57,8 +57,8 @@ function wakeBadgeClass(source: string): string {
   return `${base} border-violet-400/40 bg-violet-400/10 text-violet-300`
 }
 
-/** 折叠区：标题行（旋转箭头 + 文案）+ 内容 */
-function FoldSection({
+/** 折叠区：标题行（旋转箭头 + 文案）+ 内容（导出供 ReviewToolChain 复用同一折叠形态） */
+export function FoldSection({
   title,
   open,
   onToggle,

@@ -19,7 +19,7 @@ function stubFetch(routes: Record<string, unknown>) {
 
 afterEach(() => vi.unstubAllGlobals())
 
-/** 后端复盘报告原始项（契约 9 键） */
+/** 后端复盘报告原始项（契约 10 键） */
 const RAW_REPORT = {
   id: 7,
   period_start: 1784505600,
@@ -29,6 +29,7 @@ const RAW_REPORT = {
   strategy_action: 'rewrite',
   new_version_id: 3,
   error: '',
+  round_id: 'rvw-round-7',
   created_at: 1784595600,
 }
 
@@ -43,7 +44,7 @@ const RAW_VERSION = {
 }
 
 describe('复盘端点适配', () => {
-  it('getReviewReports：9 键 snake→camel、Unix 秒→ISO、statsJson 保留原文、total 透传', async () => {
+  it('getReviewReports：10 键 snake→camel、Unix 秒→ISO、statsJson 保留原文、total 透传', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({ '/api/review/reports?offset=0&limit=5': { items: [RAW_REPORT], total: 9 } }),
@@ -59,7 +60,19 @@ describe('复盘端点适配', () => {
     expect(r.strategyAction).toBe('rewrite')
     expect(r.newVersionId).toBe(3)
     expect(r.error).toBe('')
+    expect(r.roundId).toBe('rvw-round-7')
     expect(new Date(r.time).getTime()).toBe(1784595600000)
+  })
+
+  it('getReviewReports：raw 缺 round_id 字段（功能上线前的老数据）时 roundId 降级为空串', async () => {
+    const legacy: Record<string, unknown> = { ...RAW_REPORT }
+    delete legacy.round_id
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({ '/api/review/reports?offset=0&limit=5': { items: [legacy], total: 1 } }),
+    )
+    const [r] = (await httpApi.getReviewReports(0, 5)).items
+    expect(r.roundId).toBe('')
   })
 
   it('getReviewReports：strategy_action 非 rewrite 归一为 none，new_version_id null 透传', async () => {
@@ -77,11 +90,12 @@ describe('复盘端点适配', () => {
     expect(r.newVersionId).toBeNull()
   })
 
-  it('getReviewReport：详情同 9 键（reportMd 全文）', async () => {
+  it('getReviewReport：详情同 10 键（reportMd 全文）', async () => {
     vi.stubGlobal('fetch', stubFetch({ '/api/review/reports/7': RAW_REPORT }))
     const r = await httpApi.getReviewReport(7)
     expect(r.id).toBe(7)
     expect(r.reportMd).toContain('本区间亏损。')
+    expect(r.roundId).toBe('rvw-round-7')
   })
 
   it('runReview：started/ok 保留，snake 键转 camelCase', async () => {

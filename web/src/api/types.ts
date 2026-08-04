@@ -386,10 +386,11 @@ export interface ReviewReportSummary {
   strategyAction: 'none' | 'rewrite' // 策略动作：none=未调整 / rewrite=改写策略书
   newVersionId: number | null // rewrite 产出的策略版本 ID（none 时为 null）
   error: string // 非空 = 该次复盘失败（只落错误记录，不影响交易循环）
+  roundId: string // 复盘审计轮 ID（空串 = 无关联，功能上线前的老报告）
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
 }
 
-/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 9 键，reportMd 为全文） */
+/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 10 键，reportMd 为全文） */
 export type ReviewReport = ReviewReportSummary
 
 /** 复盘报告分页：GET /api/review/reports（后端仅返回 items/total，无 offset/limit 回显） */

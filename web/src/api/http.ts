@@ -316,7 +316,7 @@ function adaptDailyStats(raw: RawDailyStats): DailyStats {
   }
 }
 
-/** 后端复盘报告原始项（列表/详情同 9 键，仅 report_md 长度不同） */
+/** 后端复盘报告原始项（列表/详情同 10 键，仅 report_md 长度不同） */
 interface RawReviewReport {
   id: number
   period_start: number
@@ -326,6 +326,7 @@ interface RawReviewReport {
   strategy_action: string
   new_version_id: number | null
   error: string
+  round_id: string
   created_at: number
 }
 
@@ -344,6 +345,7 @@ function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
     strategyAction: raw.strategy_action === 'rewrite' ? 'rewrite' : 'none',
     newVersionId: raw.new_version_id ?? null,
     error: raw.error ?? '',
+    roundId: raw.round_id ?? '', // 老报告/异常缺省降级为空串（契约保证返回，?? 为防御）
     time: new Date(raw.created_at * 1000).toISOString(),
   }
 }

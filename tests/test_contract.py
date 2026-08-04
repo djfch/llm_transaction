@@ -14,8 +14,8 @@
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
-- GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at；顶层 total
-- GET  /api/review/reports/{id} → 同列表项 9 键，report_md 为全文
+- GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
+- GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
 - POST /api/review/run → started/ok（409 复盘进行中；503 LLM 未配置或未接线）
 - GET  /api/strategy/versions → items[] 含 id/md5/created_by/reason/report_id/created_at（不含 content，省流量）
 - GET  /api/strategy/versions/{id} → 同列表项键 + content 全文
@@ -408,7 +408,7 @@ async def test_post_secrets_contract_and_no_echo(client: AsyncClient, deps: Serv
 
 _REPORT_SPEC = (
     "id:i period_start:n period_end:n stats_json:s report_md:s "
-    "strategy_action:s new_version_id:i error:s created_at:n"
+    "strategy_action:s new_version_id:i error:s created_at:n round_id:s"
 )
 
 

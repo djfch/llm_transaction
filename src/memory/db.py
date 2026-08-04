@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS review_reports (
     strategy_action TEXT NOT NULL DEFAULT 'none',
     new_version_id INTEGER,
     error TEXT NOT NULL DEFAULT '',
+    round_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trade_plan (
@@ -171,6 +172,7 @@ class Database:
           不约束 NULL）；索引只在迁移末尾建（旧库须先补列，SCHEMA 阶段建会因缺列报错）。
         - trades.exchange_order_id：历史成交无交易所订单 id，保持 NULL（乱序补正
           只能跳过这些旧行，属可接受残留），不回填。
+        - review_reports.round_id：老报告无审计轮可循，保持默认 ''（无关联），不回填。
         """
         cur = await self._conn.execute("PRAGMA table_info(orders)")
         order_cols = {row["name"] for row in await cur.fetchall()}
@@ -203,6 +205,11 @@ class Database:
                 await self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN strategy_md5 TEXT NOT NULL DEFAULT ''"
                 )
+        cur = await self._conn.execute("PRAGMA table_info(review_reports)")
+        if "round_id" not in {row["name"] for row in await cur.fetchall()}:
+            await self._conn.execute(
+                "ALTER TABLE review_reports ADD COLUMN round_id TEXT NOT NULL DEFAULT ''"
+            )
 
     async def close(self) -> None:
         """关闭连接；重复调用安全。"""

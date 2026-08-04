@@ -113,12 +113,17 @@ class ReviewRepo:
         strategy_action: str,
         new_version_id: int | None = None,
         error: str = "",
+        round_id: str = "",
     ) -> ReviewReport:
-        """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。"""
+        """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。
+
+        round_id 为产生本报告的审计轮 id；省略默认 ''（无关联）。
+        """
         ts = _now()
         cur = await self._conn.execute(
             "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
-            "strategy_action,new_version_id,error,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            "strategy_action,new_version_id,error,round_id,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 period_start,
                 period_end,
@@ -127,6 +132,7 @@ class ReviewRepo:
                 strategy_action,
                 new_version_id,
                 error,
+                round_id,
                 ts,
             ),
         )
@@ -140,6 +146,7 @@ class ReviewRepo:
             strategy_action=strategy_action,
             new_version_id=new_version_id,
             error=error,
+            round_id=round_id,
             created_at=ts,
         )
 
