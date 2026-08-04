@@ -139,7 +139,7 @@ describe('TradesTable(成交记录)', () => {
     const select = await screen.findByLabelText(/合约筛选/)
     // 选项来自 watchlist（不硬编码）
     expect(holder.getWatchlist).toHaveBeenCalled()
-    expect(screen.getByRole('option', { name: 'ETH_USDT' })).toBeInTheDocument()
+    expect(await screen.findByRole('option', { name: 'ETH_USDT' })).toBeInTheDocument()
 
     fireEvent.change(select, { target: { value: 'ETH_USDT' } })
     expect(await screen.findByText('第 1/1 页 · 共 1 笔')).toBeInTheDocument()
