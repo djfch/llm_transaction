@@ -359,6 +359,19 @@ class Repo:
         rows, total = await query_page_rows(self._conn, _NOTES_PAGE_SQL, limit, offset)
         return [Note(**row_without_total(row)) for row in rows], total
 
+    async def list_notes_by_rounds(self, round_ids: list[str]) -> dict[str, Note]:
+        """按 round_id 批量取归属笔记（一次 IN 查询），每轮只留最新一条；供时间线端点按当前页 join 引文。"""
+        if not round_ids:
+            return {}
+        marks = ",".join(["?"] * len(round_ids))  # 占位符个数由参数决定，值仍走参数化
+        cur = await self._conn.execute(
+            f"SELECT * FROM notes WHERE round_id IN ({marks}) ORDER BY id DESC", round_ids
+        )
+        result: dict[str, Note] = {}
+        for row in await cur.fetchall():
+            result.setdefault(row["round_id"], Note(**dict(row)))  # id DESC 首个命中即该轮最新
+        return result
+
     # ---------- wakeup ----------
 
     async def record_wakeup(self, scheduled_at: float, source: str) -> None:

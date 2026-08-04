@@ -5,8 +5,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
-  Note,
-  NotesPageResult,
   RoundDetail,
   RoundsPageResult,
   RoundSummary,
@@ -51,14 +49,12 @@ function deferred<T>() {
 const holder = vi.hoisted(() => ({
   getRounds: vi.fn(),
   getRound: vi.fn(),
-  getNotes: vi.fn(),
   getStrategyVersions: vi.fn(),
 }))
 vi.mock('../api', () => ({
   api: {
     getRounds: (offset: number, limit: number) => holder.getRounds(offset, limit),
     getRound: (roundId: string) => holder.getRound(roundId),
-    getNotes: (offset?: number, limit?: number) => holder.getNotes(offset, limit),
     getStrategyVersions: () => holder.getStrategyVersions(),
   },
 }))
@@ -83,7 +79,6 @@ function detail(roundId: string): RoundDetail {
 }
 
 let currentRounds: RoundSummary[]
-let currentNotes: Note[]
 
 beforeAll(() => {
   window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -91,16 +86,12 @@ beforeAll(() => {
 
 beforeEach(() => {
   currentRounds = [...ROUNDS]
-  currentNotes = []
   wsHolder.lastMessage = null
   vi.clearAllMocks()
   holder.getRounds.mockImplementation((offset: number, limit: number): Promise<RoundsPageResult> =>
     Promise.resolve(pageOf(currentRounds, offset, limit)),
   )
   holder.getRound.mockImplementation((roundId: string): Promise<RoundDetail> => Promise.resolve(detail(roundId)))
-  holder.getNotes.mockImplementation((offset = 0, limit = 20): Promise<NotesPageResult> =>
-    Promise.resolve(pageOf(currentNotes, offset, limit)),
-  )
   holder.getStrategyVersions.mockImplementation((): Promise<StrategyVersion[]> => Promise.resolve([...VERSIONS]))
 })
 
@@ -193,16 +184,18 @@ describe('RoundTimeline(决策时间线)', () => {
     expect(screen.getByText('RAW-id-100')).toBeInTheDocument()
   })
 
-  it('笔记引文仍取最新笔记页中同轮的第一条记录', async () => {
-    currentNotes = [
-      { time: '2023-11-14T23:00:00.000Z', content: '最新结论：突破确认再加仓。', round_id: 'id-100' },
-      { time: '2023-11-14T22:00:00.000Z', content: '较早记录：先观察量能。', round_id: 'id-100' },
-    ]
+  it('笔记引文随当前页下发：第 6 页老轮次的笔记照常显示（不受最新 20 条窗口限制）', async () => {
+    // id-74（第 6 页）挂上归属笔记；原实现只映射最新 20 条笔记，该页必丢引文
+    currentRounds = currentRounds.map((r, i) =>
+      i === 26 ? { ...r, note: { content: '窗口外的老轮次笔记。', time: '2023-11-10T08:00:00.000Z' } } : r,
+    )
     renderTimeline()
+    await screen.findByText('第 100 轮结论摘要')
 
-    expect(await screen.findByText(/最新结论：突破确认再加仓。/)).toBeInTheDocument()
-    expect(screen.queryByText(/较早记录：先观察量能。/)).not.toBeInTheDocument()
-    expect(holder.getNotes).toHaveBeenCalledWith(0, 20)
+    fireEvent.change(screen.getByLabelText('跳转到第几页决策'), { target: { value: '6' } })
+    fireEvent.click(screen.getByRole('button', { name: '跳转' }))
+
+    expect(await screen.findByText(/窗口外的老轮次笔记。/)).toBeInTheDocument()
   })
 
   it('焦点目标在其他页时切换到对应页并展开高亮卡片', async () => {

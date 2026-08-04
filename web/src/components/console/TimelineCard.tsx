@@ -14,7 +14,7 @@ import ClampText from './ClampText'
 import ConversationThread from './ConversationThread'
 import ToolSteps from './ToolSteps'
 
-/** 归属本轮的 Agent 笔记（引文块数据；由父级 round_id 映射注入） */
+/** 归属本轮的 Agent 笔记（引文块数据；随 /rounds 当前页下发的 round.note 直传） */
 export interface RoundNote {
   content: string
   time: string

@@ -2,7 +2,7 @@
  * ConsolePage 冒烟 + WS 联动测试：mock api + 可控 useWs 后整页渲染，
  * 断言关键区域全部就位——TopBar / 账户面板 / 实时决策轮主角 / K线 / 持仓 /
  * 决策时间线 / Agent 笔记 / 成交记录 / 配置抽屉（RoundFocusProvider 由页面内部包裹）；
- * 并验证 WS round 事件触发账户、持仓、权益与两个笔记消费者的刷新。
+ * 并验证 WS round 事件触发账户、持仓、权益与笔记面板（唯一笔记消费者）的刷新。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -270,7 +270,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(await screen.findByText('null（进行中）')).toBeInTheDocument()
   })
 
-  it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板与引文同步失效', async () => {
+  it('WS round 事件 → account/positions/equity/dailyStats 刷新，笔记面板同步失效', async () => {
     const { rerender } = render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
     expect(holder.getPortfolio).toHaveBeenCalledTimes(1)
@@ -286,8 +286,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     await waitFor(() => expect(holder.getPortfolio).toHaveBeenCalledTimes(2))
     expect(holder.getOpenOrders).toHaveBeenCalledTimes(2)
     expect(holder.getEquity).toHaveBeenCalledTimes(2)
-    // notes = NotesPanel 与 RoundTimeline 引文各 2 次（挂载 + round 事件刷新）
-    expect(holder.getNotes).toHaveBeenCalledTimes(4)
+    // notes 仅 NotesPanel 2 次（挂载 + round 事件刷新）；时间线引文随 getRounds 当前页下发，不再独立拉取
+    expect(holder.getNotes).toHaveBeenCalledTimes(2)
     // 当日统计同步联动（新轮成交改变当日口径）
     expect(holder.getDailyStats).toHaveBeenCalledTimes(2)
     // 价格唤醒联动刷新（LLM 设置/触发唤醒均伴随决策轮事件）

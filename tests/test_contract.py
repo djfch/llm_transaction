@@ -10,7 +10,7 @@
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
 - GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，内存唯一存储，触发即移除，active 恒真）
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
-- GET  /api/rounds → items[] 含 round_id/strategy_md5 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
+- GET  /api/rounds → items[] 含 round_id/strategy_md5/note(归属笔记引文,无归属为 null) 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
@@ -157,6 +157,8 @@ _LONG_REPORT_MD = "# 复盘报告\n\n" + "区间成交 3 笔，胜率 66.7%，�
 
 async def _seed(repo: Repo) -> None:
     """种子数据：决策/审计/工具调用/成交/笔记各一条，保证列表端点非空（键断言才有意义）。"""
+    # 无笔记决策轮（先落库保持 r1 为最新轮）：锁 /api/rounds 无归属轮 note=null 的契约形态
+    await repo.save_decision(round_id="r0-nonote", mode="paper", wake_source="timer")
     await repo.save_decision(round_id="r1", mode="paper", wake_source="timer")
     await repo.start_audit_round("r1", "paper", wake_source="timer", prompt_md5="md5")
     await repo.save_audit_tool_call("r1", 1, "place_order", '{"size": 1}', "allow")
@@ -337,6 +339,12 @@ async def test_rounds_contract(client: AsyncClient):
     item = body["items"][0]
     _typed(item, "round_id:s strategy_md5:s", "/api/rounds items[0]")
     _typed(item["audit"], "round_id:s prompt_md5:s started_at:n ended_at:n error:s", "audit 摘要")
+    # 归属笔记引文随当前页下发（无归属的轮为 null）；种子 r1 有一条笔记
+    _typed(item["note"], "content:s created_at:n", "/api/rounds items[0].note")
+    assert item["note"]["content"] == "第一条笔记"
+    # 无归属笔记的轮 note 为 null（种子 r0-nonote 无笔记）
+    by_id = {i["round_id"]: i for i in body["items"]}
+    assert by_id["r0-nonote"]["note"] is None
     detail = await _get(client, "/api/rounds/r1")
     # 契约：round 展平到顶层（前端 RoundDetail 读顶层 round_id/prompt_snapshot/llm_raw）
     assert detail["round_id"] == "r1"

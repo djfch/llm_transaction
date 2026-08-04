@@ -73,6 +73,7 @@ export interface RoundSummary {
   summary: string // 本轮结论摘要
   strategyMd5: string // 策略书原文 md5（空串 = 历史数据无关联），用于 join 策略版本
   pnl_after?: number // 本轮结束后的累计盈亏（后端暂无此口径，缺失时显示 '-'）
+  note?: { content: string; time: string } | null // 归属笔记引文（随当前页下发，每轮最新一条；null/缺省 = 无归属）
 }
 
 /** 通用分页结果：items(当前页内容) 与 total(匹配总数) 由服务端一并返回。 */

@@ -390,6 +390,19 @@ async def test_notes_page_returns_latest_items_and_total(repo: Repo):
     assert empty_items == []
 
 
+async def test_list_notes_by_rounds(repo: Repo):
+    """按轮批量取笔记：每轮只留最新一条，无归属轮次缺席，空输入返回空映射。"""
+    await repo.add_note("r1", "旧笔记")
+    await repo.add_note("r1", "新笔记")
+    await repo.add_note("r2", "另一轮笔记")
+    await repo.add_note("rx", "不在查询范围的笔记")
+    result = await repo.list_notes_by_rounds(["r1", "r2", "r3"])
+    assert result["r1"].content == "新笔记"  # id DESC 首个命中即该轮最新
+    assert result["r2"].content == "另一轮笔记"
+    assert "r3" not in result  # 无归属笔记的轮次不出现在键中
+    assert await repo.list_notes_by_rounds([]) == {}
+
+
 # ---------- wakeup ----------
 
 

@@ -192,16 +192,20 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     async def list_rounds(
         offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)
     ) -> dict[str, Any]:
-        """分页返回决策轮摘要及总数，列表不包含体积较大的 LLM 原文。"""
+        """分页返回决策轮摘要及总数；列表不含 LLM 原文，含每轮归属笔记引文（无归属为 null）。"""
         decisions, total = await deps.repo.list_decisions_page(limit=limit, offset=offset)
-        audits = await deps.repo.list_audit_rounds(
-            [d.round_id for d in decisions]
-        )  # 批量取，免 N+1
+        round_ids = [d.round_id for d in decisions]
+        audits = await deps.repo.list_audit_rounds(round_ids)  # 批量取，免 N+1
+        notes = await deps.repo.list_notes_by_rounds(round_ids)  # 同页笔记引文（每轮最新一条）
         items = []
         for d in decisions:
             item = d.model_dump()
             item.pop("llm_raw", None)  # 列表不返回 LLM 原文，详情走 /rounds/{id}
             item["audit"] = _audit_summary(audits.get(d.round_id))
+            note = notes.get(d.round_id)
+            item["note"] = (
+                {"content": note.content, "created_at": note.created_at} if note else None
+            )
             items.append(item)
         return {"offset": offset, "limit": limit, "total": total, "items": items}
 
