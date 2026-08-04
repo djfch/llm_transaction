@@ -7,7 +7,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
-import type { ReviewReport, ReviewReportSummary, RoundDetail } from '../api/types'
+import type { ReviewReport, ReviewReportSummary, RoundDetail, WsMessage } from '../api/types'
 import ReviewPanel from '../components/console/ReviewPanel'
 
 const iso = (unixSec: number) => new Date(unixSec * 1000).toISOString()
@@ -97,6 +97,8 @@ const holder = vi.hoisted(() => ({
   getReviewReport: vi.fn(),
   getRound: vi.fn(),
   runReview: vi.fn(),
+  getReviewLive: vi.fn(),
+  lastMessage: null as WsMessage | null,
 }))
 vi.mock('../api', () => ({
   api: {
@@ -104,11 +106,20 @@ vi.mock('../api', () => ({
     getReviewReport: (id: number) => holder.getReviewReport(id),
     getRound: (roundId: string) => holder.getRound(roundId),
     runReview: () => holder.runReview(),
+    getReviewLive: () => holder.getReviewLive(),
   },
+}))
+
+// ReviewLiveStrip 经 useWs 订阅复盘事件；lastMessage 经 holder 可控派发（默认 null 无消息，进度条隐藏）
+vi.mock('../hooks/useWs', () => ({
+  useWs: () => ({ connected: true, lastMessage: holder.lastMessage }),
 }))
 
 beforeEach(() => {
   vi.clearAllMocks()
+  holder.lastMessage = null
+  // 默认无进行中复盘轮：进度条不渲染
+  holder.getReviewLive.mockResolvedValue({ round: null, tool_calls: [] })
   holder.getReviewReports.mockImplementation((offset: number, limit: number) =>
     Promise.resolve({ items: REPORTS.slice(offset, offset + limit), total: REPORTS.length }),
   )
@@ -274,5 +285,49 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(await screen.findByText('第 2 份报告：无需调整。')).toBeInTheDocument()
     expect(screen.getByText('第 1 份报告：无需调整。')).toBeInTheDocument()
     expect(screen.getByText('第 2/2 页 · 共 7 条复盘')).toBeInTheDocument()
+  })
+
+  it('进度条联动：review_round_start 出现进度条，review_round 结束后消失并自动刷新报告列表', async () => {
+    const { rerender } = render(<ReviewPanel />)
+    await screen.findByText(/第 5 份报告/)
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+
+    // 注入复盘开始事件：进度条出现（轮询数据源返回进行中轮与 1 条 {text} 包装的工具调用）
+    holder.getReviewLive.mockResolvedValue({
+      round: {
+        round_id: 'rv-live',
+        wake_source: 'review',
+        prompt_md5: 'md5',
+        prompt_snapshot: 'prompt',
+        context_snapshot: 'ctx',
+        llm_raw: '',
+        strategy_md5: 's-md5',
+        started_at: Math.floor(Date.now() / 1000) - 5,
+        ended_at: null,
+        error: '',
+      },
+      tool_calls: [
+        {
+          seq: 1,
+          tool: 'get_review_stats',
+          args: { interval_days: 1 },
+          risk_verdict: '',
+          risk_reason: '',
+          result: { text: '概览' },
+          duration_ms: 12,
+        },
+      ],
+    })
+    holder.lastMessage = { type: 'review_round_start', data: { round_id: 'rv-live' } }
+    rerender(<ReviewPanel />)
+    expect(await screen.findByTestId('review-live-strip')).toBeInTheDocument()
+
+    // 注入复盘结束事件：进度条消失，onFinished（即 refreshToLatest）触发报告列表自动刷新
+    const callsBefore = holder.getReviewReports.mock.calls.length
+    holder.lastMessage = { type: 'review_round', data: { round_id: 'rv-live', ok: true } }
+    rerender(<ReviewPanel />)
+
+    await waitFor(() => expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument())
+    await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
   })
 })

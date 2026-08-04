@@ -16,6 +16,7 @@ import { usePageState } from '../../hooks/usePageState'
 import { fmtNum, fmtPct2, fmtSigned, fmtTime, pnlClass } from '../../utils/format'
 import StateHint from '../StateHint'
 import PaginationControls from './PaginationControls'
+import ReviewLiveStrip from './ReviewLiveStrip'
 import ReviewToolChain from './ReviewToolChain'
 
 /** 复盘报告每页条数（与决策时间线一致的交互口径）。 */
@@ -206,6 +207,13 @@ export default function ReviewPanel() {
     [goToPage, page],
   )
 
+  /** 新报告出现在最前：收起展开项，回第一页（deps 驱动刷新）；已在第一页则原地刷新。 */
+  const refreshToLatest = useCallback(() => {
+    setExpandedId(null)
+    if (page !== 0 && totalPages > 0) goToPage(0)
+    else reload()
+  }, [goToPage, page, reload, totalPages])
+
   /** 手动触发复盘：后端同步执行完毕才返回；409/503 经 ApiError.detail 提示。 */
   const runNow = async () => {
     setRunning(true)
@@ -224,10 +232,7 @@ export default function ReviewPanel() {
       } else {
         setNotice({ ok: true, text: '复盘已完成，最新报告已入列' })
       }
-      setExpandedId(null)
-      // 新报告在最前：回第一页（deps 驱动刷新）；已在第一页则原地刷新
-      if (page !== 0 && totalPages > 0) goToPage(0)
-      else reload()
+      refreshToLatest()
     } catch (e) {
       setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {
@@ -251,6 +256,8 @@ export default function ReviewPanel() {
           {running ? '复盘中…' : '立即复盘'}
         </button>
       </header>
+
+      <ReviewLiveStrip onFinished={refreshToLatest} />
 
       {notice && (
         <div

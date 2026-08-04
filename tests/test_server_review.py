@@ -2,6 +2,7 @@
 
 覆盖：
 - GET /api/review/reports(+{id})：列表截断 200、详情全文、404；
+- GET /api/review/live：空库 round=null、键集与值（args/result 已解析）、交易轮不串台；
 - POST /api/review/run：未接线 503、LLM 未配置 503、进行中 409、成功 200；
 - GET /api/strategy/versions(+{id})：列表不含 content、详情含 content、404；
 - GET /api/strategy/diff：200 纯文本、版本不存在 404、参数非法 422；
@@ -77,6 +78,62 @@ async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
         assert detail["report_md"] == _LONG_MD  # 详情全文
         assert detail["round_id"] == "rv-round-1"  # 详情透出审计轮 id
         assert (await c.get("/api/review/reports/999")).status_code == 404
+
+
+# ---------- GET /api/review/live ----------
+
+
+async def test_review_live_empty(repo: Repo, tmp_path: Path):
+    """空库：无复盘轮时 round 为 null、tool_calls 为空。"""
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        body = (await c.get("/api/review/live")).json()
+        assert body == {"round": None, "tool_calls": []}
+
+
+async def test_review_live_returns_latest_review_round(repo: Repo, tmp_path: Path):
+    """种复盘轮 + 工具调用：round 键集不含 mode、args/result 已解析；更新的交易轮不串台。"""
+    await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
+    )
+    await repo.save_audit_tool_call("rv1", 2, "list_trades", "{}", duration_ms=12)
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        body = (await c.get("/api/review/live")).json()
+        assert set(body) == {"round", "tool_calls"}
+        assert set(body["round"]) == {  # 与 /api/agent/live 的 round 键集一致（不含 mode）
+            "round_id",
+            "wake_source",
+            "prompt_md5",
+            "strategy_md5",
+            "prompt_snapshot",
+            "context_snapshot",
+            "llm_raw",
+            "started_at",
+            "ended_at",
+            "error",
+        }
+        assert body["round"]["round_id"] == "rv1"
+        assert body["round"]["wake_source"] == "review"
+        assert body["round"]["ended_at"] is None  # 进行中的复盘轮同样返回
+        calls = body["tool_calls"]
+        assert [c["seq"] for c in calls] == [1, 2]
+        assert set(calls[0]) == {
+            "seq",
+            "tool",
+            "args",
+            "risk_verdict",
+            "risk_reason",
+            "result",
+            "duration_ms",
+        }
+        assert calls[0]["tool"] == "get_review_stats"
+        assert calls[0]["args"] == {"start_ts": 1000}  # args_json 已解析为对象
+        assert calls[0]["result"] == {"text": "概览"}  # result_json 已解析为对象
+        assert calls[1]["duration_ms"] == 12
+        # 再种一条更新的交易轮：仍返回复盘轮（不串台）
+        await repo.start_audit_round("r-t9", "paper", wake_source="timer", started_at=9000.0)
+        body2 = (await c.get("/api/review/live")).json()
+        assert body2["round"]["round_id"] == "rv1"
 
 
 # ---------- POST /api/review/run ----------

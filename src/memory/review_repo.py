@@ -13,7 +13,7 @@ import time
 import aiosqlite
 
 from src.memory.db import Database
-from src.memory.models import Decision, ReviewReport, StrategyVersion, Trade
+from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersion, Trade
 
 
 def _now() -> float:
@@ -249,3 +249,18 @@ class ReviewRepo:
         params.append(limit)
         cur = await self._conn.execute(sql + " ORDER BY id LIMIT ?", params)
         return [Trade(**dict(r)) for r in await cur.fetchall()]
+
+    # ---------- audit_rounds（复盘审计轮取数） ----------
+
+    async def latest_review_audit_round(self, mode: str) -> AuditRound | None:
+        """按模式取最近一轮复盘审计（wake_source='review' 过滤，排序口径同 latest_audit_round）。
+
+        供 /api/review/live 使用：交易轮（timer 等）再多也不参与；无复盘轮返回 None。
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM audit_rounds WHERE mode=? AND wake_source='review'"
+            " ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (mode,),
+        )
+        row = await cur.fetchone()
+        return AuditRound(**dict(row)) if row else None

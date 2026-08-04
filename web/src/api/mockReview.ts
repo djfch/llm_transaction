@@ -1,11 +1,12 @@
 /**
- * 复盘/策略版本 mock：独立内存态（复盘报告、策略版本表）+ 7 个 ApiClient 方法实现，
+ * 复盘/策略版本 mock：独立内存态（复盘报告、策略版本表、实时复盘轮状态）+ 8 个 ApiClient 方法实现，
  * 由 mock.ts 经 createReviewMock 装配进 mockApi，本模块独立维护复盘模拟状态。
  * 与后端契约对齐：报告列表 reportMd 截断 200 字符、版本列表不含 content、
- * 手动复盘立即出一份「未调整」报告、回滚 = 写回历史内容 + 记 rollback 新版本。
+ * 手动复盘立即出一份「未调整」报告（实时复盘轮随之翻转为已结束，演示进度条退出）、
+ * 回滚 = 写回历史内容 + 记 rollback 新版本。
  */
 import { ApiError } from './http'
-import type { ApiClient, ReviewReport, StrategyVersionDetail } from './types'
+import type { ApiClient, ReviewLive, ReviewReport, StrategyVersionDetail } from './types'
 
 /** mockApi 中复盘/策略版本相关的方法子集 */
 type ReviewMockHandlers = Pick<
@@ -13,6 +14,7 @@ type ReviewMockHandlers = Pick<
   | 'getReviewReports'
   | 'getReviewReport'
   | 'runReview'
+  | 'getReviewLive'
   | 'getStrategyVersions'
   | 'getStrategyVersion'
   | 'getStrategyDiff'
@@ -114,10 +116,11 @@ function seedVersions(currentStrategy: string): void {
   ]
 }
 
-/** 手动复盘：立即出一份「未调整」报告（最新在前），演示成功后列表刷新。 */
+/** 手动复盘：立即出一份「未调整」报告（最新在前），演示成功后列表刷新；实时复盘轮随之翻转为已结束。 */
 function runMockReview(): number {
   const newId = Math.max(0, ...reviewReports.map((r) => r.id)) + 1
   const end = Date.now()
+  liveRoundActive = false // 复盘完成：getReviewLive 改返已结束轮，进度条轮询发现后退出并触发列表自动刷新
   reviewReports.unshift({
     id: newId,
     periodStart: new Date(end - 24 * 3600_000).toISOString(),
@@ -135,8 +138,56 @@ function runMockReview(): number {
   return newId
 }
 
+/** 复盘轮进行状态：默认进行中（演示进度条出现）；手动复盘完成后翻转为已结束（演示进度条退出 + 列表自动刷新） */
+let liveRoundActive = true
+
 /**
- * 创建复盘/策略版本 mock 域：播种版本表并返回 7 个 ApiClient 方法 + 两个协作钩子。
+ * 实时复盘审计轮样例（active=true 进行中 / false 已结束，工具链两种形态下都保留）。
+ * 进行中：ended_at 为 null、llm_raw 空串（与 /api/agent/live 同约定）；已结束：ended_at 非空、带结论 llm_raw。
+ * 工具链 2 条（先拉统计，再查明细），result 一律 {text} 包装（与后端 review agent 对齐）；
+ * 统计叙事与 reviewReports 最新一条「未调整」报告自洽；strategy_md5 关联版本表最新版（与当前策略同文）。
+ * 每次请求重建以保证 started_at 始终新鲜（不触发前端 30 分钟僵尸轮防线）。
+ */
+function buildReviewLive(active: boolean): ReviewLive {
+  const startedAt = Math.floor(Date.now() / 1000) - 18
+  return {
+    round: {
+      round_id: 'rv-live-mock',
+      wake_source: 'review',
+      prompt_md5: '7a1b2c3d4e5f60718293a4b5c6d7e8f9',
+      prompt_snapshot: '# 复盘 Agent Prompt（md5: 7a1b…f9）\n\n你是复盘 Agent，只读分析最近交易并产出报告。',
+      context_snapshot: '统计区间: 最近 24 小时\n平仓 3 笔，胜率 66.67%，总盈亏 +18.40 USDT',
+      llm_raw: active ? '' : JSON.stringify({ thoughts: '统计区间策略执行符合预期，无需调整。' }),
+      strategy_md5: strategyVersions[0]?.md5 ?? '',
+      started_at: startedAt,
+      ended_at: active ? null : startedAt + 42,
+      error: '',
+    },
+    tool_calls: [
+      {
+        seq: 1,
+        tool: 'get_review_stats',
+        args: { interval_days: 1 },
+        risk_verdict: '',
+        risk_reason: '',
+        result: { text: '近 24 小时平仓 3 笔，胜率 66.67%，总盈亏 +18.40 USDT' },
+        duration_ms: 12,
+      },
+      {
+        seq: 2,
+        tool: 'get_decision_detail',
+        args: { round_id: 'round-0037' },
+        risk_verdict: '',
+        risk_reason: '',
+        result: { text: '波动率不足，维持现有持仓，继续观察。' },
+        duration_ms: 9,
+      },
+    ],
+  }
+}
+
+/**
+ * 创建复盘/策略版本 mock 域：播种版本表并返回 8 个 ApiClient 方法 + 两个协作钩子。
  * reply / strategy 读写由 mock.ts 注入，本模块不反向依赖 mock.ts（避免循环导入）。
  */
 export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef: StrategyRef) {
@@ -166,6 +217,7 @@ export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef
         error: '',
       })
     },
+    getReviewLive: () => reply(buildReviewLive(liveRoundActive)),
     getStrategyVersions: () =>
       // 与后端契约一致：列表不含 content 全文（省流量）
       reply(

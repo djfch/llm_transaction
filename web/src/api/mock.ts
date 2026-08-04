@@ -531,6 +531,7 @@ export const mockApi: ApiClient = {
   getReviewReports: reviewMock.handlers.getReviewReports,
   getReviewReport: reviewMock.handlers.getReviewReport,
   runReview: reviewMock.handlers.runReview,
+  getReviewLive: reviewMock.handlers.getReviewLive,
   getStrategyVersions: reviewMock.handlers.getStrategyVersions,
   getStrategyVersion: reviewMock.handlers.getStrategyVersion,
   getStrategyDiff: reviewMock.handlers.getStrategyDiff,

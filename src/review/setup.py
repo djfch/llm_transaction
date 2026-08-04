@@ -67,7 +67,8 @@ async def build_review(
     """创建复盘子系统组件：策略版本库播种 v1；复盘 agent 复用同一 provider/audit/repo。
 
     路径默认取 ROOT 下运行时文件（调用期解析，测试可 monkeypatch 本模块 ROOT 隔离）；
-    notify_event 接线后，策略书任一路径变更（复盘修订/手动保存/回滚）即广播 strategy_updated。
+    notify_event 接线后，策略书任一路径变更（复盘修订/手动保存/回滚）即广播 strategy_updated，
+    复盘轮开始/结束另广播 review_round_start/review_round（透传给 ReviewAgent）。
     指标三件套（service/config_store/watchlist）缺省 None：指标工具降级为中文提示。
     """
     on_change = None if notify_event is None else lambda: notify_event({"type": "strategy_updated"})
@@ -81,6 +82,7 @@ async def build_review(
         store=store,
         prompt_loader=ReviewPromptLoader(review_prompt_path or ROOT / "review_prompt.md"),
         on_alert=build_notifier(settings.notify).send,  # 与决策循环同款通知通道
+        notify_event=notify_event,  # 复盘轮始末事件直推 WS 广播队列
         indicator_service=indicator_service,
         indicator_config_store=indicator_config_store,
         watchlist=watchlist,

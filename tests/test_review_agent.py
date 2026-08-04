@@ -3,7 +3,8 @@
 覆盖：(a) 直接返文本 → 报告落库 action=none、审计轮 wake_source='review'、通知被调；
 (b) 先调 get_review_stats 再 submit 再返文本 → 版本创建 + action=rewrite + attach + 工具审计行；
 (c) stub 抛 LLMError → error 报告 + 告警 + 不抛；(d) provider None → 无审计无报告；
-另：空文本兜底、set_provider 热替换。
+另：空文本兜底、set_provider 热替换、轮始/轮末 WS 事件序列（成功 ok=True / 失败 ok=False /
+未配置零事件）、事件回调抛错容错（run 不受影响）。
 """
 
 import json
@@ -58,18 +59,22 @@ async def env(tmp_path):
     review_prompt = tmp_path / "review_prompt.md"
     review_prompt.write_text("# 复盘纪律\n先统计后下钻。", encoding="utf-8")
     alerts: list[str] = []
+    events: list[dict] = []  # 收集 notify_event 广播的 WS 事件
     yield SimpleNamespace(
         repo=repo,
         store=store,
         audit=AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit"))),
         loader=ReviewPromptLoader(review_prompt),
         alerts=alerts,
+        events=events,
         settings=Settings(),
     )
     await db.close()
 
 
 def _make_agent(env, provider, **kwargs) -> ReviewAgent:
+    # 默认同步收集 WS 事件；用例可经 kwargs 覆盖注入（如抛错容错测试）
+    kwargs.setdefault("notify_event", lambda payload: env.events.append(payload))
     return ReviewAgent(
         settings=env.settings,
         provider=provider,
@@ -117,6 +122,10 @@ async def test_run_success_without_revision(env):
     assert round_row.ended_at is not None and round_row.error == ""
     assert len(env.alerts) == 1
     assert "策略未调整" in env.alerts[0] and len(env.alerts[0]) <= 500
+    # WS 事件序列：轮始 → 轮末（成功 ok=True），round_id 与审计轮一致
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[0]["data"] == {"round_id": result["round_id"]}
+    assert env.events[1]["data"] == {"round_id": result["round_id"], "ok": True}
     assert len(await env.repo.review.list_strategy_versions()) == 1  # 只有播种的 v1
 
 
@@ -187,6 +196,23 @@ async def test_run_llm_failure_lands_error_report(env):
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.error == "LLMError: boom"
     assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]
+    # 失败路径也发齐两条事件，尾部 review_round 带 ok=False
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": result["round_id"], "ok": False}
+
+
+async def test_run_survives_notify_event_failure(env):
+    """notify_event 每次调用都抛错：_emit_event 容错生效，run 仍成功、报告正常落库。"""
+
+    def _boom(payload: dict) -> None:
+        raise RuntimeError("广播队列挂了")
+
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n事件失败无妨。", raw="raw-1")])
+    result = await _make_agent(env, provider, notify_event=_boom).run(*_PERIOD)
+    assert result["ok"] is True  # start/end 两次广播均抛错，不翻盘复盘结果
+    report = await env.repo.review.get_review_report(result["report_id"])
+    assert report.report_md == "# 复盘结论\n事件失败无妨。"
+    assert report.error == ""
     assert len(await env.repo.review.list_strategy_versions()) == 1  # 未产生新版本
 
 
@@ -199,6 +225,7 @@ async def test_run_without_provider_no_audit_no_report(env):
     assert await env.repo.review.latest_review_period_end() is None
     assert await env.repo.latest_audit_round("paper") is None
     assert env.alerts == []
+    assert env.events == []  # LLM 未配置提前返回：零事件
 
 
 async def test_set_provider_hot_swap(env):
