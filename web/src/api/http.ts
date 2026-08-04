@@ -26,6 +26,7 @@ import type {
   Position,
   PortfolioSnapshot,
   PutConfigResult,
+  ReviewLive,
   ReviewReport,
   ReviewReportsPage,
   ReviewReportSummary,
@@ -601,6 +602,8 @@ export const httpApi: ApiClient = {
   getReviewReport: async (id): Promise<ReviewReport> =>
     adaptReviewReport(await request<RawReviewReport>(`/review/reports/${id}`)),
   runReview: async () => adaptRunReview(await request<RawRunReview>('/review/run', { method: 'POST' })),
+  // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配
+  getReviewLive: () => request<ReviewLive>('/review/live'),
   getStrategyVersions: async () =>
     (await request<{ items: RawStrategyVersion[] }>('/strategy/versions')).items.map(adaptStrategyVersion),
   getStrategyVersion: async (id): Promise<StrategyVersionDetail> => {

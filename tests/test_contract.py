@@ -14,6 +14,7 @@
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
+- GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）
 - GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
 - GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
 - POST /api/review/run → started/ok（409 复盘进行中；503 LLM 未配置或未接线）
@@ -176,6 +177,12 @@ async def _seed(repo: Repo) -> None:
         1000.0, 2000.0, '{"trades":3}', _LONG_REPORT_MD, "rewrite", new_version_id=v2.id
     )
     await repo.review.attach_report_to_version(v2.id, report.id)
+    # 复盘审计轮种子：/api/review/live 契约断言用
+    # （started_at 早于 r1，latest_audit_round 仍取 r1，不影响 /api/agent/live）
+    await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -458,6 +465,29 @@ async def test_review_strategy_contract(client: AsyncClient):
 
     rollback = await _post(client, "/api/strategy/rollback/1")
     _typed(rollback, "rolled_back_to:i version:i", "POST /api/strategy/rollback/{id}")
+
+    live = await _get(client, "/api/review/live")
+    assert set(live) == {"round", "tool_calls"}
+    assert live["round"] is not None  # 本 fixture 已种子一轮复盘审计轮
+    assert set(live["round"]) == {  # 与 /api/agent/live 的 round 键集一致（不含 mode）
+        "round_id",
+        "wake_source",
+        "prompt_md5",
+        "strategy_md5",
+        "prompt_snapshot",
+        "context_snapshot",
+        "llm_raw",
+        "started_at",
+        "ended_at",
+        "error",
+    }
+    assert live["round"]["round_id"] == "rv1"
+    assert live["tool_calls"], "/api/review/live tool_calls 应非空"
+    _typed(
+        live["tool_calls"][0],
+        "seq:i tool:s args:d result:d risk_verdict:s risk_reason:s duration_ms:i",
+        "/api/review/live tool_calls[0]",
+    )
 
 
 async def test_indicators_contract(client: AsyncClient):

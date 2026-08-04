@@ -122,6 +122,8 @@ vi.mock('../api', () => ({
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
     // 复盘报告面板与决策时间线版本标签数据源
     getReviewReports: () => Promise.resolve({ items: [], total: 0 }),
+    // 复盘进行中进度条数据源：无进行中复盘轮（进度条保持隐藏）
+    getReviewLive: () => Promise.resolve({ round: null, tool_calls: [] }),
     getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),

@@ -7,6 +7,38 @@ import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/http'
 import { mockApi } from '../api/mock'
 
+// 注意：getReviewLive 的模块级状态会被 runReview 翻转（进行中 → 已结束），
+// 「默认进行中」断言必须先于文件内任何 runReview 调用执行，故本 describe 置于文件顶部。
+describe('mock 实时复盘状态', () => {
+  it('getReviewLive：默认返回进行中复盘轮（ended_at 为 null、wake_source=review、工具链非空且叙事自洽）', async () => {
+    const live = await mockApi.getReviewLive()
+    expect(live.round).not.toBeNull()
+    const round = live.round!
+    expect(round.wake_source).toBe('review')
+    expect(round.ended_at).toBeNull()
+    expect(round.error).toBe('')
+    expect(live.tool_calls.length).toBeGreaterThanOrEqual(2)
+    expect(live.tool_calls[0].tool).toBe('get_review_stats')
+    // 工具 result 一律 {text} 包装（与后端 review agent 对齐）
+    for (const call of live.tool_calls) expect(call.result).toHaveProperty('text')
+    // started_at 新鲜：不触发前端 30 分钟僵尸轮防线
+    expect(Date.now() - round.started_at * 1000).toBeLessThan(30 * 60 * 1000)
+    // strategy_md5 关联版本表最新版（与当前策略同文，叙事自洽）
+    const versions = await mockApi.getStrategyVersions()
+    expect(round.strategy_md5).toBe(versions[0].md5)
+  })
+
+  it('getReviewLive：手动复盘完成后翻转为已结束轮（ended_at 非空、llm_raw 有结论、工具链保留）', async () => {
+    await mockApi.runReview()
+    const live = await mockApi.getReviewLive()
+    const round = live.round!
+    expect(round.ended_at).not.toBeNull()
+    expect(round.ended_at!).toBeGreaterThan(round.started_at)
+    expect(round.llm_raw).not.toBe('')
+    expect(live.tool_calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
 describe('mock 复盘端点', () => {
   it('getReviewReports：分页切片 + total 全量 + 列表 reportMd 截断 200 字符', async () => {
     const page = await mockApi.getReviewReports(0, 2)
@@ -121,3 +153,4 @@ describe('mock 决策轮策略关联', () => {
     expect(detail.strategyMd5).toBe(withMd5!.strategyMd5)
   })
 })
+

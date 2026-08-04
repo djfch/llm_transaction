@@ -1,4 +1,4 @@
-"""复盘与策略版本端点：复盘报告只读/手动触发、策略版本列表/详情/diff/回滚。
+"""复盘与策略版本端点：复盘报告只读/手动触发、复盘实时状态、策略版本列表/详情/diff/回滚。
 
 写操作（手动复盘、策略回滚）全部经 ServerDeps 回调注入，None 时诚实 503；
 从 src.review.strategy 仅 import StrategyValidationError 异常契约做错误映射，
@@ -14,9 +14,11 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from src.config import load_settings
 from src.memory.models import ReviewReport, StrategyVersion
 from src.review.strategy import StrategyValidationError
 from src.server.deps import ServerDeps
+from src.server.routes_status import _tool_call_item  # tool_calls 与 /agent/live 同一序列化口径
 
 _LIST_REPORT_MD_LIMIT = 200  # 列表项 report_md 截断长度（省流量，详情端点给全文）
 
@@ -66,6 +68,25 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
         if report is None:
             raise HTTPException(status_code=404, detail=f"复盘报告不存在: {report_id}")
         return _report_item(report, truncate=False)
+
+    @router.get("/review/live")
+    async def get_review_live() -> dict[str, Any]:
+        """实时复盘展示：当前模式最新一轮复盘审计（wake_source='review'）+ 已落库工具调用。
+
+        响应键与前端契约冻结：round 键集同 /api/agent/live（model_dump 不含 mode，
+        进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item，
+        args/result 为已解析对象）；mode 口径同 get_agent_live（runtime_settings 优先，
+        未接线回退配置文件）；无复盘轮时 round 为 null、tool_calls 为空。
+        """
+        settings = deps.runtime_settings or load_settings(deps.config_path)
+        round_row = await deps.repo.review.latest_review_audit_round(settings.mode)
+        if round_row is None:
+            return {"round": None, "tool_calls": []}
+        calls = await deps.repo.list_audit_tool_calls(round_row.round_id)
+        return {
+            "round": round_row.model_dump(exclude={"mode"}),  # 契约不含 mode 键（同 /agent/live）
+            "tool_calls": [_tool_call_item(c) for c in calls],
+        }
 
     @router.post("/review/run")
     async def run_review_now(body: _ReviewRunBody | None = Body(None)) -> dict[str, Any]:

@@ -266,3 +266,55 @@ describe('rounds 的 strategy_md5 适配', () => {
     expect((await httpApi.getRound('r2')).strategyMd5).toBe('')
   })
 })
+
+describe('getReviewLive 适配', () => {
+  it('round 非 null：snake_case 原样透传（与 getAgentLive 同约定），args/result 为已解析对象', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        '/api/review/live': {
+          round: {
+            round_id: 'rv-1',
+            wake_source: 'review',
+            prompt_md5: 'md5',
+            prompt_snapshot: 'prompt',
+            context_snapshot: 'ctx',
+            llm_raw: '',
+            strategy_md5: 's-md5',
+            started_at: 1784600000,
+            ended_at: null,
+            error: '',
+          },
+          tool_calls: [
+            {
+              seq: 1,
+              tool: 'get_review_stats',
+              args: { interval_days: 1 },
+              risk_verdict: '',
+              risk_reason: '',
+              result: { text: '概览' },
+              duration_ms: 12,
+            },
+          ],
+        },
+      }),
+    )
+    const live = await httpApi.getReviewLive()
+    expect(live.round?.round_id).toBe('rv-1')
+    expect(live.round?.wake_source).toBe('review')
+    expect(live.round?.strategy_md5).toBe('s-md5')
+    expect(live.round?.started_at).toBe(1784600000)
+    expect(live.round?.ended_at).toBeNull()
+    expect(live.tool_calls).toHaveLength(1)
+    expect(live.tool_calls[0].tool).toBe('get_review_stats')
+    expect(live.tool_calls[0].args).toEqual({ interval_days: 1 })
+    expect(live.tool_calls[0].result).toEqual({ text: '概览' }) // 后端复盘工具结果一律 {text} 包装
+  })
+
+  it('无复盘轮：round 为 null、tool_calls 为空数组', async () => {
+    vi.stubGlobal('fetch', stubFetch({ '/api/review/live': { round: null, tool_calls: [] } }))
+    const live = await httpApi.getReviewLive()
+    expect(live.round).toBeNull()
+    expect(live.tool_calls).toEqual([])
+  })
+})

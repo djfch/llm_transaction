@@ -5,6 +5,9 @@
 - 正常路径：wake_source='review' 开审计轮 → 中文简报（区间 + 当前策略全文 +
   代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本落 review_reports →
   有修订则版本↔报告互相关联（策略书与指标短名单各自判空关联）→ 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
+- WS 事件（notify_event 注入时）：begin_round 后广播 review_round_start，
+  结束审计轮后广播 review_round（成功 ok=True / _fail 路径 ok=False）；
+  事件失败只记日志绝不影响复盘；provider None 提前返回时零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 失败告警，返回 {'ok': False}，
   绝不向上抛，确保复盘失败不影响交易决策循环；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -83,6 +86,7 @@ class ReviewAgent:
         store: StrategyStore,
         prompt_loader: ReviewPromptLoader,
         on_alert: AlertCallback | None = None,
+        notify_event: Callable[[dict], None] | None = None,  # WS 事件广播（轮始/轮末）
         max_turns: int = 12,
         indicator_service: IndicatorService | None = None,
         indicator_config_store: IndicatorConfigStore | None = None,
@@ -95,6 +99,7 @@ class ReviewAgent:
         self._store = store
         self._prompts = prompt_loader
         self._on_alert = on_alert
+        self._notify_event = notify_event  # None 则不广播（测试/未接线场景零事件）
         self._max_turns = max(1, max_turns)
         # 指标三件套默认 None/空（未装配）：指标工具降级为中文提示，其余工具不受影响
         self._indicator_service = indicator_service
@@ -124,6 +129,7 @@ class ReviewAgent:
         registry = ReviewToolRegistry(deps)
         full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
         round_id = await self._audit.begin_round(self._settings.mode, "review", full_prompt)
+        await self._emit_event({"type": "review_round_start", "data": {"round_id": round_id}})
         raw_parts: list[str] = []
         try:
             stats_text, stats_json = await self._pre_stats(period_start, period_end)
@@ -149,6 +155,7 @@ class ReviewAgent:
             await self._audit.end_round(round_id, "\n".join(raw_parts))
         except Exception as e:
             return await self._fail(round_id, raw_parts, period_start, period_end, e)
+        await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
         await self._notify(_success_alert(report_md, deps.created_version_id))
         logger.info("复盘完成 report_id=%s action=%s", report.id, report.strategy_action)
         return {
@@ -250,6 +257,9 @@ class ReviewAgent:
             period_start, period_end, "{}", "", "none", error=error, round_id=round_id
         )
         await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)
+        await self._emit_event(
+            {"type": "review_round", "data": {"round_id": round_id, "ok": False}}
+        )
         await self._notify(_escape_alert(f"【复盘失败】{error}"))
         return {"ok": False, "error": error, "report_id": report.id, "round_id": round_id}
 
@@ -261,6 +271,15 @@ class ReviewAgent:
             await maybe_await(self._on_alert(msg))
         except Exception:
             logger.exception("复盘告警发送失败")
+
+    async def _emit_event(self, payload: dict) -> None:
+        """广播 WS 事件：回调可同步/异步（与 _notify 同容错模式）；失败只记日志。"""
+        if self._notify_event is None:
+            return
+        try:
+            await maybe_await(self._notify_event(payload))
+        except Exception:
+            logger.exception("复盘事件广播失败")
 
 
 def _success_alert(report_md: str, version_id: int | None) -> str:

@@ -127,6 +127,17 @@ export interface AgentLiveState {
   tool_calls: ToolCall[] // 本轮已执行的工具调用（进行中实时追加）
 }
 
+/** 实时复盘轮快照：GET /api/review/live 的 round 字段（形状与 AgentLiveRound 一致并透传 snake_case，另带 strategy_md5） */
+export interface ReviewLiveRound extends AgentLiveRound {
+  strategy_md5: string // 复盘所依据策略书的 md5
+}
+
+/** 实时复盘状态：GET /api/review/live（无复盘轮时 round 为 null、tool_calls 为空；进行中 ended_at 为 null） */
+export interface ReviewLive {
+  round: ReviewLiveRound | null // 当前（进行中）或上一复盘轮；从未复盘时为 null
+  tool_calls: ToolCall[] // 本轮已执行的复盘工具调用（进行中实时追加）
+}
+
 /** 成交记录：GET /api/trades（created_at 已在 http 层适配为 time） */
 export interface Trade {
   id: number // 成交 ID
@@ -436,7 +447,8 @@ export interface RollbackResult {
  * WS 推送消息：/ws → {type, data}
  * 当前契约：后端广播 hello / round_start(data={wake_source}) /
  * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}） /
- * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数)；
+ * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数) /
+ * review_round_start(data={round_id}) / review_round(data={round_id, ok})（复盘轮开始/结束）；
  * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），trades_updated
  * 也不携带成交明细，两者均只作失效信号——消费方应据事件重拉 REST，勿把 payload 当数据直接渲染；
  * 后端当前不生产 trade/position；类型仅供 mock 使用，真实消费前必须按后端实际事件接线。
@@ -451,6 +463,8 @@ export type WsMessage =
   | { type: 'plan_updated' }
   | { type: 'strategy_updated' }
   | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
+  | { type: 'review_round_start'; data: { round_id: string } } // 复盘轮开始：进度条进入进行中态，实时数据走 /api/review/live
+  | { type: 'review_round'; data: { round_id: string; ok: boolean } } // 复盘轮结束：仅作失效信号，消费方重拉报告列表
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {
@@ -508,6 +522,8 @@ export interface ApiClient {
   getReviewReport(id: number): Promise<ReviewReport>
   /** 手动触发复盘（区间为最近 interval_days 天）；409=进行中、503=LLM 未配置/未接线（ApiError.detail 可读）。 */
   runReview(): Promise<RunReviewResult>
+  /** 实时复盘状态：round/tool_calls 形状与 getAgentLive 一致（进行中 ended_at 为 null），无复盘轮时 round 为 null。 */
+  getReviewLive(): Promise<ReviewLive>
   /** 策略版本列表（最新在前，不含 content 全文）。 */
   getStrategyVersions(): Promise<StrategyVersion[]>
   /** 策略版本详情（含 content 全文）；404 经 ApiError 抛出。 */

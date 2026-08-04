@@ -613,6 +613,25 @@ async def test_latest_review_period_end(repo: Repo):
     assert await repo.review.latest_review_period_end() == 2000.0
 
 
+# ---------- audit_rounds（复盘审计轮取数） ----------
+
+
+async def test_latest_review_audit_round(repo: Repo):
+    """latest_review_audit_round：只取 wake_source='review' 的最新一轮，交易轮不参与。"""
+    assert await repo.review.latest_review_audit_round("paper") is None  # 空表
+    await repo.start_audit_round("r-t1", "paper", wake_source="timer", started_at=1000.0)
+    await repo.start_audit_round("r-v1", "paper", wake_source="review", started_at=2000.0)
+    await repo.start_audit_round("r-v2", "paper", wake_source="review", started_at=3000.0)
+    await repo.start_audit_round("r-t2", "paper", wake_source="timer", started_at=4000.0)
+    latest = await repo.review.latest_review_audit_round("paper")
+    assert latest is not None
+    assert latest.round_id == "r-v2"  # 更新的交易轮 r-t2 不串台，取最新复盘轮
+    assert latest.wake_source == "review"
+    await repo.start_audit_round("r-t3", "testnet", wake_source="timer", started_at=5000.0)
+    assert await repo.review.latest_review_audit_round("testnet") is None  # 只有交易轮 → None
+    assert await repo.review.latest_review_audit_round("live") is None  # 该模式无记录
+
+
 # ---------- 复盘统计取数 ----------
 
 

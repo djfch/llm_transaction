@@ -3,7 +3,7 @@
 覆盖：面板渲染（默认周期/无数据 降级/watchlist 校验）、当前配置文本、submit 成功
 （版本落库/created_by='review_agent'/deps 记录版本 id）、submit 校验失败中文文案
 （未知键/>8 个/空 reason/无差异/非数组）、依赖 None 时「指标功能未配置」降级、
-ReviewAgent 构造期注入的指标依赖进入每轮 deps。
+ReviewAgent 构造期注入的指标依赖进入每轮 deps、build_review 透传 notify_event 事件链路。
 红线自证：本文件不 import src/agent/*（与 src/review 包约束一致），provider 用
 SimpleNamespace 鸭子类型 stub。
 """
@@ -320,3 +320,24 @@ async def test_build_review_wires_indicator_params(tmp_path, repo, deps):
     assert result["ok"] is True
     calls = await repo.list_audit_tool_calls(result["round_id"])
     assert "当前指标短名单" in calls[0].result_json  # deps 拿到 store 实例，非「指标功能未配置」
+
+
+async def test_build_review_passes_notify_event_to_agent(tmp_path, repo):
+    """build_review 透传 notify_event：装配出的 agent 轮始/轮末事件经装配层广播（透传不断）。"""
+    review_prompt = tmp_path / "review_prompt.md"
+    review_prompt.write_text("# 复盘", encoding="utf-8")
+    events: list[dict] = []
+    components = await build_review(
+        Settings(),
+        repo,
+        AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit"))),
+        _StubProvider([_resp(text="复盘报告")]),
+        strategy_path=tmp_path / "strategy.md",
+        review_prompt_path=review_prompt,
+        notify_event=events.append,  # 装配层透传入口：断则收集为空
+    )
+    result = await components.agent.run(1000.0, 2000.0)
+    assert result["ok"] is True
+    assert [e["type"] for e in events] == ["review_round_start", "review_round"]
+    assert events[0]["data"] == {"round_id": result["round_id"]}
+    assert events[1]["data"] == {"round_id": result["round_id"], "ok": True}
