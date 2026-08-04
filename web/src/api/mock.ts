@@ -196,6 +196,11 @@ function buildRounds(): RoundSummary[] {
       // 按序号轮转关联三个策略版本（演示版本标签 join）；每 5 轮一条空串（历史数据无关联，显示「—」）
       strategyMd5: seq % 5 === 0 ? '' : (VERSION_MD5S[seq % VERSION_MD5S.length] ?? ''),
       pnl_after: pnl,
+      // 每 6 轮一条归属笔记引文（跨页分布，演示任意页都能显示笔记）
+      note:
+        seq % 6 === 1
+          ? { content: `第 ${seq} 轮笔记：缩量观望，等待 4h 方向确认。`, time: started.toISOString() }
+          : null,
     }
   })
 }

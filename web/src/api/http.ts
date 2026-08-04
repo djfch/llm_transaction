@@ -259,13 +259,14 @@ function adaptNotes(raw: RawNotesPage): NotesPageResult {
   }
 }
 
-/** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 */
+/** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 + 归属笔记引文（note 可空） */
 interface RawRoundItem {
   round_id: string
   wake_source: string
   context_summary: string
   created_at: number
   strategy_md5?: string // 契约恒为 string；可选仅防御历史后端
+  note?: { content: string; created_at: number } | null // 契约恒带此键；可选仅防御历史后端
 }
 
 interface RawRoundsPage {
@@ -286,6 +287,9 @@ function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
       summary: r.context_summary,
       strategyMd5: r.strategy_md5 ?? '',
       pnl_after: undefined,
+      note: r.note
+        ? { content: r.note.content, time: new Date(r.note.created_at * 1000).toISOString() }
+        : null,
     })),
   }
 }
