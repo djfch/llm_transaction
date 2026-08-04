@@ -11,12 +11,38 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from src.audit.trail import AuditTrail
 from src.config import ROOT, Settings
 from src.gateway.base import Gateway
 from src.memory.repo import Repo
+
+
+class IndicatorBundle(Protocol):
+    """指标子系统回调束：路由经此触达指标计算与短名单版本管理（实现见 market/indicators_setup）。
+
+    结构化类型：server 不 import market 指标实现，仅按方法签名取用。
+    - panel(contract, interval)：全指标面板（shortlist 已由装配层合并当前值）；
+    - series(contract, interval, keys, limit)：逐根序列，keys=None 用当前短名单，
+      未知 key 抛 ValueError（路由映 422）；
+    - config_get()：{"shortlist", "available"}（available 取自指标注册表）；
+    - config_revise(shortlist, reason)：人工修订（created_by='human'），
+      校验失败抛 IndicatorConfigValidationError（路由映 422）；
+    - config_rollback(version_id)：回滚，版本不存在抛 IndicatorConfigValidationError（路由映 404）。
+    """
+
+    oi_task: asyncio.Task | None  # OI 后台刷新任务句柄（主程序 shutdown 取消）
+
+    def panel(self, contract: str, interval: str) -> dict: ...
+
+    def series(self, contract: str, interval: str, keys: list[str] | None, limit: int) -> dict: ...
+
+    def config_get(self) -> dict: ...
+
+    async def config_revise(self, shortlist: list[str], reason: str) -> dict: ...
+
+    async def config_rollback(self, version_id: int) -> dict: ...
 
 
 @dataclass
@@ -61,6 +87,9 @@ class ServerDeps:
     review_run: Callable[..., Awaitable[dict]] | None = None
     strategy_save: Callable[[str], Awaitable[dict]] | None = None
     strategy_rollback: Callable[[int], Awaitable[dict]] | None = None
+    # 指标子系统回调束（主程序装配注入；None 时 /api/indicators* 与 /api/indicator_config
+    # 写端点诚实 503；版本族读端点经 repo.indicator_config 直取，同策略版本先例）
+    indicators: IndicatorBundle | None = None
     event_queue: asyncio.Queue[dict[str, Any]] | None = None
     runtime_settings: Settings | None = None
     runtime_watchlist: list[str] | None = None

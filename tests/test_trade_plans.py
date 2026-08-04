@@ -75,6 +75,7 @@ def _tool_deps(repo: Repo, notify_event=None) -> ToolDeps:
         repo=repo,
         candles=none,
         triggers=none,
+        indicator_service=None,
         daily_stats_fn=None,
         notify_event=notify_event,
         round_id="r-tool",

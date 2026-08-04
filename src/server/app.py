@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from src.server.deps import ServerDeps
 from src.server.routes_config import create_config_router
 from src.server.routes_credentials import create_credentials_router
+from src.server.routes_indicators import create_indicators_router
 from src.server.routes_plans import create_plans_router
 from src.server.routes_review import create_review_router
 from src.server.routes_status import create_status_router
@@ -80,6 +81,7 @@ def create_app(deps: ServerDeps) -> FastAPI:
     app.include_router(create_credentials_router(deps))
     app.include_router(create_trading_router(deps))
     app.include_router(create_review_router(deps))
+    app.include_router(create_indicators_router(deps))
     app.include_router(create_plans_router(deps))
     register_ws_route(app, manager)
     app.state.ws_manager = manager  # 供主程序直接推送事件

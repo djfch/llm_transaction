@@ -25,6 +25,7 @@ ToolHandler = Callable[[dict], Awaitable[ToolOutcome]]
 # 交易类工具在 tool_trading，其余在 tool_handlers）
 _HANDLERS: dict[str, Callable[[ToolDeps, dict], Awaitable[ToolOutcome]]] = {
     "get_market_data": tool_handlers.get_market_data,
+    "get_indicators": tool_handlers.get_indicators,
     "place_order": tool_trading.place_order,
     "update_tpsl": tool_trading.update_tpsl,
     "amend_order": tool_trading.amend_order,

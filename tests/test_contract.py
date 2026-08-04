@@ -22,6 +22,9 @@
 - GET  /api/strategy/diff?from=&to= → PlainText unified diff（契约只断状态码）
 - POST /api/strategy/rollback/{id} → rolled_back_to/version（404 版本不存在；503 未接线）
 - GET  /api/candles → items[] 含 t/o/h/l/c/v
+- GET  /api/indicators → contract/interval/time/indicators{key: label/kind/values}/shortlist
+- GET  /api/indicators/series → contract/interval/series{key: label/kind/fields{field: [{time,value}]}（scalar oi 另有 current）}
+- GET  /api/indicator_config → shortlist/available[] 含 key/label/kind/fields
 - GET  /api/config → mode 且含 llm/risk/scheduler 段；GET /api/watchlist → settle/contracts
 - GET  /api/secrets/status → gate_key/llm_key/telegram 全布尔
 - POST /api/kill_switch → kill_switch；POST /api/agent/start|stop → agent_running
@@ -33,6 +36,7 @@
 
 from decimal import Decimal as D
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -101,6 +105,50 @@ async def _review_run() -> dict:
 
 async def _strategy_rollback(version_id: int) -> dict:
     return {"rolled_back_to": version_id, "version": 3}
+
+
+def _indicators_bundle() -> SimpleNamespace:
+    """fake 指标回调束：形状与 IndicatorComponents 回调面一致（冻结前端消费的响应键）。"""
+    return SimpleNamespace(
+        panel=lambda contract, interval: {
+            "contract": contract,
+            "interval": interval,
+            "time": 1_700_000_000,
+            "indicators": {
+                "ema20": {
+                    "label": "EMA20(指数均线)",
+                    "kind": "overlay",
+                    "values": {"ema20": "115000.50"},
+                },
+                "oi": {"label": "持仓量", "kind": "scalar", "values": {"oi": "123456"}},
+            },
+            "shortlist": ["ema20", "oi"],
+        },
+        series=lambda contract, interval, keys, limit: {
+            "contract": contract,
+            "interval": interval,
+            "series": {
+                "ema20": {
+                    "label": "EMA20(指数均线)",
+                    "kind": "overlay",
+                    "fields": {"ema20": [{"time": 1_700_000_000, "value": "115000.50"}]},
+                },
+                "oi": {"label": "持仓量", "kind": "scalar", "fields": {}, "current": "123456"},
+            },
+        },
+        config_get=lambda: {
+            "shortlist": ["ema20", "oi"],
+            "available": [
+                {
+                    "key": "ema20",
+                    "label": "EMA20(指数均线)",
+                    "kind": "overlay",
+                    "fields": ["ema20"],
+                },
+                {"key": "oi", "label": "持仓量", "kind": "scalar", "fields": ["oi"]},
+            ],
+        },
+    )
 
 
 # 长复盘报告（>200 字符）：验证列表 report_md 截断、详情全文
@@ -172,6 +220,7 @@ async def deps(tmp_path: Path):
         review_run=_review_run,
         strategy_rollback=_strategy_rollback,
         alerts_provider=lambda: triggers.list(),
+        indicators=_indicators_bundle(),
     )
     yield d
     await db.close()
@@ -401,3 +450,23 @@ async def test_review_strategy_contract(client: AsyncClient):
 
     rollback = await _post(client, "/api/strategy/rollback/1")
     _typed(rollback, "rolled_back_to:i version:i", "POST /api/strategy/rollback/{id}")
+
+
+async def test_indicators_contract(client: AsyncClient):
+    """指标端点契约：面板/序列/当前配置的响应键冻结（前端 getIndicatorConfig/getIndicatorSeries）。"""
+    panel = await _get(client, "/api/indicators?contract=BTC_USDT&interval=1h")
+    _typed(panel, "contract:s interval:s time:i indicators:d shortlist:l", "/api/indicators")
+    _typed(panel["indicators"]["ema20"], "label:s kind:s values:d", "/api/indicators ema20")
+
+    series = await _get(client, "/api/indicators/series?contract=BTC_USDT&keys=ema20,oi")
+    _typed(series, "contract:s interval:s series:d", "/api/indicators/series")
+    _typed(series["series"]["ema20"], "label:s kind:s fields:d", "/api/indicators/series ema20")
+    point = series["series"]["ema20"]["fields"]["ema20"][0]
+    _typed(point, "time:i value:n", "/api/indicators/series point")
+    assert series["series"]["oi"]["current"] is not None  # scalar（oi）随响应返回当前值
+
+    config = await _get(client, "/api/indicator_config")
+    _typed(config, "shortlist:l available:l", "/api/indicator_config")
+    _typed(
+        config["available"][0], "key:s label:s kind:s fields:l", "/api/indicator_config available"
+    )

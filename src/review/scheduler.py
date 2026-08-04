@@ -1,6 +1,6 @@
 """复盘调度：按间隔天数定时触发 + 手动触发，asyncio.Lock 防重入。
 
-- run_forever：每 60s 巡检一次（镜像 bootstrap._funding_loop），到点且距上次复盘
+- run_forever：每 60s 巡检一次（镜像 paper.funding_patrol.funding_loop），到点且距上次复盘
   已满 interval_days 则触发「最近 interval_days 天（对齐当日 00:00）」区间；
   幂等以 review_reports 落库记录（latest_review_period_end）为准，重启不重复；
 - run_now：手动触发；无参维持最近 interval_days 天区间，有参（人工补跑历史区间）

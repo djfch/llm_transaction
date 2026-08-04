@@ -5,6 +5,7 @@
 - {"type": "ticker", "data": {"contract", "last"}} 行情推送（bootstrap 按合约节流）
 - {"type": "plan_updated"} 交易计划变更（执行 agent 工具轮中即推，无 payload，只作失效信号）
 - {"type": "strategy_updated"} 策略书变更（复盘修订/手动保存/回滚，同为失效信号）
+- {"type": "indicator_config_updated"} 指标短名单变更（复盘修订/人工修订/回滚，同为失效信号）
 - {"type": "trades_updated", "data": {"contracts", "count"}} 成交落库成功
   （paper drain/手动平仓与 testnet/live fill_sync 对账落库统一发射；只作失效信号，成交数据仍走 REST）
 当前主程序不生产 trade/position 事件；event_queue 接受任意 JSON 字典，pump_events

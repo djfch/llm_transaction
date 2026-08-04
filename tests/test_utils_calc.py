@@ -114,6 +114,7 @@ def _dummy_deps() -> ToolDeps:
         repo=none,
         candles=none,
         triggers=none,
+        indicator_service=None,
         daily_stats_fn=None,
     )
 

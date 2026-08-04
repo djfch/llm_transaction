@@ -18,6 +18,7 @@ from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
 from src.memory import Database, Repo
 from src.review.agent import ReviewAgent
+from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader
 from src.review.strategy import StrategyStore
 
@@ -68,7 +69,7 @@ async def env(tmp_path):
     await db.close()
 
 
-def _make_agent(env, provider) -> ReviewAgent:
+def _make_agent(env, provider, **kwargs) -> ReviewAgent:
     return ReviewAgent(
         settings=env.settings,
         provider=provider,
@@ -77,6 +78,7 @@ def _make_agent(env, provider) -> ReviewAgent:
         store=env.store,
         prompt_loader=env.loader,
         on_alert=lambda msg: env.alerts.append(msg),  # 同步回调（maybe_await 消化）
+        **kwargs,
     )
 
 
@@ -203,3 +205,83 @@ async def test_set_provider_hot_swap(env):
     agent.set_provider(StubProvider([LLMResponse(text="热替换后报告", raw="{}")]))
     result = await agent.run(*_PERIOD)
     assert result["ok"] is True
+
+
+async def test_run_with_indicator_config_revision(env, tmp_path):
+    """指标短名单修订：轮末把报告 id 回填到指标配置版本（同策略版本关联模式，判空跳过）。"""
+    indicator_store = IndicatorConfigStore(
+        tmp_path / "indicator_config.yaml", env.repo, valid_keys=frozenset({"ema20", "rsi14"})
+    )
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_indicator_config",
+                        args={"shortlist": ["ema20"], "reason": "聚焦趋势指标"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="已聚焦趋势指标。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(env, provider, indicator_config_store=indicator_store)
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    assert result["strategy_action"] == "none" and result["new_version_id"] is None  # 未动策略
+    versions = await env.repo.indicator_config.list_versions()
+    assert len(versions) == 1 and versions[0].created_by == "review_agent"
+    assert versions[0].report_id == result["report_id"]  # 轮末 attach_report_to_version 回填
+
+
+async def test_watchlist_hot_update_visible_to_review_agent(env, tmp_path):
+    """复盘 agent 持有活名单引用：构造之后热加入的合约，轮内指标工具不再拦截（Codex P2 回归）。"""
+    from src.gateway.base import Candle
+    from src.market.indicator_service import IndicatorService
+
+    class _CandleCache:
+        def get_recent(self, contract, interval, n):
+            return [
+                Candle(
+                    t=1_700_000_000 + i * 3600,
+                    o=Decimal(100 + i),
+                    h=Decimal(101 + i),
+                    l=Decimal(99 + i),
+                    c=Decimal(100 + i),
+                    v=Decimal(10),
+                )
+                for i in range(60)
+            ]
+
+    class _OiCache:
+        def get(self, contract):
+            return Decimal("12345")
+
+    live_watchlist = ["BTC_USDT"]
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(name="get_indicators", args={"contract": "ETH_USDT"}, call_id="c1")
+                ],
+            ),
+            LLMResponse(text="看完新合约。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(
+        env,
+        provider,
+        indicator_service=IndicatorService(_CandleCache(), _OiCache()),
+        watchlist=live_watchlist,
+    )
+    live_watchlist.append("ETH_USDT")  # 启动后热更新（PUT /api/watchlist 原地改同一 list）
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    calls = await env.repo.list_audit_tool_calls(result["round_id"])
+    assert len(calls) == 1 and calls[0].tool == "get_indicators"
+    assert "不在 watchlist" not in calls[0].result_json  # 活引用：新合约不再被拦截

@@ -52,6 +52,7 @@ async def _registry(tmp_path, gateway: MockGateway) -> SimpleNamespace:
         repo=repo,
         candles=cache,
         triggers=TriggerManager(lambda _t, _p: None),
+        indicator_service=None,
         daily_stats_fn=_daily,
         round_id="r-tpsl",
     )
