@@ -42,6 +42,18 @@ describe('mock 复盘端点', () => {
     expect(after.items[0].id).toBe(result.reportId)
     expect(after.items[0].error).toBe('')
   })
+
+  it('roundId 自洽：非空 roundId 的报告经 getRound 可取到工具链；空串样例演示老报告降级', async () => {
+    const list = await mockApi.getReviewReports(0, 50)
+    // 至少一条带非空 roundId（演示工具链内嵌），且 getRound 对任意 roundId 回退通用详情
+    const withRound = list.items.find((r) => r.roundId !== '')
+    expect(withRound).toBeDefined()
+    const detail = await mockApi.getRound(withRound!.roundId)
+    expect(detail.round_id).toBe(withRound!.roundId)
+    expect(Array.isArray(detail.tool_calls)).toBe(true)
+    // 至少一条空串 roundId（功能上线前的老报告降级形态）
+    expect(list.items.some((r) => r.roundId === '')).toBe(true)
+  })
 })
 
 describe('mock 策略版本端点', () => {

@@ -1,0 +1,55 @@
+"""轻量迁移测试：旧版库文件（缺新列）经 Database.open 后补列，历史行不回填。
+
+风格参照 tests/test_repo.py 的 test_strategy_md5_migration_adds_columns：
+先用 aiosqlite 手工建旧表插旧行，再 open 触发完整 SCHEMA + _migrate。
+"""
+
+import aiosqlite
+
+from src.memory import Database, Repo
+
+# 旧版 review_reports 表结构（无 round_id 列），与功能上线前的生产库一致
+_OLD_REVIEW_REPORTS_DDL = """
+CREATE TABLE review_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_start REAL NOT NULL,
+    period_end REAL NOT NULL,
+    stats_json TEXT NOT NULL DEFAULT '{}',
+    report_md TEXT NOT NULL DEFAULT '',
+    strategy_action TEXT NOT NULL DEFAULT 'none',
+    new_version_id INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+)
+"""
+
+
+async def test_review_reports_round_id_migration(tmp_path):
+    """旧库（review_reports 无 round_id 列）迁移补列；老行保持 ''，重复 open 幂等。"""
+    path = tmp_path / "old.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(_OLD_REVIEW_REPORTS_DDL)
+    await conn.execute(
+        "INSERT INTO review_reports(period_start,period_end,report_md,created_at)"
+        " VALUES(1000.0,2000.0,'# 老报告',1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)  # open 执行完整 SCHEMA（IF NOT EXISTS 不动旧表）+ _migrate 补列
+    cur = await db.conn.execute("PRAGMA table_info(review_reports)")
+    assert "round_id" in {row["name"] for row in await cur.fetchall()}  # 列已补上
+    repo = Repo(db)
+    old = await repo.review.get_review_report(1)
+    assert old is not None and old.round_id == ""  # 老报告无审计轮可循，保持 '' 不回填
+    saved = await repo.review.save_review_report(
+        2000.0, 3000.0, "{}", "# 新报告", "none", round_id="abc"
+    )
+    got = await repo.review.get_review_report(saved.id)
+    assert got is not None and got.round_id == "abc"  # 迁移后新报告正常写入读出
+    await db.close()
+
+    db2 = Database()
+    await db2.open(path)  # 重复 open 幂等（列已存在，不再 ALTER）
+    await db2.close()

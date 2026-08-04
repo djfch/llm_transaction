@@ -138,6 +138,7 @@ class ReviewAgent:
                 report_md,
                 action,
                 new_version_id=deps.created_version_id,
+                round_id=round_id,
             )
             if deps.created_version_id is not None:
                 await self._repo.review.attach_report_to_version(deps.created_version_id, report.id)
@@ -246,7 +247,7 @@ class ReviewAgent:
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("复盘失败：%s", error)
         report = await self._repo.review.save_review_report(
-            period_start, period_end, "{}", "", "none", error=error
+            period_start, period_end, "{}", "", "none", error=error, round_id=round_id
         )
         await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)
         await self._notify(_escape_alert(f"【复盘失败】{error}"))

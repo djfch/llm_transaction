@@ -141,6 +141,7 @@ class ReviewReport(BaseModel):
 
     strategy_action 取值：none（无需调整）/ rewrite（产出新策略版本，new_version_id 指向它）。
     error 非空表示该次复盘失败（只落错误记录，不影响交易循环）。
+    round_id 为产生本报告的审计轮 id；空串 = 无关联（功能上线前的老报告，不回填）。
     """
 
     id: int
@@ -151,6 +152,7 @@ class ReviewReport(BaseModel):
     strategy_action: str
     new_version_id: int | None = None
     error: str = ""
+    round_id: str = ""
     created_at: float
 
 

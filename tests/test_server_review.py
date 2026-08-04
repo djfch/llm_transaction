@@ -62,7 +62,7 @@ def _client_of(deps: ServerDeps) -> AsyncClient:
 async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
     await repo.review.save_review_report(1000.0, 2000.0, '{"a":1}', "短报告", "none")
     r2 = await repo.review.save_review_report(
-        3000.0, 4000.0, '{"b":2}', _LONG_MD, "rewrite", new_version_id=7
+        3000.0, 4000.0, '{"b":2}', _LONG_MD, "rewrite", new_version_id=7, round_id="rv-round-1"
     )
     async with _client_of(_deps(repo, tmp_path)) as c:
         body = (await c.get("/api/review/reports")).json()
@@ -71,8 +71,11 @@ async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
         item = body["items"][0]
         assert len(item["report_md"]) == 200  # 列表截断
         assert item["new_version_id"] == 7 and item["strategy_action"] == "rewrite"
+        assert item["round_id"] == "rv-round-1"  # 列表项透出审计轮 id
+        assert body["items"][1]["round_id"] == ""  # 省略参数默认 ''（无关联）
         detail = (await c.get(f"/api/review/reports/{r2.id}")).json()
         assert detail["report_md"] == _LONG_MD  # 详情全文
+        assert detail["round_id"] == "rv-round-1"  # 详情透出审计轮 id
         assert (await c.get("/api/review/reports/999")).status_code == 404
 
 

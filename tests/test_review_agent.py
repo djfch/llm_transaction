@@ -109,6 +109,7 @@ async def test_run_success_without_revision(env):
     report = await env.repo.review.get_review_report(result["report_id"])
     assert report.report_md == "# 复盘结论\n整体表现平稳。"
     assert report.error == ""
+    assert report.round_id == result["round_id"]  # 报告关联产生它的审计轮
     stats = json.loads(report.stats_json)  # 代码侧预统计已落 stats_json
     assert stats["close_count"] == 1 and stats["total_pnl"] == "8"
     round_row = await env.repo.get_audit_round(result["round_id"])
@@ -182,6 +183,7 @@ async def test_run_llm_failure_lands_error_report(env):
     report = await env.repo.review.get_review_report(result["report_id"])
     assert report.error == "LLMError: boom" and report.report_md == ""
     assert report.strategy_action == "none"
+    assert report.round_id == result["round_id"]  # 失败轮同样关联审计轮（便于排查）
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.error == "LLMError: boom"
     assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]

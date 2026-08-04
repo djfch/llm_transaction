@@ -29,7 +29,7 @@ class _ReviewRunBody(BaseModel):
 
 
 def _report_item(report: ReviewReport, *, truncate: bool) -> dict[str, Any]:
-    """报告响应项：9 个契约键固定；truncate 时 report_md 截断（列表省流量，键名不变）。"""
+    """报告响应项：10 个契约键固定；truncate 时 report_md 截断（列表省流量，键名不变）。"""
     item = report.model_dump()
     if truncate:
         item["report_md"] = item["report_md"][:_LIST_REPORT_MD_LIMIT]
