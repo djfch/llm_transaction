@@ -13,6 +13,10 @@ llm:
   model: deepseek-v4-flash
   max_tokens: 4096
   openai_base_url: https://api.deepseek.com
+  # 思考程度（可选）：留空 = 跟随模型默认；off / on / low / medium / high / xhigh / max。
+  # 档位在 OpenAI 兼容通道翻译为 reasoning_effort（DeepSeek/GLM/Kimi k3/GPT 通用），
+  # Qwen 附加 enable_thinking，旧 Kimi k2 只区分开/关；anthropic 通道映射为思考 token 预算
+  thinking_effort: ""
   max_consecutive_failures: 3
   # ── 多凭证（可选）──────────────────────────────────────────────
   # 登记多条凭证后，上方平铺的 provider/model/openai_base_url/max_tokens 不再生效，
@@ -24,6 +28,7 @@ llm:
   #     provider: anthropic
   #     model: claude-sonnet-4-5
   #     max_tokens: 4096
+  #     # thinking_effort: high    # 思考程度（留空=模型默认）
   #     # api_key_env: 留空 → LLM_KEY_MAIN
   #   - name: backup               # 备用号（复盘用）
   #     provider: openai_compat

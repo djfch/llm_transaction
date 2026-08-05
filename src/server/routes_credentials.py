@@ -46,7 +46,19 @@ class _CredentialFields(BaseModel):
     model: str = Field(min_length=1)
     max_tokens: int = Field(default=4096, ge=1)
     openai_base_url: str = ""
+    thinking_effort: str = ""  # 空=跟随模型默认 / off / on / low / medium / high / xhigh / max
     api_key: str = ""
+
+    @field_validator("thinking_effort")
+    @classmethod
+    def _thinking_effort_valid(cls, value: str) -> str:
+        """只接受统一档位枚举；空白按空串处理（不传参数）。"""
+        value = value.strip()
+        if value not in ("", "off", "on", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError(
+                "thinking_effort 必须是 off / on / low / medium / high / xhigh / max 之一（或留空）"
+            )
+        return value
 
     @field_validator("model")
     @classmethod
@@ -157,6 +169,7 @@ def create_credentials_router(deps: ServerDeps) -> APIRouter:
             model=body.model,
             max_tokens=body.max_tokens,
             openai_base_url=body.openai_base_url,
+            thinking_effort=body.thinking_effort,
             # api_key_env 留空：按 LLM_KEY_<NAME> 推导（见 CredentialConfig 校验器）
         )
         _save_credentials(deps, [*credentials, cred])
@@ -176,6 +189,7 @@ def create_credentials_router(deps: ServerDeps) -> APIRouter:
             model=body.model,
             max_tokens=body.max_tokens,
             openai_base_url=body.openai_base_url,
+            thinking_effort=body.thinking_effort,
             api_key_env=old.api_key_env,  # 保持不变：name 锁定，推导来源不动
         )
         _save_credentials(deps, [updated if c.name == name else c for c in credentials])

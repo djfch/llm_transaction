@@ -56,6 +56,7 @@ const CONFIG: AppConfig = {
     model: 'claude-sonnet-4-5',
     max_tokens: 4096,
     openai_base_url: '',
+    thinking_effort: '',
     max_consecutive_failures: 3,
     credentials: [
       {
@@ -64,6 +65,7 @@ const CONFIG: AppConfig = {
         model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         openai_base_url: '',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_CLAUDE_MAIN',
       },
       {
@@ -72,6 +74,7 @@ const CONFIG: AppConfig = {
         model: 'deepseek-chat',
         max_tokens: 8192,
         openai_base_url: 'https://api.deepseek.com/v1',
+        thinking_effort: 'high',
         api_key_env: 'LLM_KEY_DEEPSEEK_BACKUP',
       },
     ],
@@ -154,6 +157,7 @@ describe('SecretsForm(凭证管理) · 新增凭证', () => {
         model: 'kimi-k2',
         max_tokens: 4096,
         openai_base_url: 'https://api.moonshot.cn/v1',
+        thinking_effort: '',
         api_key: 'sk-test',
       }),
     )
@@ -164,6 +168,25 @@ describe('SecretsForm(凭证管理) · 新增凭证', () => {
     expect(screen.getByLabelText('openai_base_url')).toHaveValue('')
     expect(screen.getByLabelText('api_key')).toHaveValue('')
     expect(screen.getByText('已保存')).toBeInTheDocument()
+  })
+
+  it('选择思考程度下拉：提交体带对应档位值', async () => {
+    createCredential.mockResolvedValue(OK)
+    render(<SecretsForm status={STATUS} config={CONFIG} onSaved={() => {}} />)
+
+    fireEvent.change(screen.getByLabelText('name'), { target: { value: 'deepseek-main' } })
+    fireEvent.change(screen.getByLabelText('model'), { target: { value: 'deepseek-v4-pro' } })
+    fireEvent.change(screen.getByLabelText('思考程度'), { target: { value: 'high' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存新凭证' }))
+
+    await waitFor(() =>
+      expect(createCredential).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'deepseek-v4-pro',
+          thinking_effort: 'high',
+        }),
+      ),
+    )
   })
 
   it('api_key 为纯空白：提交体不含 api_key 键（等价留空，不写入 .env）', async () => {
@@ -234,6 +257,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
     expect(within(backup).getByLabelText('model')).toHaveValue('deepseek-chat')
     expect(within(backup).getByLabelText('max_tokens')).toHaveValue('8192')
     expect(within(backup).getByLabelText('openai_base_url')).toHaveValue('https://api.deepseek.com/v1')
+    expect(within(backup).getByLabelText('思考程度')).toHaveValue('high')
     // name 锁定：只读文本 + 提示，不出现输入框
     expect(within(backup).queryByLabelText('name')).not.toBeInTheDocument()
     expect(within(backup).getByText('名称不可修改，改名请删除后重建')).toBeInTheDocument()
@@ -256,6 +280,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
         model: 'deepseek-v3',
         max_tokens: 8192,
         openai_base_url: 'https://api.deepseek.com/v1',
+        thinking_effort: 'high',
       }),
     )
     // 保存成功后收起：卡片内不再有编辑表单
@@ -274,6 +299,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
         model: 'deepseek-chat',
         max_tokens: 8192,
         openai_base_url: 'https://api.deepseek.com/v1',
+        thinking_effort: 'high',
         api_key: 'sk-new',
       }),
     )
@@ -317,6 +343,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
         model: 'claude-sonnet-4-5',
         max_tokens: 2048,
         openai_base_url: '',
+        thinking_effort: 'off',
         max_consecutive_failures: 3,
         // 无 credentials 段：旧版单凭证配置
       },
@@ -329,6 +356,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
 
     expect(within(card).getByLabelText('model')).toHaveValue('claude-sonnet-4-5')
     expect(within(card).getByLabelText('max_tokens')).toHaveValue('2048')
+    expect(within(card).getByLabelText('思考程度')).toHaveValue('off')
     // anthropic 不显示 base_url；key 已配置的占位符提示留空保持不变
     expect(within(card).queryByLabelText('openai_base_url')).not.toBeInTheDocument()
     expect(within(card).getByLabelText('api_key')).toHaveAttribute('placeholder', '已配置，留空保持不变')

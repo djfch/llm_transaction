@@ -36,6 +36,18 @@ interface CreateProps {
   onSaved: () => void
 }
 
+/** 思考程度下拉选项：显示中文文案，提交英文枚举值（空 = 跟随模型默认） */
+const THINKING_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: '跟随模型默认' },
+  { value: 'on', label: '开启（模型默认档位）' },
+  { value: 'off', label: '关闭' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '很高' },
+  { value: 'max', label: '最高' },
+]
+
 /** edit 模式初值：凭证完整定义（由调用方从 config 解析；name 仅作展示与提交寻址，不可改） */
 export interface CredentialEditInitial {
   name: string
@@ -43,6 +55,7 @@ export interface CredentialEditInitial {
   model: string
   max_tokens: number
   openai_base_url: string
+  thinking_effort: string
 }
 
 /** edit 模式 props：编辑初值 + key 配置状态 + 收起回调 */
@@ -61,6 +74,9 @@ export default function CredentialForm(props: CreateProps | EditProps) {
   const [model, setModel] = useState(isCreate ? '' : props.initial.model)
   const [maxTokens, setMaxTokens] = useState(isCreate ? '4096' : String(props.initial.max_tokens))
   const [baseUrl, setBaseUrl] = useState(isCreate ? '' : props.initial.openai_base_url)
+  const [thinkingEffort, setThinkingEffort] = useState(
+    isCreate ? '' : props.initial.thinking_effort,
+  )
   const [apiKey, setApiKey] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null) // 校验失败或请求级失败
@@ -96,6 +112,7 @@ export default function CredentialForm(props: CreateProps | EditProps) {
       model: model.trim(),
       max_tokens: Number(maxTokens),
       openai_base_url: provider !== 'anthropic' ? baseUrl.trim() : '',
+      thinking_effort: thinkingEffort,
       ...(key !== '' ? { api_key: key } : {}),
     }
     try {
@@ -112,6 +129,7 @@ export default function CredentialForm(props: CreateProps | EditProps) {
           setModel('')
           setMaxTokens('4096')
           setBaseUrl('')
+          setThinkingEffort('')
           setApiKey('')
         } else {
           props.onCancel() // 保存成功后收起编辑表单
@@ -184,6 +202,20 @@ export default function CredentialForm(props: CreateProps | EditProps) {
             onChange={(e) => setMaxTokens(e.target.value)}
             className={inputCls}
           />
+        </label>
+        <label className="block">
+          <span className={labelCls}>思考程度</span>
+          <select
+            value={thinkingEffort}
+            onChange={(e) => setThinkingEffort(e.target.value)}
+            className={inputCls}
+          >
+            {THINKING_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </label>
         {provider !== 'anthropic' && (
           <label className="block sm:col-span-2">

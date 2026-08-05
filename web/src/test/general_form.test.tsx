@@ -17,6 +17,7 @@ const LEGACY: AppConfig = {
     model: 'claude-sonnet-4-5',
     max_tokens: 4096,
     openai_base_url: '',
+    thinking_effort: '',
     max_consecutive_failures: 3,
   },
   risk: {
@@ -44,6 +45,7 @@ const WITH_CREDENTIALS: AppConfig = {
         model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         openai_base_url: '',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_CLAUDE_MAIN',
       },
     ],
