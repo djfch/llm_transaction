@@ -369,13 +369,16 @@ def _amend_direction(
 ) -> tuple[bool, Decimal]:
     """推断改后（是否平仓方向, 参与风控的有效张数）。
 
-    size 给定时当前仅按与持仓的符号关系判断；反向数量超过持仓时可能翻仓，
-    但仍会被标为平仓并获得豁免，这是尚未修复的安全边界；
+    size 给定时按与持仓的方向与数量关系判定：同向改单、以及反向数量超过持仓的
+    反手翻仓，都属新敞口，不豁免（必须过全套风控）；仅反向且数量不超过持仓
+    才是纯减仓/平仓（豁免，与 place_order 的 _opens_exposure 同一约定）。
     未给 size 时方向不可知，保守按开仓处理（不豁免），张数取挂单剩余量评估占比。
     """
     pos = next((p for p in deps.gateway.list_positions() if p.contract == contract), None)
     if size is not None:
-        is_close = pos is not None and (pos.size > 0) != (size > 0)
+        if pos is None or pos.size == 0:
+            return False, size
+        is_close = (pos.size > 0) != (size > 0) and abs(size) <= abs(pos.size)
         return is_close, size
     left = Decimal(0)
     for order in deps.gateway.list_orders(contract, "open"):

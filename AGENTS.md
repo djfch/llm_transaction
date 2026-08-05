@@ -29,17 +29,21 @@ src/
   review/                    # 复盘 agent：只读工具 + 策略/指标短名单版本化
   notify/                    # Telegram 通知
   server/                    # FastAPI 监控 API + WebSocket
-web/                         # React 前端
+  main.py / bootstrap.py     # 主入口 / 应用组装（配置、网关、行情、风控、Agent、调度、通知、监控装配）
+web/                         # React 前端（src/ 下 api/components/hooks/pages/test/utils）
 tests/                       # pytest
 scripts/                     # 验证、Git 钩子辅助与部署脚本
+docs/                        # 架构与部署文档（ARCHITECTURE/DEPLOYMENT/CODE_REVIEW、tutorial 图解导学、superpowers 设计 spec）
+design_proposals/            # 可视化方案设计稿（HTML）
+deploy/                      # systemd 服务单元
 ```
 
-运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `system_prompt.md` / `review_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。
+运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `indicator_config.yaml` / `system_prompt.md` / `review_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。**新增或修改配置字段、策略/指标模板时，必须同步更新对应的 `.example` 模板——CI 以 example 复制运行时文件，不同步会直接拖垮 CI。**
 
 ## 硬性规范
 
-1. **风控安全**：`src/risk/` 覆盖率必须 100%；新增或扩大敞口的下单/改单必须经过 `RiskEngine`，设置杠杆必须校验 `max_leverage`；LLM 工具调用须进入统一审计，人工撤单当前至少同步订单业务记录；交易所 key 只读 `.env`，永不进 API 响应/日志/前端
-2. **代码体量**：单文件 ≤300 行（机械门禁 `scripts/check_file_size.py` 进 pre-commit 与 CI：300–500 行警告，新文件或非豁免文件 >500 行失败；`BASELINE_OVERSIZE` 中登记的现存超限文件不得继续增长）、函数 ≤40 行、嵌套 ≤3 层（由 ruff C901/PLR0912/PLR0915 近似兜底，阈值见 pyproject.toml，路由工厂文件豁免；精确行数/嵌套深度为评审约定）
+1. **风控安全**：`src/risk/` 覆盖率必须 100%；新增或扩大敞口的下单/改单必须经过 `RiskEngine`，设置杠杆必须校验 `max_leverage`；LLM 工具调用须进入统一审计，人工撤单当前至少同步订单业务记录；交易所 key 只读 `.env`，永不进 API 响应/日志/前端；密钥、日志、数据库与构建产物禁止入库（见 `.gitignore`）
+2. **代码体量**：单文件 ≤300 行（机械门禁 `scripts/check_file_size.py` 进 pre-commit 与 CI：300–500 行警告，新文件或非豁免文件 >500 行失败；`BASELINE_OVERSIZE` 中登记的现存超限文件不得继续增长）、函数 ≤40 行、嵌套 ≤3 层（由 ruff C901/PLR0912/PLR0915 近似兜底：C901 阈值 13 显式配置于 pyproject.toml，PLR0912 分支 12、PLR0915 语句 50 为 ruff 默认阈值、未写入 pyproject；路由工厂文件豁免；精确行数/嵌套深度为评审约定）
 3. **解耦**：基础设施（gateway/agent providers/notify）与业务策略分离；模块间经接口通信，禁止跨层直接 import 具体实现
 4. **金额处理**：一律 Decimal，禁止 float（评审约定，无机械 gate——float 的合法用途无法可靠区分，代码评审时重点检查金额链路）
 5. **注释与文档**：中文
@@ -52,6 +56,7 @@ scripts/                     # 验证、Git 钩子辅助与部署脚本
 2. 开工先确认工作目录，阅读本文件、相关目录的 `AGENTS.md`、`README.md` 和任务涉及的设计文档；检查 `git status` 与最近提交，保护用户已有修改。
 3. 以代码而非文档为事实来源。修改代码前，先阅读相关代码和最新约束，并遵循目录树中最近的那份 `AGENTS.md`。
 4. 严格保持用户指定范围，保持改动聚焦，不要顺手夹带无关的重构。诊断、评审、方案讨论默认只读；只有用户要求实现时才修改。
+5. **危险操作卡点**：以下动作必须先停下与用户确认后才能执行：①修改 `.env` 密钥配置；②删除 `data/` 数据库或 `logs/` 日志文件。
 
 ## 根因分析与修复方案的呈现方式（面向非程序员）
 
@@ -76,7 +81,8 @@ scripts/                     # 验证、Git 钩子辅助与部署脚本
 2. **提交信息**：`type: 中文描述`（首行 ≤72 字，不带 scope），type ∈ `feat/fix/docs/style/refactor/perf/test/chore/ci/build/revert`；复杂改动正文分条写。本地 commit-msg 钩子强制校验（安装命令见上方“构建与测试命令”CI 一节，一条命令装齐两阶段）
 3. **提交时机**：commit 可以小步多次攒在功能分支上（不必每次提交都开 PR）；**PR 是功能单位——一个 PR = 一个完整功能改动**，功能齐了才开
 4. **合并**：push 后开 PR，CI 三 job（backend/frontend/e2e）全绿后由**人手动确认合并**（AI 协作者只做到"CI 绿 + 改动摘要"，不得擅自合并）；squash merge，合并即删分支
-5. **大改动**（≥3 个文件或 >100 行）必须执行以下流程：
+5. **提交归属**：AI 协作者参与的提交以协作者账号（djfch）直接提交、不额外添加 Co-authored-by 等协作标记——此为既定政策，视为正常署名而非隐匿；人工提交使用个人账号
+6. **大改动**（≥3 个文件或 >100 行）必须执行以下流程：
    1. 修复问题时使用第一性原理：先定义用户可观察行为；再找出系统不可违反的不变量；然后把不变量转成可验证规则（单元测试、集成测试、类型约束、数据库约束、断言、CI 检查）；不接受只修表面现象的补丁
    2. 实现完成后，用两个 subagent 做对抗性审查：Subagent A 主动寻找 bug、遗漏边界、架构风险、测试缺口；Subagent B 逐条核实 A 提出的问题是否真实存在、是否可复现、是否违反需求或不变量。**审查类 subagent 一律显式绑定主模型（派单时指定 primary），不走 secondary 便宜模型——审查找的是自己看不见的错，省钱即降质**。A 只派一个，任务说明要求分遍审查（第 1 遍只看跨层/前后端契约一致性，第 2 遍只看边界与失败态，第 3 遍只看测试缺口），不按检查项拆多个（重复发现徒增 B 的核实成本）；唯一例外：改动同时碰前后端时可按层面拆成两个 A（后端/前端各一，代码不重叠，契约文件两边都给）
    3. 对真实且重要的问题，先补回归测试，再按第一性原理做最小正确修复；评审问题全部修复并复验通过后，才提交/开 PR
