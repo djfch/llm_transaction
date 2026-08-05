@@ -284,6 +284,7 @@ export interface CredentialConfig {
   model: string
   max_tokens: number
   openai_base_url: string // provider 为 openai_compat / openai_responses 时的接口地址（可空）
+  thinking_effort: string // 思考程度：空=跟随模型默认 / off / on / low / medium / high / xhigh / max
   api_key_env: string // 该凭证 key 在服务器 .env 中的变量名（如 LLM_KEY_CLAUDE_MAIN）
 }
 
@@ -295,6 +296,7 @@ export interface AppConfig {
     model: string
     max_tokens: number
     openai_base_url: string
+    thinking_effort: string // 思考程度（旧平铺字段；凭证接管时以凭证为准）
     max_consecutive_failures: number
     credentials?: CredentialConfig[] // 多凭证列表；缺失 = 旧版单凭证（default）配置
   }
@@ -369,6 +371,7 @@ export interface CredentialCreateBody {
   model: string
   max_tokens: number
   openai_base_url: string // provider 为 openai_compat / openai_responses 时的接口地址（可空）
+  thinking_effort: string // 思考程度：空=跟随模型默认 / off / on / low / medium / high / xhigh / max
   api_key?: string // 凭证 key 明文（仅传输，后端写 .env 后不落响应；空串/缺省 = 不写 .env）
 }
 

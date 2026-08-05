@@ -238,6 +238,37 @@ async def test_post_credential_field_validation(client: AsyncClient, deps: Serve
     assert r.status_code == 422
 
 
+async def test_post_credential_thinking_effort_validation(
+    client: AsyncClient,
+    deps: ServerDeps,
+):
+    """thinking_effort 校验：非法值 422；空白按空串落盘；合法档位落盘并可编辑回读。"""
+    base: dict = {"name": "main", "model": "m1"}
+    for bad in (
+        {"thinking_effort": "extreme"},
+        {"thinking_effort": " HIGH "},
+        {"thinking_effort": "none"},
+    ):
+        r = await client.post("/api/credentials", json={**base, **bad})
+        assert r.status_code == 422, f"应拒绝: {bad}"
+    assert _file_credentials(deps) == []  # 全部未落盘
+    # 空白与合法档位：空白 strip 后为空串（=跟随模型默认），合法值原样保存
+    r = await client.post("/api/credentials", json={**base, "thinking_effort": "  "})
+    assert r.status_code == 200
+    r = await client.post(
+        "/api/credentials",
+        json={"name": "deep", "model": "deepseek-v4-pro", "thinking_effort": "high"},
+    )
+    assert r.status_code == 200
+    saved = _file_credentials(deps)
+    by_name = {c["name"]: c for c in saved}
+    assert by_name["main"]["thinking_effort"] == ""
+    assert by_name["deep"]["thinking_effort"] == "high"
+    # PUT 共享同一字段模型：同样拦截非法值
+    r = await client.put("/api/credentials/deep", json={"model": "m2", "thinking_effort": "maxx"})
+    assert r.status_code == 422
+
+
 async def test_post_credential_blank_whitespace_key_is_unset(client: AsyncClient, deps: ServerDeps):
     """api_key 纯空白按未填处理：200、key_saved=false、.env 不落该键。"""
     r = await client.post(

@@ -99,6 +99,7 @@ const config: AppConfig = {
     model: 'claude-sonnet-4-5',
     max_tokens: 4096,
     openai_base_url: '',
+    thinking_effort: '',
     max_consecutive_failures: 3,
     // 多凭证夹具：一条 anthropic 已配置（决策用），一条 openai_compat 未配置（复盘用）
     credentials: [
@@ -108,6 +109,7 @@ const config: AppConfig = {
         model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         openai_base_url: '',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_CLAUDE_MAIN',
       },
       {
@@ -116,6 +118,7 @@ const config: AppConfig = {
         model: 'deepseek-chat',
         max_tokens: 4096,
         openai_base_url: 'https://api.deepseek.com/v1',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_DEEPSEEK_BACKUP',
       },
     ],
@@ -484,6 +487,7 @@ export const mockApi: ApiClient = {
       model: body.model,
       max_tokens: body.max_tokens,
       openai_base_url: body.openai_base_url,
+      thinking_effort: body.thinking_effort ?? '',
       api_key_env: apiKeyEnv,
     })
     if (key !== '') llmConfigured = true
@@ -507,6 +511,7 @@ export const mockApi: ApiClient = {
       defined.model = body.model
       defined.max_tokens = body.max_tokens
       defined.openai_base_url = body.openai_base_url
+      defined.thinking_effort = body.thinking_effort ?? ''
     }
     return reply({ saved: true, key_saved: key !== '', llm_configured: true, llm_error: '' })
   },

@@ -20,6 +20,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_KEY_WHITELIST = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 ENV_KEY_PREFIX = "LLM_KEY_"
 
+# 思考程度统一档位：空串 = 不传任何参数（跟随模型默认）；off = 关闭；on = 开启；
+# low/medium/high/xhigh/max = 强度档（越高思考越久、越费 token）
+ThinkingEffort = Literal["", "off", "on", "low", "medium", "high", "xhigh", "max"]
+
 
 class GateConfig(BaseModel):
     settle: str = "usdt"
@@ -43,6 +47,9 @@ class CredentialConfig(BaseModel):
     model: str
     max_tokens: int = 4096
     openai_base_url: str = ""
+    thinking_effort: ThinkingEffort = (
+        ""  # 思考程度：空=跟随模型默认 / on / off / low / medium / high / xhigh / max
+    )
     api_key_env: str = ""
 
     @model_validator(mode="after")
@@ -68,6 +75,7 @@ class LLMConfig(BaseModel):
     model: str = "claude-sonnet-4-5"
     max_tokens: int = 4096
     openai_base_url: str = ""
+    thinking_effort: ThinkingEffort = ""  # 思考程度（旧平铺字段；credentials 非空时由凭证接管）
     max_consecutive_failures: int = 3
     # 多凭证列表：为空时旧平铺字段生效（自动合成一条 default 凭证，零迁移）
     credentials: list[CredentialConfig] = []
@@ -87,6 +95,7 @@ class LLMConfig(BaseModel):
                 model=self.model,
                 max_tokens=self.max_tokens,
                 openai_base_url=self.openai_base_url,
+                thinking_effort=self.thinking_effort,
                 api_key_env=env,
             )
         ]

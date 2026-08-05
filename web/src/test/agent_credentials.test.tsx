@@ -15,6 +15,7 @@ const CONFIG: AppConfig = {
     model: 'claude-sonnet-4-5',
     max_tokens: 4096,
     openai_base_url: '',
+    thinking_effort: '',
     max_consecutive_failures: 3,
     credentials: [
       {
@@ -23,6 +24,7 @@ const CONFIG: AppConfig = {
         model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         openai_base_url: '',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_CLAUDE_MAIN',
       },
       {
@@ -31,6 +33,7 @@ const CONFIG: AppConfig = {
         model: 'deepseek-chat',
         max_tokens: 4096,
         openai_base_url: 'https://api.deepseek.com/v1',
+        thinking_effort: '',
         api_key_env: 'LLM_KEY_DEEPSEEK_BACKUP',
       },
     ],

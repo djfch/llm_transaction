@@ -14,6 +14,7 @@ from typing import Any
 import anthropic
 
 from src.agent.providers.base import LLMError, LLMResponse, ToolCall
+from src.agent.providers.thinking import anthropic_thinking
 from src.config import CredentialConfig, LLMConfig
 
 
@@ -27,6 +28,7 @@ class AnthropicProvider:
         self._client = anthropic.AsyncAnthropic(api_key=key)
         self._model = config.model
         self._max_tokens = config.max_tokens
+        self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         req: dict[str, Any] = {
@@ -35,6 +37,9 @@ class AnthropicProvider:
             "system": system,
             "messages": messages,
         }
+        thinking = anthropic_thinking(self._thinking_effort, self._max_tokens)
+        if thinking is not None:
+            req["thinking"] = thinking
         if tools:
             req["tools"] = [
                 {

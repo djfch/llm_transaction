@@ -13,6 +13,7 @@ import os
 import openai
 
 from src.agent.providers.base import LLMError, LLMParseError, LLMResponse, ToolCall
+from src.agent.providers.thinking import thinking_wire_kwargs
 from src.config import CredentialConfig, LLMConfig
 
 
@@ -29,6 +30,7 @@ class OpenAICompatProvider:
         self._client = openai.AsyncOpenAI(**kwargs)
         self._model = config.model
         self._max_tokens = config.max_tokens
+        self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         oai_tools = [
@@ -42,12 +44,14 @@ class OpenAICompatProvider:
             }
             for t in tools
         ]
+        thinking_kwargs = thinking_wire_kwargs(self._model, self._thinking_effort)
         try:
             resp = await self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
                 messages=[{"role": "system", "content": system}, *messages],
                 tools=oai_tools or None,
+                **thinking_kwargs,
             )
         except openai.APIError as e:
             raise LLMError(f"OpenAI 兼容 API 错误: {e}") from e

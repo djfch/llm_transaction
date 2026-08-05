@@ -83,6 +83,7 @@ function resolveEditInitial(cred: CredentialStatus, config: AppConfig): Credenti
       model: defined.model,
       max_tokens: defined.max_tokens,
       openai_base_url: defined.openai_base_url,
+      thinking_effort: defined.thinking_effort ?? '',
     }
   }
   return {
@@ -91,6 +92,7 @@ function resolveEditInitial(cred: CredentialStatus, config: AppConfig): Credenti
     model: config.llm.model,
     max_tokens: config.llm.max_tokens,
     openai_base_url: config.llm.openai_base_url,
+    thinking_effort: config.llm.thinking_effort ?? '',
   }
 }
 

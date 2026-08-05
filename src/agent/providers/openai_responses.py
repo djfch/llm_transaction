@@ -37,6 +37,7 @@ class OpenAIResponsesProvider:
         self._client = openai.AsyncOpenAI(**kwargs)
         self._model = config.model
         self._max_tokens = config.max_tokens
+        self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         oai_tools = [
@@ -48,14 +49,26 @@ class OpenAIResponsesProvider:
             }
             for t in tools
         ]
+        request: dict = {
+            "model": self._model,
+            "max_output_tokens": self._max_tokens,
+            "instructions": system,
+            "input": self._to_input(messages),
+            "tools": oai_tools or None,
+        }
+        # 思考程度：空串/on 不传（用模型默认）；off 显式 none（默认思考的模型
+        # 如 GPT-5.6 不传关不掉）；档位原样透传。summary: auto 拿推理摘要，
+        # include 显式请求 reasoning 内容：无状态回放（工具调用多轮）时
+        # 历史 reasoning 项需随 input 回传，服务端才保留完整推理上下文
+        effort = self._thinking_effort
+        if effort and effort != "on":
+            request["reasoning"] = {
+                "effort": "none" if effort == "off" else effort,
+                "summary": "auto",
+            }
+            request["include"] = ["reasoning.encrypted_content"]
         try:
-            resp = await self._client.responses.create(
-                model=self._model,
-                max_output_tokens=self._max_tokens,
-                instructions=system,
-                input=self._to_input(messages),
-                tools=oai_tools or None,
-            )
+            resp = await self._client.responses.create(**request)
         except openai.APIError as e:
             raise LLMError(f"OpenAI Responses API 错误: {e}") from e
         return self._parse(resp)
