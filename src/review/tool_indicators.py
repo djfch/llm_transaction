@@ -16,6 +16,7 @@ from src.market.indicator_service import REGISTRY
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.review.indicator_config import IndicatorConfigValidationError
 from src.review.tool_handlers import ReviewToolDeps, ToolArgError, _fmt_time, _need_str
+from src.utils import fmt_indicator_value
 
 _DEFAULT_INTERVAL = "1h"  # 缺省 K 线周期，与执行 agent 工具惯例一致
 
@@ -60,11 +61,10 @@ def _need_str_list(args: dict, name: str) -> list[str]:
 
 def _render_values(item: dict) -> str:
     """单指标值文本：单字段只给值；多字段 field=value 逐一列出（None 显示 无数据）。"""
-    values = item["values"]
-    if len(values) == 1:
-        only = next(iter(values.values()))
-        return only if only is not None else "无数据"
-    return "，".join(f"{field}={v if v is not None else '无数据'}" for field, v in values.items())
+    rendered = {k: fmt_indicator_value(v) for k, v in item["values"].items()}
+    if len(rendered) == 1:
+        return next(iter(rendered.values()))
+    return "，".join(f"{field}={v}" for field, v in rendered.items())
 
 
 def _render_panel(panel: dict) -> str:

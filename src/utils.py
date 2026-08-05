@@ -151,6 +151,22 @@ def _format_result(value: Decimal) -> str:
     return str(value.normalize())
 
 
+# ---------- 指标数值文本格式化（执行/复盘两侧 get_indicators 共用） ----------
+
+
+def fmt_indicator_value(value: str | None) -> str:
+    """指标数值文本：数值保留 2 位小数（整数原样输出），None 显示 无数据。"""
+    if value is None:
+        return "无数据"
+    try:
+        num = Decimal(value)
+        if num == num.to_integral_value() and num.adjusted() < 28:
+            return str(num.quantize(Decimal(1)))
+        return format(num.quantize(Decimal("0.01")), "f")
+    except InvalidOperation:  # 非数值或超精度：原样输出
+        return value
+
+
 def calc_expression(expr: str) -> str:
     """计算数学表达式（如 `2*(3-1)^2` → `8`）；任何错误返回中文文本，不抛异常。
 
