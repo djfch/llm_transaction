@@ -161,6 +161,25 @@ async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
         await env.db.close()
 
 
+async def test_amend_flip_exceeds_position_not_exempt(tmp_path):
+    """反向改单数量超过持仓 = 翻仓（新敞口），不得豁免 kill_switch（回归 #翻仓豁免洞）。"""
+    env = await _make_tools(tmp_path)
+    try:
+        await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+        )  # 持多仓 1
+        order_id = await _open_limit_order(env, size=-1, price=59500)  # 反向限价卖单挂出
+        env.deps.risk_config.kill_switch = True
+        out = await env.registry.execute(
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order_id, "size": -2, "price": 59600},
+        )  # 反向改到 -2 > 持仓 1：翻仓成空头新敞口
+        assert out.risk_verdict == "deny" and "kill_switch" in out.text
+        assert env.gateway.orders[order_id].left == Decimal(1)  # 改单未生效
+    finally:
+        await env.db.close()
+
+
 # ---------- place_order 声明杠杆真实生效 ----------
 
 
