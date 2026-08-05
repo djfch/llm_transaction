@@ -25,7 +25,7 @@ from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
-from src.utils import calc_expression
+from src.utils import calc_expression, fmt_indicator_value
 
 
 class ToolArgError(Exception):
@@ -170,13 +170,13 @@ async def get_indicators(deps: ToolDeps, args: dict) -> ToolOutcome:
         return ToolOutcome(f"错误：指标计算失败（{type(e).__name__}: {e}）")
     lines = [f"{contract} 技术指标（{interval}，按指标各自所需深度计算）:"]
     for item in panel["indicators"].values():
-        values = item["values"]
-        if all(v is None for v in values.values()):
+        rendered = {k: fmt_indicator_value(v) for k, v in item["values"].items()}
+        if all(v == "无数据" for v in rendered.values()):
             lines.append(f"{item['label']}: 无数据")
-        elif len(values) == 1:
-            lines.append(f"{item['label']}: {next(iter(values.values()))}")
+        elif len(rendered) == 1:
+            lines.append(f"{item['label']}: {next(iter(rendered.values()))}")
         else:  # 多值指标一行列子字段；个别字段缺失如实标 无数据
-            fields = ", ".join(f"{k}={v if v is not None else '无数据'}" for k, v in values.items())
+            fields = ", ".join(f"{k}={v}" for k, v in rendered.items())
             lines.append(f"{item['label']}: {fields}")
     return ToolOutcome("\n".join(lines))
 
