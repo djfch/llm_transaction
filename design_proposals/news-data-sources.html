@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>新闻/宏观数据源能力盘点 · BTC/ETH 交易视角</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-card: #131a22;
+    --bg-card-2: #182230;
+    --border: #263242;
+    --text: #dbe4ee;
+    --text-dim: #8b9bb0;
+    --jin10: #f5a524;      /* 金十：橙 */
+    --blockbeats: #5b8def; /* 律动：蓝 */
+    --rss: #6ee7e7;        /* RSS：青 */
+    --macro: #b07cff;      /* 宏观：紫 */
+    --ok: #3fca8b;         /* 覆盖：绿 */
+    --warn: #f0564a;       /* 缺口：红 */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.7; padding: 0 0 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  header { text-align: center; padding: 56px 24px 32px; }
+  header h1 { font-size: 32px; letter-spacing: 1px; }
+  header h1 .accent { color: var(--macro); }
+  header p { color: var(--text-dim); margin-top: 10px; font-size: 15px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 22px; }
+  .badge {
+    background: var(--bg-card-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 16px; font-size: 13px; color: var(--text);
+  }
+  .badge b { font-weight: 600; }
+  .badge.jin10 b { color: var(--jin10); }
+  .badge.bb b { color: var(--blockbeats); }
+  .badge.rss b { color: var(--rss); }
+
+  nav.toc {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+    margin: 28px auto 0; max-width: 900px;
+  }
+  nav.toc a {
+    color: var(--text-dim); text-decoration: none; font-size: 13px;
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px;
+    transition: all .2s;
+  }
+  nav.toc a:hover { color: var(--macro); border-color: var(--macro); }
+
+  section { margin-top: 64px; }
+  .sec-title { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .sec-num {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--macro), #7a4fd0);
+    color: #fff; font-weight: 700; font-size: 15px;
+  }
+  .sec-title h2 { font-size: 22px; }
+  .sec-desc { color: var(--text-dim); font-size: 14px; margin-bottom: 20px; }
+
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px;
+  }
+
+  /* ---------- 1. 核心结论 ---------- */
+  .concl { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .concl .card { transition: transform .2s, border-color .2s; }
+  .concl .card:hover { transform: translateY(-3px); }
+  .concl h3 { font-size: 15px; display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .concl .tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 6px;
+    border: 1px solid; font-weight: 600;
+  }
+  .concl p { font-size: 13.5px; color: var(--text-dim); }
+  .concl p b { color: var(--text); }
+  .tag.jin10 { color: var(--jin10); border-color: var(--jin10); }
+  .tag.bb { color: var(--blockbeats); border-color: var(--blockbeats); }
+  .tag.rss { color: var(--rss); border-color: var(--rss); }
+
+  /* ---------- 2. 传导链路 ---------- */
+  .chain { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; align-items: stretch; }
+  .step {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; text-align: center;
+    transition: border-color .2s, transform .2s;
+  }
+  .step:hover { border-color: var(--macro); transform: translateY(-2px); }
+  .step .icon { font-size: 22px; }
+  .step h4 { font-size: 14px; margin: 6px 0 4px; }
+  .step p { font-size: 12px; color: var(--text-dim); }
+  .step .src { font-size: 11px; margin-top: 6px; display: inline-block; padding: 2px 8px; border-radius: 6px; }
+  .step .src.j10 { background: rgba(245,165,36,.12); color: var(--jin10); }
+  .step .src.bb { background: rgba(91,141,239,.12); color: var(--blockbeats); }
+  .step .src.both { background: rgba(110,231,231,.1); color: var(--rss); }
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 18px; }
+
+  /* ---------- 3. 数据源能力 ---------- */
+  .srcs { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .src-card { border-radius: 14px; padding: 18px; border: 1px dashed; }
+  .src-card.j10 { background: rgba(245,165,36,.05); border-color: rgba(245,165,36,.35); }
+  .src-card.bb { background: rgba(91,141,239,.05); border-color: rgba(91,141,239,.35); }
+  .src-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .src-card .sub { font-size: 12px; color: var(--text-dim); margin-bottom: 14px; }
+  .api {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+    transition: border-color .2s;
+  }
+  .api:hover { border-color: #3d5066; }
+  .api .name { font-size: 13px; font-weight: 600; font-family: "Consolas", monospace; }
+  .api .desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .api .fields { font-size: 11.5px; color: var(--text); margin-top: 6px; line-height: 1.8; }
+  .api .fields code {
+    background: var(--bg-card-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; font-size: 11px;
+    color: #9fc1ff; font-family: "Consolas", monospace;
+  }
+  .src-card.j10 .api .name { color: var(--jin10); }
+  .src-card.bb .api .name { color: var(--blockbeats); }
+  .tag-new {
+    font-size: 10px; color: var(--ok); border: 1px solid var(--ok);
+    border-radius: 4px; padding: 0 5px; margin-left: 6px; vertical-align: 1px;
+  }
+
+  /* ---------- 4. 覆盖 vs 缺口 ---------- */
+  .gap { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .gap .card h3 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .gap ul { list-style: none; }
+  .gap li { font-size: 13px; padding: 7px 0 7px 22px; position: relative; border-bottom: 1px dashed var(--border); }
+  .gap li:last-child { border-bottom: none; }
+  .gap li::before { position: absolute; left: 0; top: 7px; font-weight: 700; }
+  .ok-card h3 { color: var(--ok); }
+  .ok-card li::before { content: "✓"; color: var(--ok); }
+  .warn-card h3 { color: var(--warn); }
+  .warn-card li::before { content: "✗"; color: var(--warn); }
+  .gap li b { color: var(--text); }
+  .gap li .fix { font-size: 11px; color: var(--rss); margin-left: 6px; }
+
+  /* ---------- 5. 接入方案 ---------- */
+  .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; align-items: stretch; }
+  .p-stage {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px; text-align: center;
+    transition: border-color .2s, transform .2s;
+  }
+  .p-stage:hover { border-color: var(--ok); transform: translateY(-2px); }
+  .p-stage .idx {
+    width: 22px; height: 22px; border-radius: 50%; margin: 0 auto 6px;
+    background: linear-gradient(135deg, var(--ok), #1f8f5c);
+    color: #fff; font-size: 12px; font-weight: 700; line-height: 22px;
+  }
+  .p-stage h4 { font-size: 13.5px; }
+  .p-stage p { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; }
+  .p-arrow { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 16px; }
+
+  .note {
+    margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+    background: rgba(110,231,231,.05); border: 1px dashed rgba(110,231,231,.35);
+    font-size: 13px; color: var(--text-dim);
+  }
+  .note b { color: var(--rss); }
+
+  footer { text-align: center; color: var(--text-dim); font-size: 12px; margin-top: 64px; }
+
+  /* ---------- 6. 数据流设计 ---------- */
+  .flow-sources { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 10px; }
+  .flow-src { border-radius: 12px; padding: 14px; border: 1px dashed; text-align: center; }
+  .flow-src.j10 { background: rgba(245,165,36,.05); border-color: rgba(245,165,36,.4); }
+  .flow-src.bb { background: rgba(91,141,239,.05); border-color: rgba(91,141,239,.4); }
+  .flow-src.rss { background: rgba(110,231,231,.05); border-color: rgba(110,231,231,.4); }
+  .flow-src h4 { font-size: 14px; }
+  .flow-src p { font-size: 12px; color: var(--text-dim); }
+  .flow-src.j10 h4 { color: var(--jin10); }
+  .flow-src.bb h4 { color: var(--blockbeats); }
+  .flow-src.rss h4 { color: var(--rss); }
+
+  .flow-stack { display: flex; flex-direction: column; gap: 6px; max-width: 600px; margin: 0 auto; }
+  .flow-node {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; display: flex; gap: 14px; align-items: center;
+    transition: border-color .2s, transform .2s;
+  }
+  .flow-node:hover { border-color: var(--macro); transform: translateX(3px); }
+  .flow-node .fnum {
+    width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; color: #fff;
+    background: linear-gradient(135deg, var(--macro), #7a4fd0);
+  }
+  .flow-node .fbody h4 { font-size: 14px; }
+  .flow-node .fbody p { font-size: 12px; color: var(--text-dim); }
+  .flow-node .fbody code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace;
+  }
+  .flow-arrow { text-align: center; color: var(--text-dim); font-size: 13px; line-height: 1; padding: 2px 0; }
+
+  /* 表设计 */
+  .tbl-wrap { overflow-x: auto; }
+  table.schema { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+  table.schema th {
+    text-align: left; color: var(--text-dim); font-weight: 600; padding: 8px 10px;
+    border-bottom: 2px solid var(--border); white-space: nowrap;
+  }
+  table.schema td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.schema tr:hover td { background: rgba(63,202,139,.03); }
+  table.schema code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace; white-space: nowrap;
+  }
+  table.schema .pk { color: var(--ok); font-weight: 600; }
+
+  /* 调度节奏 */
+  .sched { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .sched-item {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; display: flex; gap: 12px; align-items: flex-start;
+  }
+  .sched-item .sicon { font-size: 18px; }
+  .sched-item h4 { font-size: 13.5px; }
+  .sched-item p { font-size: 12px; color: var(--text-dim); }
+  .sched-item .rate {
+    font-size: 11px; color: var(--ok); border: 1px solid var(--ok);
+    border-radius: 999px; padding: 1px 8px; margin-left: 8px; white-space: nowrap;
+  }
+  .sched-item.hot { border-color: rgba(245,165,36,.4); }
+  .sched-item.hot .rate { color: var(--jin10); border-color: var(--jin10); }
+
+  /* 过滤漏斗 */
+  .funnel { max-width: 620px; margin: 0 auto; }
+  .fn-level {
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 6px;
+    border: 1px solid var(--border); background: var(--bg-card);
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    transition: border-color .2s;
+  }
+  .fn-level:hover { border-color: var(--macro); }
+  .fn-level .lname { font-size: 13.5px; font-weight: 600; }
+  .fn-level .lname code {
+    font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace;
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+  }
+  .fn-level .ldesc { font-size: 12px; color: var(--text-dim); }
+  .fn-level .lqty { font-size: 12.5px; color: var(--ok); font-weight: 700; white-space: nowrap; }
+  .fn-l0 { border-color: rgba(139,155,176,.4); }
+  .fn-l1 { margin-left: 24px; }
+  .fn-l2 { margin-left: 48px; }
+  .fn-l3 { margin-left: 72px; border-color: rgba(110,231,231,.45); }
+  .fn-arrow { text-align: center; color: var(--text-dim); font-size: 12px; margin: -2px 0 2px; }
+
+  .kw { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .kw span {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; font-size: 11.5px; color: var(--text);
+  }
+  .kw span.grp { border-color: var(--jin10); color: var(--jin10); }
+  .kw span.grp2 { border-color: var(--blockbeats); color: var(--blockbeats); }
+
+  .prompt-box {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; font-family: "Consolas", monospace; font-size: 12px;
+    color: var(--text-dim); line-height: 1.9; margin-top: 12px; white-space: pre-wrap;
+  }
+  .prompt-box .p1 { color: var(--jin10); }
+  .prompt-box .p2 { color: var(--blockbeats); }
+  .prompt-box .p3 { color: var(--ok); }
+
+  @media (max-width: 900px) {
+    .concl, .srcs, .gap { grid-template-columns: 1fr; }
+    .chain { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); padding: 2px 0; }
+    .pipeline { grid-template-columns: 1fr; }
+    .p-arrow { transform: rotate(90deg); }
+    .flow-sources { grid-template-columns: 1fr; }
+    .sched { grid-template-columns: 1fr; }
+    .fn-l1 { margin-left: 12px; }
+    .fn-l2 { margin-left: 24px; }
+    .fn-l3 { margin-left: 36px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>新闻 / 宏观数据源能力盘点<span class="accent"> · BTC/ETH 交易视角</span></h1>
+  <p>基于实测结果：金十日历返回完整自然周事件、BlockBeats 24h 快讯返回约 50 条含全文 —— 均真实可获取</p>
+  <div class="badges">
+    <span class="badge jin10">金十 <b>宏观主力</b></span>
+    <span class="badge bb">BlockBeats <b>加密主力</b></span>
+    <span class="badge rss">RSS <b>英文补充</b></span>
+  </div>
+  <nav class="toc">
+    <a href="#concl">① 核心结论</a>
+    <a href="#chain">② 宏观传导链路</a>
+    <a href="#sources">③ 数据源能力明细</a>
+    <a href="#gap">④ 覆盖与缺口</a>
+    <a href="#plan">⑤ 接入方案</a>
+    <a href="#flow">⑥ 数据流设计</a>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <!-- ========== 1. 核心结论 ========== -->
+  <section id="concl">
+    <div class="sec-title"><div class="sec-num">1</div><h2>核心结论</h2></div>
+    <p class="sec-desc">三个数据源不是"选一个"，而是分工互补 —— 金十管宏观事件、律动管加密资金面、RSS 管英文一手原声。</p>
+    <div class="concl">
+      <div class="card">
+        <h3><span class="tag jin10">主力</span> 金十（宏观）</h3>
+        <p>财经日历（当前自然周全量事件）+ 宏观快讯 + 深度文章 + 实时行情。数据已实测：<b>本周日历含 8/7 美国非农、失业率（5 星）与 ADP（4 星）</b>，带实际值/预期值/前值/影响方向。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag bb">主力</span> BlockBeats（加密）</h3>
+        <p>24h 全量快讯（约 50 条，正文全文+原文链接）+ ETF 资金流 + 稳定币市值 + 合约持仓量 + 情绪指标。实测当日快讯同时覆盖<b>美联储鹰派、BTC 巨鲸、ETF 净流入</b>——正是交易需要的因果链。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag rss">补充</span> RSS（英文一手）</h3>
+        <p>补两个数据源的盲区：<b>英文原声信源</b>（美联储官网、彭博/路透原文）。中文媒体会转述、过滤、延迟，关键时刻值得直接读一手声明。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 2. 传导链路 ========== -->
+  <section id="chain">
+    <div class="sec-title"><div class="sec-num">2</div><h2>宏观 → BTC/ETH 的传导链路（已闭环）</h2></div>
+    <p class="sec-desc">交易主流币需要的是"知道何时出事 + 出什么事 + 资金怎么反应"三段信息，三个数据源正好各管一段。</p>
+    <div class="chain">
+      <div class="step">
+        <div class="icon">📅</div>
+        <h4>事件时间表</h4>
+        <p>本周哪几天有非农/CPI/议息，几点公布，重要性几星</p>
+        <span class="src j10">金十日历</span>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">📰</div>
+        <h4>事件解读</h4>
+        <p>数据出炉瞬间的解读、官员讲话、市场即时反应</p>
+        <span class="src both">金十快讯 · 律动</span>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">💧</div>
+        <h4>资金面确认</h4>
+        <p>ETF 净流入、稳定币增发、合约持仓、情绪指标是否配合</p>
+        <span class="src bb">律动指标</span>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">⚖️</div>
+        <h4>交易决策</h4>
+        <p>三段信息交叉验证后，才轮到技术面/仓位决策</p>
+        <span class="src both">Agent 综合</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 3. 数据源能力 ========== -->
+  <section id="sources">
+    <div class="sec-title"><div class="sec-num">3</div><h2>数据源能力明细</h2></div>
+    <p class="sec-desc">以下接口均已实测可用（字段为真实返回样例）。<span class="tag-new">新</span> 表示除新闻外附带的数据类能力。</p>
+    <div class="srcs">
+
+      <div class="src-card j10">
+        <h3>金十 · jin10</h3>
+        <p class="sub">宏观财经专业源，中文。最核心的价值：结构化经济日历。</p>
+
+        <div class="api">
+          <div class="name">财经日历（本周全量）</div>
+          <div class="desc">返回当前自然周全部事件，已公布带结果、未公布带预期</div>
+          <div class="fields">
+            <code>title</code> 事件名（如"美国7月非农就业人口"）·
+            <code>pub_time</code> 公布时间 ·
+            <code>star</code> 重要性 1-5 星 ·
+            <code>actual</code> 实际值 / <code>consensus</code> 预期值 / <code>previous</code> 前值 ·
+            <code>affect_txt</code> 利多/利空/影响较小
+          </div>
+        </div>
+
+        <div class="api">
+          <div class="name">快讯（分页 / 关键词搜索）</div>
+          <div class="desc">滚动快讯流，支持 cursor 分页与 keyword 搜索，最多 150 条</div>
+          <div class="fields">
+            <code>id</code> 唯一 ID ·
+            <code>title</code> 标题 ·
+            <code>content</code> 正文 ·
+            <code>time</code> 发布时间
+          </div>
+        </div>
+
+        <div class="api">
+          <div class="name">文章（分页 / 搜索 / 详情）</div>
+          <div class="desc">深度解读文章，可搜索"美联储/非农/CPI"等关键词</div>
+          <div class="fields"><code>id</code> · <code>title</code> · <code>content</code> · <code>author</code> · <code>time</code></div>
+        </div>
+
+        <div class="api">
+          <div class="name">实时行情 + 分钟 K 线</div>
+          <div class="desc">黄金、原油等关联品种行情，K 线最多取 100 根分钟线</div>
+          <div class="fields"><code>price</code> 现价 · <code>change_pct</code> 涨跌幅 · <code>high/low</code> 高低点 · <code>volume</code> 成交量</div>
+        </div>
+      </div>
+
+      <div class="src-card bb">
+        <h3>BlockBeats · 律动</h3>
+        <p class="sub">加密垂直媒体，中文。最核心的价值：加密市场+宏观混合快讯与资金面指标。</p>
+
+        <div class="api">
+          <div class="name">24h 全量快讯</div>
+          <div class="desc">过去 24 小时固定约 50 条，每条带正文全文与原文链接</div>
+          <div class="fields">
+            <code>id</code> · <code>title</code> 标题 ·
+            <code>content</code> 正文全文（实测含完整分析）·
+            <code>link</code> 原文链接 ·
+            <code>create_time</code> 时间
+          </div>
+        </div>
+
+        <div class="api">
+          <div class="name">快讯 / 文章分页 · 关键词搜索</div>
+          <div class="desc">按分类（重要/原创）分页，或按关键词搜历史内容</div>
+          <div class="fields"><code>page</code> 分页 · <code>category</code> 分类 · <code>keyword</code> 搜索词</div>
+        </div>
+
+        <div class="api">
+          <div class="name">市场情绪指标 <span class="tag-new">新</span></div>
+          <div class="desc">抄底逃顶情绪值：&lt;20 潜在买入区 · 20-80 中性 · &gt;80 潜在卖出区</div>
+        </div>
+
+        <div class="api">
+          <div class="name">BTC ETF 资金流 <span class="tag-new">新</span></div>
+          <div class="desc">全市场 BTC ETF 净流入，另有 IBIT/FBTC 单只明细 —— 机构资金的直接观测口</div>
+        </div>
+
+        <div class="api">
+          <div class="name">宏观指标组 <span class="tag-new">新</span></div>
+          <div class="desc">
+            <code>DXY</code> 美元指数 · <code>US10Y</code> 美债 10 年收益率 ·
+            <code>M2</code> 全球货币供应量 —— 流动性宽松/收紧的直接证据
+          </div>
+        </div>
+
+        <div class="api">
+          <div class="name">加密资金面组 <span class="tag-new">新</span></div>
+          <div class="desc">
+            <code>stablecoin_mcap</code> 稳定币市值（USDT/USDC）·
+            <code>contract_oi</code> 主流平台合约持仓量 ·
+            <code>bitfinex_long</code> 大户杠杆多头持仓 ·
+            <code>exchange_rank</code> 交易所成交/持仓排名
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ========== 4. 覆盖 vs 缺口 ========== -->
+  <section id="gap">
+    <div class="sec-title"><div class="sec-num">4</div><h2>全面性评估：覆盖了什么，还缺什么</h2></div>
+    <p class="sec-desc">对"BTC/ETH 主流币 + 宏观驱动"这个场景的诚实评估。</p>
+    <div class="gap">
+      <div class="card ok-card">
+        <h3>✓ 已覆盖（够用）</h3>
+        <ul>
+          <li><b>宏观事件时间表</b>：本周非农/ADP/ISM/EIA 全在日历，带星级与预期</li>
+          <li><b>宏观事件解读</b>：金十+律动双快讯，数据公布后分钟级解读</li>
+          <li><b>加密资金面</b>：ETF 净流入、稳定币市值、合约持仓、情绪指标</li>
+          <li><b>美元流动性锚</b>：DXY、美债收益率、M2 均可直接取数</li>
+          <li><b>BTC/ETH 链上动态</b>：巨鲸动向、链上数据、爆仓数据</li>
+          <li><b>历史检索</b>：两边均支持关键词搜索，可回溯历史新闻</li>
+        </ul>
+      </div>
+      <div class="card warn-card">
+        <h3>✗ 缺口（需注意）</h3>
+        <ul>
+          <li><b>英文一手信源</b>：中文媒体为主，美联储声明/外媒原文需 RSS 补 <span class="fix">→ RSS 互补</span></li>
+          <li><b>日历仅"当前自然周"</b>：无法按指定日期/范围查询，跨周需自行累积存储 <span class="fix">→ 本地缓存</span></li>
+          <li><b>24h 快讯 50 条封顶</b>：爆量日（大跌/大事件）有截断风险 <span class="fix">→ 分页+搜索兜底</span></li>
+          <li><b>无历史经济数据序列</b>：日历是单条事件，拿不到 CPI 过去 12 期走势 <span class="fix">→ 逐周落库积累</span></li>
+          <li><b>无原始财报/公告 PDF</b>：事件详情需点原文链接跳转</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 5. 接入方案 ========== -->
+  <section id="plan">
+    <div class="sec-title"><div class="sec-num">5</div><h2>建议接入方案（意图先于代码）</h2></div>
+    <p class="sec-desc">设计思路：把"拉数据"和"用数据"分开 —— 定时采集统一落库，Agent 只消费过滤后的结构化结果，未来换数据源不影响上层。</p>
+    <div class="pipeline">
+      <div class="p-stage">
+        <div class="idx">1</div>
+        <h4>定时采集</h4>
+        <p>复用现有调度器：每小时拉日历+快讯，分钟级拉 24h 快讯增量</p>
+      </div>
+      <div class="p-arrow">→</div>
+      <div class="p-stage">
+        <div class="idx">2</div>
+        <h4>归一化存储</h4>
+        <p>三个来源统一成"事件/快讯"两张表，落 SQLite（现有持久化设施）</p>
+      </div>
+      <div class="p-arrow">→</div>
+      <div class="p-stage">
+        <div class="idx">3</div>
+        <h4>过滤分层</h4>
+        <p>BTC/ETH 关键词 + 星级 ≥ 3 + 时间窗，压缩为摘要供 Agent 阅读</p>
+      </div>
+      <div class="p-arrow">→</div>
+      <div class="p-stage">
+        <div class="idx">4</div>
+        <h4>上下文注入</h4>
+        <p>按"事件→解读→资金面"分组注入 LLM 提示词，控制 token 用量</p>
+      </div>
+      <div class="p-arrow">→</div>
+      <div class="p-stage">
+        <div class="idx">5</div>
+        <h4>Agent 决策</h4>
+        <p>与行情/风控/技术面共同进入现有决策链路，新闻只做输入不做执行</p>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>关键原则：</b>新闻/宏观数据只进入"决策依据"，不进入"执行通道"——下单仍走现有 RiskEngine 风控，新闻永远不会绕过风控直接触发交易。
+    </div>
+  </section>
+
+  <!-- ========== 6. 数据流设计 ========== -->
+  <section id="flow">
+    <div class="sec-title"><div class="sec-num">6</div><h2>数据流与存储设计</h2></div>
+    <p class="sec-desc">从"数据源"到"Agent 上下文"的完整链路：数据单向流动，新闻层不持有任何交易能力。</p>
+
+    <div class="card" style="margin-bottom: 14px;">
+      <h3 style="font-size: 15px; margin-bottom: 14px;">6.1 数据流总图（A→H 单向管道）</h3>
+      <div class="flow-sources">
+        <div class="flow-src j10"><h4>金十</h4><p>日历 / 快讯 / 文章 / 行情</p></div>
+        <div class="flow-src bb"><h4>BlockBeats</h4><p>快讯 / 文章 / 指标数据</p></div>
+        <div class="flow-src rss"><h4>RSS（未来）</h4><p>英文一手信源</p></div>
+      </div>
+      <div class="flow-arrow">▼</div>
+      <div class="flow-stack">
+        <div class="flow-node">
+          <div class="fnum">A</div>
+          <div class="fbody">
+            <h4>NewsProvider 接口（统一适配层）</h4>
+            <p>三个实现 <code>Jin10Provider</code> / <code>BlockBeatsProvider</code> / <code>RssProvider</code>，同一接口可替换，上层不感知数据源差异</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">B</div>
+          <div class="fbody">
+            <h4>采集调度器</h4>
+            <p>复用现有 scheduler：按频率触发拉取，记录 <code>since_ts(上次拉取时间)</code> 做增量，避免重复拉全量</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">C</div>
+          <div class="fbody">
+            <h4>归一化 + 去重</h4>
+            <p>三源字段统一成同一模型；<code>dedup_key(去重键)</code> 加唯一约束，同一事件只落一条</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">D</div>
+          <div class="fbody">
+            <h4>SQLite 存储（复用现有 memory 设施）</h4>
+            <p>三张表：<code>events(经济事件)</code> / <code>flash(快讯)</code> / <code>indicators(指标快照)</code>，见 6.2</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">E</div>
+          <div class="fbody">
+            <h4>过滤分层 L1（纯规则）</h4>
+            <p>BTC/ETH 关键词 ∪ 高星事件(≥3) ∪ 近 2h 时间窗 —— 先把 95%+ 噪声挡在 LLM 之外</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">F</div>
+          <div class="fbody">
+            <h4>摘要压缩 L2（LLM）</h4>
+            <p>候选集压缩为 ≤10 条要点，按时间线排序，每条 ≤60 字</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">G</div>
+          <div class="fbody">
+            <h4>上下文注入 L3</h4>
+            <p>三段式注入提示词（见 6.4 示例），预算 ≤2000 token，按需读取不常驻</p>
+          </div>
+        </div>
+        <div class="flow-arrow">▼</div>
+        <div class="flow-node">
+          <div class="fnum">H</div>
+          <div class="fbody">
+            <h4>Agent 决策（只读消费）</h4>
+            <p>新闻仅作决策依据；下单仍走 RiskEngine 风控 —— 链路终点是"读"，不是"写"</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 14px;">
+      <h3 style="font-size: 15px; margin-bottom: 8px;">6.2 存储设计（SQLite 三张表）</h3>
+      <p style="font-size: 12.5px; color: var(--text-dim); margin-bottom: 6px;">金额/数值字段沿用项目规范用 Decimal 语义存储（文本或整数最小单位），禁止 float。</p>
+
+      <h4 style="font-size: 13.5px; margin: 14px 0 4px;">表 1 · <code style="color:#9fc1ff;font-family:Consolas,monospace;">events</code> 经济日历事件</h4>
+      <div class="tbl-wrap">
+        <table class="schema">
+          <tr><th>字段</th><th>说明</th><th>约束</th></tr>
+          <tr><td><code class="pk">event_id</code></td><td>事件唯一 ID（source + 标题 + 公布时间拼接）</td><td>主键</td></tr>
+          <tr><td><code>source</code></td><td>来源：jin10 / blockbeats</td><td>索引</td></tr>
+          <tr><td><code>title</code></td><td>事件名（如"美国7月非农就业人口"）</td><td></td></tr>
+          <tr><td><code>pub_time</code></td><td>公布时间（本地时区 ISO）</td><td>索引</td></tr>
+          <tr><td><code>star</code></td><td>重要性 1-5 星</td><td></td></tr>
+          <tr><td><code>actual</code> / <code>consensus</code> / <code>previous</code></td><td>实际值 / 预期值 / 前值（未公布为 NULL）</td><td></td></tr>
+          <tr><td><code>affect_txt</code></td><td>影响方向：利多 / 利空 / 影响较小 / 未公布</td><td></td></tr>
+          <tr><td><code>fetched_at</code></td><td>采集时间（便于过期判断）</td><td></td></tr>
+        </table>
+      </div>
+
+      <h4 style="font-size: 13.5px; margin: 14px 0 4px;">表 2 · <code style="color:#9fc1ff;font-family:Consolas,monospace;">flash</code> 快讯</h4>
+      <div class="tbl-wrap">
+        <table class="schema">
+          <tr><th>字段</th><th>说明</th><th>约束</th></tr>
+          <tr><td><code class="pk">flash_id</code></td><td>源 ID（金十/律动各自带 id）</td><td>主键</td></tr>
+          <tr><td><code>source</code></td><td>jin10 / blockbeats</td><td>索引</td></tr>
+          <tr><td><code>title</code></td><td>标题</td><td></td></tr>
+          <tr><td><code>content</code></td><td>正文全文（过滤 HTML 标签后存储）</td><td></td></tr>
+          <tr><td><code>url</code></td><td>原文链接</td><td></td></tr>
+          <tr><td><code>published_at</code></td><td>发布时间</td><td>索引</td></tr>
+          <tr><td><code>dedup_key</code></td><td>标题 + 发布时间窗口哈希 —— 去重核心</td><td><b style="color:var(--ok);">唯一</b></td></tr>
+        </table>
+      </div>
+
+      <h4 style="font-size: 13.5px; margin: 14px 0 4px;">表 3 · <code style="color:#9fc1ff;font-family:Consolas,monospace;">indicators</code> 指标快照</h4>
+      <div class="tbl-wrap">
+        <table class="schema">
+          <tr><th>字段</th><th>说明</th><th>约束</th></tr>
+          <tr><td><code class="pk">id</code></td><td>自增 ID</td><td>主键</td></tr>
+          <tr><td><code>indicator</code></td><td>指标键：<code>etf_btc_netflow</code> / <code>dxy</code> / <code>us10y</code> / <code>m2</code> / <code>stablecoin_usdt</code> / <code>sentiment</code> / <code>btc_oi</code>…</td><td>索引</td></tr>
+          <tr><td><code>value</code></td><td>数值（Decimal 语义）</td><td></td></tr>
+          <tr><td><code>unit</code></td><td>单位（亿美元 / % / 点…）</td><td></td></tr>
+          <tr><td><code>captured_at</code></td><td>快照时间</td><td>索引</td></tr>
+        </table>
+      </div>
+      <p style="font-size: 12.5px; color: var(--text-dim); margin-top: 8px;">指标表按时间累积成序列 —— 顺带解决"缺历史序列"的缺口，攒几周后就能画 ETF 流入趋势。</p>
+    </div>
+
+    <div class="card" style="margin-bottom: 14px;">
+      <h3 style="font-size: 15px; margin-bottom: 14px;">6.3 采集调度节奏（24h）</h3>
+      <div class="sched">
+        <div class="sched-item">
+          <div class="sicon">⚡</div>
+          <div>
+            <h4>快讯增量<span class="rate">每 5 分钟</span></h4>
+            <p>金十 + 律动快讯，<code>since_ts(上次拉取时间)</code> 增量拉取，入库去重</p>
+          </div>
+        </div>
+        <div class="sched-item">
+          <div class="sicon">📊</div>
+          <div>
+            <h4>指标快照<span class="rate">每 30 分钟</span></h4>
+            <p>ETF 净流入 / DXY / 美债收益率 / M2 / 稳定币市值 / 情绪值，逐次落库成序列</p>
+          </div>
+        </div>
+        <div class="sched-item">
+          <div class="sicon">📅</div>
+          <div>
+            <h4>经济日历<span class="rate">每小时</span></h4>
+            <p>整点后刷新当前自然周日历，捕捉已公布事件的 actual(实际值) 回填</p>
+          </div>
+        </div>
+        <div class="sched-item">
+          <div class="sicon">🌙</div>
+          <div>
+            <h4>全量兜底<span class="rate">每日 00:15</span></h4>
+            <p>重拉 24h 快讯全量 + 日历全周，补齐增量拉取可能漏掉的缺口</p>
+          </div>
+        </div>
+        <div class="sched-item hot">
+          <div class="sicon">🔥</div>
+          <div>
+            <h4>5 星事件前后<span class="rate">每 1 分钟</span></h4>
+            <p>非农 / CPI / 议息等 5 星事件 ±30 分钟临时提速，快讯延迟压到 1 分钟内</p>
+          </div>
+        </div>
+        <div class="sched-item">
+          <div class="sicon">🔔</div>
+          <div>
+            <h4>事件告警（可选）</h4>
+            <p>5 星事件公布瞬间，若 actual(实际值) vs consensus(预期值) 偏离超阈值，Telegram 推送</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size: 15px; margin-bottom: 14px;">6.4 过滤分层与上下文注入</h3>
+
+      <h4 style="font-size: 13.5px; margin-bottom: 10px;">压缩漏斗（L0 → L3）</h4>
+      <div class="funnel">
+        <div class="fn-level fn-l0">
+          <div><div class="lname">L0 · 全量原始入库</div><div class="ldesc">快讯 50 条/轮 × 288 轮/日 + 文章 + 日历</div></div>
+          <div class="lqty">~2000 条/日</div>
+        </div>
+        <div class="fn-arrow">▼ 规则过滤（不消耗 LLM token）</div>
+        <div class="fn-level fn-l1">
+          <div><div class="lname">L1 · <code>关键词 ∪ 星级≥3 ∪ 2h 窗口</code></div><div class="ldesc">只留 BTC/ETH/宏观相关，丢弃山寨、活动公告、无关美股</div></div>
+          <div class="lqty">20-60 条</div>
+        </div>
+        <div class="fn-arrow">▼ LLM 摘要（成本可控）</div>
+        <div class="fn-level fn-l2">
+          <div><div class="lname">L2 · 摘要要点</div><div class="ldesc">按时间线压缩，每条 ≤60 字，保留链接可溯源</div></div>
+          <div class="lqty">≤10 条</div>
+        </div>
+        <div class="fn-arrow">▼ 按需注入</div>
+        <div class="fn-level fn-l3">
+          <div><div class="lname">L3 · 三段式上下文</div><div class="ldesc">宏观日历 + 解读 + 资金面，预算封顶</div></div>
+          <div class="lqty">≤2000 token</div>
+        </div>
+      </div>
+
+      <h4 style="font-size: 13.5px; margin: 18px 0 4px;">L1 关键词表（规则层，可配置）</h4>
+      <div class="kw">
+        <span class="grp">btc / 比特币 / bitcoin</span>
+        <span class="grp">eth / 以太坊 / ethereum</span>
+        <span class="grp">etf</span>
+        <span class="grp">爆仓 / 清算 / 合约</span>
+        <span class="grp2">美联储 / fed</span>
+        <span class="grp2">加息 / 降息 / 利率</span>
+        <span class="grp2">非农 / cpi / pce / 失业</span>
+        <span class="grp2">美元指数 / dxy / 美债 / 收益率</span>
+        <span class="grp2">m2 / 流动性 / 稳定币</span>
+      </div>
+
+      <h4 style="font-size: 13.5px; margin: 18px 0 4px;">L3 注入格式示例</h4>
+      <div class="prompt-box"><span class="p1">【宏观日历 · 未来 24h】
+08-07 20:30 美国7月非农就业人口（5星）预期 8.3万 | 前值 5.7万
+08-07 20:30 美国7月失业率（5星）预期 4.30% | 前值 4.20%
+
+<span class="p2">【宏观解读 · 近 2h】（≤10 条）
+- 09:53 美联储鹰派阵营扩大：5 位地方联储主席支持加息
+- 10:04 美伊接近达成霍尔木兹协议，油价大跌 6%
+
+<span class="p3">【加密资金面】
+BTC ETF 净流入 +2.1 亿美元（昨日）
+USDT 市值 60 日变化 -40 亿美元（流动性收缩）
+市场情绪值 45（中性）| BTC OI 变化 -3%</span></span></span></div>
+
+      <div class="note" style="margin-top: 14px;">
+        <b>设计意图：</b>规则层（L1）保证"脏活不花 token"，LLM 只在压缩（L2）和决策时被调用；注入按"决策点"触发——开平仓前必读，定时唤醒可选读，日常循环不携带新闻，把上下文开销压到最低。
+      </div>
+    </div>
+  </section>
+
+  <footer>数据源能力盘点 · 基于 2026-08-05 实测返回 · 三个数据源分工互补而非互相替代</footer>
+</div>
+</body>
+</html>

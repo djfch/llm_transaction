@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>研报 Agent 三段闭环 · 设计定稿 v4</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-card: #131a22;
+    --bg-card-2: #182230;
+    --border: #263242;
+    --text: #dbe4ee;
+    --text-dim: #8b9bb0;
+    --research: #b07cff;
+    --exec: #3fca8b;
+    --review: #6ee7e7;
+    --warn: #f5a524;
+    --danger: #f0564a;
+    --data: #5b8def;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.7; padding: 0 0 80px;
+  }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+
+  header { text-align: center; padding: 52px 24px 28px; }
+  header h1 { font-size: 30px; letter-spacing: 1px; }
+  header h1 .accent { color: var(--research); }
+  header .ver { font-size: 12.5px; color: var(--warn); margin-top: 6px; }
+  header p { color: var(--text-dim); margin-top: 10px; font-size: 14.5px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 20px; }
+  .badge {
+    background: var(--bg-card-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 14px; font-size: 12.5px; color: var(--text);
+  }
+  .badge b { font-weight: 700; }
+  .badge.r1 b { color: var(--research); }
+  .badge.r2 b { color: var(--exec); }
+  .badge.r3 b { color: var(--review); }
+
+  nav.toc { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 24px auto 0; max-width: 960px; }
+  nav.toc a {
+    color: var(--text-dim); text-decoration: none; font-size: 12.5px;
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; transition: all .2s;
+  }
+  nav.toc a:hover { color: var(--research); border-color: var(--research); }
+
+  section { margin-top: 56px; }
+  .sec-title { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .sec-num {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--research), #7a4fd0);
+    color: #fff; font-weight: 700; font-size: 15px;
+  }
+  .sec-title h2 { font-size: 21px; }
+  .sec-desc { color: var(--text-dim); font-size: 14px; margin-bottom: 18px; }
+
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+
+  /* ---------- 结论 ---------- */
+  .concl { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .concl .card { transition: transform .2s, border-color .2s; border-top: 3px solid var(--border); }
+  .concl .card:hover { transform: translateY(-3px); }
+  .concl .card.a { border-top-color: var(--research); }
+  .concl .card.b { border-top-color: var(--exec); }
+  .concl .card.c { border-top-color: var(--review); }
+  .concl h3 { font-size: 14.5px; margin-bottom: 8px; }
+  .concl p { font-size: 13px; color: var(--text-dim); }
+  .concl p b { color: var(--text); }
+
+  /* ---------- 三段闭环 ---------- */
+  .cycle { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: stretch; }
+  .c-step {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px; text-align: center; transition: border-color .2s, transform .2s;
+  }
+  .c-step:hover { transform: translateY(-2px); }
+  .c-step .icon { font-size: 22px; }
+  .c-step h4 { font-size: 14px; margin: 6px 0 4px; }
+  .c-step p { font-size: 12px; color: var(--text-dim); }
+  .c-step .t { font-size: 11px; margin-top: 8px; display: inline-block; padding: 2px 8px; border-radius: 6px; }
+  .t-research { background: rgba(176,124,255,.12); color: var(--research); }
+  .t-exec { background: rgba(63,202,139,.12); color: var(--exec); }
+  .t-review { background: rgba(110,231,231,.1); color: var(--review); }
+  .c-arrow { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 18px; }
+
+  .tbl-wrap { overflow-x: auto; border-radius: 14px; border: 1px solid var(--border); }
+  table.t { width: 100%; border-collapse: collapse; font-size: 12.5px; background: var(--bg-card); }
+  table.t th {
+    text-align: left; padding: 10px 12px; background: var(--bg-card-2);
+    font-weight: 600; white-space: nowrap; border-bottom: 2px solid var(--border);
+  }
+  table.t td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.t tr:last-child td { border-bottom: none; }
+  table.t tr:hover td { background: rgba(176,124,255,.04); }
+  table.t code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace; white-space: nowrap;
+  }
+  table.t .hot { color: var(--warn); font-weight: 600; }
+
+  /* ---------- 研报设计 ---------- */
+  .design-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  .d-box { border-radius: 12px; padding: 16px; border: 1px dashed; }
+  .d-box h3 { font-size: 14.5px; margin-bottom: 8px; }
+  .d-box p { font-size: 12.5px; color: var(--text-dim); }
+  .d-box ul { list-style: none; margin-top: 8px; }
+  .d-box li { font-size: 12px; padding: 4px 0 4px 16px; position: relative; color: var(--text); }
+  .d-box li::before { content: "·"; position: absolute; left: 2px; color: #6ee7e7; font-weight: 700; }
+  .d-box code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace;
+  }
+  .d-purple { background: rgba(176,124,255,.05); border-color: rgba(176,124,255,.4); }
+  .d-purple h3 { color: var(--research); }
+  .d-blue { background: rgba(91,141,239,.05); border-color: rgba(91,141,239,.4); }
+  .d-blue h3 { color: var(--data); }
+  .d-cyan { background: rgba(110,231,231,.04); border-color: rgba(110,231,231,.4); }
+  .d-cyan h3 { color: var(--review); }
+
+  .prompt-box {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; font-family: "Consolas", monospace; font-size: 12px;
+    color: var(--text-dim); line-height: 1.9; margin-top: 10px; white-space: pre-wrap;
+  }
+  .prompt-box .p1 { color: var(--research); }
+  .prompt-box .p2 { color: var(--exec); }
+  .prompt-box .p3 { color: var(--warn); }
+
+  /* ---------- 时间线 ---------- */
+  .tl-box {
+    background: rgba(110,231,231,.04); border: 1px dashed rgba(110,231,231,.4);
+    border-radius: 12px; padding: 16px;
+  }
+  .tl-box h3 { font-size: 14.5px; color: var(--review); margin-bottom: 8px; }
+  .tl-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  .tl-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tl-item h4 { font-size: 13px; margin-bottom: 6px; }
+  .tl-item p { font-size: 12px; color: var(--text-dim); }
+  .tl-item .tag {
+    display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 5px;
+    margin-bottom: 6px; border: 1px solid;
+  }
+  .tag-fact { color: var(--review); border-color: var(--review); }
+  .tag-judge { color: var(--warn); border-color: var(--warn); }
+
+  /* ---------- 复盘改动 ---------- */
+  .gap-box {
+    background: rgba(240,86,74,.04); border: 1px dashed rgba(240,86,74,.35);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  .gap-box h3 { font-size: 14.5px; color: var(--danger); margin-bottom: 8px; }
+  .gap-box p { font-size: 12.5px; color: var(--text-dim); }
+  .gap-box p b { color: var(--text); }
+
+  .fix-list { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  .fix-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .fix-item h4 { font-size: 13px; margin-bottom: 6px; }
+  .fix-item p { font-size: 12px; color: var(--text-dim); }
+  .fix-item code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace;
+  }
+
+  .err-types { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px; }
+  .err-item { border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); background: var(--bg-card); }
+  .err-item h4 { font-size: 13px; margin-bottom: 6px; }
+  .err-item p { font-size: 12px; color: var(--text-dim); }
+  .err-item .fix { font-size: 11.5px; color: var(--review); margin-top: 6px; }
+
+  /* ---------- 纠错三层 ---------- */
+  .l3-box { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .l3-item { border-radius: 10px; padding: 12px 14px; border: 1px dashed; }
+  .l3-item h4 { font-size: 13px; margin-bottom: 6px; }
+  .l3-item p { font-size: 12px; color: var(--text-dim); }
+  .l3-item p b { color: var(--text); }
+  .l3-1 { background: rgba(110,231,231,.04); border-color: rgba(110,231,231,.4); }
+  .l3-1 h4 { color: var(--review); }
+  .l3-2 { background: rgba(245,165,36,.05); border-color: rgba(245,165,36,.4); }
+  .l3-2 h4 { color: var(--warn); }
+  .l3-3 { background: rgba(240,86,74,.04); border-color: rgba(240,86,74,.4); }
+  .l3-3 h4 { color: var(--danger); }
+
+  /* ---------- 修订机制 ---------- */
+  .guard { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .guard-item {
+    background: rgba(240,86,74,.04); border: 1px solid rgba(240,86,74,.3);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .guard-item h4 { font-size: 13px; color: var(--danger); margin-bottom: 6px; }
+  .guard-item p { font-size: 12px; color: var(--text-dim); }
+  .guard-item p b { color: var(--text); }
+
+  .flow-line {
+    margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    font-family: "Consolas", monospace; font-size: 12px; color: var(--text-dim); line-height: 2; white-space: pre-wrap;
+  }
+  .flow-line .c1 { color: var(--review); }
+  .flow-line .c2 { color: var(--research); }
+  .flow-line .c3 { color: var(--exec); }
+
+  /* ---------- 方向约束 ---------- */
+  .gate { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .g-item {
+    background: rgba(63,202,139,.05); border: 1px solid rgba(63,202,139,.4);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .g-item h4 { font-size: 13px; color: var(--exec); margin-bottom: 6px; }
+  .g-item p { font-size: 12px; color: var(--text-dim); }
+  .g-item code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace;
+  }
+
+  /* ---------- 安全底线 ---------- */
+  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .rule {
+    background: rgba(240,86,74,.05); border: 1px solid rgba(240,86,74,.35);
+    border-radius: 10px; padding: 12px 14px; display: flex; gap: 10px; align-items: flex-start;
+  }
+  .rule .rnum {
+    width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0; color: #fff;
+    background: linear-gradient(135deg, var(--danger), #b0342a);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+  .rule p { font-size: 12.5px; color: var(--text-dim); }
+  .rule p b { color: var(--text); }
+
+  /* ---------- 实施计划 ---------- */
+  table.plan { width: 100%; border-collapse: collapse; font-size: 12.5px; background: var(--bg-card); }
+  table.plan th {
+    text-align: left; padding: 10px 12px; background: var(--bg-card-2);
+    font-weight: 600; white-space: nowrap; border-bottom: 2px solid var(--border);
+  }
+  table.plan td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.plan tr:last-child td { border-bottom: none; }
+  table.plan tr:hover td { background: rgba(176,124,255,.04); }
+  table.plan .stage { font-weight: 700; white-space: nowrap; color: var(--research); }
+  table.plan code {
+    background: var(--bg-card-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 11px; color: #9fc1ff; font-family: "Consolas", monospace; white-space: nowrap;
+  }
+
+  .milestone {
+    margin-top: 12px; padding: 10px 14px; border-radius: 10px;
+    background: rgba(63,202,139,.06); border: 1px dashed rgba(63,202,139,.4);
+    font-size: 12.5px; color: var(--text-dim);
+  }
+  .milestone b { color: var(--exec); }
+
+  .note {
+    margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+    background: rgba(110,231,231,.05); border: 1px dashed rgba(110,231,231,.35);
+    font-size: 13px; color: var(--text-dim);
+  }
+  .note b { color: var(--review); }
+
+  footer { text-align: center; color: var(--text-dim); font-size: 12px; margin-top: 56px; }
+
+  @media (max-width: 900px) {
+    .concl, .design-grid, .rules, .gate, .tl-compare, .fix-list, .guard, .err-types, .l3-box { grid-template-columns: 1fr; }
+    .cycle { grid-template-columns: 1fr; }
+    .c-arrow { transform: rotate(90deg); padding: 2px 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>研报 Agent · 三段闭环<span class="accent"> 设计定稿 v4</span></h1>
+  <div class="ver">v4.6 · 更新：数据源定为四类（金十 MCP + 律动 MCP + FRED 宏观序列 + Polymarket 预测概率）· 工具 7+1 → 9+1</div>
+  <p>前瞻（研报）→ 执行（时机）→ 复盘（校准）三段闭环 · 复盘 agent 可带证据修订研报提示词（版本化，可回滚）</p>
+  <div class="badges">
+    <span class="badge r1">研报 agent · 定时前瞻</span>
+    <span class="badge r2">执行 agent · 方向约束 + 技术进场</span>
+    <span class="badge r3">复盘 agent · 对照校准 + 修订研报</span>
+  </div>
+  <nav class="toc">
+    <a href="#why">① 为什么改版</a>
+    <a href="#arch">② 三段闭环架构</a>
+    <a href="#design">③ 研报 agent 设计</a>
+    <a href="#timeline">④ 时间线与判断史</a>
+    <a href="#review">⑤ 复盘 agent 改动</a>
+    <a href="#gate">⑥ 方向约束</a>
+    <a href="#safety">⑦ 安全底线</a>
+    <a href="#plan">⑧ 实施计划</a>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <!-- ========== 1. 为什么改版 ========== -->
+  <section id="why">
+    <div class="sec-title"><div class="sec-num">1</div><h2>为什么 v1 不行、v2/v3/v4 怎么改</h2></div>
+    <div class="concl">
+      <div class="card a">
+        <h3>v1 的问题</h3>
+        <p>把新闻当"决策输入"喂给执行 agent：<b>时效性追不上</b>（市场秒级反应 vs 管道分钟级）、<b>LLM 因果解读不可验证</b>、<b>近因偏差会绑架仓位判断</b>、<b>全量建设却无验证设计</b>。</p>
+      </div>
+      <div class="card b">
+        <h3>v2/v3 的核心改变</h3>
+        <p><b>新闻/宏观只进研报 agent，不进执行 agent</b>。研报 agent 定时产出结构化方向结论，执行 agent 只读结论 + 遵守代码级方向约束。<b>v3 能力放开</b>（30 次工具、token 不限、全量新闻、时间线+判断史）。</p>
+      </div>
+      <div class="card c">
+        <h3>v4 的闭环强化</h3>
+        <p><b>复盘 agent 接入对照与纠错</b>：对照研报判断 vs 实际走势，三层纠错，并可<b>带证据版本化修订研报提示词</b>——三段闭环从"信息流"变成"自我进化系统"。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 2. 三段闭环架构 ========== -->
+  <section id="arch">
+    <div class="sec-title"><div class="sec-num">2</div><h2>三段闭环架构</h2></div>
+    <p class="sec-desc">对应交易员的一天：开盘前做功课 → 盘中执行 → 收盘后复盘。三个 agent 职责互不重叠，复盘 agent 带校准职责。</p>
+    <div class="cycle">
+      <div class="c-step">
+        <div class="icon">📋</div>
+        <h4>研报 agent（新）</h4>
+        <p>定时触发（亚/欧/美盘 + 事件），全量新闻+指标+日历+时间线+判断史 → 当日/近期方向研判；提示词由复盘修订</p>
+        <span class="t t-research">只读工具 · 无交易能力</span>
+      </div>
+      <div class="c-arrow">→</div>
+      <div class="c-step">
+        <div class="icon">⚡</div>
+        <h4>执行 agent（现状）</h4>
+        <p>读当日研报方向结论，技术面找进出场时机；方向约束为代码级 gate，不可绕过</p>
+        <span class="t t-exec">多 1 个只读工具 get_daily_report()</span>
+      </div>
+      <div class="c-arrow">→</div>
+      <div class="c-step">
+        <div class="icon">🔍</div>
+        <h4>复盘 agent（现状强化）</h4>
+        <p>收盘后对照研报判断 vs 实际走势，产出偏差记录；满足阈值时提交研报提示词修订（版本化）</p>
+        <span class="t t-review">新增对照工具 + 修订工具</span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px;">
+      <h3 style="font-size: 15px; margin-bottom: 10px;">研报触发时间表（北京时间 · 启动时间提前于开盘/事件，给研报生成留时间）</h3>
+      <div class="tbl-wrap">
+        <table class="t">
+          <tr><th>触发</th><th>开盘/事件时刻</th><th>研报启动时间</th><th>覆盖内容</th></tr>
+          <tr><td>亚盘研报</td><td>08:00 开盘</td><td>07:30（提前 30 分钟）</td><td>隔夜美盘表现 + 当日亚洲数据预告 + 24h 快讯</td></tr>
+          <tr><td>欧盘研报</td><td>15:00 开盘</td><td>14:30（提前 30 分钟）</td><td>欧洲时段数据（PMI 等）+ 当日剩余事件</td></tr>
+          <tr><td class="hot">美盘研报</td><td>21:00 开盘</td><td>20:30（提前 30 分钟）</td><td>全天信息汇总 + 美盘事件前瞻 —— 最重要的研报（美盘时段占 BTC 成交量主力）</td></tr>
+          <tr><td class="hot">事件研报</td><td>5 星事件公布时刻</td><td>事件前 45 分钟（如非农 20:30 → 19:45 启动）</td><td>非农/CPI/议息等：预期 vs 前值 + 市场定价 + 三种情景；<b>与时段研报重叠时事件研报优先</b></td></tr>
+        </table>
+      </div>
+      <p style="font-size: 12px; color: var(--text-dim); margin-top: 8px;">
+        <b>提前量设计：</b>研报生成需 15-30 分钟（30 次工具调用上限 + 分析推理），启动时间 = 开盘/事件时刻 − 提前量（时段研报 30 分钟、事件研报 45 分钟），保证执行 agent 在开盘/事件发生时就已读到最新研报。提前量可按日志统计的实际生成耗时调整（15~45 分钟），由配置控制。
+      </p>
+    </div>
+  </section>
+
+  <!-- ========== 3. 研报 agent 设计 ========== -->
+  <section id="design">
+    <div class="sec-title"><div class="sec-num">3</div><h2>研报 agent 设计</h2></div>
+    <p class="sec-desc">原则：能力放开（质量优先）、两端结构化（输入代码决定、输出强制 JSON）、护栏只防失控不防能力。</p>
+    <div class="design-grid">
+      <div class="d-box d-purple">
+        <h3>角色边界与护栏</h3>
+        <ul>
+          <li>独立 LLM 循环，模式复用 review agent 先例（项目已有只读 agent）</li>
+          <li><b>只读工具（9 个，全部进统一审计）</b>
+            <p style="margin-top: 6px;"><code>fetch_calendar</code> — 经济日历（金十 MCP）：今日+明日高星事件（<code>star≥3</code>），带 actual/consensus/previous（实际/预期/前值）</p>
+            <p style="margin-top: 4px;"><code>fetch_flash(hours=24)</code> — 全量快讯（金十+律动 MCP）：以"时间+标题+摘要"紧凑格式返回，一条不丢</p>
+            <p style="margin-top: 4px;"><code>fetch_indicators</code> — 指标快照（律动 MCP）：DXY(美元指数)/美债收益率/M2/ETF 净流入/稳定币市值/情绪值/OI/Bitfinex 杠杆多头</p>
+            <p style="margin-top: 4px;"><code>get_macro_series(indicator, look_back)</code> — 宏观历史序列（FRED，免费 key）：cpi/pce/联邦基金利率/10Y 美债/M2/美元指数等，Markdown 表格（最新值+窗口变化）——补"历史序列"缺口</p>
+            <p style="margin-top: 4px;"><code>get_prediction_markets(topic)</code> — 预测市场概率（Polymarket，公开无 key）："Fed rate cut"/"recession"等事件的市场隐含概率，按成交额排序——比新闻更前置的信号</p>
+            <p style="margin-top: 4px;"><code>fetch_article_detail(id)</code> — 展开单条快讯正文全文（上下文只放标题+摘要，需要细读时按 id 取全文）</p>
+            <p style="margin-top: 4px;"><code>search_news(keyword, days)</code> — 按关键词检索历史快讯/文章，深挖事件的来龙去脉；内部路由：金十/BlockBeats 搜索 API（历史全）+ 本地 timeline 表（补第三方搜不到的事实），两边结果合并去重</p>
+            <p style="margin-top: 4px;"><code>read_timeline(days=7)</code> — 读事件时间线（事实层）：近 7 天世界发生了什么，看跨天因果链</p>
+            <p style="margin-top: 4px;"><code>read_judgments(days=7)</code> — 读历史研报结论（判断层）：近 7 天我怎么看、验证结果、错因——自我纠错输入</p>
+          </li>
+          <li><b>写工具（1 个，只写分析笔记，不碰事实与交易）</b>
+            <p style="margin-top: 6px;"><code>submit_causal_links(links)</code> — 提交本次分析得出的<b>链式因果链</b>：有序节点（事件→推断→市场反应→标的结论），节点可挂 <code>timeline_id(事实层引用)</code>，整链带 confidence(置信度)/evidence(依据)/report_id(来源研报)；复盘逐环节验证、定位断点；<b>事实层（timeline 表）100% 代码写入，LLM 零写权限</b>——账本与笔记严格分开</p>
+          </li>
+          <li><b>没有任何交易工具，不持有交易所密钥</b>——结构上杜绝"看到新闻就交易"</li>
+          <li>调度器定时触发（启动时间按第 2 节时间表，提前于开盘/事件时刻），跑完落库即结束，不是常驻服务</li>
+          <li><b>护栏</b>：工具调用上限 <code>30 次</code>（防死循环保险丝，非能力限制）+ 单次超时 15 分钟强制终止；<b>token 不限量</b>，只做日志统计，每月复盘一次成本</li>
+          <li><b>提示词由外部版本化修订</b>（复盘 agent 带证据修订），自身无权修改自己的提示词</li>
+        </ul>
+        <p style="font-size: 12px; color: var(--warn); margin-top: 8px;">注：事件研究工具（<code>event_study</code>：历史同类事件 × 行情统计，回答"上次非农后 BTC 怎么走"）<b>暂缓实现</b>——待研报框架运行稳定后按需加入；当前历史检索能力由 <code>search_news</code> 承担。</p>
+      </div>
+      <div class="d-box d-blue">
+        <h3>输入（代码决定，不裁剪）</h3>
+        <ul>
+          <li><b>24h 快讯全量</b>：金十 + BlockBeats，以"时间+标题+摘要"紧凑格式全部进上下文，<b>一条不丢</b>；正文全文按需检索（<code>fetch_article_detail</code>）——上下文窗口有限是物理约束，但过滤权完全交给 agent</li>
+          <li>日历：今日 + 明日高星事件（<code>star≥3</code>），带 actual/consensus/previous</li>
+          <li>指标快照：律动 MCP 指标组（DXY、美债收益率、M2、ETF 净流入、稳定币市值、情绪值、OI）——硬数据骨架；<b>FRED 宏观序列与 Polymarket 预测概率为按需工具</b>（带参数，不进预注入）</li>
+          <li>事件时间线（近 7 天）：事实层，见第 4 节</li>
+          <li>历史研报结论（近 7 天）：判断层，含验证结果与错因，见第 4 节</li>
+        </ul>
+        <h3 style="margin-top: 14px; font-size: 13.5px;">注入机制：全部预注入第一轮消息，工具只做补充</h3>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">
+          以上输入由代码组装进<b style="color: var(--text);">第一轮 user 消息</b>（预注入）——LLM 第一次收到消息时已全部在上下文中，<b style="color: var(--text);">不需要、也不能通过工具调用获取</b>。
+        </p>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 6px;"><b style="color: var(--text);">第一轮消息组装顺序：</b></p>
+        <div class="prompt-box" style="margin-top: 6px;"><span class="p1">[系统提示词]</span> 角色定义 + 任务要求 + 护栏 + 复盘注入的改进指令（L2）
+<span class="p1">[user 消息]</span>
+  ① 日历段：今日+明日高星事件（star≥3，带实际/预期/前值）
+  ② 指标段：DXY/美债/M2/ETF/稳定币/情绪/OI 快照
+  ③ 快讯段：24h 全量，时间+标题+摘要紧凑格式（一条不丢）
+  ④ 时间线段：近 7 天事件时间线（事实层）
+  ⑤ 判断史段：近 7 天研报结论+验证结果+错因（判断层）
+  ⑥ 任务指令："基于以上信息，输出当日/近期方向研判 JSON"</div>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">
+          <b style="color: var(--text);">工具定位（补充而非获取）：</b>
+          <code>fetch_article_detail</code> / <code>search_news</code> 用于<b style="color: var(--text);">深挖</b>（细读某条全文、按关键词搜历史快讯）；
+          <code>fetch_flash</code> / <code>fetch_calendar</code> / <code>fetch_indicators</code> 用于<b style="color: var(--text);">刷新</b>（注入的是启动时点快照，生成过程中想取更新的数据才调用）；
+          <code>read_timeline</code> / <code>read_judgments</code> 可查更长历史（注入已带 7 天）。
+        </p>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">
+          <b style="color: var(--text);">特性：</b>① 第一轮输入大——全量快讯+五段数据，单次 5-10 万 token 起步，成本主要在输入侧；
+          ② 注入的是启动时点快照，生成过程中不自动更新（除非主动调工具刷新）；
+          ③ 受上下文窗口物理上限约束——快讯以紧凑格式全量注入，正文按需展开，这是唯一的技术裁剪点。
+        </p>
+        <div class="prompt-box"><span class="p1">{
+  "direction": "偏多/偏空/中性",
+  "confidence": "高/中/低",
+  "horizon": "当日/3日/周",
+  "evidence": [
+    {"point": "ETF 连续 3 日净流入 2 亿美元+", "source": "指标快照"},
+    {"point": "今晚非农预期 8.3万 前值 5.7万", "source": "经济日历"}
+  ],  <span class="p2">// 3-5 条，每条可溯源</span>
+  "risks": ["高利率环境压制风险偏好"],
+  "narrative": "当日/近期走势研判正文"
+}</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 4. 时间线与判断史 ========== -->
+  <section id="timeline">
+    <div class="sec-title"><div class="sec-num">4</div><h2>事件时间线 vs 历史判断史</h2></div>
+    <p class="sec-desc">两者都会提到同一事件，但本质不同——<b>时间线是"发生了什么"（事实），判断史是"我怎么想、想得对不对"（判断）</b>。研报 agent 用时间线理解因果，用判断史自我纠错。</p>
+    <div class="tl-box">
+      <h3>研报 agent 每次产出时，同时更新两份持久记录</h3>
+      <div class="tl-compare">
+        <div class="tl-item">
+          <span class="tag tag-fact">事实层 · timeline 表</span>
+          <h4>事件时间线（近 7 天，持续累积）</h4>
+          <p>客观记录：<code>时间 | 事件 | 来源</code>。如：<br>
+          07-30 油价 +5%（中东局势）｜金十<br>
+          07-31 美债 10Y 收益率上行 12bp｜指标<br>
+          08-01 BTC 单日 -3%（放量）｜行情<br>
+          08-03 非农预期 8.3万 前值 5.7万｜日历</p>
+          <p style="margin-top: 6px;"><b>用途</b>：看清跨天因果链——"3 天前油价大涨 → 昨天美债上行 → 今天 BTC 承压"</p>
+        </div>
+        <div class="tl-item">
+          <span class="tag tag-judge">判断层 · reports 表</span>
+          <h4>历史研报结论（近 7 天）</h4>
+          <p>主观记录：<code>日期 | 方向 | 置信度 | 核心依据 | 验证结果 | 错因</code>。如：<br>
+          08-01 看空 高 依据：美债上行<br>
+          → 实际 +1.2% <b>错</b>，错因：解读错误（忽略 ETF 流入）<br>
+          08-02 中性 中 依据：多空交织<br>
+          → 实际 -0.8% 中性偏对</p>
+          <p style="margin-top: 6px;"><b>用途</b>：自我纠错——连续 5 天看多但 BTC 一直跌，该怀疑自己的判断框架了</p>
+        </div>
+      </div>
+      <p style="font-size: 12px; color: var(--text-dim); margin-top: 12px;">
+        <b>不重复的理由</b>：时间线回答"世界发生了什么"，判断史回答"我的判断体系是否可靠"。复盘 agent 对照实盘时，也是用这两份做偏差分析——判断错在哪：是信息不足（时间线缺了关键事件）还是解读错误（信息全但因果想反了）。
+      </p>
+    </div>
+
+    <div class="tl-box" style="margin-top: 14px;">
+      <h3>事实层写入机制（代码自动累积，LLM 不碰）</h3>
+      <p style="font-size: 12.5px; color: var(--text-dim);">
+        每次研报启动时，代码拉取数据后做两件事：<b style="color: var(--text);">① 组装第一轮消息注入研报 agent；② 按增量追加进 timeline 表</b>——记录 <code>since_ts(上次写入位置)</code> 只写新内容，<code>dedup_key(时间+标题哈希)</code> 防重复。频率绑定研报启动（每天 3-4 次），两次之间的事件由下次 24h 全量拉取覆盖，信息不丢。
+      </p>
+      <div class="flow-line" style="margin-top: 10px;">研报启动 → 代码拉取（快讯全量 + 日历 + 指标）
+  ├─ 组装第一轮消息 → 注入研报 agent（预注入）
+  └─ 增量追加 timeline 表（since_ts + dedup_key）
+下次启动 → 读出近 7 天 timeline → 作为"时间线段"注入</div>
+      <p style="font-size: 12px; color: var(--text-dim); margin-top: 10px;">
+        <b style="color: var(--text);">LLM 写权限边界</b>：研报 agent 对事实层只读（<code>read_timeline</code>），只写因果链层（<code>submit_causal_links</code>）；事实层是历史账本，因果链层是分析笔记，写权限严格分开。
+      </p>
+    </div>
+
+    <div class="tl-box" style="margin-top: 14px;">
+      <h3>因果链层（causal_links 表 · 分析笔记 · 复盘逐环验证）</h3>
+      <p style="font-size: 12.5px; color: var(--text-dim);">
+        因果链是<b style="color: var(--text);">有序节点链</b>（从因到果的完整推导路径），只有研报 agent 能产生——代码提取不出"导致"关系。链上每个节点区分类型，可挂事实层引用，把推断锚在事实上：
+      </p>
+      <div class="prompt-box" style="margin-top: 10px;">{
+  "chain": [
+    {"node": "油价上涨",        "kind": "事件",     "timeline_id": "T-1024"},
+    {"node": "通胀预期上升",     "kind": "推断"},
+    {"node": "美联储鹰派预期",   "kind": "推断"},
+    {"node": "美债收益率上行",   "kind": "市场反应", "timeline_id": "T-1031"},
+    {"node": "BTC 承压",        "kind": "标的结论"}
+  ],
+  "confidence": 0.7,        // 整条链的置信度
+  "evidence": ["..."],      // 依据（可溯源）
+  "report_id": "R-042"      // 来源研报
+}</div>
+      <p style="font-size: 12.5px; color: var(--text-dim); margin-top: 10px;">
+        <b style="color: var(--text);">复盘验证升级为"断点定位"</b>：逐环节对照实际走势，标记断在哪一环（如"BTC 虽跌但美债环节未发生"→ 断点在"鹰派预期→美债"），错因精确到环节而非整条链；研报 agent 通过 L1 读近 7 天验证过的因果链记录自我纠错。
+        <b style="color: var(--text);">断点统计器（聚合"哪类环节经常断"供 L2 注入）按需加入</b>——第一版只落库 + 逐环验证，跑起来发现 L1 纠错不足时再补。
+      </p>
+    </div>
+  </section>
+
+  <!-- ========== 5. 复盘 agent 改动 ========== -->
+  <section id="review">
+    <div class="sec-title"><div class="sec-num">5</div><h2>复盘 agent 改动：从"只看自己"到"对照世界"</h2></div>
+    <p class="sec-desc">现状复盘只分析内部行为（成交/决策轮次/工具调用链），看不到外部环境。改动原则：不动现有逻辑，只加输入和工具。</p>
+
+    <div class="gap-box">
+      <h3>现状盲区</h3>
+      <p>复盘 agent 只能回答"<b>我怎么做的</b>"（这单追涨了），回答不了"<b>为什么亏</b>"（撞上非农冲击 vs 纯粹判断错）——<b>行为和环境的因果分不开，复盘结论就浅</b>。</p>
+    </div>
+
+    <h3 style="font-size: 14.5px; margin: 14px 0 8px;">改动清单（四个点）</h3>
+    <div class="fix-list">
+      <div class="fix-item">
+        <h4>① 简报输入扩展</h4>
+        <p>复盘 briefing 增加三段：区间内<b>研报判断史</b>（时间/方向/置信度/依据）+ <b>事件时间线</b>（时间/事件/来源）+ <b>实际走势</b>（BTC/ETH 涨跌幅，代码算好不靠 LLM 猜）</p>
+      </div>
+      <div class="fix-item">
+        <h4>② 新增工具（只读 + 修订，全部进统一审计）</h4>
+        <p><b>只读工具（3 个）</b>——复盘 agent 对照研报所需的"外部视角"数据：</p>
+        <p style="margin-top: 6px;"><code>get_report_judgments(period)</code> — 读取指定时间区间内的<b>研报判断史</b>（时间/方向/置信度/核心依据/验证结果），复盘据此逐条对照"当时怎么看"</p>
+        <p style="margin-top: 4px;"><code>get_event_timeline(period)</code> — 读取指定区间内的<b>事件时间线</b>（时间/事件/来源），帮复盘还原"当时外面发生了什么"</p>
+        <p style="margin-top: 4px;"><code>get_price_move(period)</code> — 读取区间内的<b>实际走势</b>（BTC/ETH 涨跌幅、振幅），代码计算不靠 LLM 猜，是对照的"标准答案"</p>
+        <p style="margin-top: 8px;"><b>修订工具（1 个）</b>——产出纠错动作：</p>
+        <p style="margin-top: 6px;"><code>submit_research_revision</code> — 提交<b>研报提示词修订</b>（新提示词全文 + 修订理由 + 引用的错因统计），经五道护栏校验后版本化发布，研报 agent 下次自动加载（详见 5.4）</p>
+      </div>
+      <div class="fix-item">
+        <h4>③ 输出扩展：研报对照小节</h4>
+        <p>复盘报告新增"研报对照"表：<code>研报 | 方向 | 置信度 | 实际走势 | 判定(对/错/偏对)</code> + 偏差分析（错因分类 + 改进建议）</p>
+      </div>
+      <div class="fix-item">
+        <h4>④ 偏差写回（闭环起点）</h4>
+        <p>对照结论写回研报记录（验证结果 + 错因字段）——研报 agent 下次读判断史时能看到"我上次判得对不对"</p>
+      </div>
+    </div>
+
+    <h3 style="font-size: 14.5px; margin: 14px 0 8px;">错因分类（让校准有针对性）</h3>
+    <div class="err-types">
+      <div class="err-item">
+        <h4>信息不足</h4>
+        <p>时间线缺关键事件，当时根本看不到</p>
+        <div class="fix">对策：补数据源 / 扩输入范围</div>
+      </div>
+      <div class="err-item">
+        <h4>解读错误</h4>
+        <p>信息齐全但因果想反了（如放大美债、忽略 ETF）</p>
+        <div class="fix">对策：提示词修订（见 5.3）</div>
+      </div>
+      <div class="err-item">
+        <h4>时机偏差</h4>
+        <p>方向对但时间点错（提前/滞后）</p>
+        <div class="fix">对策：调整 horizon 预期</div>
+      </div>
+    </div>
+
+    <h3 style="font-size: 14.5px; margin: 22px 0 8px;">5.3 三层纠错机制（纠错如何真正到达研报 agent）</h3>
+    <p class="sec-desc" style="margin-bottom: 12px;">难点：LLM 的"自我纠错"天然不可靠——告诉它"上次错了"，它下次会说"这次不一样"。只有改变它的输入或行为框架，纠错才生效。</p>
+    <div class="l3-box">
+      <div class="l3-item l3-1">
+        <h4>L1 每次研报（短期）</h4>
+        <p>判断史带<b>验证结果 + 错因</b>：研报 agent 每次输入近 7 天判断史，一睁眼就看到"我 3 天前看空错了，错因是低估 ETF 流入"</p>
+        <p style="margin-top: 6px;"><b>效果</b>：提醒作用，基础但不强</p>
+      </div>
+      <div class="l3-item l3-2">
+        <h4>L2 周期注入（中期）</h4>
+        <p>代码每周统计<b>错因分布</b>，生成针对性指令注入研报系统提示词。例："近 7 天你的判断 3 次错在<b>低估 ETF 资金面</b>（08-01/03/05），给出高置信方向前先核对 ETF 净流入与稳定币市值"</p>
+        <p style="margin-top: 6px;"><b>效果</b>：强。代码可控的输入变化，不靠 LLM 自觉</p>
+      </div>
+      <div class="l3-item l3-3">
+        <h4>L3 结构性修正（长期）</h4>
+        <p>某类错因连续高频（如连续 4 周"低估 ETF"），提示词提醒无效 → <b>结构性修改</b>：输入结构调整（ETF 数据前置高亮）、horizon 调整、改研报提示词模板。由<b>人（你）决定</b></p>
+        <p style="margin-top: 6px;"><b>效果</b>：兜底。防失控</p>
+      </div>
+    </div>
+
+    <h3 style="font-size: 14.5px; margin: 22px 0 8px;">5.4 研报提示词版本化修订（复盘 agent 可改，带护栏）</h3>
+    <p class="sec-desc" style="margin-bottom: 12px;">边界：<b>研报 agent 自己改自己 = 禁止</b>（自我强化偏差）；<b>复盘 agent 作为第三方、带证据、走版本化机制修订 = 允许</b>。与策略修订（submit_strategy_revision）同一模式，机制现成。</p>
+    <div class="guard">
+      <div class="guard-item"><h4>护栏 ① 触发阈值</h4><p>某错因近 7 天 <b>≥3 次且占比 ≥50%</b> 才允许提交修订——防止每次复盘都动一下提示词</p></div>
+      <div class="guard-item"><h4>护栏 ② 频率上限</h4><p>每 <b>7 天最多 1 次</b>研报提示词修订</p></div>
+      <div class="guard-item"><h4>护栏 ③ 范围限制</h4><p>只能改"分析要求/权重提示"；<b>输出 JSON 结构（direction/confidence schema）是代码强制，LLM 不可触碰</b></p></div>
+      <div class="guard-item"><h4>护栏 ④ 证据要求</h4><p>提交必须带：新提示词全文 + 修订理由 + <b>引用的错因统计</b>——没有证据不通过</p></div>
+      <div class="guard-item"><h4>护栏 ⑤ 人工兜底</h4><p>版本历史可查可回滚（前端/数据库），人可随时撤销任何自动修订</p></div>
+      <div class="guard-item"><h4>落地方式</h4><p>提示词存 <code>research_prompt.md</code>（运行时写回、不入库、同步 <code>.example</code>）；<code>ResearchPromptStore</code> 仿 StrategyStore 版本化 + 报告关联；研报 agent 下次运行自动加载最新版</p></div>
+    </div>
+
+    <div class="flow-line"><span class="c1">复盘 agent 出偏差记录（验证结果+错因）</span>
+      ↓ 写回 reports 表
+      <span class="c2">错因统计器聚合（每周）</span>
+      ↓ L2 注入 / 阈值校验
+      <span class="c2">研报提示词修订（版本化发布，可回滚）</span>
+      ↓
+      <span class="c3">研报 agent 下次自动用新提示词 → 判断改变</span>
+      ↓
+      <span class="c1">复盘再验证：错因分布下降 = 修订有效；不降 = 升级人工结构性修改（L3）</span></div>
+  </section>
+
+  <!-- ========== 6. 方向约束 ========== -->
+  <section id="gate">
+    <div class="sec-title"><div class="sec-num">6</div><h2>方向约束（代码级 gate）</h2></div>
+    <p class="sec-desc">研报结论对执行 agent 的约束不写在提示词里（提示词可被绕过），而是作为工具层的硬检查——与 RiskEngine 同级。</p>
+    <div class="gate">
+      <div class="g-item">
+        <h4>高置信看空</h4>
+        <p>拒绝开多仓/加多仓调用（工具层拦截，返回拒绝原因）；已有仓位不受影响</p>
+      </div>
+      <div class="g-item">
+        <h4>高置信看多</h4>
+        <p>拒绝开空仓/加空仓调用；已有仓位不受影响</p>
+      </div>
+      <div class="g-item">
+        <h4>中低置信度 / 中性</h4>
+        <p>不拦截，研报结论仅作为上下文提示</p>
+      </div>
+    </div>
+    <div class="note" style="margin-top: 14px;">
+      <b>实现位置：</b>下单工具入口前新增 <code>direction_gate(合约, 方向)</code> 检查，读取当日最新研报的 direction+confidence，返回 <code>allow(放行)</code> / <code>deny(拦截)</code>。研报缺失时默认放行（不因系统故障阻塞交易）。硬约束的意义：方向错了最多错失行情，但执行 agent 永远不可能在逆势中开反向重仓。
+    </div>
+  </section>
+
+  <!-- ========== 7. 安全底线 ========== -->
+  <section id="safety">
+    <div class="sec-title"><div class="sec-num">7</div><h2>安全底线（不可妥协）</h2></div>
+    <div class="rules">
+      <div class="rule"><div class="rnum">1</div><p><b>研报/复盘 agent 无交易能力</b>：只读工具 + 无密钥，结构上不可能触发交易</p></div>
+      <div class="rule"><div class="rnum">2</div><p><b>方向约束是代码 gate</b>：工具层硬检查，LLM 不可绕过，与 RiskEngine 同级</p></div>
+      <div class="rule"><div class="rnum">3</div><p><b>统一审计</b>：研报生成、复盘对照、gate 拦截、提示词修订全部进审计通道</p></div>
+      <div class="rule"><div class="rnum">4</div><p><b>护栏只防失控</b>：研报/复盘工具调用均 ≤30 次（保险丝）+ 超时终止；token 不限量但日志统计，每月复盘成本</p></div>
+      <div class="rule"><div class="rnum">5</div><p><b>研报 agent 不自我修改提示词</b>：修订只能来自复盘 agent（带证据、版本化）或人工；输出 schema 代码强制不可改</p></div>
+      <div class="rule"><div class="rnum">6</div><p><b>配置同步</b>：新增研报/复盘配置段必须同步 <code>config.example.yaml</code>，否则 CI 挂</p></div>
+      <div class="rule"><div class="rnum">7</div><p><b>gate 默认放行</b>：研报缺失/系统故障时不阻塞交易，宁可无约束不可锁死</p></div>
+    </div>
+  </section>
+
+  <!-- ========== 8. 实施计划 ========== -->
+  <section id="plan">
+    <div class="sec-title"><div class="sec-num">8</div><h2>实施计划（验证先行）</h2></div>
+    <p class="sec-desc">不做全量建设，先建最小闭环验证研报方向结论有没有判断力，再决定扩不扩。</p>
+    <div class="tbl-wrap">
+      <table class="plan">
+        <tr><th>阶段</th><th>做什么</th><th>验收标准</th></tr>
+        <tr>
+          <td class="stage">M1 研报骨架</td>
+          <td>数据源四类（金十 MCP + 律动 MCP + FRED + Polymarket）+ 研报 agent（10 工具 + 全量新闻预注入 + 结构化输出）+ 亚/欧/美盘调度触发（配置预留，第一期手动跑）+ <code>reports</code>/<code>timeline</code>/<code>causal_links</code> 表 + <code>direction_gate</code>（第二期）+ 复盘对照基础（判断史/时间线/实际走势读入，第二期）</td>
+          <td>四类源连通性实测通过；定时产出结构化研报落库；时间线自动累积；pytest 全绿</td>
+        </tr>
+        <tr>
+          <td class="stage">M2 验证期（核心）</td>
+          <td>复盘 agent 新增对照工具与"研报对照"小节 + 偏差/错因写回 + 错因统计器 + L2 注入 + <code>submit_research_revision</code>（五道护栏）+ 研报提示词版本化</td>
+          <td>两周准确率统计报告；错因分布可用；修订工具实测（构造错因超阈值 → 修订通过并版本化 → 研报下次加载新版）；pytest 全绿</td>
+        </tr>
+        <tr>
+          <td class="stage">M3 增强（按结果）</td>
+          <td>事件研报（5 星事件前 30 分钟）+ <code>indicators</code> 快照序列积累 + 新闻源扩展（RSS 英文源等）</td>
+          <td>按 M2 结论决定：通过则扩，不通过则停</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="milestone">
+      <b>动工顺序：M1 → M2（两周验证）→ 根据验证结果决定 M3。</b> 整个方案的成败判据只有一个：研报方向结论的准确率是否显著高于随机（50%），以及纠错闭环能否让错因分布持续下降。
+    </div>
+
+    <div class="note">
+      <b>成本提示：</b>放开 token 限制 + 全量新闻输入 + 每日复盘对照，月度 LLM 成本会明显上升。接受现状，M2 结束用日志统计评估性价比——方向准确率显著高于 50% 且错因下降，成本就是值得的投入；否则是省钱的依据。
+    </div>
+  </section>
+
+  <footer>设计定稿 v4.6 · 沿革：v1 新闻注入管道（废弃）→ v2 研报三段闭环 → v3 能力放开+时间线+判断史 → v4 复盘对照+三层纠错+提示词版本化修订 → v4.1 触发提前启动 → v4.2 输入预注入机制 → v4.3 事实层机制+因果链验证 → v4.4 删除 append_timeline（事实层 LLM 零写权限）→ v4.5 因果链链式结构+断点定位 → v4.6 数据源四类（+FRED+Polymarket）· 前置调研：oss-comparison.html（开源对比，TradingAgents 95k⭐ 模式）</footer>
+</div>
+</body>
+</html>
