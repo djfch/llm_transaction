@@ -27,6 +27,7 @@ src/
   audit/                     # 审计溯源与日志
   scheduler/                 # 唤醒调度
   review/                    # 复盘 agent：只读工具 + 策略/指标短名单版本化
+  research/                  # 研报 agent（前瞻）：数据源（金十/律动 MCP + FRED + Polymarket）+ 10 工具 + 预注入 + 事实层 timeline
   notify/                    # Telegram 通知
   server/                    # FastAPI 监控 API + WebSocket
   main.py / bootstrap.py     # 主入口 / 应用组装（配置、网关、行情、风控、Agent、调度、通知、监控装配）
@@ -38,7 +39,7 @@ design_proposals/            # 可视化方案设计稿（HTML）
 deploy/                      # systemd 服务单元
 ```
 
-运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `indicator_config.yaml` / `system_prompt.md` / `review_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。**新增或修改配置字段、策略/指标模板时，必须同步更新对应的 `.example` 模板——CI 以 example 复制运行时文件，不同步会直接拖垮 CI。**
+运行时会被程序写回的文件（`config.yaml` / `watchlist.yaml` / `indicator_config.yaml` / `system_prompt.md` / `review_prompt.md` / `research_prompt.md`）不入库，只跟踪 `.example` 模板；克隆后按 README 快速开始复制。**新增或修改配置字段、策略/指标/研报模板时，必须同步更新对应的 `.example` 模板——CI 以 example 复制运行时文件，不同步会直接拖垮 CI。**
 
 ## 硬性规范
 

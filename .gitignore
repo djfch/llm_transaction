@@ -20,6 +20,7 @@ watchlist.yaml
 indicator_config.yaml
 system_prompt.md
 review_prompt.md
+research_prompt.md
 
 # Node
 node_modules/

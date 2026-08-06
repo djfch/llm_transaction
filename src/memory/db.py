@@ -123,12 +123,52 @@ CREATE TABLE IF NOT EXISTS trade_plan (
     content TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
+-- 研报系统三表：事实层 timeline / 判断层 research_reports / 分析笔记 causal_links
+CREATE TABLE IF NOT EXISTS timeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    published_at REAL NOT NULL,
+    meta_json TEXT NOT NULL DEFAULT '{}',
+    dedup_key TEXT NOT NULL UNIQUE,
+    fetched_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_type TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    horizon TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    risks_json TEXT NOT NULL DEFAULT '[]',
+    narrative TEXT NOT NULL DEFAULT '',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    verify_result TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    round_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS causal_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    chain_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    broken_at INTEGER,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_round ON orders(round_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_round ON audit_tool_calls(round_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_md5 ON strategy_versions(md5);
 CREATE INDEX IF NOT EXISTS idx_review_reports_created ON review_reports(created_at);
+CREATE INDEX IF NOT EXISTS idx_timeline_published ON timeline(published_at);
+CREATE INDEX IF NOT EXISTS idx_research_reports_created ON research_reports(created_at);
+CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id);
 """
 
 

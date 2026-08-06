@@ -70,6 +70,15 @@ review:
   interval_days: 1  # 复盘间隔天数：每隔 N 天一次，区间为最近 N 天（1 = 每天）。
   # 注意：复盘失败也计入幂等记录（不自动重试，防 LLM 故障时每分钟重发），
   # 间隔设得越大，单次失败跨过的周期越长；可在监控页「立即复盘」手动补跑
+research:
+  enabled: false  # 研报 agent：第一期手动触发（scripts/verify_research.py），定时调度后续期接入
+  max_turns: 30   # 工具调用上限（防死循环保险丝，非能力限制）
+  timeout_seconds: 900  # 单次研报超时强制终止
+  jin10_mcp_url: https://mcp.jin10.com/mcp
+  blockbeats_mcp_cmd: npx -y blockbeats-mcp
+  fred_base_url: https://api.stlouisfed.org/fred
+  polymarket_base_url: https://gamma-api.polymarket.com
+  # 密钥只存 .env（本人填写）：JIN10_MCP_TOKEN / BLOCKBEATS_API_KEY / FRED_API_KEY
 log:
   dir: logs
   level: INFO

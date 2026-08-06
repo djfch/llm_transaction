@@ -172,6 +172,7 @@ def _dual_settings() -> Settings:
         agents=AgentsConfig(
             trader=AgentBinding(credential="main"),
             reviewer=AgentBinding(credential="review"),
+            researcher=AgentBinding(credential="main"),  # 研报 agent 复用主号
         ),
     )
 

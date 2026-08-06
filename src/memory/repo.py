@@ -15,6 +15,7 @@ from src.memory.db import Database
 from src.memory.indicator_config_repo import IndicatorConfigRepo
 from src.memory.models import AuditRound, AuditToolCall, Decision, Note, OrderRecord, Trade
 from src.memory.plans_repo import PlansRepo
+from src.memory.research_repo import ResearchRepo
 from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
 
@@ -59,6 +60,8 @@ class Repo:
         self.plans = PlansRepo(db)
         # 指标短名单版本子仓库（见 src/memory/indicator_config_repo.py）
         self.indicator_config = IndicatorConfigRepo(db)
+        # 研报系统子仓库：timeline/reports/causal_links（见 src/memory/research_repo.py）
+        self.research = ResearchRepo(db)
 
     @property
     def _conn(self) -> aiosqlite.Connection:

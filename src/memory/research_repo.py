@@ -1,0 +1,191 @@
+"""研报子仓库：事实层 timeline、判断层 research_reports、分析笔记 causal_links 三组存取。
+
+子仓库模式：ResearchRepo 与 Repo 共享同一 Database（同一连接、同一事务语义），由
+Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向 import Repo），
+无循环依赖。
+
+安全约定：
+- timeline（事实层）只由代码写入（append_timeline_many），研报/复盘 agent 零写权限；
+- research_reports / causal_links 由研报 agent 经工具写入，落库即审计留痕。
+"""
+
+from __future__ import annotations
+
+import time
+
+import aiosqlite
+
+from src.memory.db import Database
+from src.memory.models import CausalLink, ResearchReport, Timeline
+
+
+def _now() -> float:
+    return time.time()
+
+
+class ResearchRepo:
+    """研报系统存取方法集合。所有写操作立即 commit。"""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    @property
+    def _conn(self) -> aiosqlite.Connection:
+        return self._db.conn
+
+    # ---------- timeline（事实层，代码写入） ----------
+
+    async def append_timeline_many(self, items: list[dict]) -> int:
+        """批量增量追加事实记录，返回实际新插入条数。
+
+        幂等实现：dedup_key 唯一约束 + INSERT OR IGNORE，重复采集自动跳过；
+        条数用连接级 total_changes 差值统计（忽略的行不计入）。
+        """
+        if not items:
+            return 0
+        before = self._conn.total_changes
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO timeline(source,kind,title,url,published_at,"
+            "meta_json,dedup_key,fetched_at) VALUES(:source,:kind,:title,:url,"
+            ":published_at,:meta_json,:dedup_key,:fetched_at)",
+            items,
+        )
+        await self._conn.commit()
+        return self._conn.total_changes - before
+
+    async def list_timeline(
+        self, start_ts: float = 0.0, end_ts: float | None = None, limit: int = 500
+    ) -> list[Timeline]:
+        """按时间范围查询事实记录（[start, end)），取窗口内**最新** limit 条按正序返回。"""
+        sql = "SELECT * FROM timeline WHERE published_at >= ?"
+        params: list = [start_ts]
+        if end_ts is not None:
+            sql += " AND published_at < ?"
+            params.append(end_ts)
+        sql += " ORDER BY published_at DESC LIMIT ?"
+        params.append(limit)
+        cur = await self._conn.execute(sql, params)
+        rows = [Timeline(**dict(r)) for r in await cur.fetchall()]
+        rows.reverse()  # 最新在前 → 时间正序（便于拼接上下文）
+        return rows
+
+    async def latest_dedup_keys(self, limit: int = 2000) -> set[str]:
+        """最近 limit 条的 dedup_key 集合（增量定位：只追加集合外的新记录）。"""
+        cur = await self._conn.execute(
+            "SELECT dedup_key FROM timeline ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        return {r["dedup_key"] for r in await cur.fetchall()}
+
+    # ---------- research_reports（判断层，研报 agent 产出） ----------
+
+    async def save_report(
+        self,
+        *,
+        report_type: str,
+        direction: str,
+        confidence: str,
+        horizon: str = "",
+        evidence_json: str = "[]",
+        risks_json: str = "[]",
+        narrative: str = "",
+        raw_json: str = "{}",
+        error: str = "",
+        round_id: str = "",
+    ) -> ResearchReport:
+        """落库一份研报；error 非空表示该次研报失败（只留错误记录）。
+
+        round_id 为产生本研报的审计轮 id；省略默认 ''（无关联）。
+        """
+        ts = _now()
+        cur = await self._conn.execute(
+            "INSERT INTO research_reports(report_type,direction,confidence,horizon,"
+            "evidence_json,risks_json,narrative,raw_json,verify_result,error,round_id,"
+            "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                report_type,
+                direction,
+                confidence,
+                horizon,
+                evidence_json,
+                risks_json,
+                narrative,
+                raw_json,
+                "",
+                error,
+                round_id,
+                ts,
+            ),
+        )
+        await self._conn.commit()
+        return ResearchReport(
+            id=cur.lastrowid or 0,
+            report_type=report_type,
+            direction=direction,
+            confidence=confidence,
+            horizon=horizon,
+            evidence_json=evidence_json,
+            risks_json=risks_json,
+            narrative=narrative,
+            raw_json=raw_json,
+            error=error,
+            round_id=round_id,
+            created_at=ts,
+        )
+
+    async def list_reports(self, days: int = 7) -> list[ResearchReport]:
+        """近 days 天研报，按创建时间正序（最旧在前，便于拼接上下文）。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM research_reports WHERE created_at >= ? AND error = '' ORDER BY id",
+            (_now() - days * 86400,),
+        )
+        return [ResearchReport(**dict(r)) for r in await cur.fetchall()]
+
+    async def latest_report(self, include_error: bool = False) -> ResearchReport | None:
+        """最近一份研报；默认只取成功（error=''），include_error=True 含失败记录。"""
+        sql = "SELECT * FROM research_reports"
+        if not include_error:
+            sql += " WHERE error = ''"
+        sql += " ORDER BY id DESC LIMIT 1"
+        cur = await self._conn.execute(sql)
+        row = await cur.fetchone()
+        return ResearchReport(**dict(row)) if row else None
+
+    async def get_report(self, report_id: int) -> ResearchReport | None:
+        """按 id 取研报（含失败记录）；不存在返回 None。"""
+        cur = await self._conn.execute("SELECT * FROM research_reports WHERE id=?", (report_id,))
+        row = await cur.fetchone()
+        return ResearchReport(**dict(row)) if row else None
+
+    # ---------- causal_links（分析笔记，研报 agent 提交） ----------
+
+    async def save_causal_link(
+        self,
+        *,
+        report_id: int,
+        chain_json: str,
+        confidence: float,
+        evidence_json: str = "[]",
+    ) -> CausalLink:
+        """落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）。"""
+        cur = await self._conn.execute(
+            "INSERT INTO causal_links(report_id,chain_json,confidence,evidence_json,"
+            "status,broken_at,created_at) VALUES(?,?,?,?,?,?,?)",
+            (report_id, chain_json, confidence, evidence_json, "pending", None, _now()),
+        )
+        await self._conn.commit()
+        return CausalLink(
+            id=cur.lastrowid or 0,
+            report_id=report_id,
+            chain_json=chain_json,
+            confidence=confidence,
+            evidence_json=evidence_json,
+            created_at=_now(),
+        )
+
+    async def list_causal_links(self, days: int = 7) -> list[CausalLink]:
+        """近 days 天因果链，按创建时间正序。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM causal_links WHERE created_at >= ? ORDER BY id",
+            (_now() - days * 86400,),
+        )
+        return [CausalLink(**dict(r)) for r in await cur.fetchall()]
