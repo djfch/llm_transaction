@@ -13,6 +13,7 @@ import type {
   Candle,
   CredentialStatus,
   EquityPoint,
+  LiveSnapshot,
   Note,
   OpenOrder,
   PriceAlert,
@@ -550,6 +551,17 @@ export const mockApi: ApiClient = {
   getResearchReport: researchMock.handlers.getResearchReport,
   runResearch: researchMock.handlers.runResearch,
   getResearchLive: researchMock.handlers.getResearchLive,
+  // 按 agent 转发三实现并归一为 LiveSnapshot（mock 行为与现状一致：trader 上轮、复盘/研报无进行中轮）
+  getLiveFor: (agent): Promise<LiveSnapshot> => {
+    switch (agent) {
+      case 'trader':
+        return reply(buildAgentLive())
+      case 'review':
+        return reviewMock.handlers.getReviewLive()
+      case 'research':
+        return researchMock.handlers.getResearchLive()
+    }
+  },
 }
 
 /** prompt 快照（各叙事共用，与 buildAgentLive 的上下文口径一致） */

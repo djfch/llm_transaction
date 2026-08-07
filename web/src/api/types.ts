@@ -496,6 +496,19 @@ export interface ResearchLive {
   tool_calls: ToolCall[] // 本轮已执行的研报工具调用（进行中实时追加）
 }
 
+/** 实时决策轮可展示的 agent 种类：trader=交易 / review=复盘 / research=研报 */
+export type LiveAgentKind = 'trader' | 'review' | 'research'
+
+/**
+ * 三端点（/api/agent/live、/api/review/live、/api/research/live）归一后的实时轮快照：
+ * 丢弃端点私有字段（in_round / strategy_md5），进行中一律以 round.ended_at === null 判定；
+ * 三端点统一在轮结束后保留终态轮（ended_at 非 null），仅当该 agent 从未运行时 round 为 null。
+ */
+export interface LiveSnapshot {
+  round: AgentLiveRound | null // 当前轮（进行中）或上一轮（含刚结束的终态轮）；该 agent 从未运行时为 null
+  tool_calls: ToolCall[] // 本轮已执行的工具调用（进行中实时追加）
+}
+
 /** 策略版本（列表项不含 content 全文）：GET /api/strategy/versions */
 export interface StrategyVersion {
   id: number // 版本号（vN 的 N）
@@ -609,6 +622,8 @@ export interface ApiClient {
   runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
   /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null。 */
   getResearchLive(): Promise<ResearchLive>
+  /** 按 agent 取实时轮快照（三端点归一为 LiveSnapshot；进行中以 round.ended_at === null 判定）。 */
+  getLiveFor(agent: LiveAgentKind): Promise<LiveSnapshot>
   /** 策略版本列表（最新在前，不含 content 全文）。 */
   getStrategyVersions(): Promise<StrategyVersion[]>
   /** 策略版本详情（含 content 全文）；404 经 ApiError 抛出。 */

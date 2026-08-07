@@ -1,17 +1,21 @@
 /**
- * 实时决策轮主角卡：agent 决策中流式展示工具调用链（进行中每 3 秒轮询 + WS 事件即时刷新），
+ * 实时决策轮主角卡：多 agent（交易/复盘/研报）实时轮流换展示——由 useLiveAgent 选定当前 agent
+ * （后到优先、结束停留），经 getLiveFor 拉取归一快照；进行中每 3 秒轮询 + WS 六事件即时刷新，
  * ended_at 从 null 变为非 null 后 lazy 拉取审计详情（llm_raw 仅详情接口有完整版），
  * 渲染本轮结论与可折叠的完整对话；紫色呼吸描边仅进行中启用（prefers-reduced-motion 兜底）。
+ * 三 live 端点统一在轮结束后保留终态轮（结束事件后 reload 即得服务器终态）；
+ * ended_at===null 但 started_at 超僵尸阈值的轮（进程崩溃残留）不视为进行中——不呼吸、不轮询。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
-import type { AgentLiveRound, RoundDetail } from '../../api/types'
+import type { RoundDetail } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
+import { isLiveRoundEvent, useLiveAgent, ZOMBIE_MS } from '../../hooks/useLiveAgent'
 import { useWs } from '../../hooks/useWs'
 import { buildConversation } from '../../utils/conversation'
-import { fmtTime } from '../../utils/format'
 import StateHint from '../StateHint'
 import ConversationThread from './ConversationThread'
+import HeroHeader from './HeroHeader'
 import ToolSteps from './ToolSteps'
 
 /** 呼吸描边动画（进行中）：命名加 lrh- 前缀避免与全局样式冲突；减少动效偏好时关闭 */
@@ -61,73 +65,6 @@ function useRoundDetail(roundId: string, ended: boolean) {
   return { detail, detailError }
 }
 
-/** 秒数 → HH:MM:SS（计时展示，等宽数字） */
-function fmtElapsed(sec: number): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}:${pad(Math.floor(sec % 60))}`
-}
-
-/** wake_source(唤醒来源) → 徽标配色：价格触发 amber / 定时唤醒 cyan / 启动 violet */
-function wakeClass(source: string): string {
-  if (source.includes('价格')) return 'border-amber-300/40 bg-amber-400/10 text-amber-300'
-  if (source.includes('定时')) return 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300'
-  if (source.includes('启动')) return 'border-violet-300/40 bg-violet-400/10 text-violet-300'
-  return 'border-zinc-500/40 bg-zinc-500/10 text-zinc-400'
-}
-
-/** 卡片头：脉冲呼吸点 + 轮次号 + 唤醒来源徽标 + 走秒计时 + 起止时间行 */
-function HeroHeader({
-  round,
-  inRound,
-  elapsed,
-}: {
-  round: AgentLiveRound
-  inRound: boolean
-  elapsed: number
-}) {
-  return (
-    <header className="mb-4 border-b border-white/5 pb-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="relative flex h-3 w-3">
-          {inRound && (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-70 motion-reduce:animate-none" />
-          )}
-          <span
-            className={`relative inline-flex h-3 w-3 rounded-full ${inRound ? 'bg-violet-400' : 'bg-zinc-600'}`}
-          />
-        </span>
-        <h2 className="text-lg font-bold text-zinc-50">
-          实时决策轮 <span className="font-mono text-violet-300">#{round.round_id}</span>
-        </h2>
-        <span
-          className={`rounded border px-2 py-0.5 text-[11px] font-semibold ${wakeClass(round.wake_source)}`}
-        >
-          {round.wake_source}
-        </span>
-        {!inRound && (
-          <span className="rounded border border-zinc-600/40 bg-zinc-700/30 px-2 py-0.5 text-[11px] text-zinc-400">
-            上轮决策
-          </span>
-        )}
-        <span className="ml-auto font-mono tabular-nums text-xs text-zinc-500">
-          {inRound ? '已进行' : '耗时'}{' '}
-          <span className={inRound ? 'text-violet-300' : 'text-zinc-300'}>
-            {fmtElapsed(elapsed)}
-          </span>
-        </span>
-      </div>
-      <div className="mt-2 font-mono tabular-nums text-[11px] text-zinc-600">
-        开始 {fmtTime(new Date(round.started_at * 1000).toISOString())} · 结束{' '}
-        {round.ended_at !== null ? (
-          fmtTime(new Date(round.ended_at * 1000).toISOString())
-        ) : (
-          <span className="text-violet-300">null（进行中）</span>
-        )}
-      </div>
-    </header>
-  )
-}
-
 /** 结束区：审计详情加载中/失败提示、本轮结论（末条 assistant 文本）、完整对话（默认收起） */
 function EndedSection({
   detail,
@@ -164,11 +101,20 @@ function EndedSection({
 }
 
 export default function LiveRoundHero() {
-  const { data, loading, error, reload } = useApiData(() => api.getAgentLive(), [])
+  const { connected, lastMessage } = useWs()
+  const currentAgent = useLiveAgent(lastMessage, connected)
+  const { data, loading, error, reload } = useApiData(
+    () => api.getLiveFor(currentAgent),
+    [currentAgent],
+  )
   const { data: status } = useApiData(() => api.getStatus(), [])
-  const { lastMessage } = useWs()
-  const inRound = data?.in_round ?? false
+  // 三端点统一在轮结束后保留终态轮，live 快照即唯一展示来源（无本地兜底）
   const round = data?.round ?? null
+
+  // 进行中口径三端点统一：round.ended_at === null 且未超僵尸阈值
+  // （僵尸轮 = 进程崩溃残留的 ended_at=NULL 脏数据，不算进行中——不呼吸、不轮询）
+  const inRound =
+    round !== null && round.ended_at === null && Date.now() - round.started_at * 1000 <= ZOMBIE_MS
   const now = useNow(inRound)
   const ended = round !== null && round.ended_at !== null
   const { detail, detailError } = useRoundDetail(round?.round_id ?? '', ended)
@@ -180,9 +126,11 @@ export default function LiveRoundHero() {
     return () => clearInterval(timer)
   }, [inRound, reload])
 
-  // WS round_start(轮开始)/round(轮结束) 消息触发即时刷新
+  // WS 六事件（三 agent 轮开始/结束）触发即时刷新：start 切换靠 currentAgent 变化自动重载，
+  // end 停留时靠这里的 reload 拿服务器终态（三端点统一保留终态轮，结束后 round 不会变 null）
   useEffect(() => {
-    if (lastMessage?.type === 'round_start' || lastMessage?.type === 'round') reload()
+    if (lastMessage === null || !isLiveRoundEvent(lastMessage)) return
+    reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟随消息变化
   }, [lastMessage])
 
@@ -199,7 +147,8 @@ export default function LiveRoundHero() {
   const shownCalls = detail?.tool_calls ?? data?.tool_calls ?? []
   const allowCount = shownCalls.filter((c) => c.risk_verdict === 'allow').length
   const denyCount = shownCalls.filter((c) => c.risk_verdict === 'deny').length
-  const llmOff = status !== null && !status.llm_configured
+  // llm_configured 是 trader 语义（自动决策暂停），仅展示 trader 轮时提示
+  const llmOff = currentAgent === 'trader' && status !== null && !status.llm_configured
   const endMs = ended && round.ended_at !== null ? round.ended_at * 1000 : now
   const elapsed = round ? Math.max(0, Math.floor(endMs / 1000 - round.started_at)) : 0
 
@@ -220,7 +169,7 @@ export default function LiveRoundHero() {
           )
         ) : (
           <div>
-            <HeroHeader round={round} inRound={inRound} elapsed={elapsed} />
+            <HeroHeader round={round} agent={currentAgent} inRound={inRound} elapsed={elapsed} />
             {llmOff && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/[.06] px-4 py-2.5 text-xs text-amber-300">
                 LLM未配置：自动决策已暂停，请先在设置中配置 API Key
