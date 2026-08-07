@@ -429,10 +429,8 @@ class Repo:
 
     async def update_audit_context(self, round_id: str, context_snapshot: str) -> None:
         """回填上下文快照：审计行先于上下文构建落库（保证失败轮有痕迹），构建完成后回填。"""
-        await self._conn.execute(
-            "UPDATE audit_rounds SET context_snapshot=? WHERE round_id=?",
-            (context_snapshot, round_id),
-        )
+        sql = "UPDATE audit_rounds SET context_snapshot=? WHERE round_id=?"
+        await self._conn.execute(sql, (context_snapshot, round_id))
         await self._conn.commit()
 
     async def get_audit_round(self, round_id: str) -> AuditRound | None:
@@ -441,10 +439,7 @@ class Repo:
         return AuditRound(**dict(row)) if row else None
 
     async def list_audit_rounds(self, round_ids: list[str]) -> dict[str, AuditRound]:
-        """按 round_id 批量取审计轮（一次 IN 查询），结果以 round_id 为键。
-
-        供列表端点使用，避免逐轮 get_audit_round 的 N+1 查询。
-        """
+        """按 round_id 批量取审计轮（一次 IN 查询避免列表端点 N+1），结果以 round_id 为键。"""
         if not round_ids:
             return {}
         marks = ",".join(["?"] * len(round_ids))  # 占位符个数由参数决定，值仍走参数化
@@ -453,12 +448,18 @@ class Repo:
         )
         return {a.round_id: a for a in (AuditRound(**dict(r)) for r in await cur.fetchall())}
 
-    async def latest_audit_round(self, mode: str) -> AuditRound | None:
-        """按模式取最近一轮审计（started_at 最新，并列取后插入者）；无记录返回 None。"""
-        cur = await self._conn.execute(
-            "SELECT * FROM audit_rounds WHERE mode=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
-            (mode,),
-        )
+    async def latest_audit_round(
+        self, mode: str, exclude_wake_sources: tuple[str, ...] = ()
+    ) -> AuditRound | None:
+        """按模式取最近一轮审计（started_at 最新并列取后插入者）；exclude_wake_sources 非空时排除该来源（trader live 视图排除复盘/研报轮），默认空元组不加过滤。"""
+        sql, params = "SELECT * FROM audit_rounds WHERE mode=?", [mode]
+        if exclude_wake_sources:
+            # 占位符个数由参数决定，值仍走参数化
+            marks = ",".join(["?"] * len(exclude_wake_sources))
+            sql += f" AND wake_source NOT IN ({marks})"
+            params.extend(exclude_wake_sources)
+        sql += " ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        cur = await self._conn.execute(sql, params)
         row = await cur.fetchone()
         return AuditRound(**dict(row)) if row else None
 

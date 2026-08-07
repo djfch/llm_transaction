@@ -330,11 +330,12 @@ async def build_app(
             indicator_config_store=indicators.store,
             watchlist=watchlist.contracts,
         ),
-        research=build_research(  # 研报子系统装配（第一期手动触发，不接调度）
+        research=build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
             settings,
             repo,
             audit,
             researcher_provider,
+            notify_event=event_queue.put_nowait,
         ),
         scheduler=scheduler,
         event_queue=event_queue,
@@ -415,6 +416,7 @@ def _build_server(
         llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
         alerts_provider=lambda: ctx.triggers.list(),
         review_run=ctx.review.scheduler.run_now,
+        research_run=ctx.research.scheduler.run_now,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,
         runtime_settings=settings,
@@ -453,8 +455,9 @@ async def run_app(
     safety_task = (
         asyncio.create_task(ctx.trade_sync.run_safety_net()) if ctx.trade_sync is not None else None
     )
-    # 复盘巡检无论 enabled 与否都创建：scheduler 每 tick 读 settings.review.enabled（热开关）
+    # 复盘/研报巡检无论 enabled 与否都创建：scheduler 每 tick 现读各自 enabled 配置（热开关）
     review_task = asyncio.create_task(ctx.review.scheduler.run_forever())
+    research_task = asyncio.create_task(ctx.research.scheduler.run_forever())
     logger.info(
         "应用已启动（mode=%s，HTTP=%s:%d）",
         ctx.settings.mode,
@@ -467,7 +470,9 @@ async def run_app(
         else:
             await asyncio.Event().wait()  # 长驻，Ctrl+C 退出
     finally:
-        await shutdown(ctx, server_task, pusher_task, funding_task, review_task, safety_task)
+        await shutdown(
+            ctx, server_task, pusher_task, funding_task, review_task, research_task, safety_task
+        )
 
 
 async def shutdown(
@@ -476,6 +481,7 @@ async def shutdown(
     pusher_task: asyncio.Task | None,
     funding_task: asyncio.Task,
     review_task: asyncio.Task,
+    research_task: asyncio.Task,
     safety_task: asyncio.Task | None = None,
 ) -> None:
     """优雅退出：停调度与行情，关 HTTP，收尾数据库。"""
@@ -492,7 +498,13 @@ async def shutdown(
     if ctx.server is not None:
         ctx.server.should_exit = True
         await asyncio.gather(server_task, return_exceptions=True)
-    for task in (pusher_task, funding_task, review_task, ctx.server_deps.indicators.oi_task):
+    for task in (
+        pusher_task,
+        funding_task,
+        review_task,
+        research_task,
+        ctx.server_deps.indicators.oi_task,
+    ):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

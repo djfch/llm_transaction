@@ -6,7 +6,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AgentLiveState, AppConfig, OpenOrder, PriceAlert, RoundDetail, StatusInfo, WsMessage } from '../api/types'
+import type { AgentLiveState, AppConfig, LiveAgentKind, LiveSnapshot, OpenOrder, PriceAlert, RoundDetail, StatusInfo, WsMessage } from '../api/types'
 import ConsolePage from '../pages/ConsolePage'
 
 const STATUS: StatusInfo = {
@@ -118,6 +118,11 @@ vi.mock('../api', () => ({
     getNotes: () => holder.getNotes(),
     getDailyStats: () => holder.getDailyStats(),
     getAgentLive: () => holder.getAgentLive(),
+    // 实时决策轮主角（多 agent 改造后）数据源：trader 走 getAgentLive 夹具并归一形状；复盘/研报恒无轮次
+    getLiveFor: (agent: LiveAgentKind): Promise<LiveSnapshot> =>
+      agent === 'trader'
+        ? holder.getAgentLive().then((s) => ({ round: s.round, tool_calls: s.tool_calls }))
+        : Promise.resolve({ round: null, tool_calls: [] }),
     getRound: () => Promise.resolve(DETAIL),
     getRounds: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 5 }),
     getTrades: () => Promise.resolve({ items: [], total: 0, offset: 0, limit: 20 }),
@@ -125,6 +130,10 @@ vi.mock('../api', () => ({
     getReviewReports: () => Promise.resolve({ items: [], total: 0 }),
     // 复盘进行中进度条数据源：无进行中复盘轮（进度条保持隐藏）
     getReviewLive: () => Promise.resolve({ round: null, tool_calls: [] }),
+    // 研报面板数据源（与复盘并排）
+    getResearchReports: () => Promise.resolve({ items: [], total: 0 }),
+    // 研报进行中进度条数据源：无进行中研报轮（进度条保持隐藏）
+    getResearchLive: () => Promise.resolve({ round: null, tool_calls: [] }),
     getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
@@ -253,7 +262,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
     expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
     expect(screen.getByText('自检笔记')).toBeInTheDocument()
-    // 复盘报告面板（成交记录之前，全宽 section）
+    // 研报面板 + 复盘报告面板（并排各半，成交记录之前）
+    expect(screen.getByRole('button', { name: '生成研报' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '立即复盘' })).toBeInTheDocument()
     // 第三屏：成交记录
     expect(screen.getByText('成交记录')).toBeInTheDocument()
@@ -262,10 +272,15 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
   })
 
   it('进行中的决策轮保留 null 技术状态及中文补充', async () => {
-    holder.getAgentLive.mockResolvedValueOnce({
+    // 持久 mock（非 Once）：useLiveAgent 挂载补漏与 hero 数据查询都会各调一次 getLiveFor('trader')，两次都需返回进行中轮；
+    // started_at 取当前时间（30 分钟僵尸阈值内），否则会被当作崩溃残留的僵尸轮、不显示进行中态
+    holder.getAgentLive.mockResolvedValue({
       ...LIVE,
       in_round: true,
-      round: LIVE.round === null ? null : { ...LIVE.round, ended_at: null },
+      round:
+        LIVE.round === null
+          ? null
+          : { ...LIVE.round, started_at: Math.floor(Date.now() / 1000) - 10, ended_at: null },
     })
 
     render(<ConsolePage />)

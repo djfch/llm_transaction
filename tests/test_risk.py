@@ -42,7 +42,15 @@ def make_position(**kw) -> PositionSnapshot:
     return PositionSnapshot(**(defaults | kw))
 
 
-def check(intent=None, account=None, positions=None, daily=None, watchlist=None, config=None):
+def check(
+    intent=None,
+    account=None,
+    positions=None,
+    daily=None,
+    watchlist=None,
+    config=None,
+    research_direction=None,
+):
     """便捷入口：默认参数全部安全（应放行），各用例只覆盖目标规则。"""
     return RiskEngine().check(
         intent or make_intent(),
@@ -51,6 +59,7 @@ def check(intent=None, account=None, positions=None, daily=None, watchlist=None,
         daily or make_daily(),
         watchlist if watchlist is not None else ["BTC_USDT"],
         config or RiskConfig(),
+        research_direction=research_direction,
     )
 
 
@@ -265,3 +274,58 @@ def test_engine_aggregates_multiple_reasons():
     verdict = check(intent=intent, config=config)
     assert verdict.allowed is False
     assert len(verdict.reasons) == 4
+
+
+# ---------- 研报方向闸门 ----------
+
+
+def test_research_gate_exempts_close():
+    # 平仓/减仓永远豁免：即使高置信研报反向也不拦
+    verdict = check(intent=make_intent(is_close=True), research_direction="偏空")
+    assert verdict.allowed is True
+
+
+def test_research_gate_none_direction_allowed():
+    # 闸门未传入方向（关闭/无研报/过期/降级）：不约束
+    assert check(research_direction=None).allowed is True
+
+
+def test_research_gate_neutral_allowed():
+    assert check(research_direction="中性").allowed is True
+
+
+def test_research_gate_bearish_denies_long():
+    verdict = check(intent=make_intent(side_size=D(1)), research_direction="偏空")
+    assert verdict.allowed is False
+    assert any("闸门" in r for r in verdict.reasons)
+
+
+def test_research_gate_bullish_denies_short():
+    verdict = check(intent=make_intent(side_size=D(-1)), research_direction="偏多")
+    assert verdict.allowed is False
+    assert any("闸门" in r for r in verdict.reasons)
+
+
+def test_research_gate_bearish_allows_short():
+    # 顺向（研报偏空 + 开空）放行
+    assert check(intent=make_intent(side_size=D(-1)), research_direction="偏空").allowed is True
+
+
+def test_research_gate_bullish_allows_long():
+    # 顺向（研报偏多 + 开多）放行
+    assert check(intent=make_intent(side_size=D(1)), research_direction="偏多").allowed is True
+
+
+def test_engine_check_passes_research_direction():
+    # engine.check 的 research_direction 入参链路：传入即组装进 RuleInput 生效
+    verdict = RiskEngine().check(
+        make_intent(side_size=D(1)),
+        make_account(),
+        [],
+        make_daily(),
+        ["BTC_USDT"],
+        RiskConfig(),
+        research_direction="偏空",
+    )
+    assert verdict.allowed is False
+    assert verdict.reasons == ["高置信研报偏空，反向开多被闸门拦截"]

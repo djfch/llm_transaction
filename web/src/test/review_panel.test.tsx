@@ -175,6 +175,32 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(await screen.findByText(/完整版追加段落。/)).toBeInTheDocument()
   })
 
+  it('慢请求回归：展开→请求未返回时收起→再展开→请求完成，最终显示全文而非永远加载中', async () => {
+    // 第一次请求挂起（模拟慢请求），完成时机由测试可控
+    let resolveFirst: (d: ReviewReport) => void = () => {}
+    holder.getReviewReport.mockImplementationOnce(
+      () => new Promise<ReviewReport>((resolve) => { resolveFirst = resolve }),
+    )
+    render(<ReviewPanel />)
+    const preview = await screen.findByText(/本区间亏损。/)
+
+    fireEvent.click(preview) // 展开：请求 1 在途
+    expect(holder.getReviewReport).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('报告全文加载中…')).toBeInTheDocument()
+
+    fireEvent.click(preview) // 收起：cleanup 置 alive=false
+    fireEvent.click(preview) // 再展开：请求 1 仍在途，fetchedRef 早退不发新请求
+    expect(holder.getReviewReport).toHaveBeenCalledTimes(1)
+
+    // 请求 1 完成但结果被丢弃：内部应重置防重入并重新发起请求（第二次走 beforeEach 默认实现，立即返回）
+    const found = REPORTS.find((r) => r.id === 6)!
+    resolveFirst({ ...found, reportMd: `${found.reportMd}\n\n完整版追加段落。` })
+    await waitFor(() => expect(holder.getReviewReport).toHaveBeenCalledTimes(2))
+
+    expect(await screen.findByText(/完整版追加段落。/)).toBeInTheDocument()
+    expect(screen.queryByText('报告全文加载中…')).not.toBeInTheDocument()
+  })
+
   it('statsJson 为空对象时降级：展开不渲染统计表格行', async () => {
     render(<ReviewPanel />)
     const errorRow = await screen.findByText('复盘失败：LLM 响应超时')

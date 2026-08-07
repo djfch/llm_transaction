@@ -1,15 +1,17 @@
 """工具层测试：amend 过风控、声明杠杆真实生效、落库失败禁止重试、
-close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移。"""
+close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移、
+研报方向闸门（高置信反向开仓拦截与各路降级放行）。"""
 
 from __future__ import annotations
 
 import sqlite3
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 
 from src.agent.tool_handlers import ToolDeps
 from src.agent.tools import ToolRegistry
-from src.config import RiskConfig
+from src.config import ResearchConfig, RiskConfig
 from src.gateway.base import Contract
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
@@ -41,7 +43,9 @@ async def _zero_daily() -> DailyStats:
     return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
 
-async def _make_tools(tmp_path, *, extra_contracts: tuple = ()) -> SimpleNamespace:
+async def _make_tools(
+    tmp_path, *, extra_contracts: tuple = (), research_config: ResearchConfig | None = None
+) -> SimpleNamespace:
     """组装工具注册表（MockGateway + tmp_path SQLite）。"""
     db = Database()
     await db.open(tmp_path / "tools.db")
@@ -60,6 +64,7 @@ async def _make_tools(tmp_path, *, extra_contracts: tuple = ()) -> SimpleNamespa
         triggers=TriggerManager(lambda t, p: None),
         indicator_service=None,
         daily_stats_fn=_zero_daily,
+        research_config=research_config,
         mode="paper",
         round_id="r-test",
     )
@@ -309,5 +314,108 @@ async def test_close_order_skips_price_deviation(tmp_path):
             "place_order", {"contract": "BTC_USDT", "size": 1, "price": 100, "stop_loss_price": 90}
         )
         assert out2.risk_verdict == "deny" and "偏离" in out2.text  # 开仓仍受偏离约束
+    finally:
+        await env.db.close()
+
+
+# ---------- 研报方向闸门（高置信反向开仓拦截，降级一律放行） ----------
+
+_GATE_ON = ResearchConfig(gate_enabled=True, gate_max_age_hours=13)
+_OPEN_LONG = {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+
+
+async def _save_report(env: SimpleNamespace, direction: str, confidence: str) -> None:
+    """落一份最新成功研报（created_at 为当前时刻，有效期内）。"""
+    await env.repo.research.save_report(
+        report_type="manual", direction=direction, confidence=confidence
+    )
+
+
+async def test_research_gate_high_confidence_blocks_counter_order(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await _save_report(env, "偏空", "高")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "deny" and "闸门" in out.text
+        assert env.gateway.placed == []  # 被闸门硬拒，订单未到网关
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_mid_confidence_allows(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await _save_report(env, "偏空", "中")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_low_confidence_allows(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await _save_report(env, "偏空", "低")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_expired_report_allows(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await _save_report(env, "偏空", "高")
+        # 把研报创建时间改到 14 小时前（超过 13 小时有效期）
+        await env.db.conn.execute(
+            "UPDATE research_reports SET created_at = ?", (time.time() - 14 * 3600,)
+        )
+        await env.db.conn.commit()
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_disabled_allows(tmp_path):
+    env = await _make_tools(tmp_path, research_config=ResearchConfig(gate_enabled=False))
+    try:
+        await _save_report(env, "偏空", "高")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_no_config_allows(tmp_path):
+    # research_config=None（旧构造方式）：闸门关闭，高置信反向也放行
+    env = await _make_tools(tmp_path)
+    try:
+        await _save_report(env, "偏空", "高")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_no_report_allows(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_latest_report_error_degrades(tmp_path, monkeypatch):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+
+        async def _boom():
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(env.repo.research, "latest_report", _boom)
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text  # 读取异常降级放行，不阻塞交易
     finally:
         await env.db.close()

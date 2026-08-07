@@ -153,7 +153,9 @@ def settings() -> Settings:
     return Settings(mode="paper")
 
 
-async def _build_agent(repo: Repo, settings: Settings, provider, tmp_path) -> ResearchAgent:
+async def _build_agent(
+    repo: Repo, settings: Settings, provider, tmp_path, notify_event=None
+) -> ResearchAgent:
     audit = AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit")))
     data = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
     return ResearchAgent(
@@ -163,6 +165,7 @@ async def _build_agent(repo: Repo, settings: Settings, provider, tmp_path) -> Re
         audit=audit,
         prompt_loader=ResearchPromptLoader(tmp_path / "research_prompt.md"),
         data_provider=data,
+        notify_event=notify_event,
         max_turns=10,
         timeout_seconds=60,
     )
@@ -533,3 +536,57 @@ async def test_retry_round_tool_calls_executed_and_flushed(
     # 重试轮的工具调用也进审计（seq 高位基数 900+）
     calls = await repo.list_audit_tool_calls(result["round_id"])
     assert any(c.tool == "submit_causal_links" for c in calls)
+
+
+# ---------- WS 事件发射（对照复盘 agent 模式） ----------
+
+
+async def test_event_success_sequence(repo: Repo, settings: Settings, tmp_path) -> None:
+    """WS 事件：成功一轮恰好推 start + ok=True，round_id 一致。"""
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[0]["data"]["round_id"] == result["round_id"]
+    assert events[1]["data"] == {"round_id": result["round_id"], "ok": True}
+
+
+async def test_event_failure_sequence(repo: Repo, settings: Settings, tmp_path) -> None:
+    """WS 事件：失败一轮恰好推 start + ok=False。"""
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _BadJsonProvider(), tmp_path, events.append)
+    result = await agent.run(report_type="asia")
+    assert result["ok"] is False
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[0]["data"]["round_id"] == result["round_id"]
+    assert events[1]["data"] == {"round_id": result["round_id"], "ok": False}
+
+
+async def test_event_no_provider_zero_events(repo: Repo, settings: Settings, tmp_path) -> None:
+    """WS 事件：LLM 未配置早退，零事件。"""
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, None, tmp_path, events.append)
+    result = await agent.run()
+    assert result["ok"] is False
+    assert events == []
+
+
+async def test_event_notifier_default_no_break(repo: Repo, settings: Settings, tmp_path) -> None:
+    """WS 事件：未注入 notify_event（默认 None）时 run 正常完成不炸。"""
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+
+
+async def test_event_notifier_raise_does_not_break(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """WS 事件：广播回调抛异常只记日志，不拖垮 run。"""
+
+    def _boom(_event: dict) -> None:
+        raise RuntimeError("WS 连接断开")
+
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, _boom)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True

@@ -95,7 +95,9 @@ function ReportItem({
   const [error, setError] = useState<string | null>(null)
 
   // 展开时 lazy 拉取全文；loading 不进 deps（同 TimelineCard：避免清理函数自我取消），fetchedRef 防重入
+  // retryTick：请求完成但结果被收起丢弃（alive=false）时自增，重跑 effect 重新请求（已展开时）
   const fetchedRef = useRef(false)
+  const [retryTick, setRetryTick] = useState(0)
   useEffect(() => {
     if (!expanded || fetchedRef.current) return
     fetchedRef.current = true
@@ -114,12 +116,19 @@ function ReportItem({
         }
       })
       .finally(() => {
-        if (alive) setLoading(false)
+        if (alive) {
+          setLoading(false)
+          return
+        }
+        // 请求完成但结果被丢弃（收起时 cleanup 置 alive=false）：重置防重入并重跑 effect，
+        // 已重新展开则重新请求，仍收起则留给下次展开
+        fetchedRef.current = false
+        setRetryTick((t) => t + 1)
       })
     return () => {
       alive = false
     }
-  }, [expanded, report.id])
+  }, [expanded, report.id, retryTick])
 
   const statRows = detail === null ? [] : parseStatRows(detail.statsJson)
 

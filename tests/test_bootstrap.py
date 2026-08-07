@@ -18,12 +18,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.bootstrap import AppContext, _default_contract, build_app
+from src.bootstrap import AppContext, _default_contract, build_app, run_app
 from src.config import Settings, Watchlist
 from src.config_io import write_settings
 from src.gateway.base import OrderRequest, Ticker
 from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import settle_due_funding
+from src.research.setup import build_research as _build_research_impl
 from src.review.strategy import StrategyValidationError
 
 BTC = "BTC_USDT"
@@ -235,6 +236,63 @@ async def test_on_wake_pushes_round_start_then_round(build_ctx):
     assert first["type"] == "round_start"
     assert first["data"]["wake_source"] == "test_event_order"
     assert second["type"] == "round"
+
+
+# ---------- 研报子系统接线 ----------
+
+
+async def test_research_subsystem_assembled(build_ctx):
+    """研报子系统装配进 AppContext：scheduler 就位，server 的 research_run 同源。"""
+    ctx = await build_ctx()
+    assert ctx.research.agent is not None
+    assert ctx.research.scheduler is not None
+    deps = ctx.server_deps
+    assert deps is not None
+    assert deps.research_run == ctx.research.scheduler.run_now
+
+
+async def test_build_research_receives_notify_event(build_ctx, monkeypatch):
+    """build_research 收到 notify_event=event_queue.put_nowait（研报轮始/轮末事件经 WS 广播）。"""
+    captured: list = []
+
+    def _wrap(settings, repo, audit, provider, notify_event=None):
+        captured.append(notify_event)
+        return _build_research_impl(settings, repo, audit, provider, notify_event=notify_event)
+
+    monkeypatch.setattr("src.bootstrap.build_research", _wrap)
+    ctx = await build_ctx()
+    assert captured == [ctx.event_queue.put_nowait]  # bound method 同 func+self 即相等
+
+
+async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkeypatch):
+    """run_app 创建研报巡检 task（run_forever），shutdown 时被 cancel（与复盘同构）。"""
+    ctx = await build_ctx()
+    captured: list[asyncio.Task] = []
+
+    async def _fake_forever() -> None:
+        await asyncio.Event().wait()  # 挂起直至被 cancel
+
+    async def _fake_serve() -> None:
+        await asyncio.sleep(0)
+
+    async def _fake_shutdown(
+        _ctx, server_task, pusher_task, funding_task, review_task, research_task, safety_task=None
+    ) -> None:
+        captured.append(research_task)
+        for task in (server_task, funding_task, review_task, research_task):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            server_task, funding_task, review_task, research_task, return_exceptions=True
+        )
+
+    monkeypatch.setattr(ctx.research.scheduler, "run_forever", _fake_forever)
+    monkeypatch.setattr(ctx.server, "serve", _fake_serve)  # 不起真实 HTTP 端口
+    monkeypatch.setattr("src.bootstrap.shutdown", _fake_shutdown)
+
+    await run_app(ctx, duration=0)
+    assert len(captured) == 1
+    assert captured[0].cancelled()
 
 
 # ---------- 复盘子系统接线 ----------

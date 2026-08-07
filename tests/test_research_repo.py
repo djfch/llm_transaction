@@ -119,3 +119,70 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
     assert len(links) == 1
     assert links[0].report_id == report.id
     assert "油价上涨" in links[0].chain_json
+
+
+async def test_list_reports_page(repo: Repo) -> None:
+    """分页：最新在前、含失败记录、越界页 items 空但 total 准确。"""
+    ids = []
+    for i in range(3):
+        r = await repo.research.save_report(
+            report_type="us", direction="偏多", confidence="高", narrative=f"第{i}份"
+        )
+        ids.append(r.id)
+    fail = await repo.research.save_report(
+        report_type="asia", direction="中性", confidence="中", error="解析失败"
+    )
+    # 最新在前：失败记录 id 最大，第一页第一条就是它
+    page1, total = await repo.research.list_reports_page(limit=2, offset=0)
+    assert [r.id for r in page1] == [fail.id, ids[2]]
+    assert total == 4
+    page2, total = await repo.research.list_reports_page(limit=2, offset=2)
+    assert [r.id for r in page2] == [ids[1], ids[0]]
+    assert total == 4
+    page3, total = await repo.research.list_reports_page(limit=2, offset=4)
+    assert page3 == []
+    assert total == 4
+
+
+async def test_list_causal_links_by_report(repo: Repo) -> None:
+    """按研报取因果链：id 正序，只返回该研报的。"""
+    r1 = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    r2 = await repo.research.save_report(report_type="asia", direction="中性", confidence="中")
+    for i in range(2):
+        await repo.research.save_causal_link(
+            report_id=r1.id, chain_json=f'[{{"node": "A{i}", "kind": "事件"}}]', confidence=0.6
+        )
+    await repo.research.save_causal_link(
+        report_id=r2.id, chain_json='[{"node": "B", "kind": "事件"}]', confidence=0.6
+    )
+    links = await repo.research.list_causal_links_by_report(r1.id)
+    assert [link.report_id for link in links] == [r1.id, r1.id]
+    assert [link.id for link in links] == sorted(link.id for link in links)  # id 正序
+    assert all("A" in link.chain_json for link in links)
+
+
+async def test_has_report_since(repo: Repo) -> None:
+    """幂等判定：恰好等于 since_ts 算有；成功或失败都算已跑（失败不自动重试）；类型不匹配不算。"""
+    ok = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    fail = await repo.research.save_report(
+        report_type="asia", direction="中性", confidence="中", error="解析失败"
+    )
+    assert await repo.research.has_report_since("us", ok.created_at) is True  # 恰好等于
+    assert await repo.research.has_report_since("us", ok.created_at + 1) is False  # 之后无
+    assert await repo.research.has_report_since("asia", fail.created_at) is True  # 失败也算已跑
+    assert await repo.research.has_report_since("europe", ok.created_at) is False  # 类型不匹配
+
+
+async def test_latest_research_audit_round(repo: Repo) -> None:
+    """latest_research_audit_round：只取 wake_source='research' 的最新一轮，交易轮不参与。"""
+    assert await repo.research.latest_research_audit_round("paper") is None  # 空表
+    await repo.start_audit_round("r-t1", "paper", wake_source="timer", started_at=1000.0)
+    await repo.start_audit_round("r-r1", "paper", wake_source="research", started_at=2000.0)
+    await repo.start_audit_round("r-r2", "paper", wake_source="research", started_at=3000.0)
+    await repo.start_audit_round("r-t2", "paper", wake_source="timer", started_at=4000.0)
+    latest = await repo.research.latest_research_audit_round("paper")
+    assert latest is not None and latest.round_id == "r-r2"
+    assert latest.wake_source == "research"
+    await repo.start_audit_round("r-t3", "testnet", wake_source="timer", started_at=5000.0)
+    assert await repo.research.latest_research_audit_round("testnet") is None  # 只有交易轮 → None
+    assert await repo.research.latest_research_audit_round("live") is None  # 该模式无记录

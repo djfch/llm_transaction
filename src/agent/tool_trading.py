@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -37,6 +38,28 @@ logger = get_logger(__name__)
 # ---------- 风控辅助 ----------
 
 
+async def _research_gate_direction(deps: ToolDeps) -> str | None:
+    """研报方向闸门取值：仅高置信、方向明确且未过期的最新研报才约束开仓方向。
+
+    降级约定（一律返回 None，不阻塞交易）：闸门关闭（research_config 为 None 或
+    gate_enabled=False）、无研报、置信度非"高"、方向非偏多/偏空、研报超过
+    gate_max_age_hours 有效期，以及读取研报抛异常。
+    """
+    cfg = deps.research_config
+    if cfg is None or not cfg.gate_enabled:
+        return None
+    try:
+        report = await deps.repo.research.latest_report()
+    except Exception:
+        logger.exception("研报方向闸门读取最新研报失败，降级为不约束方向")
+        return None
+    if report is None or report.confidence != "高" or report.direction not in ("偏多", "偏空"):
+        return None
+    if time.time() - report.created_at > cfg.gate_max_age_hours * 3600:
+        return None
+    return report.direction
+
+
 async def _risk_check(
     deps: ToolDeps,
     contract: str,
@@ -55,6 +78,7 @@ async def _risk_check(
         return ToolOutcome("风控拒绝：账户权益非正，禁止交易", "deny", "账户权益非正")
     snap = AccountSnapshot(equity=equity, unrealised_pnl=account.unrealised_pnl)
     daily = await deps.daily_stats_fn()
+    gate_direction = await _research_gate_direction(deps)
     try:
         intent = TradeIntent(
             contract=contract,
@@ -74,6 +98,7 @@ async def _risk_check(
         daily,
         deps.watchlist,
         deps.risk_config,
+        gate_direction,
     )
     if not verdict.allowed:
         reason = "；".join(verdict.reasons)

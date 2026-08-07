@@ -18,7 +18,7 @@ import time
 import aiosqlite
 
 from src.memory.db import Database
-from src.memory.models import CausalLink, ResearchReport, Timeline
+from src.memory.models import AuditRound, CausalLink, ResearchReport, Timeline
 
 
 def _now() -> float:
@@ -158,6 +158,31 @@ class ResearchRepo:
         row = await cur.fetchone()
         return ResearchReport(**dict(row)) if row else None
 
+    async def list_reports_page(
+        self, limit: int = 20, offset: int = 0
+    ) -> tuple[list[ResearchReport], int]:
+        """分页查询研报（含失败记录），最新在前；返回 (items, total)。
+
+        total 用独立 COUNT(*) 统计：越界页 items 为空但 total 仍准确。
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM research_reports ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        items = [ResearchReport(**dict(r)) for r in await cur.fetchall()]
+        cur = await self._conn.execute("SELECT COUNT(*) AS total FROM research_reports")
+        row = await cur.fetchone()
+        total = int(row["total"]) if row else 0
+        return items, total
+
+    async def has_report_since(self, report_type: str, since_ts: float) -> bool:
+        """since_ts 后是否存在该 report_type 的研报记录（成功或失败都算——对齐复盘幂等口径：失败不自动重试，防 LLM 故障时每分钟重发）。"""
+        cur = await self._conn.execute(
+            "SELECT 1 FROM research_reports WHERE report_type=? AND created_at>=? LIMIT 1",
+            (report_type, since_ts),
+        )
+        return await cur.fetchone() is not None
+
     # ---------- causal_links（分析笔记，研报 agent 提交） ----------
 
     async def save_causal_link(
@@ -191,3 +216,25 @@ class ResearchRepo:
             (_now() - days * 86400,),
         )
         return [CausalLink(**dict(r)) for r in await cur.fetchall()]
+
+    async def list_causal_links_by_report(self, report_id: int) -> list[CausalLink]:
+        """按研报 id 取因果链，id 正序（同一研报内按提交顺序）。"""
+        cur = await self._conn.execute(
+            "SELECT * FROM causal_links WHERE report_id=? ORDER BY id", (report_id,)
+        )
+        return [CausalLink(**dict(r)) for r in await cur.fetchall()]
+
+    # ---------- audit_rounds（研报审计轮取数） ----------
+
+    async def latest_research_audit_round(self, mode: str) -> AuditRound | None:
+        """按模式取最近一轮研报审计（wake_source='research' 过滤，排序口径同 latest_audit_round）。
+
+        交易轮（timer 等）再多也不参与；无研报轮返回 None。
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM audit_rounds WHERE mode=? AND wake_source='research'"
+            " ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (mode,),
+        )
+        row = await cur.fetchone()
+        return AuditRound(**dict(row)) if row else None

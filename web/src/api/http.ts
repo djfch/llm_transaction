@@ -10,6 +10,8 @@ import type {
   AppConfig,
   Candle,
   CancelOpenOrderResult,
+  CausalLinkView,
+  ChainNode,
   ClosePositionResult,
   CredentialCreateBody,
   CredentialMutationResult,
@@ -19,6 +21,7 @@ import type {
   IndicatorConfig,
   IndicatorSeriesResponse,
   KillSwitchResult,
+  LiveSnapshot,
   NotesPageResult,
   PaperResetResult,
   OpenOrder,
@@ -26,6 +29,10 @@ import type {
   Position,
   PortfolioSnapshot,
   PutConfigResult,
+  ResearchLive,
+  ResearchReportDetail,
+  ResearchReportsPage,
+  ResearchReportSummary,
   ReviewLive,
   ReviewReport,
   ReviewReportsPage,
@@ -33,6 +40,7 @@ import type {
   RollbackResult,
   RoundDetail,
   RoundsPageResult,
+  RunResearchResult,
   RunReviewResult,
   SecretsStatus,
   SetSecretsBody,
@@ -379,6 +387,174 @@ function adaptRunReview(raw: RawRunReview): RunReviewResult {
   }
 }
 
+/** 后端研报原始项（列表/详情同 13 键，仅 narrative 长度不同；时间为 created_at(Unix秒)） */
+interface RawResearchReport {
+  id: number
+  report_type: string
+  direction: string
+  confidence: string
+  horizon: string
+  evidence_json: string
+  risks_json: string
+  narrative: string
+  raw_json: string
+  verify_result: string
+  error: string
+  round_id: string
+  created_at: number
+}
+
+/**
+ * 后端研报 → 前端 ResearchReportSummary：snake_case 转 camelCase、created_at(Unix秒) 转 ISO；
+ * evidence_json/risks_json/raw_json 保留原始字符串不解析（与复盘 statsJson 同约定：
+ * 列表不需要结构化内容，详情端点会给已解析对象，适配层不为其建双份口径）。
+ */
+function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
+  return {
+    id: raw.id,
+    reportType: raw.report_type ?? '',
+    direction: raw.direction ?? '',
+    confidence: raw.confidence ?? '',
+    horizon: raw.horizon ?? '',
+    evidenceJson: raw.evidence_json ?? '[]',
+    risksJson: raw.risks_json ?? '[]',
+    narrative: raw.narrative ?? '',
+    rawJson: raw.raw_json ?? '{}',
+    verifyResult: raw.verify_result ?? '',
+    error: raw.error ?? '',
+    roundId: raw.round_id ?? '',
+    time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御）；broken_at 为断点节点下标 */
+interface RawCausalLink {
+  id: number
+  report_id: number
+  chain?: unknown
+  confidence: number | string
+  evidence?: unknown
+  status: string
+  broken_at?: number | null
+  created_at: number
+}
+
+/** 后端研报详情原始响应：同摘要键 + evidence/risks/raw 已解析 + causal_links */
+type RawResearchReportDetail = RawResearchReport & {
+  evidence?: unknown
+  risks?: unknown
+  raw?: unknown
+  causal_links?: RawCausalLink[]
+}
+
+/** 容错解析：契约上为已解析数组，防御性兼容 JSON 字符串形态；解析失败返回 null */
+function tryParseJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+/** 字符串列表字段适配（risks/因果链 evidence）：非数组降级空数组，元素统一转字符串 */
+function adaptStringList(value: unknown): string[] {
+  const parsed = tryParseJson(value)
+  if (!Array.isArray(parsed)) return []
+  return parsed.map((item) => (typeof item === 'string' ? item : String(item)))
+}
+
+/**
+ * 研报 evidence 适配：后端契约为对象数组 [{point, source}]（见 research_prompt 输出格式），
+ * 元素映射为「point（source）」展示串（source 缺失只留 point）；字符串原样（兼容历史/防御）；
+ * 其他形状兜底 String(item)。risks 为真字符串数组，不走本函数。
+ * 导出供 mock 数据源（与后端同形状）在返回前复用同一适配。
+ */
+export function adaptEvidenceList(value: unknown): string[] {
+  const parsed = tryParseJson(value)
+  if (!Array.isArray(parsed)) return []
+  return parsed.map((item) => {
+    if (typeof item === 'string') return item
+    if (item !== null && typeof item === 'object') {
+      const { point, source } = item as { point?: unknown; source?: unknown }
+      if (typeof point === 'string' && point !== '') {
+        return typeof source === 'string' && source !== '' ? `${point}（${source}）` : point
+      }
+    }
+    return String(item)
+  })
+}
+
+/** 因果链节点适配：缺 node 文本的节点丢弃（无法渲染）；kind 缺省空串、timeline_id 仅数字保留 */
+function adaptChainNode(raw: unknown): ChainNode | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const node = raw as { node?: unknown; kind?: unknown; timeline_id?: unknown }
+  const text = typeof node.node === 'string' ? node.node.trim() : ''
+  if (text === '') return null
+  return {
+    node: text,
+    kind: typeof node.kind === 'string' ? node.kind : '',
+    ...(typeof node.timeline_id === 'number' ? { timeline_id: node.timeline_id } : {}),
+  }
+}
+
+/** 后端因果链 → 前端 CausalLinkView：chain/evidence 防御性解析，created_at(Unix秒) 转 ISO */
+function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
+  const chain = tryParseJson(raw.chain)
+  return {
+    id: raw.id,
+    reportId: raw.report_id,
+    chain: Array.isArray(chain)
+      ? chain.map(adaptChainNode).filter((n): n is ChainNode => n !== null)
+      : [],
+    confidence: Number(raw.confidence),
+    evidence: adaptStringList(raw.evidence),
+    status: raw.status ?? 'pending',
+    brokenAt: raw.broken_at ?? null,
+    time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端研报详情 → 前端 ResearchReportDetail：摘要适配 + 已解析字段/因果链适配 */
+function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReportDetail {
+  const parsedRaw = tryParseJson(raw.raw)
+  return {
+    ...adaptResearchReport(raw),
+    evidence: adaptEvidenceList(raw.evidence),
+    risks: adaptStringList(raw.risks),
+    raw: parsedRaw !== null && typeof parsedRaw === 'object' && !Array.isArray(parsedRaw)
+      ? (parsedRaw as Record<string, unknown>)
+      : {},
+    causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
+  }
+}
+
+/** 后端 POST /api/research/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+interface RawRunResearch {
+  started: boolean
+  ok?: boolean
+  report_id?: number
+  round_id?: string
+  direction?: string
+  confidence?: string
+  error?: string
+  error_code?: string
+}
+
+/** 后端 run 响应 → 前端 RunResearchResult：snake_case 转 camelCase */
+function adaptRunResearch(raw: RawRunResearch): RunResearchResult {
+  return {
+    started: Boolean(raw.started),
+    ok: raw.ok,
+    reportId: raw.report_id,
+    roundId: raw.round_id,
+    direction: raw.direction,
+    confidence: raw.confidence,
+    error: raw.error ?? '',
+    errorCode: raw.error_code,
+  }
+}
+
 /** 后端策略版本原始项（列表无 content，详情有） */
 interface RawStrategyVersion {
   id: number
@@ -450,6 +626,13 @@ async function fetchReviewReports(offset: number, limit: number): Promise<Review
   const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
   const raw = await request<{ items: RawReviewReport[]; total: number }>(`/review/reports?${qs.toString()}`)
   return { items: raw.items.map(adaptReviewReport), total: raw.total }
+}
+
+/** GET /api/research/reports 适配：{items,total}（后端不回显 offset/limit）+ items 字段转换 */
+async function fetchResearchReports(offset: number, limit: number): Promise<ResearchReportsPage> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  const raw = await request<{ items: RawResearchReport[]; total: number }>(`/research/reports?${qs.toString()}`)
+  return { items: raw.items.map(adaptResearchReport), total: raw.total }
 }
 
 /** GET /api/candles 适配：取出 items 数组（字段名 t/o/h/l/c/v 与前端一致） */
@@ -604,6 +787,30 @@ export const httpApi: ApiClient = {
   runReview: async () => adaptRunReview(await request<RawRunReview>('/review/run', { method: 'POST' })),
   // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配
   getReviewLive: () => request<ReviewLive>('/review/live'),
+  getResearchReports: fetchResearchReports,
+  getResearchReport: async (id): Promise<ResearchReportDetail> =>
+    adaptResearchReportDetail(await request<RawResearchReportDetail>(`/research/reports/${id}`)),
+  // 409=生成中、503=LLM 未配置、422=hours 越界：非 2xx 经 toApiError 抛 ApiError（detail 可读），同 runReview
+  runResearch: async (reportType = 'manual', hours = 24) =>
+    adaptRunResearch(
+      await request<RawRunResearch>('/research/run', {
+        method: 'POST',
+        body: JSON.stringify({ report_type: reportType, hours }),
+      }),
+    ),
+  // 与 getReviewLive 同约定：响应契约即最终形态，无需适配
+  getResearchLive: () => request<ResearchLive>('/research/live'),
+  // 按 agent 转发三端点；返回值类型收窄为 LiveSnapshot（in_round / strategy_md5 等端点私有字段随之丢弃）
+  getLiveFor: (agent): Promise<LiveSnapshot> => {
+    switch (agent) {
+      case 'trader':
+        return request<AgentLiveState>('/agent/live')
+      case 'review':
+        return request<ReviewLive>('/review/live')
+      case 'research':
+        return request<ResearchLive>('/research/live')
+    }
+  },
   getStrategyVersions: async () =>
     (await request<{ items: RawStrategyVersion[] }>('/strategy/versions')).items.map(adaptStrategyVersion),
   getStrategyVersion: async (id): Promise<StrategyVersionDetail> => {

@@ -499,6 +499,17 @@ async def test_latest_audit_round_tie_breaks_by_insert_order(repo: Repo):
     assert latest is not None and latest.round_id == "r-second"
 
 
+async def test_latest_audit_round_exclude_wake_sources(repo: Repo):
+    """exclude_wake_sources：排除复盘/研报轮（trader live 视图口径）；默认空元组行为不变。"""
+    await repo.start_audit_round("r-trader", "paper", wake_source="timer", started_at=1000.0)
+    await repo.start_audit_round("r-research", "paper", wake_source="research", started_at=2000.0)
+    await repo.start_audit_round("r-review", "paper", wake_source="review", started_at=3000.0)
+    latest = await repo.latest_audit_round("paper", exclude_wake_sources=("review", "research"))
+    assert latest is not None and latest.round_id == "r-trader"  # 更新的复盘/研报轮被排除
+    default = await repo.latest_audit_round("paper")
+    assert default is not None and default.round_id == "r-review"  # 默认不过滤，仍取最新
+
+
 # ---------- decisions/audit_rounds.strategy_md5（策略书原文 md5） ----------
 
 

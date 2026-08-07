@@ -162,3 +162,15 @@ async def test_live_prefers_runtime_settings_mode(repo: Repo, tmp_path: Path):
     deps = _deps(repo, tmp_path, {}, runtime_settings=Settings(mode="testnet"))
     body = await _get_live(deps)
     assert body["round"]["round_id"] == "r-testnet"
+
+
+async def test_live_excludes_review_research_rounds(repo: Repo, tmp_path: Path):
+    """trader 视图只看交易轮：更新的复盘/研报轮不污染 /api/agent/live（各有专属端点）。"""
+    await repo.start_audit_round("r-trader", "paper", wake_source="timer", started_at=1000.0)
+    await repo.finish_audit_round("r-trader", llm_raw="交易轮原文", ended_at=1010.0)
+    # 更新的复盘/研报轮（started_at 更大，生产中研报每天三轮、trader 60min 一轮）
+    await repo.start_audit_round("r-review", "paper", wake_source="review", started_at=2000.0)
+    await repo.start_audit_round("r-research", "paper", wake_source="research", started_at=3000.0)
+    body = await _get_live(_deps(repo, tmp_path, {}))
+    assert body["round"]["round_id"] == "r-trader"
+    assert body["round"]["ended_at"] == 1010.0

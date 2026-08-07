@@ -425,6 +425,90 @@ export interface RunReviewResult {
   error?: string // 失败原因（空串/缺省 = 正常）
 }
 
+/** 研报摘要：GET /api/research/reports（列表项 narrative 截断 200 字符，省流量） */
+export interface ResearchReportSummary {
+  id: number // 研报 ID
+  reportType: string // 研报类型：manual(手动) / asia_open(亚盘) / europe_open(欧盘) / us_open(美盘)
+  direction: string // 方向判断：偏多 / 偏空 / 中性
+  confidence: string // 置信度：高 / 中 / 低
+  horizon: string // 前瞻窗口（如 '24h'；空串 = 未给出）
+  evidenceJson: string // 证据 JSON 原文（展示方自行解析，字段缺失时降级）
+  risksJson: string // 风险 JSON 原文（同 evidenceJson 约定）
+  narrative: string // 研判叙事（列表截断 200 字符）
+  rawJson: string // LLM 结构化输出 JSON 原文
+  verifyResult: string // 复盘验证结果（预留，空串 = 未验证）
+  error: string // 非空 = 本次研报失败（只落错误记录，不影响交易循环）
+  roundId: string // 研报审计轮 ID（空串 = 无关联）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+}
+
+/** 因果链节点：chain 已解析为有序数组（timeline_id 溯源事实层 timeline 条目，可缺省） */
+export interface ChainNode {
+  node: string // 节点内容（事件/数据/判断的描述文本）
+  kind: string // 节点类型（中文自由文本：事件/推断/市场反应/标的结论；空串降级）
+  timeline_id?: number // 溯源 timeline 条目 ID（有值时小字标注）
+}
+
+/** 因果链视图：研报详情内嵌（chain/evidence 已由后端解析为对象） */
+export interface CausalLinkView {
+  id: number // 因果链 ID
+  reportId: number // 归属研报 ID（由 report_id 适配）
+  chain: ChainNode[] // 有序节点链（2-6 节点）
+  confidence: number // 链式置信度（0-1）
+  evidence: string[] // 支撑证据列表
+  status: string // 复盘验证状态：pending(待验证) / verified(已确认) / failed(已否决)
+  brokenAt: number | null // 断点节点下标（复盘标记；null = 未定位）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+}
+
+/** 研报详情：GET /api/research/reports/{id}（narrative 全文 + evidence/risks/raw 已解析 + 因果链） */
+export interface ResearchReportDetail extends ResearchReportSummary {
+  evidence: string[] // 证据列表（后端为 {point, source} 对象数组，适配后为「point（source）」展示串数组）
+  risks: string[] // 风险列表（已由后端解析，真字符串数组）
+  raw: Record<string, unknown> // LLM 结构化输出（已由后端解析）
+  causalLinks: CausalLinkView[] // 本轮研报关联的因果链
+}
+
+/** 研报分页：GET /api/research/reports（后端仅返回 items/total，无 offset/limit 回显） */
+export interface ResearchReportsPage {
+  items: ResearchReportSummary[]
+  total: number
+}
+
+/** 手动触发研报结果：POST /api/research/run（409=生成中 / 503=LLM 未配置 / 422=hours 越界，经 ApiError 抛出） */
+export interface RunResearchResult {
+  started: boolean // 是否真正启动了研报（false 见 error）
+  ok?: boolean // 研报是否成功
+  reportId?: number // 产出的研报 ID
+  roundId?: string // 研报审计轮 ID
+  direction?: string // 方向结论（成功时回显）
+  confidence?: string // 置信度结论（成功时回显）
+  error?: string // 失败原因（空串/缺省 = 正常）
+  errorCode?: string // 错误码（由 error_code 适配）
+}
+
+/** 实时研报轮快照：GET /api/research/live 的 round 字段（形状与 AgentLiveRound 一致并透传 snake_case） */
+export type ResearchLiveRound = AgentLiveRound
+
+/** 实时研报状态：GET /api/research/live（形状同 /api/review/live；无研报轮时 round 为 null、tool_calls 为空） */
+export interface ResearchLive {
+  round: ResearchLiveRound | null // 当前（进行中）或上一研报轮；从未研报时为 null
+  tool_calls: ToolCall[] // 本轮已执行的研报工具调用（进行中实时追加）
+}
+
+/** 实时决策轮可展示的 agent 种类：trader=交易 / review=复盘 / research=研报 */
+export type LiveAgentKind = 'trader' | 'review' | 'research'
+
+/**
+ * 三端点（/api/agent/live、/api/review/live、/api/research/live）归一后的实时轮快照：
+ * 丢弃端点私有字段（in_round / strategy_md5），进行中一律以 round.ended_at === null 判定；
+ * 三端点统一在轮结束后保留终态轮（ended_at 非 null），仅当该 agent 从未运行时 round 为 null。
+ */
+export interface LiveSnapshot {
+  round: AgentLiveRound | null // 当前轮（进行中）或上一轮（含刚结束的终态轮）；该 agent 从未运行时为 null
+  tool_calls: ToolCall[] // 本轮已执行的工具调用（进行中实时追加）
+}
+
 /** 策略版本（列表项不含 content 全文）：GET /api/strategy/versions */
 export interface StrategyVersion {
   id: number // 版本号（vN 的 N）
@@ -451,7 +535,8 @@ export interface RollbackResult {
  * 当前契约：后端广播 hello / round_start(data={wake_source}) /
  * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}） /
  * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数) /
- * review_round_start(data={round_id}) / review_round(data={round_id, ok})（复盘轮开始/结束）；
+ * review_round_start(data={round_id}) / review_round(data={round_id, ok})（复盘轮开始/结束）/
+ * research_round_start(data={round_id}) / research_round(data={round_id, ok})（研报轮开始/结束）；
  * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），trades_updated
  * 也不携带成交明细，两者均只作失效信号——消费方应据事件重拉 REST，勿把 payload 当数据直接渲染；
  * 后端当前不生产 trade/position；类型仅供 mock 使用，真实消费前必须按后端实际事件接线。
@@ -468,6 +553,8 @@ export type WsMessage =
   | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
   | { type: 'review_round_start'; data: { round_id: string } } // 复盘轮开始：进度条进入进行中态，实时数据走 /api/review/live
   | { type: 'review_round'; data: { round_id: string; ok: boolean } } // 复盘轮结束：仅作失效信号，消费方重拉报告列表
+  | { type: 'research_round_start'; data: { round_id: string } } // 研报轮开始：进度条进入进行中态，实时数据走 /api/research/live
+  | { type: 'research_round'; data: { round_id: string; ok: boolean } } // 研报轮结束：仅作失效信号，消费方重拉研报列表
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {
@@ -527,6 +614,16 @@ export interface ApiClient {
   runReview(): Promise<RunReviewResult>
   /** 实时复盘状态：round/tool_calls 形状与 getAgentLive 一致（进行中 ended_at 为 null），无复盘轮时 round 为 null。 */
   getReviewLive(): Promise<ReviewLive>
+  /** 研报分页列表（最新在前）；narrative 截断 200 字符。 */
+  getResearchReports(offset: number, limit: number): Promise<ResearchReportsPage>
+  /** 研报详情：narrative 全文 + evidence/risks/raw 已解析 + 因果链；404 经 ApiError 抛出。 */
+  getResearchReport(id: number): Promise<ResearchReportDetail>
+  /** 手动触发研报；409=生成中、503=LLM 未配置、422=hours 越界（ApiError.detail 可读）。 */
+  runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
+  /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null。 */
+  getResearchLive(): Promise<ResearchLive>
+  /** 按 agent 取实时轮快照（三端点归一为 LiveSnapshot；进行中以 round.ended_at === null 判定）。 */
+  getLiveFor(agent: LiveAgentKind): Promise<LiveSnapshot>
   /** 策略版本列表（最新在前，不含 content 全文）。 */
   getStrategyVersions(): Promise<StrategyVersion[]>
   /** 策略版本详情（含 content 全文）；404 经 ApiError 抛出。 */

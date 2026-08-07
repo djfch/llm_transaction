@@ -120,7 +120,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/agent/live")
     async def get_agent_live() -> dict[str, Any]:
-        """实时决策展示：当前模式最新一轮审计 + 已落库工具调用（响应键与前端契约冻结）。
+        """实时决策展示：当前模式最新一轮交易审计（排除复盘/研报轮）+ 已落库工具调用（响应键与前端契约冻结）。
 
         in_round 取运行时状态的 in_round 键（调度器防重入标记），缺省 False；
         mode 优先 runtime_settings（agent 实际运行模式），未接线回退配置文件；
@@ -132,7 +132,11 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         """
         runtime = deps.runtime_status()
         settings = deps.runtime_settings or load_settings(deps.config_path)
-        round_row = await deps.repo.latest_audit_round(settings.mode)
+        # trader 视图只看交易轮：复盘/研报轮各有专属端点（/api/review/live、/api/research/live），
+        # 不排除时复盘/研报轮更新（更新更频繁）会污染交易实时展示
+        round_row = await deps.repo.latest_audit_round(
+            settings.mode, exclude_wake_sources=("review", "research")
+        )
         if round_row is None:
             return {"in_round": runtime.get("in_round", False), "round": None, "tool_calls": []}
         calls = await deps.repo.list_audit_tool_calls(round_row.round_id)

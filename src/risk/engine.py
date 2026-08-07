@@ -18,9 +18,16 @@ class RiskEngine:
         daily_stats: DailyStats,
         watchlist: list[str],
         config: RiskConfig,
+        research_direction: str | None = None,
     ) -> Verdict:
-        """逐条跑规则；任一拒绝即 Deny，reasons 汇总全部命中理由（不只返回第一条）。"""
-        ctx = RuleInput(intent, account, positions, daily_stats, watchlist, config)
+        """逐条跑规则；任一拒绝即 Deny，reasons 汇总全部命中理由（不只返回第一条）。
+
+        research_direction：高置信研报方向（偏多/偏空），供方向闸门规则判定；
+        缺省 None 表示闸门不约束（兼容既有调用方）。
+        """
+        ctx = RuleInput(
+            intent, account, positions, daily_stats, watchlist, config, research_direction
+        )
         reasons = [reason for rule in ALL_RULES if (reason := rule(ctx))]
         if reasons:
             return Verdict.deny(reasons)

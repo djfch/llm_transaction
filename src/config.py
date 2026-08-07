@@ -186,10 +186,11 @@ class ReviewConfig(BaseModel):
 
 
 class ResearchConfig(BaseModel):
-    """研报 agent：数据源接入与循环参数（第一期手动触发，定时调度后续期接入）。
+    """研报 agent：数据源接入、循环参数与每日三盘口定时调度（亚盘/欧盘/美盘，北京时间）。
 
     密钥不在此配置（只存 .env）：JIN10_MCP_TOKEN / BLOCKBEATS_API_KEY / FRED_API_KEY。
-    enabled 供后续期调度器读取（第一期恒手动跑，默认 False 不干扰现有流程）。
+    time_* 为三盘口触发时刻；us_dst_adjust 控制美盘按美国冬夏令时顺延；
+    gate_enabled/gate_max_age_hours 为方向闸门硬约束：研报方向结论在有效期内约束交易方向。
     """
 
     enabled: bool = False
@@ -199,6 +200,29 @@ class ResearchConfig(BaseModel):
     blockbeats_mcp_cmd: str = "npx -y blockbeats-mcp"
     fred_base_url: str = "https://api.stlouisfed.org/fred"
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
+    # 每日定时调度触发时刻（北京时间 HH:MM）：亚盘 / 欧盘 / 美盘
+    time_asia: str = "08:30"
+    time_europe: str = "14:30"
+    time_us: str = "21:00"
+    # 美盘按美国冬夏令时顺延 1 小时（冬令时生效）
+    us_dst_adjust: bool = True
+    # 方向闸门硬约束开关：研报结论（多/空/中性）在 gate_max_age_hours 小时内强制生效
+    gate_enabled: bool = True
+    gate_max_age_hours: int = Field(default=13, ge=1, le=48)
+
+    @model_validator(mode="after")
+    def _check_schedule_times(self) -> ResearchConfig:
+        """time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）。"""
+        for field in ("time_asia", "time_europe", "time_us"):
+            parts = getattr(self, field).split(":")
+            if (
+                len(parts) != 2
+                or not all(p.isdigit() for p in parts)
+                or not 0 <= int(parts[0]) <= 23
+                or not 0 <= int(parts[1]) <= 59
+            ):
+                raise ValueError(f"{field} 必须为 HH:MM 格式（时 0-23，分 0-59）")
+        return self
 
 
 class LogConfig(BaseModel):
