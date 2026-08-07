@@ -25,6 +25,8 @@ class RuleInput:
     daily: DailyStats
     watchlist: list[str]
     config: RiskConfig
+    # 高置信研报方向（偏多/偏空），由调用方在有效期内传入；None=闸门不约束
+    research_direction: str | None = None
 
 
 def intent_notional(intent: TradeIntent) -> Decimal:
@@ -110,6 +112,20 @@ def rule_price_deviation(ctx: RuleInput) -> str | None:
     return None
 
 
+def rule_research_direction(ctx: RuleInput) -> str | None:
+    """研报方向闸门：高置信研报有效期内，反向开仓硬拒（平/减仓豁免）。"""
+    if ctx.intent.is_close:
+        return None
+    d = ctx.research_direction
+    if not d or d == "中性":
+        return None
+    if ctx.intent.side_size > 0 and d == "偏空":
+        return "高置信研报偏空，反向开多被闸门拦截"
+    if ctx.intent.side_size < 0 and d == "偏多":
+        return "高置信研报偏多，反向开空被闸门拦截"
+    return None
+
+
 ALL_RULES = [
     rule_whitelist,
     rule_kill_switch,
@@ -119,4 +135,5 @@ ALL_RULES = [
     rule_daily_loss,
     rule_max_orders,
     rule_price_deviation,
+    rule_research_direction,
 ]

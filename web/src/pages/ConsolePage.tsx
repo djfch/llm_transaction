@@ -1,10 +1,11 @@
 /**
  * AI 大脑观察舱单页装配：
  * sticky TopBar → 首屏 12 列 grid（左 3：账户+权益曲线+硬性风控+策略(只读)+交易计划(只读) / 中 6：实时决策轮主角 / 右 3：K线+持仓）
- * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 复盘报告 → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
+ * → 第二屏 决策时间线(8/12) + Agent 笔记(4/12) → 研报面板+复盘报告并排(各6/12) → 成交记录全宽；配置抽屉右侧滑入（含 paper 权益重置）。
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
  * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略/计划面板(refreshKey)；
  * strategy_updated/plan_updated 事件在 LLM 改完的瞬间即时重拉对应面板（不等轮末/下一轮）；
+ * 研报/复盘面板各自消费 research_round_start/research_round 与 review_round_start/review_round 事件（进度条与列表刷新）；
  * 时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
@@ -21,6 +22,7 @@ import NotesPanel from '../components/console/NotesPanel'
 import PositionsPanel from '../components/console/PositionsPanel'
 import OpenOrdersPanel from '../components/console/OpenOrdersPanel'
 import PriceAlertsPanel from '../components/console/PriceAlertsPanel'
+import ResearchPanel from '../components/console/ResearchPanel'
 import ReviewPanel from '../components/console/ReviewPanel'
 import RiskPanel from '../components/console/RiskPanel'
 import RoundTimeline from '../components/console/RoundTimeline'
@@ -130,7 +132,7 @@ function FirstScreen({
   )
 }
 
-/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；随后复盘报告与成交记录各占全宽。 */
+/** 第二屏：决策时间线(8/12) + Agent 笔记(4/12)；研报面板与复盘报告并排(各6/12)；成交记录全宽。 */
 function SecondScreen() {
   return (
     <>
@@ -142,8 +144,13 @@ function SecondScreen() {
           <NotesPanel />
         </aside>
       </section>
-      <section className="mt-8">
-        <ReviewPanel />
+      <section className="mt-8 grid grid-cols-12 gap-4">
+        <div className="col-span-12 lg:col-span-6">
+          <ResearchPanel />
+        </div>
+        <div className="col-span-12 lg:col-span-6">
+          <ReviewPanel />
+        </div>
       </section>
       <section className="mt-8">
         <TradesTable />

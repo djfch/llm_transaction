@@ -125,6 +125,10 @@ vi.mock('../api', () => ({
     getReviewReports: () => Promise.resolve({ items: [], total: 0 }),
     // 复盘进行中进度条数据源：无进行中复盘轮（进度条保持隐藏）
     getReviewLive: () => Promise.resolve({ round: null, tool_calls: [] }),
+    // 研报面板数据源（与复盘并排）
+    getResearchReports: () => Promise.resolve({ items: [], total: 0 }),
+    // 研报进行中进度条数据源：无进行中研报轮（进度条保持隐藏）
+    getResearchLive: () => Promise.resolve({ round: null, tool_calls: [] }),
     getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
@@ -253,7 +257,8 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText(/决策时间线/)).toBeInTheDocument()
     expect(screen.getByText('Agent 笔记')).toBeInTheDocument()
     expect(screen.getByText('自检笔记')).toBeInTheDocument()
-    // 复盘报告面板（成交记录之前，全宽 section）
+    // 研报面板 + 复盘报告面板（并排各半，成交记录之前）
+    expect(screen.getByRole('button', { name: '生成研报' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '立即复盘' })).toBeInTheDocument()
     // 第三屏：成交记录
     expect(screen.getByText('成交记录')).toBeInTheDocument()

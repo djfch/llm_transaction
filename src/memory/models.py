@@ -191,7 +191,7 @@ class Timeline(BaseModel):
 class ResearchReport(BaseModel):
     """研报（判断层）：研报 agent 产出的结构化方向结论。
 
-    report_type 取值：asia / europe / us / event / manual；
+    report_type 取值：manual（手动触发）/ asia_open / europe_open / us_open（三盘定时 slot）；
     direction 取值：偏多/偏空/中性；confidence 取值：高/中/低；
     verify_result 预留：第二期复盘 agent 对照后写入（''= 未验证）。
     error 非空表示本次研报失败（只落错误记录）。

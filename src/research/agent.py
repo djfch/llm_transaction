@@ -7,6 +7,8 @@
   （direction/confidence 必填）→ 成功落 research_reports → 回填落库本轮暂存的
   因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败重试 1 次，
   仍失败落 error 报告，暂存链随 deps 丢弃；
+- WS 事件（notify_event 注入时）：begin_round 后 research_round_start、审计轮结束
+  research_round（ok 随成败，_fail 路径 ok=False）；事件失败只记日志；provider None 早退零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 返回 {'ok': False}，
   绝不向上抛，确保研报失败不影响交易决策循环；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -18,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import time
 import json
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from src.audit.logger import get_logger
@@ -29,6 +32,7 @@ from src.research.preinject import build_preinjection
 from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
 from src.research.tools import ResearchToolRegistry
+from src.utils import maybe_await
 
 logger = get_logger(__name__)
 
@@ -57,6 +61,7 @@ class ResearchAgent:
         audit: AuditTrail,
         prompt_loader: ResearchPromptLoader,
         data_provider: Any,  # ResearchDataProvider（鸭子类型，防循环 import）
+        notify_event: Callable[[dict], None] | None = None,  # WS 事件广播（轮始/轮末）
         max_turns: int = 30,
         timeout_seconds: int = 900,
     ) -> None:
@@ -66,6 +71,7 @@ class ResearchAgent:
         self._audit = audit
         self._prompts = prompt_loader
         self._data_provider = data_provider
+        self._notify_event = notify_event  # None 则不广播（测试/未接线场景零事件）
         self._max_turns = max(1, max_turns)
         self._timeout = max(60, timeout_seconds)
 
@@ -95,6 +101,7 @@ class ResearchAgent:
         try:
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
             round_id = await self._audit.begin_round(self._settings.mode, "research", full_prompt)
+            await self._emit_event({"type": "research_round_start", "data": {"round_id": round_id}})
             briefing = await build_preinjection(deps, hours)
             await self._audit.record_context(round_id, briefing)
             text = await self._chat_with_timeout(
@@ -116,6 +123,9 @@ class ResearchAgent:
             )
             links_saved = await self._flush_causal_links(deps, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
+            await self._emit_event(
+                {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
+            )
             logger.info(
                 "研报完成 report_id=%s type=%s %s/%s 因果链=%d",
                 report.id,
@@ -281,4 +291,15 @@ class ResearchAgent:
                 await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)
             except Exception:
                 logger.exception("研报审计轮结束失败（继续返回失败结果）")
+            await self._emit_event(
+                {"type": "research_round", "data": {"round_id": round_id, "ok": False}}
+            )
         return {"ok": False, "error": error, "round_id": round_id}
+
+    async def _emit_event(self, payload: dict) -> None:
+        """广播 WS 事件：回调可同步/异步（与复盘同容错模式）；失败只记日志。"""
+        if self._notify_event:
+            try:
+                await maybe_await(self._notify_event(payload))
+            except Exception:
+                logger.exception("研报事件广播失败")

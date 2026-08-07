@@ -11,6 +11,7 @@ from src.config import (
     AgentsConfig,
     CredentialConfig,
     LLMConfig,
+    ResearchConfig,
     ReviewConfig,
     SchedulerConfig,
     Settings,
@@ -118,6 +119,41 @@ def test_review_daily_time_invalid():
     for bad in ["24:00", "12:60", "-1:30", "3点", "03:00:00", "", "ab:cd"]:
         with pytest.raises(ValidationError, match="daily_time"):
             ReviewConfig(daily_time=bad)
+
+
+# ---------- ResearchConfig 定时调度与方向闸门字段 ----------
+
+
+def test_research_config_defaults():
+    """研报配置默认值：三盘口时刻（北京时间）、美盘 DST 顺延开、方向闸门开、有效期 13h。"""
+    cfg = ResearchConfig()
+    assert (cfg.time_asia, cfg.time_europe, cfg.time_us) == ("08:30", "14:30", "21:00")
+    assert cfg.us_dst_adjust is True
+    assert cfg.gate_enabled is True
+    assert cfg.gate_max_age_hours == 13
+
+
+def test_research_schedule_time_valid():
+    """合法触发时刻：边界值 0:00 与 23:59 接受。"""
+    cfg = ResearchConfig(time_asia="0:00", time_europe="23:59", time_us="12:30")
+    assert (cfg.time_asia, cfg.time_europe, cfg.time_us) == ("0:00", "23:59", "12:30")
+
+
+def test_research_schedule_time_invalid():
+    """三个 time 字段非法值均拒绝：越界时刻、非 HH:MM 结构，报错指明字段名。"""
+    for field in ("time_asia", "time_europe", "time_us"):
+        for bad in ["25:00", "8:60", "0830", "ab:cd"]:
+            with pytest.raises(ValidationError, match=field):
+                ResearchConfig(**{field: bad})
+
+
+def test_research_gate_max_age_hours_bounds():
+    """方向闸门有效期：1-48 小时接受，0 与 49 拒绝。"""
+    assert ResearchConfig(gate_max_age_hours=1).gate_max_age_hours == 1
+    assert ResearchConfig(gate_max_age_hours=48).gate_max_age_hours == 48
+    for bad in [0, 49]:
+        with pytest.raises(ValidationError, match="gate_max_age_hours"):
+            ResearchConfig(gate_max_age_hours=bad)
 
 
 # ---------- PaperConfig.initial_equity 为 Decimal ----------

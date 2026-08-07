@@ -4,6 +4,7 @@
  */
 import { ApiError } from './http'
 import { createIndicatorMock } from './mockIndicators'
+import { createResearchMock } from './mockResearch'
 import { createReviewMock } from './mockReview'
 import type {
   AgentLiveState,
@@ -173,6 +174,9 @@ const reviewMock = createReviewMock(reply, {
 
 /** 版本表 md5 快照（最新在前）：决策轮 strategyMd5 关联演示用 */
 const VERSION_MD5S = reviewMock.versionMd5s()
+
+// 研报 mock 域（研报列表 + 因果链演示数据与 4 个方法实现）拆分到 mockResearch.ts；此处装配。
+const researchMock = createResearchMock(reply)
 
 // 指标 mock 域（短名单配置 + 由 buildCandles 确定性计算的序列）拆分到 mockIndicators.ts；
 // buildCandles 为函数声明会提升，此处引用安全。
@@ -541,6 +545,11 @@ export const mockApi: ApiClient = {
   getStrategyVersion: reviewMock.handlers.getStrategyVersion,
   getStrategyDiff: reviewMock.handlers.getStrategyDiff,
   rollbackStrategy: reviewMock.handlers.rollbackStrategy,
+  // 研报方法由 mockResearch.ts 实现（同一 ApiClient 契约形态）
+  getResearchReports: researchMock.handlers.getResearchReports,
+  getResearchReport: researchMock.handlers.getResearchReport,
+  runResearch: researchMock.handlers.runResearch,
+  getResearchLive: researchMock.handlers.getResearchLive,
 }
 
 /** prompt 快照（各叙事共用，与 buildAgentLive 的上下文口径一致） */

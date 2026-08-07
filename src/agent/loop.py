@@ -128,6 +128,7 @@ class DecisionLoop:
             triggers=triggers,
             indicator_service=indicator_service,
             daily_stats_fn=daily_stats_fn or (lambda: default_daily_stats(repo, settings.mode)),
+            research_config=settings.research,
             mode=settings.mode,
             set_next_wake=set_next_wake,
             notify_event=notify_event,
@@ -141,6 +142,7 @@ class DecisionLoop:
             watchlist,
             indicator_service=indicator_service,
             indicator_shortlist=indicator_shortlist,
+            research_config=settings.research,
         )
 
     @property

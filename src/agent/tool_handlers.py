@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from src.config import RiskConfig
+from src.config import ResearchConfig, RiskConfig
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
@@ -57,6 +57,7 @@ class ToolDeps:
     triggers: TriggerManager
     indicator_service: IndicatorService | None  # None=未接入：get_indicators 如实回报不可用
     daily_stats_fn: DailyStatsFn
+    research_config: ResearchConfig | None = None  # 研报方向闸门配置（None=闸门关闭）
     mode: str = "paper"
     set_next_wake: Callable[[int], int] | None = None  # 返回钳制后实际生效分钟数
     notify_event: Callable[[dict], None] | None = None  # WS 事件广播（如 plan_updated）

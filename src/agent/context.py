@@ -1,4 +1,4 @@
-"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/交易计划/近期笔记/近期成交。
+"""决策上下文组装：账户/持仓/白名单行情摘要/价格预警线/研报前瞻/交易计划/近期笔记/近期成交。
 
 产出的 AgentContext.text 同时用作发给 LLM 的 user 消息与审计的上下文快照；
 summary 为一行摘要，落 decisions.context_summary。
@@ -14,11 +14,12 @@ from datetime import datetime
 from decimal import Decimal
 
 from src.audit.logger import get_logger
-from src.config import DEFAULT_INDICATOR_SHORTLIST
+from src.config import DEFAULT_INDICATOR_SHORTLIST, ResearchConfig
 from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
 from src.market.triggers import MAX_ALERTS, TriggerManager
+from src.memory.models import ResearchReport
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
 
@@ -87,6 +88,7 @@ class ContextBuilder:
         trades_n: int = 20,
         indicator_service: IndicatorService | None = None,
         indicator_shortlist: Callable[[], list[str]] | None = None,
+        research_config: ResearchConfig | None = None,
     ) -> None:
         self._gateway = gateway
         self._repo = repo
@@ -103,6 +105,7 @@ class ContextBuilder:
         self._indicator_shortlist = indicator_shortlist or (
             lambda: list(DEFAULT_INDICATOR_SHORTLIST)
         )
+        self._research_config = research_config
 
     async def build(self, wake_source: str) -> AgentContext:
         account = self._gateway.get_account()
@@ -113,12 +116,14 @@ class ContextBuilder:
             self._account_section(account, positions, equity),
             self._market_section(),
             self._alerts_section(),
+            await self._research_section(),
             await self._plans_section(),
             await self._notes_section(),
             await self._trades_section(),
         ]
         summary = f"权益 {equity}，持仓 {len(positions)} 个，唤醒源 {wake_source}"
-        return AgentContext(text="\n\n".join(sections), summary=summary)
+        text = "\n\n".join(s for s in sections if s is not None)
+        return AgentContext(text=text, summary=summary)
 
     def _header(self, wake_source: str) -> str:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -197,6 +202,44 @@ class ContextBuilder:
         if len(triggers) > self._alerts_n:
             lines.append(f"- …另有 {len(triggers) - self._alerts_n} 条未显示")
         return "\n".join(lines)
+
+    async def _research_section(self) -> str | None:
+        """最新研报前瞻（宏观与消息面）：方向结论 + 高置信硬约束标注。
+
+        无研报返回 None（整段省略，对齐指标服务未接入惯例）；读取/渲染异常降级为
+        提示段，不拖垮其余 section。高置信（偏多/偏空）且未过 gate 有效期时，
+        如实标注风控已对反向开仓硬约束——软上下文与硬闸门口径一致。
+        """
+        try:
+            report = await self._repo.research.latest_report()
+            if report is None:
+                return None
+            lines = [
+                "## 研报前瞻（宏观与消息面）",
+                f"方向：{report.direction} · 置信度：{report.confidence} · 周期：{report.horizon}",
+                f"创建时间：{_fmt_ts(report.created_at)}",
+            ]
+            narrative = report.narrative
+            if len(narrative) > 500:
+                narrative = narrative[:500] + "…"
+            if narrative:
+                lines.append(f"正文摘要：{narrative}")
+            if self._gate_active(report):
+                lines.append("⚠ 高置信结论有效期内：反向开仓已被风控硬约束")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.exception("研报前瞻段生成失败：%s", e)
+            return "## 研报前瞻（宏观与消息面）\n暂不可用"
+
+    def _gate_active(self, report: ResearchReport) -> bool:
+        """研报方向闸门当前是否生效（gate 开启 + 高置信多/空 + 未过有效期）。"""
+        cfg = self._research_config
+        if cfg is None or not cfg.gate_enabled:
+            return False
+        if report.confidence != "高" or report.direction not in ("偏多", "偏空"):
+            return False
+        age = time.time() - report.created_at
+        return age <= cfg.gate_max_age_hours * 3600
 
     async def _notes_section(self) -> str:
         notes = await self._repo.recent_notes(self._notes_n)
