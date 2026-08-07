@@ -43,6 +43,7 @@ from src.notify.telegram import build_notifier
 from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import funding_loop
 from src.review.setup import ReviewComponents, build_review
+from src.research.setup import ResearchComponents, build_research
 from src.risk.engine import RiskEngine
 from src.scheduler.wakeup import WakeupScheduler
 from src.server.app import create_app
@@ -67,6 +68,7 @@ class AppContext:
     scheduler: WakeupScheduler
     loop: DecisionLoop
     review: ReviewComponents  # 复盘子系统组件束（store/agent/scheduler + 策略写回调）
+    research: ResearchComponents  # 研报子系统组件束（agent + 数据聚合器）
     event_queue: asyncio.Queue
     candles: CandleCache
     triggers: TriggerManager
@@ -139,6 +141,7 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
         targets = (
             ("trader", ctx.settings.agents.trader.credential, ctx.loop),
             ("reviewer", ctx.settings.agents.reviewer.credential, ctx.review.agent),
+            ("researcher", ctx.settings.agents.researcher.credential, ctx.research.agent),
         )
         errors: list[str] = []
         for agent_name, cred_name, target in targets:
@@ -284,9 +287,16 @@ async def build_app(
     # mock 模式共享同一 MockProvider 实例
     if mock_llm or os.environ.get("LLM_MOCK") == "1":
         trader_provider = reviewer_provider = MockProvider()
+        # 研报专用 Mock（独立实例）：交易 Mock 输出交易工具与非 JSON 文本，研报链路不可用
+        from src.research.mock_provider import ResearchMockProvider
+
+        researcher_provider = ResearchMockProvider()
     else:
         trader_provider = build_provider(settings, mock_llm, settings.agents.trader.credential)
         reviewer_provider = build_provider(settings, mock_llm, settings.agents.reviewer.credential)
+        researcher_provider = build_provider(
+            settings, mock_llm, settings.agents.researcher.credential
+        )
     indicators = await setup_indicators(repo, gateway, candles, watchlist.contracts, event_queue)
     loop = _build_loop(
         settings,
@@ -319,6 +329,12 @@ async def build_app(
             indicator_service=indicators.service,
             indicator_config_store=indicators.store,
             watchlist=watchlist.contracts,
+        ),
+        research=build_research(  # 研报子系统装配（第一期手动触发，不接调度）
+            settings,
+            repo,
+            audit,
+            researcher_provider,
         ),
         scheduler=scheduler,
         event_queue=event_queue,

@@ -108,10 +108,11 @@ class AgentBinding(BaseModel):
 
 
 class AgentsConfig(BaseModel):
-    """按 agent 分配凭证：trader（决策循环）/ reviewer（复盘 agent）。"""
+    """按 agent 分配凭证：trader（决策循环）/ reviewer（复盘 agent）/ researcher（研报 agent）。"""
 
     trader: AgentBinding = AgentBinding()
     reviewer: AgentBinding = AgentBinding()
+    researcher: AgentBinding = AgentBinding()
 
 
 class RiskConfig(BaseModel):
@@ -184,6 +185,22 @@ class ReviewConfig(BaseModel):
         return self
 
 
+class ResearchConfig(BaseModel):
+    """研报 agent：数据源接入与循环参数（第一期手动触发，定时调度后续期接入）。
+
+    密钥不在此配置（只存 .env）：JIN10_MCP_TOKEN / BLOCKBEATS_API_KEY / FRED_API_KEY。
+    enabled 供后续期调度器读取（第一期恒手动跑，默认 False 不干扰现有流程）。
+    """
+
+    enabled: bool = False
+    max_turns: int = Field(default=30, ge=1, le=100)
+    timeout_seconds: int = Field(default=900, ge=60, le=3600)
+    jin10_mcp_url: str = "https://mcp.jin10.com/mcp"
+    blockbeats_mcp_cmd: str = "npx -y blockbeats-mcp"
+    fred_base_url: str = "https://api.stlouisfed.org/fred"
+    polymarket_base_url: str = "https://gamma-api.polymarket.com"
+
+
 class LogConfig(BaseModel):
     dir: str = "logs"
     level: str = "INFO"
@@ -202,17 +219,24 @@ class Settings(BaseModel):
     server: ServerConfig = ServerConfig()
     audit: AuditConfig = AuditConfig()
     review: ReviewConfig = ReviewConfig()
+    research: ResearchConfig = ResearchConfig()
     log: LogConfig = LogConfig()
     agents: AgentsConfig = AgentsConfig()
 
     @model_validator(mode="after")
     def _check_agent_credentials(self) -> Settings:
-        """agent 引用的凭证必须存在（凭证重名也在此经 resolve_credentials 拦截）。"""
+        """agent 引用的凭证必须存在（凭证重名也在此经 resolve_credentials 拦截）。
+
+        researcher（研报 agent）为例外：可选功能（默认关闭），凭证缺失不阻塞
+        配置加载——运行时研报会提示 LLM 未配置/不可用。
+        """
         names = {c.name for c in self.llm.resolve_credentials()}
-        for agent, binding in (("trader", self.agents.trader), ("reviewer", self.agents.reviewer)):
-            if binding.credential not in names:
+        for agent, binding in self.agents.model_dump().items():
+            if binding["credential"] not in names:
+                if agent == "researcher":
+                    continue  # 研报 agent 可选：凭证缺失降级为"研报不可用"
                 raise ValueError(
-                    f"agents.{agent}.credential 引用了不存在的凭证: {binding.credential}"
+                    f"agents.{agent}.credential 引用了不存在的凭证: {binding['credential']}"
                 )
         return self
 

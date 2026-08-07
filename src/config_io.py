@@ -55,6 +55,7 @@ def write_settings(data: dict, config_path: Path | None = None) -> Settings:
         raise ConfigError(str(exc)) from exc
     path = config_path or ROOT / "config.yaml"
     path.write_text(
+        # 全量落盘（含默认字段）：GET /api/config 直接读文件，缺字段会破坏前端契约
         yaml.safe_dump(_yaml_safe(settings.model_dump()), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )

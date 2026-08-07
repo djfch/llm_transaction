@@ -17,7 +17,7 @@ jobs:
       - name: 安装依赖
         run: uv sync --frozen
       - name: 准备运行时配置（模板复制，部分测试用 build_app 默认路径读取）
-        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md && cp review_prompt.example.md review_prompt.md
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md && cp review_prompt.example.md review_prompt.md && cp research_prompt.example.md research_prompt.md
       - name: ruff check
         run: uv run ruff check src tests scripts
       - name: 单文件行数门禁（超 500 行失败）
@@ -72,6 +72,6 @@ jobs:
         working-directory: web
         run: npm run build
       - name: 准备运行时配置（模板复制，文件不入库）
-        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md && cp review_prompt.example.md review_prompt.md
+        run: cp config.example.yaml config.yaml && cp watchlist.example.yaml watchlist.yaml && cp system_prompt.example.md system_prompt.md && cp review_prompt.example.md review_prompt.md && cp research_prompt.example.md research_prompt.md
       - name: 整机冒烟（真实端口 + dist 静态托管 + 操作链）
         run: uv run python scripts/e2e_web_smoke.py

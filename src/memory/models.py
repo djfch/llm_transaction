@@ -166,3 +166,66 @@ class TradePlan(BaseModel):
     round_id: str = ""
     content: str = ""
     updated_at: float
+
+
+class Timeline(BaseModel):
+    """事实层记录（研报系统）：代码增量写入的事件流，LLM 零写权限。
+
+    source 取值：jin10 / blockbeats（数据来源）；
+    kind 取值：flash（快讯）/ calendar（日历事件）/ indicator（指标快照）；
+    meta_json 存结构化附加（日历事件带 actual/consensus/previous/star，指标带数值）。
+    dedup_key 为「来源+时间+标题」哈希，唯一约束保证增量幂等。
+    """
+
+    id: int
+    source: str
+    kind: str
+    title: str
+    url: str = ""
+    published_at: float
+    meta_json: str = "{}"
+    dedup_key: str
+    fetched_at: float
+
+
+class ResearchReport(BaseModel):
+    """研报（判断层）：研报 agent 产出的结构化方向结论。
+
+    report_type 取值：asia / europe / us / event / manual；
+    direction 取值：偏多/偏空/中性；confidence 取值：高/中/低；
+    verify_result 预留：第二期复盘 agent 对照后写入（''= 未验证）。
+    error 非空表示本次研报失败（只落错误记录）。
+    round_id 为产生本研报的审计轮 id。
+    """
+
+    id: int
+    report_type: str
+    direction: str
+    confidence: str
+    horizon: str = ""
+    evidence_json: str = "[]"
+    risks_json: str = "[]"
+    narrative: str = ""
+    raw_json: str = "{}"
+    verify_result: str = ""
+    error: str = ""
+    round_id: str = ""
+    created_at: float
+
+
+class CausalLink(BaseModel):
+    """因果链（分析笔记）：研报 agent 提交的链式因果推导，复盘验证状态。
+
+    chain_json 为有序节点链 JSON（node/kind/timeline_id）；
+    status 取值：pending（待验证）/ verified（复盘确认）/ failed（复盘否决）；
+    broken_at 为断点节点下标（复盘标记，None = 未定位）。
+    """
+
+    id: int
+    report_id: int
+    chain_json: str
+    confidence: float
+    evidence_json: str = "[]"
+    status: str = "pending"
+    broken_at: int | None = None
+    created_at: float
