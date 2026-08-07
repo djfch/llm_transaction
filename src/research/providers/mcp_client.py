@@ -7,6 +7,8 @@ mcp 2.0 SDK：streamable_http_client / stdio_client + ClientSession；
 from __future__ import annotations
 
 import os
+import shlex
+import sys
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -42,6 +44,23 @@ def _minimal_env() -> dict[str, str]:
         if not k.startswith(_SENSITIVE_ENV_PREFIXES)
         and not any(marker in k.upper() for marker in _SENSITIVE_ENV_KEYS)
     }
+
+
+def _stdio_command(cmd: str) -> tuple[str, list[str]]:
+    """把 'npx -y blockbeats-mcp' 命令串拆成 (command, args)。
+
+    平台分支（M1 修复）：Windows 上 npx 是 .cmd 批处理，CreateProcess 不能直接
+    执行，须经 cmd /c 包装；POSIX（Linux 部署机）无 cmd，shlex 拆分后直接 exec。
+    Windows 分支用普通 split——shlex 按 POSIX 规则吃反斜杠，会拆坏
+    'C:\\tools\\xx.cmd' 这类路径型自定义命令（复审 #3 修复）。
+    """
+    if not cmd.strip():
+        raise ResearchSourceError("stdio MCP 命令为空")
+    if sys.platform == "win32":
+        parts = cmd.split()
+        return "cmd", ["/c", *parts]
+    parts = shlex.split(cmd)
+    return parts[0], parts[1:]
 
 
 class McpSession:
@@ -84,9 +103,8 @@ class McpSession:
                 env = _minimal_env()
                 if self._env_key:
                     env[self._env_key] = os.environ.get(self._env_key, "")
-                params = StdioServerParameters(
-                    command="cmd", args=["/c", *self._cmd.split()], env=env
-                )
+                command, args = _stdio_command(self._cmd)
+                params = StdioServerParameters(command=command, args=args, env=env)
                 self._ctx = stdio_client(params)
             read, write = await self._ctx.__aenter__()
             self._session = ClientSession(read, write, read_timeout_seconds=self._timeout)

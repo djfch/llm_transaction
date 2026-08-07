@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from src.research.providers.base import (
     CalendarEvent,
@@ -18,15 +18,24 @@ from src.research.providers.base import (
 )
 from src.research.providers.mcp_client import McpSession
 
+# 金十/律动的时间串均为北京时间（UTC+8，无夏令时）：按固定时区解释，
+# 与服务器本地时区解耦（M-TZ 修复：UTC 部署机上快讯窗口不再偏移 8h）
+BEIJING_TZ = timezone(timedelta(hours=8))
+
 
 def parse_ts(value: str) -> float:
-    """时间串 → Unix 秒。支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；失败返回当前时间。"""
+    """时间串 → Unix 秒。支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；失败返回当前时间。
+
+    无时区的日期时间串按北京时间解释（数据源口径），带 %z 的 ISO 串尊重其自带时区。
+    """
     if not value:
         return time.time()
     text = value.strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z"):
         try:
             dt = datetime.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=BEIJING_TZ)
             return dt.timestamp()
         except ValueError:
             continue
@@ -37,8 +46,12 @@ def parse_ts(value: str) -> float:
 
 
 def _flash_from_row(row: dict) -> FlashItem:
-    """一条金十快讯行 → FlashItem（字段名以实测为准，.get 兜底）。"""
-    title = row.get("title") or row.get("id") or ""
+    """一条金十快讯行 → FlashItem（字段名以实测为准，.get 兜底）。
+
+    title 兜底强制 str：快讯常缺 title，用 id 顶包时 id 可能是 JSON 数字，
+    不转 str 会让聚合层 title[:40] 抛 TypeError（M3 修复）。
+    """
+    title = str(row.get("title") or row.get("id") or "")
     content = row.get("content") or ""
     return FlashItem(
         id=str(row.get("id", "")),
@@ -118,16 +131,23 @@ class Jin10Source:
         return text
 
     async def search_news(self, keyword: str, limit: int = 20) -> list[FlashItem]:
-        """关键词搜索：快讯 + 文章两个通道合并，按时间倒序取 limit 条。"""
+        """关键词搜索：快讯 + 文章两个通道合并，按时间倒序取 limit 条。
+
+        单通道失败降级用另一通道；双通道全挂抛 ResearchSourceError（M2 修复：
+        聚合器据此判定源失败，不再把连接故障伪装成"未找到"）。
+        """
         items: list[FlashItem] = []
+        errors: list[str] = []
         for tool in ("search_flash", "search_news"):
             try:
                 async with self._session() as s:
                     text = await s.call_tool(tool, {"keyword": keyword, "size": limit})
                 rows = _safe_json_rows(text)
                 items.extend(_flash_from_row(r) for r in rows)
-            except ResearchSourceError:
-                continue  # 单通道失败降级
+            except ResearchSourceError as exc:
+                errors.append(f"{tool}: {exc}")  # 单通道失败降级
+        if len(errors) == 2:
+            raise ResearchSourceError(f"金十搜索双通道均失败（{'；'.join(errors)}）")
         items.sort(key=lambda x: x.published_at, reverse=True)
         return items[:limit]
 

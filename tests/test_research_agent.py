@@ -6,6 +6,7 @@ provider 用确定性 Mock（不触网）；数据源用假实现；审计落 tm
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -13,13 +14,15 @@ from src.audit.logger import get_logger  # noqa: F401  （确保日志初始化�
 from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
 from src.memory import Database, Repo
-from src.research.agent import ResearchAgent, _parse_payload
+from src.research.agent import ResearchAgent
+from src.research.payload import _parse_payload
 from src.research.providers.base import (
     CalendarEvent,
     FlashItem,
     ResearchDataProvider,
 )
 from src.research.providers.blockbeats import BlockbeatsSource  # noqa: F401
+from src.research.providers.jin10 import BEIJING_TZ
 from src.research.prompts import ResearchPromptLoader
 
 logger = get_logger(__name__)
@@ -39,10 +42,12 @@ GOOD_JSON = json.dumps(
 
 class _FakeJin10:
     async def fetch_calendar(self):
+        # 事件日期按北京时区动态生成（复审 #6 配套）：写死日期跨天后即过期
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         return [
             CalendarEvent(
                 title="非农",
-                pub_time="2026-08-07 20:30",
+                pub_time=f"{today} 20:30",
                 star=5,
                 actual="",
                 consensus="8.3",
@@ -348,3 +353,183 @@ async def test_max_turns_exhausted_warns(repo: Repo, settings: Settings, tmp_pat
     assert result["ok"] is False  # 轮次耗尽且无有效 JSON 输出 → 失败落 error 报告
     report = await repo.research.latest_report(include_error=True)
     assert report is not None and report.error != ""
+
+
+# ---------- 审查补齐：H1 因果链暂存-回填 ----------
+
+
+class _CausalLinkProvider(_SequentialProvider):
+    """第一轮提交一条因果链（不传 report_id——LLM 无法预知本轮 id），第二轮输出 JSON。"""
+
+    async def chat(self, system, messages, tools):
+        from src.agent.providers.base import LLMResponse, ToolCall
+
+        self._calls += 1
+        if self._calls == 1:
+            return LLMResponse(
+                text="形成因果链",
+                tool_calls=[
+                    ToolCall(
+                        "submit_causal_links",
+                        {
+                            "chain": [
+                                {"node": "油价上涨", "kind": "事件"},
+                                {"node": "通胀预期上升", "kind": "推断"},
+                                {"node": "BTC 承压", "kind": "标的结论"},
+                            ],
+                            "confidence": 0.7,
+                            "evidence": ["金十快讯"],
+                        },
+                    )
+                ],
+                raw=f"raw-{self._calls}",
+                assistant_message={"role": "assistant", "content": "工具轮"},
+            )
+        return LLMResponse(
+            text=GOOD_JSON,
+            raw=f"raw-{self._calls}",
+            assistant_message={"role": "assistant", "content": GOOD_JSON},
+        )
+
+
+async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, tmp_path) -> None:
+    """回归（H1）：完整一轮中提交因果链 → 落研报后由代码回填本轮 report_id。
+
+    修复前 LLM 被要求传尚不存在的研报 id，因果链按设计永远走不通；
+    本测试走此前零覆盖的"run 完整一轮中提交"路径。
+    """
+    agent = await _build_agent(repo, settings, _CausalLinkProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    links = await repo.research.list_causal_links()
+    assert len(links) == 1
+    assert links[0].report_id == result["report_id"]
+    assert links[0].status == "pending"
+    chain = json.loads(links[0].chain_json)
+    assert [n["node"] for n in chain] == ["油价上涨", "通胀预期上升", "BTC 承压"]
+
+
+async def test_failed_round_discards_causal_links(repo: Repo, settings: Settings, tmp_path) -> None:
+    """H1 配套：本轮研报失败时暂存的因果链被丢弃（不留孤儿、不错挂历史研报）。"""
+
+    class _SubmitThenBadJson(_SequentialProvider):
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse, ToolCall
+
+            self._calls += 1
+            if self._calls == 1:
+                return LLMResponse(
+                    text="先存链",
+                    tool_calls=[
+                        ToolCall(
+                            "submit_causal_links",
+                            {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 0.5},
+                        )
+                    ],
+                    raw="raw-1",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            return LLMResponse(  # 重试也输出坏 JSON → 整轮失败
+                text="不是JSON",
+                raw=f"raw-{self._calls}",
+                assistant_message={"role": "assistant", "content": "不是JSON"},
+            )
+
+    agent = await _build_agent(repo, settings, _SubmitThenBadJson(), tmp_path)
+    result = await agent.run()
+    assert result["ok"] is False
+    assert await repo.research.list_causal_links() == []
+
+
+async def test_flush_causal_links_partial_failure(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch
+) -> None:
+    """复审 #7：多条暂存、单条落库失败 → 跳过该条不影响研报主产物，其余照常落库。"""
+
+    class _TwoChainsProvider(_SequentialProvider):
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse, ToolCall
+
+            self._calls += 1
+            if self._calls == 1:
+                return LLMResponse(
+                    text="两条链",
+                    tool_calls=[
+                        ToolCall(
+                            "submit_causal_links",
+                            {"chain": [{"node": "a1"}, {"node": "b1"}], "confidence": 0.6},
+                        ),
+                        ToolCall(
+                            "submit_causal_links",
+                            {"chain": [{"node": "a2"}, {"node": "b2"}], "confidence": 0.7},
+                        ),
+                    ],
+                    raw="raw-1",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            return LLMResponse(
+                text=GOOD_JSON,
+                raw=f"raw-{self._calls}",
+                assistant_message={"role": "assistant", "content": GOOD_JSON},
+            )
+
+    real_save = repo.research.save_causal_link
+    calls = {"n": 0}
+
+    async def flaky_save(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("DB 抖动")
+        return await real_save(**kwargs)
+
+    monkeypatch.setattr(repo.research, "save_causal_link", flaky_save)
+    agent = await _build_agent(repo, settings, _TwoChainsProvider(), tmp_path)
+    result = await agent.run()
+    assert result["ok"] is True  # 主产物不受单条失败影响
+    links = await repo.research.list_causal_links()
+    assert len(links) == 1  # 第 1 条成功，第 2 条跳过
+    assert links[0].report_id == result["report_id"]
+
+
+async def test_retry_round_tool_calls_executed_and_flushed(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """复审 #9④：JSON 重试轮携带的工具调用（L7 块）被执行，因果链随成功研报回填。"""
+
+    class _RetryToolProvider(_SequentialProvider):
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse, ToolCall
+
+            self._calls += 1
+            if self._calls == 1:  # 首轮坏 JSON → 触发重试
+                return LLMResponse(
+                    text="坏JSON",
+                    raw="raw-1",
+                    assistant_message={"role": "assistant", "content": "坏JSON"},
+                )
+            if self._calls == 2:  # 重试轮带工具调用（L7 路径）
+                return LLMResponse(
+                    text="补条链",
+                    tool_calls=[
+                        ToolCall(
+                            "submit_causal_links",
+                            {"chain": [{"node": "x"}, {"node": "y"}], "confidence": 0.5},
+                        )
+                    ],
+                    raw="raw-2",
+                    assistant_message={"role": "assistant", "content": "补条链"},
+                )
+            return LLMResponse(  # 工具回填后输出合法 JSON
+                text=GOOD_JSON,
+                raw="raw-3",
+                assistant_message={"role": "assistant", "content": GOOD_JSON},
+            )
+
+    agent = await _build_agent(repo, settings, _RetryToolProvider(), tmp_path)
+    result = await agent.run()
+    assert result["ok"] is True
+    links = await repo.research.list_causal_links()
+    assert len(links) == 1 and links[0].report_id == result["report_id"]
+    # 重试轮的工具调用也进审计（seq 高位基数 900+）
+    calls = await repo.list_audit_tool_calls(result["round_id"])
+    assert any(c.tool == "submit_causal_links" for c in calls)

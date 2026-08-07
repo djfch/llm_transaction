@@ -71,7 +71,7 @@ async def test_jin10() -> None:
 
 
 async def test_blockbeats() -> None:
-    """BlockBeats stdio MCP（Windows 用 cmd /c 包装）：握手 + tools/list + 拉一次快讯。"""
+    """BlockBeats stdio MCP（Windows 走 cmd /c、POSIX 直接 exec）：握手 + tools/list + 拉一次快讯。"""
     key = os.environ.get("BLOCKBEATS_API_KEY", "")
     if not key:
         print("[FAIL]  BlockBeats MCP：BLOCKBEATS_API_KEY 未配置（请填 .env）")
@@ -80,11 +80,12 @@ async def test_blockbeats() -> None:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
+        from src.research.providers.mcp_client import _stdio_command
+
         env = dict(os.environ)
         env["BLOCKBEATS_API_KEY"] = key
-        params = StdioServerParameters(
-            command="cmd", args=["/c", *BLOCKBEATS_MCP_CMD.split()], env=env
-        )
+        command, args = _stdio_command(BLOCKBEATS_MCP_CMD)
+        params = StdioServerParameters(command=command, args=args, env=env)
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()

@@ -97,13 +97,12 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "提交本次分析得出的链式因果链（唯一写工具）：chain 为有序节点数组"
             "（事件→推断→市场反应→标的结论），节点可带 kind 与 timeline_id 引用事实层；"
-            "整链带 confidence(0-1)、evidence 依据、report_id（本研报 id）。"
-            "提交真实推导过的链，不要凑数"
+            "整链带 confidence(0-1)、evidence 依据。无需传研报 id——代码在本轮研报"
+            "落库后自动回填关联。提交真实推导过的链，不要凑数"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "report_id": {"type": "integer", "description": "本轮研报 id"},
                 "chain": {
                     "type": "array",
                     "description": "有序节点链（2-6 个节点）",
@@ -133,7 +132,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "description": "依据列表（可溯源）",
                 },
             },
-            "required": ["report_id", "chain", "confidence"],
+            "required": ["chain", "confidence"],
         },
     },
 }

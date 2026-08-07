@@ -6,7 +6,9 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 
 安全约定：
 - timeline（事实层）只由代码写入（append_timeline_many），研报/复盘 agent 零写权限；
-- research_reports / causal_links 由研报 agent 经工具写入，落库即审计留痕。
+- research_reports 由研报 agent 代码直接落库（不经工具）；
+- causal_links 由工具 submit_causal_links 校验暂存、研报落库后由 agent 代码回填
+  report_id 批量落库（LLM 无法预知本轮研报 id，H1 修复后口径）。
 """
 
 from __future__ import annotations

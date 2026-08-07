@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 from src.research.providers.base import (
     KIND_CALENDAR,
@@ -15,6 +16,7 @@ from src.research.providers.base import (
     SOURCE_JIN10,
     ResearchSourceError,
 )
+from src.research.providers.jin10 import BEIJING_TZ, parse_ts
 from src.research.tool_handlers import (
     ResearchToolDeps,
     _fmt_ts,
@@ -29,8 +31,6 @@ async def _section_calendar(deps: ResearchToolDeps) -> str:
         events = await deps.provider.fetch_calendar()
     except ResearchSourceError as exc:
         return f"## 经济日历\n（数据不可用：{exc}）"
-    from src.research.providers.jin10 import parse_ts
-
     items = []
     for e in events:
         items.append(
@@ -97,7 +97,8 @@ async def _section_flash(deps: ResearchToolDeps, hours: int) -> str:
                     "url": item.url,
                     "published_at": item.published_at,
                     "meta_json": "{}",
-                    "dedup_key": f"{item.source}|{item.published_at}|{item.title[:40]}",
+                    # dedup_key 时间戳按秒取整：与聚合器内存去重键同口径（B 复审发现修复）
+                    "dedup_key": f"{item.source}|{int(item.published_at)}|{item.title[:40]}",
                     "fetched_at": time.time(),
                 }
                 for item in items
@@ -143,12 +144,13 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
     """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史）。
 
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
-    首段标注当前本地时间（M12：给 LLM 提供时间锚点，防臆测未来数据）。
+    首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源
+    时间串同一时区口径，UTC 部署机不偏移）。
     """
-    now = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
     return "\n\n".join(
         [
-            f"## 当前时间\n{now}（本地时间，所有分析以此为准）",
+            f"## 当前时间\n{now}（北京时间，所有分析以此为准）",
             await _section_calendar(deps),
             await _section_indicators(deps),
             await _section_flash(deps, hours),

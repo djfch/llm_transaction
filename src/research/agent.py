@@ -4,8 +4,9 @@
 - provider 为 None（LLM 未配置）→ 直接返回失败，不落审计、不落研报；
 - 正常路径：wake_source='research' 开审计轮 → 预注入组装（五段数据）作第一轮
   user 消息 → ≤max_turns 工具循环（整体超时强制终止）→ 最终文本解析 JSON
-  （direction/confidence 必填）→ 成功落 research_reports；解析失败重试 1 次，
-  仍失败落 error 报告；
+  （direction/confidence 必填）→ 成功落 research_reports → 回填落库本轮暂存的
+  因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败重试 1 次，
+  仍失败落 error 报告，暂存链随 deps 丢弃；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 返回 {'ok': False}，
   绝不向上抛，确保研报失败不影响交易决策循环；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -23,16 +24,13 @@ from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
 from src.config import Settings
 from src.memory.repo import Repo
+from src.research.payload import _parse_payload
 from src.research.preinject import build_preinjection
 from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
 from src.research.tools import ResearchToolRegistry
 
 logger = get_logger(__name__)
-
-_REQUIRED_FIELDS = ("direction", "confidence")
-_VALID_DIRECTIONS = ("偏多", "偏空", "中性")
-_VALID_CONFIDENCE = ("高", "中", "低")
 
 
 class _ProviderProtocol(Protocol):
@@ -116,13 +114,15 @@ class ResearchAgent:
                 raw_json=json.dumps(payload, ensure_ascii=False),
                 round_id=round_id,
             )
+            links_saved = await self._flush_causal_links(deps, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
             logger.info(
-                "研报完成 report_id=%s type=%s %s/%s",
+                "研报完成 report_id=%s type=%s %s/%s 因果链=%d",
                 report.id,
                 report_type,
                 report.direction,
                 report.confidence,
+                links_saved,
             )
             return {
                 "ok": True,
@@ -137,6 +137,20 @@ class ResearchAgent:
             raise
         except Exception as e:
             return await self._fail(round_id, raw_parts, report_type, e)
+
+    async def _flush_causal_links(self, deps: ResearchToolDeps, report_id: int) -> int:
+        """把本轮暂存的因果链回填 report_id 批量落库（H1：LLM 无需预知 id）。
+
+        单条落库失败只记日志、不影响研报主产物；返回成功条数。
+        """
+        saved = 0
+        for link in deps.pending_causal_links:
+            try:
+                await self._repo.research.save_causal_link(report_id=report_id, **link)
+                saved += 1
+            except Exception:
+                logger.exception("因果链落库失败（report_id=%s，跳过该条）", report_id)
+        return saved
 
     async def _chat_with_timeout(
         self,
@@ -268,29 +282,3 @@ class ResearchAgent:
             except Exception:
                 logger.exception("研报审计轮结束失败（继续返回失败结果）")
         return {"ok": False, "error": error, "round_id": round_id}
-
-
-def _parse_payload(text: str) -> dict | None:
-    """容错解析研报 JSON：剥离可能的 Markdown 代码块包裹。"""
-    body = text.strip()
-    if body.startswith("```"):
-        body = body.strip("`")
-        if body.startswith("json"):
-            body = body[4:]
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if not all(field in payload for field in _REQUIRED_FIELDS):
-        return None
-    if payload["direction"] not in _VALID_DIRECTIONS:
-        return None
-    if payload["confidence"] not in _VALID_CONFIDENCE:
-        return None
-    # L6：evidence/risks 必须为列表（LLM 输出字符串时不照存，触发重试规范化）
-    for field in ("evidence", "risks"):
-        if field in payload and not isinstance(payload[field], list):
-            return None
-    return payload

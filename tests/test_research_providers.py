@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from datetime import datetime
 
@@ -17,18 +18,35 @@ from src.research.providers.base import (
     ResearchSourceError,
 )
 from src.research.providers.blockbeats import BlockbeatsSource
-from src.research.providers.jin10 import Jin10Source, parse_ts
+from src.research.providers.jin10 import BEIJING_TZ, Jin10Source, parse_ts
 from src.research.providers.mcp_client import McpSession
 
 # ---------- 时间解析 ----------
 
 
 def test_parse_ts_formats() -> None:
-    """支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；空串/坏值用当前时间兜底。"""
-    assert parse_ts("2026-08-05 20:30") == datetime(2026, 8, 5, 20, 30).timestamp()
-    assert parse_ts("2026-08-05 20:30:00") == datetime(2026, 8, 5, 20, 30).timestamp()
+    """支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；空串/坏值用当前时间兜底。
+
+    回归（M-TZ）：无时区串必须按北京时间（UTC+8）解释，与服务器本地时区
+    无关——UTC 部署机上本测试在修复前必挂（旧实现按本地时区解释）。
+    """
+    assert (
+        parse_ts("2026-08-05 20:30") == datetime(2026, 8, 5, 20, 30, tzinfo=BEIJING_TZ).timestamp()
+    )
+    assert (
+        parse_ts("2026-08-05 20:30:00")
+        == datetime(2026, 8, 5, 20, 30, tzinfo=BEIJING_TZ).timestamp()
+    )
     assert parse_ts("0") == 0.0
     assert abs(parse_ts("") - datetime.now().timestamp()) < 5
+
+
+def test_parse_ts_aware_iso_respects_own_tz() -> None:
+    """复审 #9②：带 %z 的 ISO 串尊重自带时区（不套北京时间）。"""
+    from datetime import timezone
+
+    expected = datetime(2026, 8, 5, 20, 30, tzinfo=timezone.utc).timestamp()
+    assert parse_ts("2026-08-05T20:30:00+00:00") == expected
 
 
 # ---------- 金十源 ----------
@@ -110,6 +128,58 @@ async def test_jin10_flash_pagination(monkeypatch) -> None:
     assert len(calls) == 2  # 第二页遇旧讯即停
 
 
+async def test_jin10_flash_int_title_coerced(monkeypatch) -> None:
+    """回归（M3）：快讯缺 title、id 为 JSON 数字时，title 兜底必须为 str。
+
+    修复前 title 是 int，聚合层 title[:40] 抛 TypeError，一行畸形数据废掉整轮研报。
+    """
+    recent_str = datetime.fromtimestamp(time.time() - 100).strftime("%Y-%m-%d %H:%M:%S")
+    text = json.dumps({"data": [{"id": 360139, "content": "无标题快讯", "time": recent_str}]})
+    _fake_mcp(monkeypatch, {"list_flash": text})
+    src = Jin10Source(url="http://x", token="t")
+    items = await src.fetch_flash(hours=24)
+    assert len(items) == 1
+    assert isinstance(items[0].title, str)
+    assert items[0].title == "360139"
+    assert items[0].title[:40] == "360139"  # 切片可用（聚合层去重键安全）
+
+
+async def test_jin10_search_both_channels_down_raises(monkeypatch) -> None:
+    """回归（M2）：搜索双通道全挂抛 ResearchSourceError，不伪装'未找到'。"""
+
+    async def fake_enter(self) -> McpSession:
+        return self
+
+    async def fake_call(self, name: str, args: dict | None = None) -> str:
+        raise ResearchSourceError(f"{name} 连接失败")
+
+    monkeypatch.setattr(McpSession, "__aenter__", fake_enter)
+    monkeypatch.setattr(McpSession, "call_tool", fake_call)
+    src = Jin10Source(url="http://x", token="t")
+    with pytest.raises(ResearchSourceError, match="双通道均失败"):
+        await src.search_news("美联储")
+
+
+async def test_jin10_search_one_channel_down_degrades(monkeypatch) -> None:
+    """M2 配套：单通道失败降级——返回成功通道的结果，不抛错。"""
+    recent_str = datetime.fromtimestamp(time.time() - 50).strftime("%Y-%m-%d %H:%M:%S")
+    ok = json.dumps({"data": [{"id": "1", "title": "搜到", "content": "c", "time": recent_str}]})
+
+    async def fake_enter(self) -> McpSession:
+        return self
+
+    async def fake_call(self, name: str, args: dict | None = None) -> str:
+        if name == "search_flash":
+            raise ResearchSourceError("search_flash 挂了")
+        return ok
+
+    monkeypatch.setattr(McpSession, "__aenter__", fake_enter)
+    monkeypatch.setattr(McpSession, "call_tool", fake_call)
+    src = Jin10Source(url="http://x", token="t")
+    items = await src.search_news("美联储")
+    assert len(items) == 1 and items[0].title == "搜到"
+
+
 # ---------- 律动源 ----------
 
 
@@ -136,7 +206,20 @@ async def test_blockbeats_flash_parsing(monkeypatch) -> None:
     assert items[0].source == "blockbeats"
     assert "加息" in items[0].summary  # HTML 标签已剥离
     assert "<b>" in items[0].detail  # 全文保留原始 HTML
-    assert items[0].published_at == datetime(2026, 8, 5, 17, 50, 32).timestamp()
+    assert items[0].published_at == datetime(2026, 8, 5, 17, 50, 32, tzinfo=BEIJING_TZ).timestamp()
+
+
+async def test_blockbeats_flash_int_title_coerced(monkeypatch) -> None:
+    """复审 #9①：律动数字 title 强制 str（与金十 M3 同族防御）。"""
+    recent_str = datetime.fromtimestamp(time.time() - 100).strftime("%Y-%m-%d %H:%M:%S")
+    text = json.dumps(
+        {"page": 1, "data": [{"id": 1, "title": 12345, "content": "c", "create_time": recent_str}]}
+    )
+    _fake_mcp(monkeypatch, {"get_newsflash_24h": text})
+    src = BlockbeatsSource(cmd="npx -y blockbeats-mcp")
+    items = await src.fetch_flash()
+    assert len(items) == 1
+    assert isinstance(items[0].title, str) and items[0].title == "12345"
 
 
 async def test_blockbeats_indicators_partial_failure(monkeypatch) -> None:
@@ -448,3 +531,34 @@ async def test_aggregator_one_source_down_degrades() -> None:
     provider = ResearchDataProvider(jin10=_BrokenSource(), blockbeats=_OkSource())
     items = await provider.fetch_flash()
     assert len(items) == 1 and items[0].title == "可用新闻"
+
+
+# ---------- MCP stdio 命令平台拆分 ----------
+
+
+def test_stdio_command_platform_split(monkeypatch) -> None:
+    """回归（M1）：stdio 命令按平台拆分——Windows 走 cmd /c，POSIX 直接 exec。
+
+    修复前硬编码 cmd /c，Linux 部署机（systemd）上律动源必然连接失败。
+    """
+    from src.research.providers.mcp_client import _stdio_command
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    command, args = _stdio_command("npx -y blockbeats-mcp")
+    assert (command, args) == ("cmd", ["/c", "npx", "-y", "blockbeats-mcp"])
+
+    # 复审 #3：Windows 路径型自定义命令不被 shlex 吃反斜杠拆坏
+    command, args = _stdio_command(r"C:\tools\bb-mcp.cmd -y")
+    assert (command, args) == ("cmd", ["/c", r"C:\tools\bb-mcp.cmd", "-y"])
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    command, args = _stdio_command("npx -y blockbeats-mcp")
+    assert (command, args) == ("npx", ["-y", "blockbeats-mcp"])
+
+
+def test_stdio_command_empty_raises() -> None:
+    """复审 #9③：空/纯空白命令抛 ResearchSourceError（__init__ 的 not cmd 拦不住 ' '）。"""
+    from src.research.providers.mcp_client import _stdio_command
+
+    with pytest.raises(ResearchSourceError):
+        _stdio_command("   ")

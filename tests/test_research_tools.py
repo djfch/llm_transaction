@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 import pytest
 
@@ -17,6 +18,7 @@ from src.research.providers.base import (
     ResearchDataProvider,
     ResearchSourceError,
 )
+from src.research.providers.jin10 import BEIJING_TZ
 from src.research.tool_handlers import ResearchToolDeps
 from src.research.tools import ResearchToolRegistry
 
@@ -30,10 +32,13 @@ async def repo(tmp_path) -> Repo:
 
 class _FakeJin10:
     async def fetch_calendar(self):
+        # 事件日期按北京时区动态生成（复审 #6 修复）：写死日期会在跨天后被
+        # 今日/明日过滤器排空，测试次日必红
+        today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         return [
             CalendarEvent(
                 title="美国7月非农就业人口",
-                pub_time="2026-08-07 20:30",
+                pub_time=f"{today} 20:30",
                 star=5,
                 actual="",
                 consensus="8.3",
@@ -42,7 +47,7 @@ class _FakeJin10:
             ),
             CalendarEvent(
                 title="低星事件",
-                pub_time="2026-08-07 09:00",
+                pub_time=f"{today} 09:00",
                 star=1,
                 actual="",
                 consensus="",
@@ -169,16 +174,16 @@ async def test_unknown_tool_returns_error(deps) -> None:
 # ---------- 写工具 ----------
 
 
-async def test_submit_causal_links_valid(deps) -> None:
-    """合法因果链落库成功。"""
-    report = await deps.repo.research.save_report(
-        report_type="us", direction="看空", confidence="高"
-    )
+async def test_submit_causal_links_staged(deps) -> None:
+    """回归（H1）：合法因果链校验通过即暂存（无需 report_id），不直接落库。
+
+    本轮研报 id 在工具循环结束后才生成，LLM 无法预知；提交先暂存 deps，
+    由 agent 落研报后用代码回填 report_id。
+    """
     text = await _run(
         deps,
         "submit_causal_links",
         {
-            "report_id": report.id,
             "chain": [
                 {"node": "油价上涨", "kind": "事件"},
                 {"node": "BTC 承压", "kind": "标的结论"},
@@ -187,51 +192,34 @@ async def test_submit_causal_links_valid(deps) -> None:
             "evidence": ["金十快讯"],
         },
     )
-    assert "已提交" in text
-    links = await deps.repo.research.list_causal_links()
-    assert len(links) == 1
-    assert links[0].status == "pending"
-
-
-async def test_submit_causal_links_invalid(deps) -> None:
-    """非法因果链：节点数/置信度/类型校验返回错误文本。"""
-    assert "参数错误" in await _run(
-        deps, "submit_causal_links", {"report_id": 1, "chain": [{"node": "x"}], "confidence": 0.5}
-    )
-    assert "参数错误" in await _run(
-        deps,
-        "submit_causal_links",
-        {"report_id": 1, "chain": [{"node": "a"}, {"node": "b"}], "confidence": 1.5},
-    )
-
-
-async def test_submit_causal_links_orphan_report(deps) -> None:
-    """T10：悬空 report_id（不存在）被拒绝，不落库。"""
-    text = await _run(
-        deps,
-        "submit_causal_links",
-        {"report_id": 9999, "chain": [{"node": "a"}, {"node": "b"}], "confidence": 0.5},
-    )
-    assert "不存在" in text
+    assert "已暂存" in text
+    assert len(deps.pending_causal_links) == 1
+    # 暂存 ≠ 落库：表内仍为空（等 agent 落研报后回填）
     assert await deps.repo.research.list_causal_links() == []
 
 
-async def test_submit_causal_links_evidence_not_list(deps) -> None:
-    """T10：evidence 非 list 被拒绝。"""
-    report = await deps.repo.research.save_report(
-        report_type="us", direction="看空", confidence="高"
+async def test_submit_causal_links_invalid(deps) -> None:
+    """非法因果链：节点数/置信度校验返回错误文本，且不留暂存。"""
+    assert "参数错误" in await _run(
+        deps, "submit_causal_links", {"chain": [{"node": "x"}], "confidence": 0.5}
     )
+    assert "参数错误" in await _run(
+        deps,
+        "submit_causal_links",
+        {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 1.5},
+    )
+    assert deps.pending_causal_links == []
+
+
+async def test_submit_causal_links_evidence_not_list(deps) -> None:
+    """T10：evidence 非 list 被拒绝，且不留暂存。"""
     text = await _run(
         deps,
         "submit_causal_links",
-        {
-            "report_id": report.id,
-            "chain": [{"node": "a"}, {"node": "b"}],
-            "confidence": 0.5,
-            "evidence": "不是列表",
-        },
+        {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 0.5, "evidence": "不是列表"},
     )
     assert "参数错误" in text
+    assert deps.pending_causal_links == []
 
 
 # ---------- 审查补齐：T9 参数边界 ----------
@@ -309,3 +297,37 @@ async def test_build_preinjection_partial_failure(repo: Repo) -> None:
     text = await build_preinjection(deps, hours=24)
     assert "日历接口挂了" in text  # 失败段标注
     assert "金十新闻" in text  # 快讯段仍正常
+
+
+async def test_preinject_dedup_key_second_normalized(repo: Repo) -> None:
+    """回归（B 复审发现）：flash 落库 dedup_key 的时间戳按秒取整。
+
+    与聚合器内存去重键 (int(published_at), title[:40]) 同口径；修复前
+    dedup_key 带亚秒小数，commit 声称的"按秒归一化"未真正落地。
+    """
+
+    class _FracFlashJin10(_FakeJin10):
+        async def fetch_flash(self, hours=24):
+            return [
+                FlashItem(
+                    id="j1",
+                    source="jin10",
+                    title="亚秒新闻",
+                    summary="s",
+                    detail="d",
+                    url="",
+                    published_at=time.time() - 100 + 0.37,
+                )
+            ]
+
+    class _EmptyBb(_FakeBb):
+        async def fetch_flash(self, hours=24):
+            return []
+
+    provider = ResearchDataProvider(jin10=_FracFlashJin10(), blockbeats=_EmptyBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    await build_preinjection(deps, hours=24)
+    rows = [r for r in await deps.repo.research.list_timeline(0.0, None) if r.kind == "flash"]
+    assert len(rows) == 1
+    ts_part = rows[0].dedup_key.split("|")[1]
+    assert "." not in ts_part  # 按秒取整，无小数

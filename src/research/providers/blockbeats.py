@@ -32,7 +32,7 @@ _INDICATOR_TOOLS: list[tuple[str, dict, str]] = [
 
 def _flash_from_row(row: dict) -> FlashItem:
     """一条律动快讯行 → FlashItem（24h 快讯自带全文 content）。"""
-    title = row.get("title") or ""
+    title = str(row.get("title") or "")  # 强制 str：防数字标题炸聚合层切片（同 M3）
     content = row.get("content") or ""
     return FlashItem(
         id=str(row.get("id", "")),

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from src.memory.repo import Repo
 from src.research.providers.base import (
     ResearchDataProvider,
     ResearchSourceError,
 )
+from src.research.providers.jin10 import BEIJING_TZ
 
 
 class ToolArgError(ValueError):
@@ -23,15 +25,22 @@ class ToolArgError(ValueError):
 
 @dataclass
 class ResearchToolDeps:
-    """研报工具依赖：数据聚合器 + 存取层 + 运行模式。"""
+    """研报工具依赖：数据聚合器 + 存取层 + 运行模式 + 本轮因果链暂存区。
+
+    pending_causal_links：submit_causal_links 校验通过后的暂存区（H1 修复——
+    本轮研报 id 在工具循环结束后才生成，LLM 无法预知）；agent 落研报后由代码
+    回填 report_id 批量落库；本轮失败时随 deps 一并丢弃，不会错挂历史研报。
+    """
 
     provider: ResearchDataProvider
     repo: Repo
     mode: str
+    pending_causal_links: list[dict] = field(default_factory=list)
 
 
 def _fmt_ts(ts: float) -> str:
-    return time.strftime("%m-%d %H:%M", time.localtime(ts))
+    """时间戳 → 'MM-DD HH:MM'（北京时间）：与数据源头串口径一致，UTC 部署机不偏移。"""
+    return datetime.fromtimestamp(ts, tz=BEIJING_TZ).strftime("%m-%d %H:%M")
 
 
 def _parse_int(args: dict, key: str, default: int, lo: int, hi: int) -> tuple[int, str | None]:
@@ -50,10 +59,9 @@ def _parse_int(args: dict, key: str, default: int, lo: int, hi: int) -> tuple[in
 
 
 def _today_markers() -> tuple[str, str]:
-    """今日/明日日期串（本地 YYYY-MM-DD），供日历过滤。"""
-    today = time.strftime("%Y-%m-%d", time.localtime())
-    tomorrow = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
-    return today, tomorrow
+    """今日/明日日期串（北京时间 YYYY-MM-DD）：与日历 pub_time 同一时区口径。"""
+    now = datetime.now(BEIJING_TZ)
+    return now.strftime("%Y-%m-%d"), (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ---------- 只读工具 ----------
@@ -209,14 +217,14 @@ async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
-    """提交链式因果链（唯一写出口，落 causal_links 表）。"""
-    report_id = args.get("report_id")
+    """提交链式因果链（唯一写出口）：校验通过后暂存 deps。
+
+    H1 修复：LLM 无需也无法预知本轮研报 id（id 在工具循环结束后落库才生成），
+    故 report_id 不再是 LLM 参数——agent 落研报后由代码回填并批量落库；
+    本轮研报失败时暂存链随 deps 丢弃，不会错挂历史研报。
+    """
     chain = args.get("chain")
     confidence = args.get("confidence")
-    if not isinstance(report_id, int) or report_id <= 0:
-        return "参数错误：report_id 必须为正整数（本轮研报 id）"
-    if await deps.repo.research.get_report(report_id) is None:
-        return f"参数错误：report_id={report_id} 不存在（请使用本轮研报的真实 id）"
     if not isinstance(chain, list) or not 2 <= len(chain) <= 6:
         return "参数错误：chain 必须为 2-6 个节点的有序数组"
     for node in chain:
@@ -231,11 +239,12 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     evidence = args.get("evidence") or []
     if not isinstance(evidence, list):
         return "参数错误：evidence 必须为字符串数组"
-    link = await deps.repo.research.save_causal_link(
-        report_id=report_id,
-        chain_json=json.dumps(chain, ensure_ascii=False),
-        confidence=confidence,
-        evidence_json=json.dumps(evidence, ensure_ascii=False),
+    deps.pending_causal_links.append(
+        {
+            "chain_json": json.dumps(chain, ensure_ascii=False),
+            "confidence": confidence,
+            "evidence_json": json.dumps(evidence, ensure_ascii=False),
+        }
     )
     nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain)
-    return f"因果链已提交（id={link.id}，{len(chain)} 节点）：{nodes}"
+    return f"因果链已暂存（{len(chain)} 节点）：{nodes}（将随本轮研报自动关联落库）"
