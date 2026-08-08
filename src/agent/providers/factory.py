@@ -3,6 +3,8 @@
 key 只从环境变量读取（凭证模型只存环境变量名，永不存明文）；缺 key 抛 LLMError，
 由调用方决定降级为 None（启动不崩）或保留旧 provider（热重建失败），
 待前端经 POST /api/secrets 补齐 key 后再热重建。
+真实 provider 统一外裹 RetryingProvider（失败同参重发 ×3，见 providers/retry.py）；
+MockProvider 不裹（冒烟/测试要求确定性）。
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from src.agent.providers.base import LLMError, LLMProvider
 from src.agent.providers.mock import MockProvider
 from src.agent.providers.openai_compat import OpenAICompatProvider
 from src.agent.providers.openai_responses import OpenAIResponsesProvider
+from src.agent.providers.retry import RetryingProvider
 from src.audit.logger import get_logger
 from src.config import CredentialConfig, Settings
 
@@ -29,15 +32,15 @@ def resolve_agent_credential(settings: Settings, credential_name: str) -> Creden
 
 
 def create_provider(cred: CredentialConfig) -> LLMProvider:
-    """按凭证构造真实 provider；缺 key 抛 LLMError（错误点名环境变量名）。"""
+    """按凭证构造真实 provider（外裹同参重试装饰器）；缺 key 抛 LLMError（点名环境变量名）。"""
     key = os.environ.get(cred.api_key_env, "")
     if not key:
         raise LLMError(f"缺少 {cred.api_key_env} 环境变量，无法初始化 {cred.provider} provider")
     if cred.provider == "anthropic":
-        return AnthropicProvider(cred, api_key=key)
+        return RetryingProvider(AnthropicProvider(cred, api_key=key))
     if cred.provider == "openai_responses":
-        return OpenAIResponsesProvider(cred, api_key=key)
-    return OpenAICompatProvider(cred, api_key=key)
+        return RetryingProvider(OpenAIResponsesProvider(cred, api_key=key))
+    return RetryingProvider(OpenAICompatProvider(cred, api_key=key))
 
 
 def build_provider(settings: Settings, mock_llm: bool, credential_name: str) -> LLMProvider | None:

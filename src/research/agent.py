@@ -5,8 +5,9 @@
 - 正常路径：wake_source='research' 开审计轮 → 预注入组装（五段数据）作第一轮
   user 消息 → ≤max_turns 工具循环（整体超时强制终止）→ 最终文本解析 JSON
   （direction/confidence 必填）→ 成功落 research_reports → 回填落库本轮暂存的
-  因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败重试 1 次，
-  仍失败落 error 报告，暂存链随 deps 丢弃；
+  因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败以同一
+  上下文原样重发（累计 3 次输出，不回灌失败内容；重试阶段同受超时保险丝
+  约束），仍失败落 error 报告，暂存链随 deps 丢弃；
 - WS 事件（notify_event 注入时）：begin_round 后 research_round_start、审计轮结束
   research_round（ok 随成败，_fail 路径 ok=False）；事件失败只记日志；provider None 早退零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 返回 {'ok': False}，
@@ -104,11 +105,15 @@ class ResearchAgent:
             await self._emit_event({"type": "research_round_start", "data": {"round_id": round_id}})
             briefing = await build_preinjection(deps, hours)
             await self._audit.record_context(round_id, briefing)
-            text = await self._chat_with_timeout(
+            text, ask_messages = await self._chat_with_timeout(
                 full_prompt, briefing, registry, round_id, raw_parts
             )
-            payload = await self._parse_json_with_retry(
-                full_prompt, briefing, registry, round_id, raw_parts, text
+            # JSON 重试会放大该阶段调用数，与工具循环同受超时保险丝约束
+            payload = await asyncio.wait_for(
+                self._parse_json_with_retry(
+                    full_prompt, ask_messages, registry, round_id, raw_parts, text
+                ),
+                timeout=self._timeout,
             )
             report = await self._repo.research.save_report(
                 report_type=report_type,
@@ -169,7 +174,7 @@ class ResearchAgent:
         registry: ResearchToolRegistry,
         round_id: str,
         raw_parts: list[str],
-    ) -> str:
+    ) -> tuple[str, list[dict]]:
         """整体超时强制终止（保险丝：防 LLM/工具卡死无限烧钱）。"""
         return await asyncio.wait_for(
             self._chat_loop(prompt, briefing, registry, round_id, raw_parts),
@@ -183,19 +188,25 @@ class ResearchAgent:
         registry: ResearchToolRegistry,
         round_id: str,
         raw_parts: list[str],
-    ) -> str:
-        """多轮对话：LLM 返回工具调用就执行并回填，直到无调用或达轮次上限。"""
+    ) -> tuple[str, list[dict]]:
+        """多轮对话：LLM 返回工具调用就执行并回填，直到无调用或达轮次上限。
+
+        返回 (最终文本, 可重发前缀)：前缀即产生该文本的请求上下文（快照于
+        本轮 assistant 消息回填之前），供最终 JSON 解析失败时原样重发。
+        轮次耗尽时前缀为全部 messages（末尾是工具结果，可直接重发）。
+        """
         messages: list[dict] = [{"role": "user", "content": briefing}]
         schemas = registry.schemas()
         text, seq = "", 0
         for _ in range(self._max_turns):
             resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
             raw_parts.append(resp.raw)
+            prefix = list(messages)  # 本轮请求所用上下文快照
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
             text = resp.text
             if not resp.tool_calls:
-                return text
+                return text, prefix
             for call in resp.tool_calls:
                 seq += 1
                 started = time.monotonic()
@@ -213,58 +224,79 @@ class ResearchAgent:
                 )
                 messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
         logger.warning("round=%s 研报达到最大工具轮次 %d，强制结束", round_id[:8], self._max_turns)
-        return text
+        return text, messages
 
     async def _parse_json_with_retry(
         self,
         prompt: str,
-        briefing: str,
+        ask_messages: list[dict],
         registry: ResearchToolRegistry,
         round_id: str,
         raw_parts: list[str],
         text: str,
     ) -> dict:
-        """解析最终 JSON；失败反馈给 LLM 重试 1 次，仍失败抛错（落 error 报告）。"""
-        for attempt in range(2):
+        """解析最终 JSON；失败以产生该输出的同一上下文原样重发，累计 3 次输出仍失败抛错。
+
+        失败内容不回灌、不追加任何纠错消息（用户口径）：重试请求与产生坏输出
+        的请求完全一致（含 L7 工具轮扩展后的上下文），依赖采样非确定性自愈偶发
+        坏 JSON；系统性格式错误 3 次后抛 ValueError，按既有口径落 error 报告。
+        """
+        for attempt in range(3):
             payload = _parse_payload(text)
             if payload is not None:
                 return payload
-            if attempt == 0:
-                messages = [
-                    {"role": "user", "content": briefing},
-                    {"role": "assistant", "content": text},
-                    {
-                        "role": "user",
-                        "content": (
-                            "输出不是合法研报 JSON（需含 direction/confidence，取值见要求）。"
-                            "请只输出修正后的 JSON，不要解释。"
-                        ),
-                    },
-                ]
-                resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
-                raw_parts.append(resp.raw)
-                if resp.assistant_message is not None:
-                    messages.append(resp.assistant_message)
-                if resp.tool_calls:  # L7：重试响应若带工具调用则执行回填，再取最终文本
-                    seq = 900  # 高位基数，避免与主循环 seq 冲突
-                    for call in resp.tool_calls:
-                        seq += 1
-                        result = await registry.execute(call.name, call.args)
-                        await self._audit.record_tool_call(
-                            round_id,
-                            seq,
-                            call.name,
-                            args=json.dumps(call.args, ensure_ascii=False, default=str),
-                            risk_verdict="",
-                            risk_reason="",
-                            result=json.dumps({"text": result}, ensure_ascii=False),
-                            duration_ms=0,
-                        )
-                        messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
-                    resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
-                    raw_parts.append(resp.raw)
-                text = resp.text
-        raise ValueError("研报输出解析失败：非合法 JSON 或缺必填字段")
+            if attempt < 2:
+                text, ask_messages = await self._reask_final(
+                    prompt,
+                    ask_messages,
+                    registry,
+                    round_id,
+                    raw_parts,
+                    seq_base=900 + attempt * 100,
+                )
+        raise ValueError("研报输出解析失败：同上下文重试 3 次仍非合法 JSON 或缺必填字段")
+
+    async def _reask_final(
+        self,
+        prompt: str,
+        ask_messages: list[dict],
+        registry: ResearchToolRegistry,
+        round_id: str,
+        raw_parts: list[str],
+        seq_base: int,
+    ) -> tuple[str, list[dict]]:
+        """以同一上下文前缀原样重发，返回 (新一轮最终文本, 该文本的真实产生上下文)。
+
+        无工具调用时上下文仍为原前缀（本体不就地修改）；响应携带工具调用时（L7）
+        执行回填后再取一次文本，此时文本产生于"前缀 + assistant + 工具结果"的
+        扩展上下文并一并返回，供下一次重发沿用。工具审计 seq 从 seq_base 起排，
+        避免与主循环及其他重试轮冲突。
+        """
+        messages = list(ask_messages)
+        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        raw_parts.append(resp.raw)
+        if resp.assistant_message is not None:
+            messages.append(resp.assistant_message)
+        if not resp.tool_calls:
+            return resp.text, ask_messages
+        seq = seq_base
+        for call in resp.tool_calls:
+            seq += 1
+            result = await registry.execute(call.name, call.args)
+            await self._audit.record_tool_call(
+                round_id,
+                seq,
+                call.name,
+                args=json.dumps(call.args, ensure_ascii=False, default=str),
+                risk_verdict="",
+                risk_reason="",
+                result=json.dumps({"text": result}, ensure_ascii=False),
+                duration_ms=0,
+            )
+            messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
+        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        raw_parts.append(resp.raw)
+        return resp.text, messages
 
     async def _fail(
         self, round_id: str, raw_parts: list[str], report_type: str, exc: Exception

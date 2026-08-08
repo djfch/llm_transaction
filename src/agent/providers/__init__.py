@@ -1,4 +1,4 @@
-"""LLM Provider：统一接口（base）与 Anthropic / OpenAI 兼容 / OpenAI Responses 三种实现。"""
+"""LLM Provider：统一接口（base）、三种实现与同参重试装饰器（retry）。"""
 
 from src.agent.providers.anthropic import AnthropicProvider
 from src.agent.providers.base import (
@@ -10,6 +10,7 @@ from src.agent.providers.base import (
 )
 from src.agent.providers.openai_compat import OpenAICompatProvider
 from src.agent.providers.openai_responses import OpenAIResponsesProvider
+from src.agent.providers.retry import RetryingProvider
 
 __all__ = [
     "AnthropicProvider",
@@ -19,5 +20,6 @@ __all__ = [
     "LLMResponse",
     "OpenAICompatProvider",
     "OpenAIResponsesProvider",
+    "RetryingProvider",
     "ToolCall",
 ]
