@@ -142,6 +142,8 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
         chain_json='[{"node": "加息放缓", "kind": "macro"}]',
         confidence=0.8,
         evidence_json='[{"timeline_id": 3}]',
+        topic="利率",
+        await_verification=False,
     )
     await repo.research.save_causal_link(report_id=r2.id, chain_json="[]", confidence=0.5)
     async with _client_of(_deps(repo, tmp_path)) as c:
@@ -156,12 +158,18 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
             "evidence",
             "status",
             "broken_at",
+            "topic",
+            "supersedes_id",
+            "await_verification",
             "created_at",
         }
         assert links[0]["id"] == link.id
         assert links[0]["report_id"] == r1.id
         assert links[0]["chain"] == [{"node": "加息放缓", "kind": "macro"}]
         assert links[0]["confidence"] == 0.8
+        assert links[0]["topic"] == "利率"
+        assert links[0]["supersedes_id"] is None
+        assert links[0]["await_verification"] is False
         assert links[0]["evidence"] == [{"timeline_id": 3}]
         assert links[0]["status"] == "pending"
         assert links[0]["broken_at"] is None

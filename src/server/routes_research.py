@@ -57,6 +57,9 @@ def _causal_link_item(link: CausalLink) -> dict[str, Any]:
         "evidence": _parse_json_field(link.evidence_json),
         "status": link.status,
         "broken_at": link.broken_at,
+        "topic": link.topic,
+        "supersedes_id": link.supersedes_id,
+        "await_verification": link.await_verification,
         "created_at": link.created_at,
     }
 

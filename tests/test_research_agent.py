@@ -505,6 +505,7 @@ class _CausalLinkProvider(_SequentialProvider):
                             ],
                             "confidence": 0.7,
                             "evidence": ["金十快讯"],
+                            "topic": "油价",
                         },
                     )
                 ],
@@ -522,7 +523,7 @@ async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, t
     """回归（H1）：完整一轮中提交因果链 → 落研报后由代码回填本轮 report_id。
 
     修复前 LLM 被要求传尚不存在的研报 id，因果链按设计永远走不通；
-    本测试走此前零覆盖的"run 完整一轮中提交"路径。
+    本测试走此前零覆盖的"run 完整一轮中提交"路径。版本化字段透传落库。
     """
     agent = await _build_agent(repo, settings, _CausalLinkProvider(), tmp_path)
     result = await agent.run(report_type="us")
@@ -531,6 +532,9 @@ async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, t
     assert len(links) == 1
     assert links[0].report_id == result["report_id"]
     assert links[0].status == "pending"
+    assert links[0].topic == "油价"  # topic 透传
+    assert links[0].await_verification is True  # 默认待验证
+    assert links[0].supersedes_id is None
     chain = json.loads(links[0].chain_json)
     assert [n["node"] for n in chain] == ["油价上涨", "通胀预期上升", "BTC 承压"]
 
@@ -549,7 +553,11 @@ async def test_failed_round_discards_causal_links(repo: Repo, settings: Settings
                     tool_calls=[
                         ToolCall(
                             "submit_causal_links",
-                            {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 0.5},
+                            {
+                                "chain": [{"node": "a"}, {"node": "b"}],
+                                "confidence": 0.5,
+                                "topic": "关税",
+                            },
                         )
                     ],
                     raw="raw-1",
@@ -583,11 +591,19 @@ async def test_flush_causal_links_partial_failure(
                     tool_calls=[
                         ToolCall(
                             "submit_causal_links",
-                            {"chain": [{"node": "a1"}, {"node": "b1"}], "confidence": 0.6},
+                            {
+                                "chain": [{"node": "a1"}, {"node": "b1"}],
+                                "confidence": 0.6,
+                                "topic": "关税",
+                            },
                         ),
                         ToolCall(
                             "submit_causal_links",
-                            {"chain": [{"node": "a2"}, {"node": "b2"}], "confidence": 0.7},
+                            {
+                                "chain": [{"node": "a2"}, {"node": "b2"}],
+                                "confidence": 0.7,
+                                "topic": "非农",
+                            },
                         ),
                     ],
                     raw="raw-1",
@@ -639,7 +655,11 @@ async def test_retry_round_tool_calls_executed_and_flushed(
                     tool_calls=[
                         ToolCall(
                             "submit_causal_links",
-                            {"chain": [{"node": "x"}, {"node": "y"}], "confidence": 0.5},
+                            {
+                                "chain": [{"node": "x"}, {"node": "y"}],
+                                "confidence": 0.5,
+                                "topic": "关税",
+                            },
                         )
                     ],
                     raw="raw-2",

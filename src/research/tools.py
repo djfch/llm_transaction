@@ -1,4 +1,4 @@
-"""研报工具注册表：10 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
+"""研报工具注册表：11 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
 
 安全不变量：本注册表无任何交易工具、不持有 Gateway 引用；
 execute 是研报 agent 的唯一执行入口，任何失败（未知工具/参数错误/内部异常）
@@ -30,6 +30,7 @@ _HANDLERS: dict[str, Callable[[ResearchToolDeps, dict], Awaitable[str]]] = {
     "search_news": tool_handlers.search_news,
     "read_timeline": tool_handlers.read_timeline,
     "read_judgments": tool_handlers.read_judgments,
+    "read_causal_links": tool_handlers.read_causal_links,
     "submit_causal_links": tool_handlers.submit_causal_links,
 }
 

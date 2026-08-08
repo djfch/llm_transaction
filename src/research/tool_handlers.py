@@ -1,4 +1,4 @@
-"""研报工具实现：9 只读 + 1 写（submit_causal_links）。
+"""研报工具实现：10 只读 + 1 写（submit_causal_links）。
 
 安全不变量：本层无任何交易工具；数据源失败（ResearchSourceError）一律转中文
 "数据不可用"哨兵返回给 LLM（不编造数值、不中断本轮）；参数校验失败返回错误文本。
@@ -10,6 +10,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from src.memory.repo import Repo
 from src.research.providers.base import (
@@ -44,11 +45,16 @@ def _fmt_ts(ts: float) -> str:
 
 
 def _parse_int(args: dict, key: str, default: int, lo: int, hi: int) -> tuple[int, str | None]:
-    """解析整数参数：缺失用默认值；非数字/越界返回错误文本（L1 参数容错）。"""
+    """解析整数参数：缺失用默认值；非数字/越界返回错误文本（L1 参数容错）。
+
+    布尔与非整数值（True/1.5）一律拒绝，不做静默截断（与 supersedes_id 同口径）。
+    """
     raw = args.get(key)
     if raw is None:
         value = default
     else:
+        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+            return 0, f"参数错误：{key} 必须为整数"
         try:
             value = int(raw)
         except (TypeError, ValueError):
@@ -213,7 +219,93 @@ async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
     return "\n".join(lines)
 
 
+async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
+    """读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版。"""
+    days, err = _parse_int(args, "days", 7, 1, 30)
+    if err:
+        return err
+    limit, err = _parse_int(args, "limit", 20, 1, 50)
+    if err:
+        return err
+    topic = str(args.get("topic") or "").strip() or None
+    links = await deps.repo.research.list_causal_links(days=days, topic=topic, limit=limit)
+    if not links:
+        scope = f"主题 {topic!r} " if topic else ""
+        return f"近 {days} 天{scope}无已提交因果链"
+    scope = f"，主题 {topic}" if topic else ""
+    lines = [f"## 已提交因果链（近 {days} 天{scope}，{len(links)} 条）"]
+    for link in links:
+        try:
+            chain = json.loads(link.chain_json)
+        except (TypeError, ValueError):
+            chain = []
+        nodes = " → ".join(str(n.get("node", ""))[:25] for n in chain if isinstance(n, dict))
+        tag = "待验证" if link.await_verification else "结论"
+        if link.supersedes_id is not None:
+            status = f"替代链#{link.supersedes_id}"  # 本链替代了旧链 X
+        else:
+            status = {
+                "pending": "当前版",
+                "verified": "已验证",
+                "failed": "已否决",
+                "superseded": "已被替代",
+            }.get(link.status, link.status)
+        lines.append(
+            f"- [链#{link.id}][{link.topic or '无主题'}][{tag}][{status}] {nodes}"
+            f"（置信度 {link.confidence}）"
+        )
+    return "\n".join(lines)
+
+
 # ---------- 写工具 ----------
+
+
+def _parse_await_verification(raw: Any) -> bool | None:
+    """解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None。"""
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in ("1", "true", "yes", "是"):
+            return True
+        if lowered in ("0", "false", "no", "否"):
+            return False
+    return None
+
+
+async def _validate_supersedes(
+    deps: ResearchToolDeps, topic: str, raw: Any
+) -> tuple[int | None, str | None]:
+    """supersedes_id 校验：可空；非空须为正整数、链存在、未被替代、主题一致。
+
+    主题校验放行空主题目标（历史遗留链 topic=''，允许以新主题修正）；
+    同轮内已声明替代过该链则拒绝（防止一轮内重复替代产生双当前版）。
+    返回 (校验后的 id, 错误文本)；错误文本非空时调用方直接返回。
+    """
+    if raw in (None, ""):
+        return None, None
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        return None, "参数错误：supersedes_id 必须为整数"
+    try:
+        link_id = int(raw)
+    except (TypeError, ValueError):
+        return None, "参数错误：supersedes_id 必须为整数"
+    if link_id <= 0:
+        return None, "参数错误：supersedes_id 必须为正整数"
+    if any(p.get("supersedes_id") == link_id for p in deps.pending_causal_links):
+        return None, f"参数错误：链 {link_id} 本轮已声明替代，不能重复替代"
+    old = await deps.repo.research.get_causal_link(link_id)
+    if old is None:
+        return None, f"参数错误：supersedes_id 指向的链 {link_id} 不存在"
+    if old.status == "superseded":
+        return None, f"参数错误：链 {link_id} 已被替代，只能替代当前版"
+    if old.topic and old.topic != topic:
+        return None, f"参数错误：链 {link_id} 主题（{old.topic}）与本次（{topic}）不一致"
+    return link_id, None
 
 
 async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
@@ -222,11 +314,22 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     H1 修复：LLM 无需也无法预知本轮研报 id（id 在工具循环结束后落库才生成），
     故 report_id 不再是 LLM 参数——agent 落研报后由代码回填并批量落库；
     本轮研报失败时暂存链随 deps 丢弃，不会错挂历史研报。
+
+    版本化（V1）：topic 必填（同主题聚合成族）；supersedes_id 声明替代旧链
+    （须同主题当前版），落库时旧链标记 superseded；await_verification 声明
+    待验证中间态（默认 true，允许 1 节点半成品观察）或结论链（须 2-6 节点）。
     """
     chain = args.get("chain")
     confidence = args.get("confidence")
-    if not isinstance(chain, list) or not 2 <= len(chain) <= 6:
-        return "参数错误：chain 必须为 2-6 个节点的有序数组"
+    topic = str(args.get("topic") or "").strip()
+    if not topic:
+        return "参数错误：topic 必填（事件主题，如 非农/关税/美联储）"
+    await_verification = _parse_await_verification(args.get("await_verification"))
+    if await_verification is None:
+        return "参数错误：await_verification 必须为布尔值"
+    min_nodes, max_nodes = (1, 6) if await_verification else (2, 6)
+    if not isinstance(chain, list) or not min_nodes <= len(chain) <= max_nodes:
+        return f"参数错误：chain 必须为 {min_nodes}-{max_nodes} 个节点的有序数组"
     for node in chain:
         if not isinstance(node, dict) or not str(node.get("node") or "").strip():
             return "参数错误：chain 每个节点必须是含 node 字段的对象"
@@ -239,12 +342,19 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     evidence = args.get("evidence") or []
     if not isinstance(evidence, list):
         return "参数错误：evidence 必须为字符串数组"
+    supersedes_id, err = await _validate_supersedes(deps, topic, args.get("supersedes_id"))
+    if err:
+        return err
     deps.pending_causal_links.append(
         {
             "chain_json": json.dumps(chain, ensure_ascii=False),
             "confidence": confidence,
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
+            "topic": topic,
+            "supersedes_id": supersedes_id,
+            "await_verification": await_verification,
         }
     )
     nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain)
-    return f"因果链已暂存（{len(chain)} 节点）：{nodes}（将随本轮研报自动关联落库）"
+    tag = "待验证" if await_verification else "结论"
+    return f"因果链已暂存（{len(chain)} 节点，{tag}）：{nodes}（将随本轮研报自动关联落库）"

@@ -436,6 +436,9 @@ interface RawCausalLink {
   evidence?: unknown
   status: string
   broken_at?: number | null
+  topic?: string
+  supersedes_id?: number | null
+  await_verification?: unknown
   created_at: number
 }
 
@@ -511,6 +514,14 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
     evidence: adaptStringList(raw.evidence),
     status: raw.status ?? 'pending',
     brokenAt: raw.broken_at ?? null,
+    topic: typeof raw.topic === 'string' ? raw.topic : '',
+    supersedesId: raw.supersedes_id ?? null,
+    // 防御解析：缺字段（旧数据）按待验证；布尔/0-1/常见字符串形态均识别
+    awaitVerification:
+      raw.await_verification !== false &&
+      raw.await_verification !== 0 &&
+      raw.await_verification !== 'false' &&
+      raw.await_verification !== '0',
     time: new Date(raw.created_at * 1000).toISOString(),
   }
 }

@@ -178,7 +178,7 @@ async def test_submit_causal_links_staged(deps) -> None:
     """回归（H1）：合法因果链校验通过即暂存（无需 report_id），不直接落库。
 
     本轮研报 id 在工具循环结束后才生成，LLM 无法预知；提交先暂存 deps，
-    由 agent 落研报后用代码回填 report_id。
+    由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待验证。
     """
     text = await _run(
         deps,
@@ -190,23 +190,38 @@ async def test_submit_causal_links_staged(deps) -> None:
             ],
             "confidence": 0.7,
             "evidence": ["金十快讯"],
+            "topic": "油价",
         },
     )
     assert "已暂存" in text
     assert len(deps.pending_causal_links) == 1
+    staged = deps.pending_causal_links[0]
+    assert staged["topic"] == "油价"
+    assert staged["supersedes_id"] is None
+    assert staged["await_verification"] is True  # 默认待验证
     # 暂存 ≠ 落库：表内仍为空（等 agent 落研报后回填）
     assert await deps.repo.research.list_causal_links() == []
 
 
 async def test_submit_causal_links_invalid(deps) -> None:
-    """非法因果链：节点数/置信度校验返回错误文本，且不留暂存。"""
+    """非法因果链：缺 topic/节点数/置信度校验返回错误文本，且不留暂存。"""
     assert "参数错误" in await _run(
         deps, "submit_causal_links", {"chain": [{"node": "x"}], "confidence": 0.5}
+    )  # 缺 topic
+    assert "参数错误" in await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}],
+            "confidence": 0.5,
+            "topic": "关税",
+            "await_verification": False,  # 结论链须 2-6 节点
+        },
     )
     assert "参数错误" in await _run(
         deps,
         "submit_causal_links",
-        {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 1.5},
+        {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 1.5, "topic": "关税"},
     )
     assert deps.pending_causal_links == []
 
@@ -216,10 +231,250 @@ async def test_submit_causal_links_evidence_not_list(deps) -> None:
     text = await _run(
         deps,
         "submit_causal_links",
-        {"chain": [{"node": "a"}, {"node": "b"}], "confidence": 0.5, "evidence": "不是列表"},
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.5,
+            "evidence": "不是列表",
+            "topic": "关税",
+        },
     )
     assert "参数错误" in text
     assert deps.pending_causal_links == []
+
+
+async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
+    """待验证中间态：1 节点半成品（事件未走完的观察）放行。"""
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "非农数据即将公布", "kind": "事件"}],
+            "confidence": 0.4,
+            "topic": "非农",
+        },
+    )
+    assert "已暂存" in text
+    assert deps.pending_causal_links[0]["await_verification"] is True
+
+
+async def test_submit_causal_links_await_verification_parsing(deps) -> None:
+    """await_verification 解析：false 字符串/数字 0 → 结论链；非法值报错。"""
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "await_verification": "false",
+        },
+    )
+    assert "已暂存" in text and "结论" in text
+    assert deps.pending_causal_links[-1]["await_verification"] is False
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "await_verification": "也许",
+        },
+    )
+    assert "参数错误" in text
+
+
+async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
+    """supersedes_id 校验：不存在/已被替代/主题不一致分别报错；合法替代通过。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    v1 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
+    )
+    other = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "b"}]', confidence=0.5, topic="关税"
+    )
+    superseded = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "c"}]',
+        confidence=0.6,
+        topic="非农",
+        supersedes_id=v1.id,
+    )
+    deps = ResearchToolDeps(
+        provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        repo=repo,
+        mode="paper",
+    )
+
+    def _args(**extra) -> dict:
+        return {
+            "chain": [{"node": "x"}, {"node": "y"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            **extra,
+        }
+
+    assert "不存在" in await _run(deps, "submit_causal_links", _args(supersedes_id=999))
+    assert "已被替代" in await _run(deps, "submit_causal_links", _args(supersedes_id=v1.id))
+    assert "主题" in await _run(deps, "submit_causal_links", _args(supersedes_id=other.id))
+    assert deps.pending_causal_links == []
+    text = await _run(deps, "submit_causal_links", _args(supersedes_id=superseded.id))
+    assert "已暂存" in text
+    assert deps.pending_causal_links[0]["supersedes_id"] == superseded.id
+
+
+async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
+    """supersedes_id 输入形态：0/负数/浮点/布尔被拒；数字字符串容错接受。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    target = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
+    )
+    deps = ResearchToolDeps(
+        provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        repo=repo,
+        mode="paper",
+    )
+
+    def _args(**extra) -> dict:
+        return {
+            "chain": [{"node": "x"}, {"node": "y"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            **extra,
+        }
+
+    assert "正整数" in await _run(deps, "submit_causal_links", _args(supersedes_id=0))
+    assert "正整数" in await _run(deps, "submit_causal_links", _args(supersedes_id=-3))
+    assert "整数" in await _run(deps, "submit_causal_links", _args(supersedes_id=1.5))  # 浮点拒绝
+    assert "整数" in await _run(deps, "submit_causal_links", _args(supersedes_id=True))  # 布尔拒绝
+    assert deps.pending_causal_links == []
+    text = await _run(deps, "submit_causal_links", _args(supersedes_id=str(target.id)))
+    assert "已暂存" in text  # 数字字符串容错
+    assert deps.pending_causal_links[0]["supersedes_id"] == target.id
+
+
+async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> None:
+    """同轮内两次声明替代同一旧链：第二次被拒（防双当前版进池）。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    target = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
+    )
+    deps = ResearchToolDeps(
+        provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        repo=repo,
+        mode="paper",
+    )
+
+    def _args(**extra) -> dict:
+        return {
+            "chain": [{"node": "x"}, {"node": "y"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            **extra,
+        }
+
+    assert "已暂存" in await _run(deps, "submit_causal_links", _args(supersedes_id=target.id))
+    assert "重复替代" in await _run(deps, "submit_causal_links", _args(supersedes_id=target.id))
+    assert len(deps.pending_causal_links) == 1
+
+
+async def test_submit_causal_links_supersede_legacy_empty_topic(repo: Repo) -> None:
+    """遗留链（topic=''，旧库迁移）可被新主题修正：空主题目标放行。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    legacy = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "老链"}]', confidence=0.5, topic=""
+    )
+    deps = ResearchToolDeps(
+        provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        repo=repo,
+        mode="paper",
+    )
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "x"}, {"node": "y"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            "supersedes_id": legacy.id,
+        },
+    )
+    assert "已暂存" in text
+    assert deps.pending_causal_links[0]["supersedes_id"] == legacy.id
+
+
+async def test_read_causal_links_arg_boundaries(deps) -> None:
+    """read_causal_links 参数边界：days/limit 越界、非法类型（含布尔/浮点不截断）返回错误文本。"""
+    assert "参数错误" in await _run(deps, "read_causal_links", {"days": 0})
+    assert "参数错误" in await _run(deps, "read_causal_links", {"days": 31})
+    assert "参数错误" in await _run(deps, "read_causal_links", {"limit": 0})
+    assert "参数错误" in await _run(deps, "read_causal_links", {"limit": 51})
+    assert "参数错误" in await _run(deps, "read_causal_links", {"days": "x"})
+    assert "参数错误" in await _run(deps, "read_causal_links", {"days": True})  # 布尔拒绝不截断
+    assert "参数错误" in await _run(deps, "read_causal_links", {"days": 2.7})  # 浮点拒绝不截断
+    assert "无已提交因果链" in await _run(deps, "read_causal_links", {"days": 1, "limit": 50})
+
+
+async def test_submit_causal_links_await_verification_shapes(deps) -> None:
+    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别。"""
+    for raw, expected in [(1, True), (0, False), ("true", True), ("是", True), ("否", False)]:
+        text = await _run(
+            deps,
+            "submit_causal_links",
+            {
+                "chain": [{"node": "a"}, {"node": "b"}],
+                "confidence": 0.6,
+                "topic": "关税",
+                "await_verification": raw,
+            },
+        )
+        assert "已暂存" in text
+        assert deps.pending_causal_links[-1]["await_verification"] is expected
+
+
+async def test_read_causal_links_empty(deps) -> None:
+    """read_causal_links：无提交过链时返回提示（含主题过滤提示）。"""
+    assert "无已提交因果链" in await _run(deps, "read_causal_links")
+    assert "无已提交因果链" in await _run(deps, "read_causal_links", {"topic": "非农"})
+
+
+async def test_read_causal_links_lists_family(repo: Repo) -> None:
+    """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    v1 = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "旧推断", "kind": "推断"}]',
+        confidence=0.5,
+        topic="非农",
+    )
+    await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "修正推断"}]',
+        confidence=0.7,
+        topic="非农",
+        supersedes_id=v1.id,
+    )
+    await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "关税结论"}]',
+        confidence=0.6,
+        topic="关税",
+        await_verification=False,
+    )
+    deps = ResearchToolDeps(
+        provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        repo=repo,
+        mode="paper",
+    )
+    text = await _run(deps, "read_causal_links", {"topic": "非农", "days": 7})
+    assert "已提交因果链" in text
+    assert f"[链#{v1.id}]" in text
+    assert "[非农]" in text
+    assert f"替代链#{v1.id}" in text  # 修正版标注替代目标（方向：本链替代了旧链）
+    assert "[已被替代]" in text  # 被替代的旧链中文标注
+    assert "[待验证]" in text
+    text_all = await _run(deps, "read_causal_links")
+    assert "[关税]" in text_all and "[结论]" in text_all  # 结论链标注
 
 
 # ---------- 审查补齐：T9 参数边界 ----------
@@ -264,7 +519,7 @@ async def test_source_failure_returns_sentinel(repo: Repo) -> None:
 
 
 async def test_build_preinjection_sections(deps) -> None:
-    """预注入五段齐全：日历/指标/快讯/时间线/判断史；快讯与日历已落事实层。"""
+    """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。"""
     text = await build_preinjection(deps, hours=24)
     assert "经济日历" in text
     assert "美国7月非农就业人口" in text
@@ -272,6 +527,7 @@ async def test_build_preinjection_sections(deps) -> None:
     assert "快讯" in text and "金十新闻" in text and "律动新闻" in text
     assert "事件时间线" in text and "暂无记录" in text
     assert "历史研报结论" in text and "首次研报" in text
+    assert "未闭合因果链" in text and "（暂无）" in text  # 无未闭合链空态
     # 事实层已写入：日历 2 条（含低星）+ 快讯 2 条（金十/律动各一）
     rows = await deps.repo.research.list_timeline(0.0, None)
     assert len(rows) == 4
@@ -283,6 +539,45 @@ async def test_build_preinjection_sections(deps) -> None:
 
         meta = _json.loads(r.meta_json)
         assert isinstance(meta, dict)
+
+
+async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
+    """预注入未闭合链段：带链 id/主题/节点链，且排除结论链与被替代链。"""
+    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    p1 = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "非农数据", "kind": "事件"}, {"node": "观望"}]',
+        confidence=0.6,
+        topic="非农",
+    )
+    await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "关税结论"}]',
+        confidence=0.6,
+        topic="关税",
+        await_verification=False,  # 结论链不进池
+    )
+    old = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "旧链"}]',
+        confidence=0.5,
+        topic="非农",
+    )
+    await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "新链"}]',
+        confidence=0.7,
+        topic="非农",
+        supersedes_id=old.id,  # 替代后旧链不进池
+    )
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    assert f"[链#{p1.id}]" in text and "[非农]" in text  # 带链 id 与主题
+    assert "非农数据 → 观望" in text  # 节点链紧凑呈现
+    assert "关税结论" not in text  # 结论链排除
+    assert "旧链" not in text  # 被替代链排除
+    assert "supersedes_id" in text  # 提示跟进修订方式
 
 
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:

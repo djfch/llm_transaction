@@ -121,6 +121,114 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
     assert "油价上涨" in links[0].chain_json
 
 
+async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
+    """版本化字段落库：topic/supersedes_id/await_verification 存取一致。"""
+    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    link = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "a"}]',
+        confidence=0.6,
+        topic="关税",
+        supersedes_id=3,
+        await_verification=False,
+    )
+    assert link.topic == "关税"
+    assert link.supersedes_id == 3
+    assert link.await_verification is False
+    got = await repo.research.get_causal_link(link.id)
+    assert got is not None
+    assert got.topic == "关税" and got.supersedes_id == 3 and got.await_verification is False
+    # 缺省口径：无 supersedes_id / 未传 await_verification → 非修正版、按待验证
+    plain = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "b"}]', confidence=0.5, topic="关税"
+    )
+    assert plain.supersedes_id is None
+    assert plain.await_verification is True
+
+
+async def test_save_causal_link_supersede_marks_old(repo: Repo) -> None:
+    """版本化事务：新链替代旧链时，同一次落库把旧链 status 标记 superseded。"""
+    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    v1 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "旧推断"}]', confidence=0.5, topic="非农"
+    )
+    v2 = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "修正后推断"}]',
+        confidence=0.7,
+        topic="非农",
+        supersedes_id=v1.id,
+    )
+    old = await repo.research.get_causal_link(v1.id)
+    assert old is not None and old.status == "superseded"  # 旧链已盖章
+    assert v2.supersedes_id == v1.id
+    # 族谱：两条都在，旧链保留留档
+    links = await repo.research.list_causal_links(days=7, topic="非农")
+    assert [link.id for link in links] == [v1.id, v2.id]
+
+
+async def test_get_causal_link_missing(repo: Repo) -> None:
+    """get_causal_link：不存在的 id 返回 None。"""
+    assert await repo.research.get_causal_link(999) is None
+
+
+async def test_list_pending_causal_links(repo: Repo) -> None:
+    """未闭合池口径：只收 待验证声明 + 未被替代；排除 结论链/已被替代；按时间正序取前 N。"""
+    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    p1 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.6, topic="关税"
+    )  # 待验证（默认）
+    await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "b"}]',
+        confidence=0.7,
+        topic="关税",
+        await_verification=False,  # 结论链 → 不进池
+    )
+    p2 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "c"}]', confidence=0.8, topic="非农"
+    )
+    superseded = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "d"}]', confidence=0.4, topic="关税"
+    )
+    replacer = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "e"}]',
+        confidence=0.9,
+        topic="关税",
+        supersedes_id=superseded.id,  # 替代 → superseded 不进池，新链进池
+    )
+    pending = await repo.research.list_pending_causal_links(limit=10)
+    assert [link.id for link in pending] == [p1.id, p2.id, replacer.id]
+    assert all(link.status == "pending" for link in pending)
+    assert all(link.await_verification for link in pending)
+    assert superseded.id not in [link.id for link in pending]
+    # limit 截取：只取最新 2 条（正序返回）
+    top2 = await repo.research.list_pending_causal_links(limit=2)
+    assert [link.id for link in top2] == [p2.id, replacer.id]
+
+
+async def test_list_causal_links_topic_filter(repo: Repo) -> None:
+    """按主题过滤：只返回该主题链；limit 截取最新 N 条按时间正序。"""
+    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    a1 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a1"}]', confidence=0.6, topic="关税"
+    )
+    b1 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "b1"}]', confidence=0.6, topic="非农"
+    )
+    a2 = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "a2"}]', confidence=0.7, topic="关税"
+    )
+    all_links = await repo.research.list_causal_links(days=7)
+    assert [link.id for link in all_links] == [a1.id, b1.id, a2.id]
+    tariff = await repo.research.list_causal_links(days=7, topic="关税")
+    assert [link.id for link in tariff] == [a1.id, a2.id]
+    # limit 截取：最新 1 条
+    top1 = await repo.research.list_causal_links(days=7, limit=1)
+    assert [link.id for link in top1] == [a2.id]
+
+
 async def test_list_reports_page(repo: Repo) -> None:
     """分页：最新在前、含失败记录、越界页 items 空但 total 准确。"""
     ids = []

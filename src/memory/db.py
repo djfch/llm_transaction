@@ -158,6 +158,9 @@ CREATE TABLE IF NOT EXISTS causal_links (
     evidence_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending',
     broken_at INTEGER,
+    topic TEXT NOT NULL DEFAULT '',
+    supersedes_id INTEGER,
+    await_verification INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
@@ -213,6 +216,9 @@ class Database:
         - trades.exchange_order_id：历史成交无交易所订单 id，保持 NULL（乱序补正
           只能跳过这些旧行，属可接受残留），不回填。
         - review_reports.round_id：老报告无审计轮可循，保持默认 ''（无关联），不回填。
+        - causal_links.topic/supersedes_id/await_verification：旧链无主题（''）、无替代关系
+          （NULL）、按待验证处理（1），不回填；supersedes 索引只在迁移末尾建（旧库须先补列，
+          SCHEMA 阶段建会因缺列报错，同 trades.exchange_trade_id）。
         """
         cur = await self._conn.execute("PRAGMA table_info(orders)")
         order_cols = {row["name"] for row in await cur.fetchall()}
@@ -250,6 +256,21 @@ class Database:
             await self._conn.execute(
                 "ALTER TABLE review_reports ADD COLUMN round_id TEXT NOT NULL DEFAULT ''"
             )
+        cur = await self._conn.execute("PRAGMA table_info(causal_links)")
+        link_cols = {row["name"] for row in await cur.fetchall()}
+        if "topic" not in link_cols:
+            await self._conn.execute(
+                "ALTER TABLE causal_links ADD COLUMN topic TEXT NOT NULL DEFAULT ''"
+            )
+        if "supersedes_id" not in link_cols:
+            await self._conn.execute("ALTER TABLE causal_links ADD COLUMN supersedes_id INTEGER")
+        if "await_verification" not in link_cols:
+            await self._conn.execute(
+                "ALTER TABLE causal_links ADD COLUMN await_verification INTEGER NOT NULL DEFAULT 1"
+            )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_causal_links_supersedes ON causal_links(supersedes_id)"
+        )
 
     async def close(self) -> None:
         """关闭连接；重复调用安全。"""

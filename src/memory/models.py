@@ -217,8 +217,13 @@ class CausalLink(BaseModel):
     """因果链（分析笔记）：研报 agent 提交的链式因果推导，复盘验证状态。
 
     chain_json 为有序节点链 JSON（node/kind/timeline_id）；
-    status 取值：pending（待验证）/ verified（复盘确认）/ failed（复盘否决）；
-    broken_at 为断点节点下标（复盘标记，None = 未定位）。
+    status 取值：pending（待验证）/ verified（复盘确认）/ failed（复盘否决）/
+    superseded（已被更新版替代）；
+    broken_at 为断点节点下标（复盘标记，None = 未定位）；
+    topic 为事件主题（同主题多次提交聚合成族）；
+    supersedes_id 为新链声明的替代目标（版本化：旧链保留留档）；
+    await_verification 为 agent 显式声明（True=待验证中间态，允许半成品，
+    进入未闭合监控池；False=结论链）。
     """
 
     id: int
@@ -228,4 +233,7 @@ class CausalLink(BaseModel):
     evidence_json: str = "[]"
     status: str = "pending"
     broken_at: int | None = None
+    topic: str = ""
+    supersedes_id: int | None = None
+    await_verification: bool = True
     created_at: float
