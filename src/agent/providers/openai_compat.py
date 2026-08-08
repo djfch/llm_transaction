@@ -24,7 +24,9 @@ class OpenAICompatProvider:
         key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not key:
             raise LLMError("缺少 OPENAI_API_KEY 环境变量，无法初始化 OpenAI 兼容 provider")
-        kwargs: dict = {"api_key": key}
+        # 重试收口到 RetryingProvider 一层：SDK 默认 max_retries=2 会与之叠乘
+        # （持久故障时 HTTP 请求数与延迟放大 3 倍，偏离"累计 3 次"口径）
+        kwargs: dict = {"api_key": key, "max_retries": 0}
         if config.openai_base_url:
             kwargs["base_url"] = config.openai_base_url
         self._client = openai.AsyncOpenAI(**kwargs)

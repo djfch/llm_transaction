@@ -25,7 +25,9 @@ class AnthropicProvider:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise LLMError("缺少 ANTHROPIC_API_KEY 环境变量，无法初始化 Anthropic provider")
-        self._client = anthropic.AsyncAnthropic(api_key=key)
+        # 重试收口到 RetryingProvider 一层：SDK 默认 max_retries=2 会与之叠乘
+        # （持久故障时 HTTP 请求数与延迟放大 3 倍，偏离"累计 3 次"口径）
+        self._client = anthropic.AsyncAnthropic(api_key=key, max_retries=0)
         self._model = config.model
         self._max_tokens = config.max_tokens
         self._thinking_effort = config.thinking_effort

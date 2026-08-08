@@ -15,6 +15,7 @@ import pytest
 from src.agent.providers.base import LLMError, LLMParseError, ToolCall
 from src.agent.providers.factory import create_provider
 from src.agent.providers.openai_responses import OpenAIResponsesProvider
+from src.agent.providers.retry import RetryingProvider
 from src.config import CredentialConfig
 
 
@@ -222,6 +223,8 @@ def test_missing_key_raises_llmerror(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_create_provider_builds_openai_responses(monkeypatch: pytest.MonkeyPatch):
-    """openai_responses 凭证经 create_provider 构造出 OpenAIResponsesProvider。"""
+    """openai_responses 凭证经 create_provider 构造出 OpenAIResponsesProvider（外裹重试装饰器）。"""
     monkeypatch.setenv("LLM_KEY_T", "sk-test")
-    assert isinstance(create_provider(_cred()), OpenAIResponsesProvider)
+    provider = create_provider(_cred())
+    assert isinstance(provider, RetryingProvider)
+    assert isinstance(provider._inner, OpenAIResponsesProvider)

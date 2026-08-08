@@ -118,7 +118,7 @@ class _SequentialProvider:
 
 
 class _BadJsonProvider(_SequentialProvider):
-    """输出非法 JSON 两次（验证重试后仍失败落 error 报告）。"""
+    """持续输出非法 JSON（同上下文重发 3 次后仍失败，落 error 报告）。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -191,11 +191,13 @@ async def test_full_round_success(repo: Repo, settings: Settings, tmp_path) -> N
 
 
 async def test_bad_json_falls_to_error_report(repo: Repo, settings: Settings, tmp_path) -> None:
-    """输出非法 JSON 重试仍失败：落 error 报告 + 审计轮 error，返回 ok=False。"""
-    agent = await _build_agent(repo, settings, _BadJsonProvider(), tmp_path)
+    """输出非法 JSON、同上下文重发 3 次仍失败：落 error 报告 + 审计轮 error，返回 ok=False。"""
+    provider = _BadJsonProvider()
+    agent = await _build_agent(repo, settings, provider, tmp_path)
     result = await agent.run(report_type="asia")
     assert result["ok"] is False
     assert "解析失败" in result["error"]
+    assert provider._calls == 3  # 初始输出 + 2 次同参重发，累计 3 次输出才判失败
     report = await repo.research.latest_report(include_error=True)
     assert report is not None and report.error != ""
     audit_round = await repo.latest_audit_round("paper")
@@ -273,17 +275,19 @@ async def test_provider_chat_raises_falls_to_error(
 
 
 async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path) -> None:
-    """T3：首次输出坏 JSON、重试后合法 → ok=True（重试成功路径）。"""
+    """T3：首次输出坏 JSON、同上下文重发后合法 → ok=True（重试成功路径）。"""
 
     class _RetryProvider(_SequentialProvider):
         def __init__(self) -> None:
             super().__init__()
             self._retry_called = False
+            self.seen: list[list[dict]] = []  # 每次调用收到的 messages 快照
 
         async def chat(self, system, messages, tools):
             from src.agent.providers.base import LLMResponse
 
             self._calls += 1
+            self.seen.append([dict(m) for m in messages])
             if self._calls == 1:
                 return LLMResponse(
                     text="坏JSON",
@@ -302,6 +306,125 @@ async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path)
     result = await agent.run()
     assert result["ok"] is True and result["direction"] == "偏多"
     assert provider._retry_called  # 确实走了重试
+    # 同上下文重发：重试请求与产生坏输出的请求一致，未追加纠错/失败内容
+    assert provider._calls == 2
+    assert provider.seen[1] == provider.seen[0]
+
+
+async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, tmp_path) -> None:
+    """坏 JSON 连续 2 次、第 3 次输出合法 → ok=True；三次请求上下文完全一致。"""
+
+    class _ThirdTimeProvider(_SequentialProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[list[dict]] = []
+
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse
+
+            self._calls += 1
+            self.seen.append([dict(m) for m in messages])
+            if self._calls <= 2:
+                return LLMResponse(
+                    text=f"坏JSON{self._calls}",
+                    raw=f"raw-{self._calls}",
+                    assistant_message={"role": "assistant", "content": "坏"},
+                )
+            return LLMResponse(
+                text=GOOD_JSON,
+                raw="raw-3",
+                assistant_message={"role": "assistant", "content": GOOD_JSON},
+            )
+
+    provider = _ThirdTimeProvider()
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    result = await agent.run()
+    assert result["ok"] is True and result["direction"] == "偏多"
+    assert provider._calls == 3  # 初始 + 2 次同参重发
+    assert provider.seen[0] == provider.seen[1] == provider.seen[2]
+
+
+async def test_reask_uses_full_context_after_tool_round(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """工具轮后产出坏 JSON：重发上下文为 [user, assistant, 工具结果] 全序列，坏输出不回灌。"""
+
+    class _ToolThenBadJson(_SequentialProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[list[dict]] = []
+
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse, ToolCall
+
+            self._calls += 1
+            self.seen.append([dict(m) for m in messages])
+            if self._calls == 1:
+                return LLMResponse(
+                    text="先查日历",
+                    tool_calls=[ToolCall("fetch_calendar", {})],
+                    raw="raw-1",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            if self._calls == 2:
+                return LLMResponse(
+                    text="坏JSON",
+                    raw="raw-2",
+                    assistant_message={"role": "assistant", "content": "坏JSON"},
+                )
+            return LLMResponse(
+                text=GOOD_JSON,
+                raw="raw-3",
+                assistant_message={"role": "assistant", "content": GOOD_JSON},
+            )
+
+    provider = _ToolThenBadJson()
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    result = await agent.run()
+    assert result["ok"] is True
+    assert provider._calls == 3
+    # 重发（第 3 次调用）请求与产生坏 JSON（第 2 次调用）的请求上下文完全一致：
+    # [user 预注入, assistant 工具轮, 工具结果] 全序列，坏 JSON 文本本身未回灌
+    assert provider.seen[2] == provider.seen[1]
+    assert len(provider.seen[2]) == 3
+    assert provider.seen[2][0]["role"] == "user"
+    assert provider.seen[2][1] == {"role": "assistant", "content": "工具轮"}
+    assert "坏JSON" not in str(provider.seen[2])
+
+
+async def test_parse_retry_phase_under_timeout_fuse(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """JSON 重试阶段同受超时保险丝约束：重发卡死 → TimeoutError 落 error 报告。"""
+
+    class _BadThenHang:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, system, messages, tools):
+            from src.agent.providers.base import LLMResponse
+
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    text="坏JSON",
+                    raw="raw-1",
+                    assistant_message={"role": "assistant", "content": "坏JSON"},
+                )
+            import asyncio
+
+            await asyncio.sleep(60)  # 重发请求卡死，远超 2s 保险丝
+
+        def tool_result_message(self, call, result):
+            return {"role": "user", "content": "x"}
+
+    provider = _BadThenHang()
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    agent._timeout = 2  # 压到 2 秒（构造参数已过，直接改实例属性）
+    result = await agent.run()
+    assert result["ok"] is False and "TimeoutError" in result["error"]
+    report = await repo.research.latest_report(include_error=True)
+    assert report is not None and report.error != ""
 
 
 async def test_timeout_terminates_round(repo: Repo, settings: Settings, tmp_path) -> None:
