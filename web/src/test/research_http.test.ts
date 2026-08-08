@@ -170,6 +170,47 @@ describe('研报端点适配', () => {
     expect(link.chain[0].timeline_id).toBeUndefined() // 非数字 timeline_id 不保留
   })
 
+  it('getResearchReport：因果链版本化字段——topic/supersedesId/awaitVerification 透传，含 true/1/false/0/字符串形态', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        '/api/research/reports/7': {
+          ...RAW_REPORT,
+          causal_links: [
+            { ...RAW_LINK, topic: '关税', supersedes_id: 12, await_verification: false },
+            { ...RAW_LINK, id: 4, topic: '非农', supersedes_id: null, await_verification: 1 },
+            { ...RAW_LINK, id: 5, topic: 'CPI', supersedes_id: 0, await_verification: 'false' },
+            { ...RAW_LINK, id: 6, topic: '利率', supersedes_id: 7, await_verification: '0' },
+          ],
+        },
+      }),
+    )
+    const links = (await httpApi.getResearchReport(7)).causalLinks
+    expect(links[0].topic).toBe('关税')
+    expect(links[0].supersedesId).toBe(12)
+    expect(links[0].awaitVerification).toBe(false)
+    expect(links[1].awaitVerification).toBe(true) // 数字 1 → 待验证
+    expect(links[2].awaitVerification).toBe(false) // 字符串 'false' 防御识别
+    expect(links[3].awaitVerification).toBe(false) // 字符串 '0' 防御识别
+    expect(links[3].supersedesId).toBe(7)
+  })
+
+  it('getResearchReport：因果链版本化字段缺省（旧数据形态）——topic→空串、supersedes_id→null、await_verification→待验证', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        '/api/research/reports/7': {
+          ...RAW_REPORT,
+          causal_links: [RAW_LINK], // 旧数据无三字段
+        },
+      }),
+    )
+    const link = (await httpApi.getResearchReport(7)).causalLinks[0]
+    expect(link.topic).toBe('')
+    expect(link.supersedesId).toBeNull()
+    expect(link.awaitVerification).toBe(true) // 缺省按待验证（进未闭合池语义一致）
+  })
+
   it('runResearch：POST body 为 report_type/hours，响应 snake 键转 camelCase（含 errorCode）', async () => {
     vi.stubGlobal(
       'fetch',

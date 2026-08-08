@@ -1,4 +1,4 @@
-"""预注入组装：第一轮 user 消息的五段数据（日历→指标→快讯→时间线→判断史）。
+"""预注入组装：第一轮 user 消息的六段数据（日历→指标→快讯→时间线→判断史→未闭合因果链）。
 
 数据源失败段标注不可用（不中断研报轮）；返回 Markdown 文本。
 从 tool_handlers 复用 ResearchToolDeps / 时间格式化 / 日期标记（单向依赖，无循环）。
@@ -140,8 +140,32 @@ async def _section_judgments(deps: ResearchToolDeps) -> str:
     return "\n".join(lines)
 
 
+async def _section_pending_links(deps: ResearchToolDeps) -> str:
+    """未闭合因果链段：前 10 条待验证当前版，带链 id 供 supersedes_id 引用。
+
+    不按时间淘汰（事件发展需要时间）；提示 LLM 事件有新进展时提交修正版。
+    """
+    links = await deps.repo.research.list_pending_causal_links(limit=10)
+    if not links:
+        return "## 未闭合因果链\n（暂无）"
+    lines = [
+        "## 未闭合因果链"
+        f"（前 {len(links)} 条，待验证中；事件有新进展请提交修正版并声明 supersedes_id）"
+    ]
+    for link in links:
+        try:
+            chain = json.loads(link.chain_json)
+        except (TypeError, ValueError):
+            chain = []
+        nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain if isinstance(n, dict))
+        lines.append(
+            f"- [链#{link.id}][{link.topic or '无主题'}] {nodes}（置信度 {link.confidence}）"
+        )
+    return "\n".join(lines)
+
+
 async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
-    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史）。
+    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→未闭合因果链）。
 
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
     首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源
@@ -156,5 +180,6 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
             await _section_flash(deps, hours),
             await _section_timeline(deps, hours),
             await _section_judgments(deps),
+            await _section_pending_links(deps),
         ]
     )

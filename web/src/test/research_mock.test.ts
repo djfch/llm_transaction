@@ -54,16 +54,23 @@ describe('mock 研报端点', () => {
     expect(full.risks).toHaveLength(2)
     expect(typeof full.risks[0]).toBe('string') // risks 为真字符串数组，不受对象适配影响
     expect(full.raw).toEqual({ direction: '偏多', confidence: '中', horizon: '24h' })
-    // 因果链：已确认/待验证各一条，chain 均为 3 节点、confidence 为数值
-    expect(full.causalLinks).toHaveLength(2)
+    // 因果链：已确认结论 / 待验证修正版（替代链#3）/ 已被替代旧版 三条，chain 均为节点数组、confidence 为数值
+    expect(full.causalLinks).toHaveLength(3)
     const verified = full.causalLinks.find((l) => l.status === 'verified')
     const pending = full.causalLinks.find((l) => l.status === 'pending')
+    const superseded = full.causalLinks.find((l) => l.status === 'superseded')
     expect(verified).toBeDefined()
     expect(verified!.chain).toHaveLength(3)
     expect(verified!.chain[0]).toMatchObject({ node: '美国 6 月 CPI 同比回落至 3.0%', kind: '事件', timeline_id: 1287 })
     expect(typeof verified!.confidence).toBe('number')
     expect(pending).toBeDefined()
     expect(pending!.brokenAt).toBeNull()
+    expect(pending!.supersedesId).toBe(3) // 修正版声明替代旧版链#3
+    expect(superseded).toBeDefined()
+    expect(superseded!.topic).toBe('美联储')
+    expect(verified!.topic).toBe('CPI')
+    expect(verified!.awaitVerification).toBe(false) // 结论链
+    expect(pending!.awaitVerification).toBe(true) // 待验证
 
     const err: unknown = await mockApi.getResearchReport(99999).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ApiError)

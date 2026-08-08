@@ -165,6 +165,25 @@ beforeEach(() => {
           evidence: ['金十日历：CPI 公布值 3.0% 低于预期 3.1%', '律动快讯：BTC ETF 单日净流入 2.1 亿美元'],
           status: 'verified',
           brokenAt: null,
+          topic: 'CPI',
+          supersedesId: null,
+          awaitVerification: false,
+          time: iso(1784510000),
+        },
+        {
+          id: 3,
+          reportId: 6,
+          chain: [
+            { node: '美联储官员鹰派讲话', kind: '事件' },
+            { node: '降息预期降温', kind: '推断' },
+          ],
+          confidence: 0.5,
+          evidence: ['金十快讯：鲍威尔称「不急于降息」'],
+          status: 'superseded',
+          brokenAt: null,
+          topic: '美联储',
+          supersedesId: null,
+          awaitVerification: false, // 旧版结论链被替代：不得再显示「结论」徽标
           time: iso(1784510000),
         },
         {
@@ -179,6 +198,22 @@ beforeEach(() => {
           evidence: ['金十快讯：鲍威尔称「不急于降息」'],
           status: 'pending',
           brokenAt: null,
+          topic: '美联储',
+          supersedesId: 3, // 修正版：替代链#3
+          awaitVerification: true,
+          time: iso(1784510000),
+        },
+        {
+          id: 4,
+          reportId: 6,
+          chain: [{ node: '旧数据无主题的链', kind: '事件' }],
+          confidence: 0.4,
+          evidence: [],
+          status: 'pending',
+          brokenAt: null,
+          topic: '', // 旧数据形态 → 「未分组」族
+          supersedesId: null,
+          awaitVerification: true,
           time: iso(1784510000),
         },
       ],
@@ -233,10 +268,17 @@ describe('ResearchPanel(研报面板)', () => {
     expect(screen.getByText('· BTC 现货 ETF 连续三日净流入')).toBeInTheDocument()
     expect(screen.getByText('风险')).toBeInTheDocument()
     expect(screen.getByText('· 美联储官员讲话偏鹰或压制风险偏好')).toBeInTheDocument()
-    // 因果链：状态徽标 + 链置信度 + chip 节点链（→ 串联）+ timeline 溯源标注
-    expect(screen.getByText('因果链')).toBeInTheDocument()
+    // 因果链：按主题分族标题 + 状态徽标 + 链置信度 + chip 节点链（→ 串联）+ timeline 溯源标注
+    expect(screen.getByText('因果链（按主题分族）')).toBeInTheDocument()
     expect(screen.getByText('已确认')).toBeInTheDocument()
-    expect(screen.getByText('待验证')).toBeInTheDocument()
+    expect(screen.getAllByText('待验证').length).toBe(2) // id2 修正版 + id4 未分组旧链
+    expect(screen.getByText('已被替代')).toBeInTheDocument() // superseded 状态徽标
+    expect(screen.getByText('结论')).toBeInTheDocument() // awaitVerification=false 且未被替代的结论徽标
+    expect(screen.getByText('替代链#3')).toBeInTheDocument() // 修正版标注替代目标
+    expect(screen.getByText('已被链#2替代')).toBeInTheDocument() // findReplacer 反查
+    expect(screen.getByText('CPI')).toBeInTheDocument() // 分族标题
+    expect(screen.getByText('美联储')).toBeInTheDocument()
+    expect(screen.getByText('未分组')).toBeInTheDocument() // topic 空串降级
     expect(screen.getByText('链置信度 72%')).toBeInTheDocument()
     expect(screen.getByText('链置信度 55%')).toBeInTheDocument()
     expect(screen.getByText('美国 6 月 CPI 同比回落至 3.0%')).toBeInTheDocument()
@@ -244,6 +286,16 @@ describe('ResearchPanel(研报面板)', () => {
     expect(screen.getByText('加密市场短线承压回落')).toBeInTheDocument()
     expect(screen.getByText('溯源 #1287')).toBeInTheDocument()
     expect(screen.getAllByText('→').length).toBeGreaterThanOrEqual(4) // 两条 3 节点链各 2 个箭头
+    // 族内排序：美联储族当前版（id2 待验证）在前、历史版（id3 已被替代）在后
+    // （按「链置信度」过滤出卡片 li，排除卡片内证据列表的嵌套 li）
+    const fedGroup = screen.getByText('美联储').closest('div')!
+    const fedCards = Array.from(fedGroup.querySelectorAll('li')).filter((li) =>
+      li.textContent?.includes('链置信度'),
+    )
+    expect(fedCards[0].textContent).toContain('待验证')
+    expect(fedCards[1].textContent).toContain('已被替代')
+    // 被替代的结论链不再显示「结论」徽标（只有 CPI 族的 id1 有）
+    expect(screen.getAllByText('结论').length).toBe(1)
   })
 
   it('慢请求回归：展开→请求未返回时收起→再展开→请求完成，最终显示详情而非永远加载中', async () => {
@@ -290,7 +342,7 @@ describe('ResearchPanel(研报面板)', () => {
     // 无数据整块不渲染（失败研报无证据/风险/因果链）
     expect(screen.queryByText('证据')).not.toBeInTheDocument()
     expect(screen.queryByText('风险')).not.toBeInTheDocument()
-    expect(screen.queryByText('因果链')).not.toBeInTheDocument()
+    expect(screen.queryByText('因果链（按主题分族）')).not.toBeInTheDocument()
     // 空串 roundId：灰字降级提示，且不拉取审计轮
     expect(screen.getByText('该研报无工具调用记录')).toBeInTheDocument()
     expect(holder.getRound).not.toHaveBeenCalled()

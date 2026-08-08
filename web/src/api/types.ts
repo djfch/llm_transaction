@@ -453,11 +453,14 @@ export interface ChainNode {
 export interface CausalLinkView {
   id: number // 因果链 ID
   reportId: number // 归属研报 ID（由 report_id 适配）
-  chain: ChainNode[] // 有序节点链（2-6 节点）
+  chain: ChainNode[] // 有序节点链（待验证 1-6 节点 / 结论 2-6 节点）
   confidence: number // 链式置信度（0-1）
   evidence: string[] // 支撑证据列表
-  status: string // 复盘验证状态：pending(待验证) / verified(已确认) / failed(已否决)
+  status: string // 状态：pending(待验证) / verified(已确认) / failed(已否决) / superseded(已被替代)
   brokenAt: number | null // 断点节点下标（复盘标记；null = 未定位）
+  topic: string // 事件主题（同主题链聚合成族；空串 = 旧数据无主题）
+  supersedesId: number | null // 本链替代的旧链 ID（修正版有值；null = 非修正版）
+  awaitVerification: boolean // 待验证声明：true=未闭合中间态（继续监控）/ false=结论链
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
 }
 

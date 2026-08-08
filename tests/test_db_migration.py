@@ -53,3 +53,62 @@ async def test_review_reports_round_id_migration(tmp_path):
     db2 = Database()
     await db2.open(path)  # 重复 open 幂等（列已存在，不再 ALTER）
     await db2.close()
+
+
+# 旧版 causal_links 表结构（无 topic/supersedes_id/await_verification 列），与版本化上线前一致
+_OLD_CAUSAL_LINKS_DDL = """
+CREATE TABLE causal_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    chain_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    broken_at INTEGER,
+    created_at REAL NOT NULL
+)
+"""
+
+
+async def test_causal_links_versioning_migration(tmp_path):
+    """旧库（causal_links 缺三列）迁移补列；老行保持 主题''/无替代/待验证，重复 open 幂等。"""
+    path = tmp_path / "old-causal.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(_OLD_CAUSAL_LINKS_DDL)
+    await conn.execute(
+        "INSERT INTO causal_links(report_id,chain_json,confidence,created_at)"
+        ' VALUES(1,\'[{"node": "老链"}]\',0.6,1.0)'
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)  # 完整 SCHEMA（IF NOT EXISTS 不动旧表）+ _migrate 补列 + 补索引
+    cur = await db.conn.execute("PRAGMA table_info(causal_links)")
+    cols = {row["name"] for row in await cur.fetchall()}
+    assert {"topic", "supersedes_id", "await_verification"} <= cols  # 三列已补上
+    cur = await db.conn.execute("PRAGMA index_list(causal_links)")
+    index_names = {row["name"] for row in await cur.fetchall()}
+    assert "idx_causal_links_supersedes" in index_names  # 迁移末尾补建的索引存在
+    repo = Repo(db)
+    old = await repo.research.get_causal_link(1)
+    assert old is not None
+    assert old.topic == ""  # 老链无主题，不回填
+    assert old.supersedes_id is None  # 老链无替代关系
+    assert old.await_verification is True  # 老链按待验证处理（进未闭合监控池）
+    assert old.status == "pending"
+    # 迁移后新链正常写入读出（含版本化字段）
+    link = await repo.research.save_causal_link(
+        report_id=1,
+        chain_json='[{"node": "新链"}]',
+        confidence=0.7,
+        topic="非农",
+        await_verification=False,
+    )
+    got = await repo.research.get_causal_link(link.id)
+    assert got is not None and got.topic == "非农" and got.await_verification is False
+    await db.close()
+
+    db2 = Database()
+    await db2.open(path)  # 重复 open 幂等（列与索引已存在）
+    await db2.close()

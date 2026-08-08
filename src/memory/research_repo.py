@@ -8,7 +8,10 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 - timeline（事实层）只由代码写入（append_timeline_many），研报/复盘 agent 零写权限；
 - research_reports 由研报 agent 代码直接落库（不经工具）；
 - causal_links 由工具 submit_causal_links 校验暂存、研报落库后由 agent 代码回填
-  report_id 批量落库（LLM 无法预知本轮研报 id，H1 修复后口径）。
+  report_id 批量落库（LLM 无法预知本轮研报 id，H1 修复后口径）；
+- causal_links 版本化：新链可声明 supersedes_id 替代旧链（同事务把旧链 status 标记
+  superseded，旧链保留留档）；待验证链（await_verification=1）进入未闭合监控池，
+  由预注入持续跟进，直到被替代或复盘验证结案。
 """
 
 from __future__ import annotations
@@ -192,13 +195,37 @@ class ResearchRepo:
         chain_json: str,
         confidence: float,
         evidence_json: str = "[]",
+        topic: str = "",
+        supersedes_id: int | None = None,
+        await_verification: bool = True,
     ) -> CausalLink:
-        """落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）。"""
+        """落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）。
+
+        版本化：supersedes_id 非空时同一事务内先插入新链、再把旧链 status 标记为
+        superseded（旧链保留留档，复盘可对比各版本）；任一步失败整体不 commit
+        （aiosqlite 单连接串行，未 commit 自然回滚）。
+        """
         cur = await self._conn.execute(
             "INSERT INTO causal_links(report_id,chain_json,confidence,evidence_json,"
-            "status,broken_at,created_at) VALUES(?,?,?,?,?,?,?)",
-            (report_id, chain_json, confidence, evidence_json, "pending", None, _now()),
+            "status,broken_at,topic,supersedes_id,await_verification,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                report_id,
+                chain_json,
+                confidence,
+                evidence_json,
+                "pending",
+                None,
+                topic,
+                supersedes_id,
+                int(bool(await_verification)),
+                _now(),
+            ),
         )
+        if supersedes_id is not None:
+            await self._conn.execute(
+                "UPDATE causal_links SET status='superseded' WHERE id=?", (supersedes_id,)
+            )
         await self._conn.commit()
         return CausalLink(
             id=cur.lastrowid or 0,
@@ -206,16 +233,51 @@ class ResearchRepo:
             chain_json=chain_json,
             confidence=confidence,
             evidence_json=evidence_json,
+            topic=topic,
+            supersedes_id=supersedes_id,
+            await_verification=bool(await_verification),
             created_at=_now(),
         )
 
-    async def list_causal_links(self, days: int = 7) -> list[CausalLink]:
-        """近 days 天因果链，按创建时间正序。"""
+    async def get_causal_link(self, link_id: int) -> CausalLink | None:
+        """按 id 取因果链（supersedes 校验用）；不存在返回 None。"""
+        cur = await self._conn.execute("SELECT * FROM causal_links WHERE id=?", (link_id,))
+        row = await cur.fetchone()
+        return CausalLink(**dict(row)) if row else None
+
+    async def list_pending_causal_links(self, limit: int = 10) -> list[CausalLink]:
+        """未闭合链：待验证声明（await_verification=1）且未被替代（status=pending）。
+
+        预注入用：最新在前取 limit 条后按 id 正序返回；不按时间淘汰——事件发展
+        需要时间，直到被替代或复盘盖章才闭合。
+        """
         cur = await self._conn.execute(
-            "SELECT * FROM causal_links WHERE created_at >= ? ORDER BY id",
-            (_now() - days * 86400,),
+            "SELECT * FROM causal_links WHERE status='pending' AND await_verification=1"
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
         )
-        return [CausalLink(**dict(r)) for r in await cur.fetchall()]
+        rows = [CausalLink(**dict(r)) for r in await cur.fetchall()]
+        rows.reverse()  # 最新在前 → 时间正序（便于拼接上下文）
+        return rows
+
+    async def list_causal_links(
+        self, days: int = 7, topic: str | None = None, limit: int = 200
+    ) -> list[CausalLink]:
+        """近 days 天因果链（含历史版与全部状态），按创建时间正序。
+
+        topic 非空时只取该主题的链（read_causal_links 工具按主题查族谱用）。
+        """
+        sql = "SELECT * FROM causal_links WHERE created_at >= ?"
+        params: list = [_now() - days * 86400]
+        if topic:
+            sql += " AND topic = ?"
+            params.append(topic)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cur = await self._conn.execute(sql, params)
+        rows = [CausalLink(**dict(r)) for r in await cur.fetchall()]
+        rows.reverse()
+        return rows
 
     async def list_causal_links_by_report(self, report_id: int) -> list[CausalLink]:
         """按研报 id 取因果链，id 正序（同一研报内按提交顺序）。"""
