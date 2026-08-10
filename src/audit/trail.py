@@ -21,7 +21,14 @@ logger = get_logger(__name__)
 
 
 def _to_json_str(value: Any) -> str:
-    """入参/结果统一序列化为 JSON 字符串；已是字符串则原样保留。"""
+    """入参/结果统一序列化为 JSON 字符串；已是字符串则原样保留。
+
+    参数：
+        value: Any，待转换或校验的值
+
+    返回：
+        str：入参/结果统一序列化为 JSON 字符串；已是字符串则原样保留
+    """
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
@@ -31,6 +38,15 @@ class AuditTrail:
     """一轮决策的审计写入入口：begin → (record_context) → record_tool_call × N → end。"""
 
     def __init__(self, repo: Repo, config: AuditConfig) -> None:
+        """初始化审计追踪器，绑定审计仓储与 JSON 快照输出目录。
+
+        参数：
+            repo: Repo，审计记录持久化仓储（SQLite 读写入口）
+            config: AuditConfig，审计配置（dir 指定快照文件输出目录）
+
+        返回：
+            None，就地设置实例属性（保存仓储引用与快照目录路径）
+        """
         self._repo = repo
         self._dir = Path(config.dir)
 
@@ -48,6 +64,16 @@ class AuditTrail:
         上下文构建完成后经 record_context 回填快照。
         strategy_md5 为策略书原文 md5（区别于 prompt_md5 的拼装 md5），
         供复盘按策略版本关联本轮。
+
+        参数：
+            mode: str，交易运行模式
+            wake_source: str，触发本轮决策的来源
+            system_prompt: str，本轮系统提示词全文
+            context: str，本轮决策上下文全文
+            strategy_md5: str，策略书内容摘要；为空时不按版本过滤
+
+        返回：
+            str：开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id
         """
         round_id = uuid.uuid4().hex
         prompt_md5 = hashlib.md5(system_prompt.encode("utf-8")).hexdigest()
@@ -64,7 +90,15 @@ class AuditTrail:
         return round_id
 
     async def record_context(self, round_id: str, context: str) -> None:
-        """上下文构建完成后回填快照（配合 begin_round 的空快照先行落库）。"""
+        """上下文构建完成后回填快照（配合 begin_round 的空快照先行落库）。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+            context: str，本轮决策上下文全文
+
+        返回：
+            None：上下文构建完成后回填快照（配合 begin_round 的空快照先行落库）
+        """
         await self._repo.update_audit_context(round_id, context)
 
     async def record_tool_call(
@@ -78,7 +112,21 @@ class AuditTrail:
         result: Any,
         duration_ms: int,
     ) -> None:
-        """记录一次工具调用（含风控判定与耗时）。args/result 接受 dict 或 JSON 字符串。"""
+        """记录一次工具调用（含风控判定与耗时）。args/result 接受 dict 或 JSON 字符串。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+            seq: int，工具调用在本轮中的顺序号
+            tool: str，工具名称
+            args: Any，调用方传入的工具参数字典
+            risk_verdict: str，风控判定结果
+            risk_reason: str，风控判定原因
+            result: Any，待序列化或返回的执行结果
+            duration_ms: int，工具执行耗时毫秒数
+
+        返回：
+            None：记录一次工具调用（含风控判定与耗时）。args/result 接受 dict 或 JSON 字符串
+        """
         await self._repo.save_audit_tool_call(
             round_id=round_id,
             seq=seq,
@@ -91,13 +139,29 @@ class AuditTrail:
         )
 
     async def end_round(self, round_id: str, llm_raw: str, error: str = "") -> None:
-        """结束一轮：补全 LLM 原始输出与异常信息，并写 JSON 全文快照。"""
+        """结束一轮：补全 LLM 原始输出与异常信息，并写 JSON 全文快照。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+            llm_raw: str，本轮 LLM 原始输出
+            error: str，需要记录的错误文本
+
+        返回：
+            None：结束一轮：补全 LLM 原始输出与异常信息，并写 JSON 全文快照
+        """
         await self._repo.finish_audit_round(round_id, llm_raw=llm_raw, error=error)
         await self._write_snapshot(round_id)
         logger.info("审计轮次结束 round_id=%s error=%s", round_id, error or "无")
 
     async def get_round(self, round_id: str) -> dict[str, Any] | None:
-        """读取一轮完整记录（主表 + 工具调用链）；不存在返回 None。供 server 层复用。"""
+        """读取一轮完整记录（主表 + 工具调用链）；不存在返回 None。供 server 层复用。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+
+        返回：
+            dict[str, Any] | None：读取一轮完整记录（主表 + 工具调用链）；不存在返回 None。供 server 层复用
+        """
         round_row = await self._repo.get_audit_round(round_id)
         if round_row is None:
             return None
@@ -108,7 +172,14 @@ class AuditTrail:
         }
 
     async def _write_snapshot(self, round_id: str) -> None:
-        """把本轮完整记录写成 logs/audit/round_<round_id>.json（目录自动创建）。"""
+        """把本轮完整记录写成 logs/audit/round_<round_id>.json（目录自动创建）。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+
+        返回：
+            None：把本轮完整记录写成 logs/audit/round_<round_id>.json（目录自动创建）
+        """
         data = await self.get_round(round_id)
         if data is None:
             logger.warning("快照跳过：round_id=%s 不存在", round_id)

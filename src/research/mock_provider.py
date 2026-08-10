@@ -13,6 +13,14 @@ from src.agent.providers.base import LLMResponse, ToolCall
 
 
 def _watchlist_contracts(messages: list[dict]) -> tuple[str, ...]:
+    """从对话消息中解析「本轮白名单」段落，提取本轮研报覆盖的合约列表。
+
+    参数：
+        messages: list[dict]，多轮对话消息列表，在其中查找含「## 本轮白名单」段落的消息
+
+    返回：
+        tuple[str, ...]：按出现顺序去重后的合约名元组；未找到白名单段落时返回空元组
+    """
     for message in messages:
         content = message.get("content")
         if not isinstance(content, str) or "## 本轮白名单" not in content:
@@ -30,6 +38,14 @@ def _watchlist_contracts(messages: list[dict]) -> tuple[str, ...]:
 
 
 def _report_json(contracts: tuple[str, ...]) -> str:
+    """按给定合约列表拼出确定性的 v2 研报 JSON 字符串（mock 数据，仅供链路验证）。
+
+    参数：
+        contracts: tuple[str, ...]，本轮白名单合约名，逐个生成一条中性立场的标的观点
+
+    返回：
+        str：schema_version=2 的研报 JSON 字符串，各字段均为固定 mock 内容
+    """
     asset_views = [
         {
             "contract": contract,
@@ -61,9 +77,27 @@ class ResearchMockProvider:
     """实现 LLMProvider 协议的研报专用 Mock（不触网，输出确定性成功）。"""
 
     def __init__(self) -> None:
+        """初始化 Mock Provider，对话轮次计数器归零。
+
+        参数：无
+
+        返回：None，仅初始化内部状态（轮次计数器置 0）
+        """
         self._calls = 0
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """模拟一轮研报对话：首轮按白名单发出工具调用，拿到市场数据后返回 v2 研报 JSON。
+
+        参数：
+            system: str，系统提示词（mock 不读取，仅为保持接口一致）
+            messages: list[dict]，多轮对话消息，用于解析白名单及判断市场工具结果是否已回填
+            tools: list[dict]，可用工具定义（mock 不读取，仅为保持接口一致）
+
+        返回：
+            LLMResponse：白名单非空且尚无市场工具结果时，返回 fetch_calendar、
+            fetch_indicators 与逐标的 get_research_market_data 的工具调用；
+            否则返回确定性的 v2 研报 JSON 文本
+        """
         self._calls += 1
         contracts = _watchlist_contracts(messages)
         has_market_result = any(
@@ -96,4 +130,13 @@ class ResearchMockProvider:
         )
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把一次工具执行结果包装成 user 角色消息，供回填对话继续下一轮。
+
+        参数：
+            call: ToolCall，已执行的工具调用，取其中的工具名写入消息文本
+            result: str，工具执行结果文本
+
+        返回：
+            dict：形如 {"role": "user", "content": "工具 <工具名> 执行结果：<结果>"} 的消息
+        """
         return {"role": "user", "content": f"工具 {call.name} 执行结果：{result}"}

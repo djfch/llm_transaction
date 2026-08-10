@@ -39,7 +39,18 @@ def to_position(
     maintenance_rate: Decimal,
     account: PaperAccount,
 ) -> Position:
-    """内部持仓转为 Gateway 接口的 Position 模型（liq_price 为简化估算）。"""
+    """把模拟账户持仓转换为网关统一持仓模型并估算强平价格与未实现盈亏。
+
+    参数：
+        pos: PaperPosition，模拟账户内部持仓
+        contract_meta: Contract，合约乘数与资金费率等元数据
+        mark: Decimal，当前标记价格
+        maintenance_rate: Decimal，维持保证金率
+        account: PaperAccount，提供未实现盈亏计算的模拟账户
+
+    返回：
+        Position，供网关接口返回的标准持仓快照
+    """
     quanto = contract_meta.quanto_multiplier
     return Position(
         contract=pos.contract,
@@ -54,7 +65,16 @@ def to_position(
 
 
 def synth_ticker(name: str, snap: PriceSnap, contract_meta: Contract | None) -> Ticker:
-    """无外部 ticker provider 时，由行情快照合成 ticker（24h 高低/涨跌取快照值）。"""
+    """在无外部行情提供器时，用当前价格快照合成标准行情对象。
+
+    参数：
+        name: str，合约名称
+        snap: PriceSnap，当前标记价与买卖价快照
+        contract_meta: Contract | None，可选合约元数据，用于读取资金费率
+
+    返回：
+        Ticker，以快照价格填充 24 小时字段的标准行情对象
+    """
     return Ticker(
         contract=name,
         last=snap.mark,

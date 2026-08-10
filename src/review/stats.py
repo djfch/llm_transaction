@@ -49,7 +49,13 @@ class ReviewStats:
     per_contract: dict[str, ContractStat] = field(default_factory=dict)  # 各合约分布
 
     def to_dict(self) -> dict:
-        """序列化为 stats_json 落库结构（Decimal 转字符串，None 保留）。"""
+        """序列化为 stats_json 落库结构（Decimal 转字符串，None 保留）。
+
+        参数：无
+
+        返回：
+            dict，可直接写入 stats_json 的统计字典
+        """
         return {
             "close_count": self.close_count,
             "total_pnl": str(self.total_pnl),
@@ -68,14 +74,30 @@ class ReviewStats:
 
 
 def _div(numerator: Decimal, denominator: Decimal, quantum: Decimal) -> Decimal | None:
-    """Decimal 除法：分母为 0 返回 None，否则按 quantum 量化。"""
+    """Decimal 除法：分母为 0 返回 None，否则按 quantum 量化。
+
+    参数：
+        numerator: Decimal，除法分子
+        denominator: Decimal，除法分母
+        quantum: Decimal，Decimal 量化精度
+
+    返回：
+        Decimal | None，Decimal 除法：分母为 0 返回 None，否则按 quantum 量化
+    """
     if denominator == 0:
         return None
     return (numerator / denominator).quantize(quantum)
 
 
 def compute_review_stats(trades: list[Trade]) -> ReviewStats:
-    """按模块定义的固定口径统计平仓成交；入参已过滤并去重。"""
+    """按模块定义的固定口径统计平仓成交；入参已过滤并去重。
+
+    参数：
+        trades: list[Trade]，已过滤去重的平仓成交列表
+
+    返回：
+        ReviewStats，按模块定义的固定口径统计平仓成交；入参已过滤并去重
+    """
     sample = [t for t in trades if t.source in CLOSE_SOURCES]
     wins = [t.pnl for t in sample if t.pnl > 0]
     losses = [t.pnl for t in sample if t.pnl < 0]
@@ -102,12 +124,27 @@ def compute_review_stats(trades: list[Trade]) -> ReviewStats:
 
 
 def _fmt(value: Decimal | None, quantum: Decimal = Decimal("0.01")) -> str:
-    """展示用格式化：None 显示为「数据不足」，Decimal 按分位量化。"""
+    """展示用格式化：None 显示为「数据不足」，Decimal 按分位量化。
+
+    参数：
+        value: Decimal | None，待解析的时间、JSON 或指标值
+        quantum: Decimal，Decimal 量化精度
+
+    返回：
+        str，展示用格式化：None 显示为「数据不足」，Decimal 按分位量化
+    """
     return "数据不足" if value is None else str(value.quantize(quantum))
 
 
 def format_stats_text(stats: ReviewStats) -> str:
-    """中文纯文本统计结果（供 get_review_stats 工具返回与复盘简报预统计段）。"""
+    """中文纯文本统计结果（供 get_review_stats 工具返回与复盘简报预统计段）。
+
+    参数：
+        stats: ReviewStats，复盘统计结果
+
+    返回：
+        str，中文纯文本统计结果（供 get_review_stats 工具返回与复盘简报预统计段）
+    """
     lines = [
         f"平仓笔数：{stats.close_count}；总盈亏：{stats.total_pnl}",
         f"胜率：{_fmt(stats.win_rate, Decimal('0.0001'))}（{stats.win_count}/{stats.close_count}）",

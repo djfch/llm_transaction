@@ -28,6 +28,20 @@ class OpenAIResponsesProvider:
     """OpenAI Responses API 适配（无状态 input 回放）。"""
 
     def __init__(self, config: LLMConfig | CredentialConfig, api_key: str | None = None) -> None:
+        """初始化 OpenAI Responses 客户端：取 key、建 AsyncOpenAI 并记下模型参数。
+
+        参数：
+            config: LLMConfig | CredentialConfig，LLM 配置（模型名、max_tokens、
+                thinking_effort、可选的 openai_base_url）
+            api_key: str | None，显式传入的 API key；为 None 时从环境变量
+                OPENAI_API_KEY 读取
+
+        返回：
+            None，就地初始化实例属性（创建 self._client 异步客户端）
+
+        异常：
+            LLMError：未提供 api_key 且环境变量 OPENAI_API_KEY 也为空时抛出
+        """
         key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not key:
             raise LLMError("缺少 OPENAI_API_KEY 环境变量，无法初始化 OpenAI Responses provider")
@@ -42,6 +56,22 @@ class OpenAIResponsesProvider:
         self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """调用 OpenAI Responses API 发起一轮对话，返回统一格式的回复。
+
+        参数：
+            system: str，系统提示词（作为 instructions 传给模型）
+            messages: list[dict]，内部多轮对话消息列表（普通 user/assistant 消息、
+                带 response_items 的 assistant 私有包裹、function_call_output 工具结果），
+                发送前由 _to_input 展开回放为原生 input 项
+            tools: list[dict]，中性格式工具定义 {name, description, parameters(JSON Schema)}，
+                内部转换为 Responses 扁平 function 格式；空列表表示不带工具
+
+        返回：
+            LLMResponse：统一回复（文本 + 工具调用列表 + 原始输出 + 原生 assistant 消息）
+
+        异常：
+            LLMError：OpenAI API 调用失败（网络/鉴权/限流/服务端错误等）时抛出
+        """
         oai_tools = [
             {
                 "type": "function",
@@ -76,6 +106,15 @@ class OpenAIResponsesProvider:
         return self._parse(resp)
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把一次工具执行结果包装成 Responses 原生 function_call_output 项，供回填继续对话。
+
+        参数：
+            call: ToolCall，对应的工具调用（取 call_id 关联原调用）
+            result: str，工具执行结果文本
+
+        返回：
+            dict：{"type": "function_call_output", "call_id", "output"} 形式的消息
+        """
         return {"type": "function_call_output", "call_id": call.call_id, "output": result}
 
     @staticmethod
@@ -84,6 +123,13 @@ class OpenAIResponsesProvider:
 
         三种形态：带 response_items 键的 assistant 私有包裹展开逐项追加；
         function_call_output 工具结果透传；其余普通 user/assistant 消息原样透传。
+
+        参数：
+            messages: list[dict]，统一格式的对话消息
+
+        返回：
+            list[dict]，符合 Responses API 输入格式的消息数组
+
         """
         items: list[dict] = []
         for msg in messages:
@@ -99,6 +145,16 @@ class OpenAIResponsesProvider:
 
         status 非 completed（截断/失败）抛 LLMError：截断轮 output 可能全空，
         放行会被当作"空仓观望"落库 ok=True；SDK status 为 Optional，None 放行。
+
+        参数：
+            resp: Response，提供商原始响应
+
+        返回：
+            LLMResponse，output 项列表 → 统一 LLMResponse；reasoning 等其他类型项跳过。  status 非 completed（截断/失败）抛 LLMError：截断轮 output 可能全空， 放行会被当作"空仓观望"落库 ok=True；SDK status 为 Optional，None 放行
+
+        异常：
+            LLMError，Responses 状态不是 completed 时抛出并阻止本轮交易
+
         """
         status = getattr(resp, "status", None)
         if status not in (None, "completed"):
@@ -128,6 +184,16 @@ class OpenAIResponsesProvider:
         """function_call 项 → ToolCall；call_id 取 call_id 字段（不是 id）。
 
         arguments 非法 JSON 或非 JSON 对象抛 LLMParseError（本轮不交易）。
+
+        参数：
+            item: object，提供商响应中的工具调用项
+
+        返回：
+            ToolCall，包含工具名、对象参数与 call_id 的统一工具调用
+
+        异常：
+            LLMParseError，工具参数不是合法 JSON 或解析后不是对象时抛出
+
         """
         try:
             args = json.loads(item.arguments) if item.arguments else {}

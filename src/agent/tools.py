@@ -55,6 +55,15 @@ class ToolRegistry:
     """工具注册表：schemas() 供 provider 转换，execute() 统一捕获错误。"""
 
     def __init__(self, deps: ToolDeps) -> None:
+        """初始化注册表：为每个工具预绑定执行函数与共享依赖，并挂接同名 schema。
+
+        参数：
+            deps: ToolDeps，工具执行所需的共享依赖（网关、风控、仓库等），
+                通过 partial 预绑定到每个工具的执行函数上
+
+        返回：
+            None，把全部 ToolSpec 写入实例的 _tools 字典
+        """
         self._tools: dict[str, ToolSpec] = {}
         for name, fn in _HANDLERS.items():
             schema = SCHEMAS[name]
@@ -67,17 +76,38 @@ class ToolRegistry:
 
     @property
     def specs(self) -> list[ToolSpec]:
+        """全部已注册工具的完整定义列表（供拼装系统提示词等场景使用）。
+
+        参数：无
+
+        返回：
+            list[ToolSpec]：全部已注册工具的 ToolSpec
+        """
         return list(self._tools.values())
 
     def schemas(self) -> list[dict]:
-        """中性格式 [{name, description, parameters}]，provider 各自转换。"""
+        """导出与厂商无关的工具定义，供各 LLM 提供器转换为自身协议。
+
+        参数：无
+
+        返回：
+            list[dict]，包含名称、说明和参数结构的工具定义列表
+        """
         return [
             {"name": s.name, "description": s.description, "parameters": s.parameters}
             for s in self._tools.values()
         ]
 
     async def execute(self, name: str, args: dict | None) -> ToolOutcome:
-        """执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）。"""
+        """执行指定工具，并把参数、网关或内部失败转换为可供 LLM 修正的结果文本。
+
+        参数：
+            name: str，待执行的注册工具名称
+            args: dict | None，工具参数对象；为空时按空对象处理
+
+        返回：
+            ToolOutcome，工具执行结果或已转换的错误说明
+        """
         spec = self._tools.get(name)
         if spec is None:
             return ToolOutcome(f"错误：未知工具 {name}（可用：{', '.join(self._tools)}）")

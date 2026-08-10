@@ -37,7 +37,13 @@ _SENSITIVE_ENV_KEYS = frozenset({"API_KEY", "API_SECRET", "TOKEN", "PASSWORD", "
 
 
 def _minimal_env() -> dict[str, str]:
-    """复制系统环境但剔除敏感项（第三方 MCP 子进程只需 PATH 等运行环境）。"""
+    """复制系统环境但剔除敏感项（第三方 MCP 子进程只需 PATH 等运行环境）。
+
+    参数：无
+
+    返回：
+        dict[str, str]，保留运行必需项且剔除敏感项的子进程环境
+    """
     return {
         k: v
         for k, v in os.environ.items()
@@ -53,6 +59,16 @@ def _stdio_command(cmd: str) -> tuple[str, list[str]]:
     执行，须经 cmd /c 包装；POSIX（Linux 部署机）无 cmd，shlex 拆分后直接 exec。
     Windows 分支用普通 split——shlex 按 POSIX 规则吃反斜杠，会拆坏
     'C:\\tools\\xx.cmd' 这类路径型自定义命令（复审 #3 修复）。
+
+    参数：
+        cmd: str，待拆分的 stdio MCP 命令串
+
+    返回：
+        tuple[str, list[str]]，可执行命令与参数列表
+
+    异常：
+        ResearchSourceError，拆分后的 MCP 命令为空时抛出
+
     """
     if not cmd.strip():
         raise ResearchSourceError("stdio MCP 命令为空")
@@ -79,6 +95,25 @@ class McpSession:
         env_key: str = "",
         timeout: float = 60.0,
     ) -> None:
+        """保存一个 MCP 会话的连接配置并校验必填项，此时尚不建立连接。
+
+        参数：
+            kind: Literal["http", "stdio"]，会话类型：http 为金十（Bearer token 直连），
+                stdio 为律动（npx 子进程 + API key）
+            url: str，HTTP 模式的 MCP 服务地址；kind='http' 时必填
+            token: str，HTTP 模式的 Bearer 鉴权令牌；可为空串表示不鉴权
+            cmd: str，stdio 模式的启动命令串（如 'npx -y blockbeats-mcp'）；
+                kind='stdio' 时必填
+            env_key: str，stdio 模式需额外透传给子进程的环境变量名（如律动 API key）；
+                为空串则不透传任何敏感变量
+            timeout: float，连接与读取超时秒数；省略时默认 60 秒
+
+        返回：
+            None，就地写入实例属性（连接在 async with 进入时才建立）
+
+        异常：
+            ResearchSourceError：kind='http' 但缺少 url，或 kind='stdio' 但缺少 cmd 时抛出
+        """
         if kind == "http" and not url:
             raise ResearchSourceError("HTTP MCP 缺少 url")
         if kind == "stdio" and not cmd:
@@ -93,6 +128,17 @@ class McpSession:
         self._ctx: AsyncIterator | None = None
 
     async def __aenter__(self) -> "McpSession":
+        """按配置建立 MCP 连接并完成初始化握手，返回就绪会话；失败先清理资源再抛错。
+
+        参数：无
+
+        返回：
+            McpSession：已建立连接的会话自身，供 async with 语句绑定使用
+
+        异常：
+            ResearchSourceError：连接、会话建立或初始化任一步骤失败时抛出，
+                原始异常保留在 __cause__ 中
+        """
         try:
             if self._kind == "http":
                 http = httpx2.AsyncClient(
@@ -116,6 +162,15 @@ class McpSession:
             raise ResearchSourceError(f"MCP 连接失败（{self._kind}）：{exc}") from exc
 
     async def __aexit__(self, *exc_info: object) -> None:
+        """释放 MCP 会话与底层连接/子进程资源；清理中的异常被吞掉，保证退出不再抛错。
+
+        参数：
+            exc_info: object，async with 退出时传入的异常信息（异常类型、值、追溯），
+                仅原样透传给底层会话与传输层的关闭逻辑
+
+        返回：
+            None，就地释放资源（会话与连接上下文置为 None）
+        """
         if self._session is not None:
             try:
                 await self._session.__aexit__(*exc_info)
@@ -130,7 +185,18 @@ class McpSession:
             self._ctx = None
 
     async def call_tool(self, name: str, args: dict | None = None) -> str:
-        """调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError。"""
+        """调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError。
+
+        参数：
+            name: str，工具名或参数名
+            args: dict | None，工具调用参数
+
+        返回：
+            str，调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError
+
+        异常：
+            ResearchSourceError，会话未建立、工具返回错误标记或调用过程失败时抛出
+        """
         if self._session is None:
             raise ResearchSourceError("MCP 会话未建立")
         try:
@@ -145,7 +211,16 @@ class McpSession:
             raise ResearchSourceError(f"MCP 工具 {name} 调用失败：{exc}") from exc
 
     async def list_tools(self) -> list[str]:
-        """列出可用工具名（连通性自检用）。"""
+        """列出可用工具名（连通性自检用）。
+
+        参数：无
+
+        返回：
+            list[str]，列出可用工具名（连通性自检用）
+
+        异常：
+            ResearchSourceError，MCP 会话尚未建立时抛出
+        """
         if self._session is None:
             raise ResearchSourceError("MCP 会话未建立")
         tools = await self._session.list_tools()

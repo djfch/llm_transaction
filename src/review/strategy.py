@@ -22,7 +22,13 @@ _MAX_BYTES = 32 * 1024  # UTF-8 体积上限 32KB
 
 
 def content_md5(content: str) -> str:
-    """策略书原文 md5（与 PromptLoader.body_md5 同一算法，作为版本关联键）。"""
+    """策略书原文 md5（与 PromptLoader.body_md5 同一算法，作为版本关联键）。
+
+    参数：
+        content: str，待保存的完整文本
+    返回：
+        str，策略书原文 md5（与 PromptLoader.body_md5 同一算法，作为版本关联键）
+    """
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
@@ -37,6 +43,16 @@ class StrategyValidationError(Exception):
     """
 
     def __init__(self, reasons: list[str], *, no_diff_only: bool = False) -> None:
+        """初始化校验失败异常：保存全部未过原因，并用中文分号拼成异常消息。
+
+        参数：
+            reasons: list[str]，全部未通过校验的原因列表（逐项展示给 LLM 修正重试）
+            no_diff_only: bool，唯一原因是否为"与当前版本无差异"（人工重复保存的
+                幂等判定依据），省略时默认为 False
+
+        返回：
+            None，就地设置实例属性 reasons 与 no_diff_only
+        """
         self.reasons = reasons
         self.no_diff_only = no_diff_only
         super().__init__("；".join(reasons))
@@ -57,18 +73,39 @@ class StrategyStore:
         repo: Repo,
         on_change: Callable[[], None] | None = None,
     ) -> None:
+        """初始化策略书存储入口：绑定策略书文件路径、版本仓库与变更回调。
+
+        参数：
+            prompt_path: str | Path，策略书文件路径（system_prompt.md）
+            repo: Repo，持久化仓库（版本表读写经其 review 子仓库）
+            on_change: Callable[[], None] | None，策略书变更回调（revise/rollback
+                落版本后触发，如广播 WS 事件）；省略时默认为 None，表示不接线
+
+        返回：
+            None，就地设置实例属性（保存路径、仓库与回调引用）
+        """
         self._path = Path(prompt_path)
         self._repo = repo
         # 策略书变更回调（revise/rollback 落版本后触发，如广播 WS 事件）；未接线为 None
         self._on_change = on_change
 
     def _notify_change(self) -> None:
-        """变更即通知（前端据此立即重拉策略面板）；未接线时静默跳过。"""
+        """变更即通知（前端据此立即重拉策略面板）；未接线时静默跳过。
+
+        参数：无
+        返回：
+            None，变更即通知（前端据此立即重拉策略面板）；未接线时静默跳过
+        """
         if self._on_change is not None:
             self._on_change()
 
     async def seed_if_empty(self) -> StrategyVersion | None:
-        """启动播种：版本表为空且策略书文件存在 → 记 v1（created_by='human'）。"""
+        """启动播种：版本表为空且策略书文件存在 → 记 v1（created_by='human'）。
+
+        参数：无
+        返回：
+            StrategyVersion | None，启动播种：版本表为空且策略书文件存在 → 记 v1（created_by='human'）
+        """
         if await self._repo.review.list_strategy_versions():
             return None
         current = self.current()
@@ -79,7 +116,12 @@ class StrategyStore:
         )
 
     def current(self) -> str:
-        """当前策略书原文；文件不存在返回 ''。"""
+        """当前策略书原文；文件不存在返回 ''。
+
+        参数：无
+        返回：
+            str，当前策略书原文；文件不存在返回 ''
+        """
         try:
             return self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -88,7 +130,16 @@ class StrategyStore:
     async def revise(
         self, content: str, reason: str, created_by: str, report_id: int | None = None
     ) -> StrategyVersion:
-        """校验通过后原子替换策略书并落新版本；校验失败抛 StrategyValidationError。"""
+        """校验通过后原子替换策略书并落新版本；校验失败抛 StrategyValidationError。
+
+        参数：
+            content: str，待保存的完整文本
+            reason: str，清空或变更原因
+            created_by: str，版本创建来源
+            report_id: int | None，关联报告标识
+        返回：
+            StrategyVersion，校验通过后原子替换策略书并落新版本；校验失败抛 StrategyValidationError
+        """
         content = content.replace("\r\n", "\n")  # 归一化后校验/md5/写盘/落库用同一份内容
         self._validate(content)
         self._atomic_write(content)
@@ -99,7 +150,15 @@ class StrategyStore:
         return version
 
     async def rollback(self, version_id: int) -> StrategyVersion:
-        """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。"""
+        """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。
+
+        参数：
+            version_id: int，目标历史版本标识
+        返回：
+            StrategyVersion，回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本
+        异常：
+            StrategyValidationError，目标策略版本不存在时抛出
+        """
         version = await self._repo.review.get_strategy_version(version_id)
         if version is None:
             raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
@@ -112,13 +171,36 @@ class StrategyStore:
         return new_version
 
     async def list_versions(self) -> list[StrategyVersion]:
+        """列出全部策略书历史版本，最新版本排在最前。
+
+        参数：无
+
+        返回：
+            list[StrategyVersion]：全部策略书版本，按版本 id 倒序（最新在前）
+        """
         return await self._repo.review.list_strategy_versions()
 
     async def get_version(self, version_id: int) -> StrategyVersion | None:
+        """按版本 id 读取单个策略书历史版本。
+
+        参数：
+            version_id: int，策略书版本 id
+
+        返回：
+            StrategyVersion | None：对应版本；该 id 不存在时返回 None
+        """
         return await self._repo.review.get_strategy_version(version_id)
 
     def _validate(self, content: str) -> None:
-        """写前校验：收集全部未过项一次性抛出（LLM 可逐项修正）。"""
+        """写前校验：收集全部未过项一次性抛出（LLM 可逐项修正）。
+
+        参数：
+            content: str，待保存的完整文本
+        返回：
+            None，写前校验：收集全部未过项一次性抛出（LLM 可逐项修正）
+        异常：
+            StrategyValidationError，策略内容存在任一校验失败项时汇总抛出
+        """
         reasons: list[str] = []
         if len(content.strip()) < _MIN_CHARS:
             reasons.append(
@@ -137,6 +219,11 @@ class StrategyStore:
 
         newline="" 关闭写入换行转换，保证落盘字节与计算 md5 的内容逐字节一致；
         os.replace 失败残留的 .tmp 孤儿文件不清理（下次写入自然覆盖）。
+
+        参数：
+            content: str，待保存的完整文本
+        返回：
+            None，先写同目录 .tmp 临时文件，再 os.replace 原子替换目标文件
         """
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(content, encoding="utf-8", newline="")

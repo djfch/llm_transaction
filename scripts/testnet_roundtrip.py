@@ -24,7 +24,13 @@ LEVERAGE = 2
 
 
 def _build_gateway() -> GateRestGateway:
-    """加载配置与密钥，构建 testnet 网关；host 必须含 testnet，否则直接退出。"""
+    """加载配置与密钥并构建 Gate 测试网网关，拒绝连接非测试网地址。
+
+    参数：无
+
+    返回：
+        GateRestGateway，已完成测试网安全校验的真实交易网关
+    """
     load_dotenv()
     gate = load_settings().gate
     if "testnet" not in gate.testnet_host:
@@ -36,6 +42,14 @@ def _build_gateway() -> GateRestGateway:
 
 
 def _step_account(gw: GateRestGateway) -> None:
+    """打印 testnet 账户的可用余额与未实现盈亏（流程第 1 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+
+    返回：
+        None，仅在终端打印账户信息
+    """
     acc = gw.get_account()
     print(
         f"[1/6] 账户：available(可用)={acc.available} unrealised_pnl(未实现盈亏)={acc.unrealised_pnl}"
@@ -43,11 +57,28 @@ def _step_account(gw: GateRestGateway) -> None:
 
 
 def _step_leverage(gw: GateRestGateway) -> None:
+    """把 BTC_USDT 合约杠杆调为 2 倍逐仓并打印结果（流程第 2 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+
+    返回：
+        None，仅在终端打印调整后的杠杆倍数
+    """
     pos = gw.set_leverage(CONTRACT, LEVERAGE, "isolated")
     print(f"[2/6] 调杠杆：{CONTRACT} leverage(杠杆)={pos.leverage} 模式=isolated")
 
 
 def _step_open(gw: GateRestGateway, size: int) -> None:
+    """按给定张数市价开多 BTC_USDT 并打印成交结果（流程第 3 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+        size: int，开仓张数（通常取合约最小张数）
+
+    返回：
+        None，仅在终端打印订单状态与成交均价
+    """
     result = gw.place_order(OrderRequest(contract=CONTRACT, size=size))
     print(
         f"[3/6] 市价开多 {size} 张：status={result.status} "
@@ -56,6 +87,14 @@ def _step_open(gw: GateRestGateway, size: int) -> None:
 
 
 def _step_verify_position(gw: GateRestGateway) -> None:
+    """校验开仓后确实存在 BTC_USDT 持仓，无持仓则判定失败退出（流程第 4 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+
+    返回：
+        None，校验通过时打印持仓明细；无持仓时调用 sys.exit 终止脚本
+    """
     time.sleep(2)  # 等撮合落定
     holding = [p for p in gw.list_positions() if p.contract == CONTRACT and p.size != 0]
     if not holding:
@@ -68,11 +107,27 @@ def _step_verify_position(gw: GateRestGateway) -> None:
 
 
 def _step_close(gw: GateRestGateway) -> None:
+    """以 size=0 且 close=true 的方式平掉 BTC_USDT 全部持仓（流程第 5 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+
+    返回：
+        None，仅在终端打印平仓订单状态
+    """
     result = gw.place_order(OrderRequest(contract=CONTRACT, close=True))
     print(f"[5/6] 平仓（size=0+close=true）：status={result.status} finish_as={result.finish_as}")
 
 
 def _step_verify_flat(gw: GateRestGateway) -> None:
+    """校验平仓后 BTC_USDT 已无残留持仓，仍有持仓则判定失败退出（流程第 6 步）。
+
+    参数：
+        gw: GateRestGateway，已连接 testnet 的网关实例
+
+    返回：
+        None，校验通过时打印确认信息；仍有持仓时调用 sys.exit 终止脚本
+    """
     time.sleep(2)
     holding = [p for p in gw.list_positions() if p.contract == CONTRACT and p.size != 0]
     if holding:
@@ -81,6 +136,13 @@ def _step_verify_flat(gw: GateRestGateway) -> None:
 
 
 def main() -> None:
+    """串起完整闭环：建网关、查合约取最小张数，再依次执行查账户、调杠杆、开平仓及两次持仓校验。
+
+    参数：无
+
+    返回：
+        None，全部步骤通过后在终端打印 TESTNET ROUNDTRIP PASS
+    """
     gw = _build_gateway()
     contract = gw.get_contract(CONTRACT)
     size = int(contract.order_size_min)

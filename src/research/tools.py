@@ -50,6 +50,15 @@ class ResearchToolRegistry:
     """研报工具注册表：schemas() 供 provider 转换，execute() 统一捕获错误。"""
 
     def __init__(self, deps: ResearchToolDeps) -> None:
+        """按 _HANDLERS 注册表组装全部研报工具，把共享依赖注入每个执行函数。
+
+        参数：
+            deps: ResearchToolDeps，研报工具共享的只读依赖（数据源、存储等），
+                通过 partial 预绑定到每个工具的执行函数上
+
+        返回：
+            None，初始化工具字典（就地填充实例属性 _tools）
+        """
         self._tools: dict[str, ToolSpec] = {}
         for name, fn in _HANDLERS.items():
             schema = SCHEMAS[name]
@@ -62,17 +71,39 @@ class ResearchToolRegistry:
 
     @property
     def specs(self) -> list[ToolSpec]:
+        """返回全部已注册工具的完整定义列表。
+
+        参数：无
+
+        返回：
+            list[ToolSpec]：每个工具的中性 schema（名称/描述/参数）与异步执行函数
+        """
         return list(self._tools.values())
 
     def schemas(self) -> list[dict]:
-        """中性格式 [{name, description, parameters}]，provider 各自转换。"""
+        """中性格式 [{name, description, parameters}]，provider 各自转换。
+
+        参数：
+            无
+
+        返回：
+            list[dict]：中性格式 [{name, description, parameters}]，provider 各自转换
+        """
         return [
             {"name": s.name, "description": s.description, "parameters": s.parameters}
             for s in self._tools.values()
         ]
 
     async def execute(self, name: str, args: dict | None) -> str:
-        """执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）。"""
+        """执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）。
+
+        参数：
+            name: str，字段、工具或资源名称
+            args: dict | None，调用方传入的工具参数字典
+
+        返回：
+            str：执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）
+        """
         spec = self._tools.get(name)
         if spec is None:
             return f"错误：未知工具 {name}（可用：{', '.join(self._tools)}）"

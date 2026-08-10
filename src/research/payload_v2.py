@@ -24,6 +24,14 @@ _VIEW_FIELDS = (
 
 
 def _json_body(text: str) -> dict | None:
+    """从 LLM 输出文本中提取 JSON 对象，容忍 markdown 代码围栏包装。
+
+    参数：
+        text: str，LLM 返回的原始文本，可能被 ``` 或 ```json 代码围栏包裹
+
+    返回：
+        dict | None：解析出的 JSON 对象；文本非法或顶层不是对象时返回 None
+    """
     body = text.strip()
     if body.startswith("```"):
         body = body.strip("`")
@@ -37,6 +45,15 @@ def _json_body(text: str) -> dict | None:
 
 
 def _valid_evidence(value: object) -> bool:
+    """校验证据列表结构：每项必须是含字符串要点与来源字段的对象。
+
+    参数：
+        value: object，待校验的证据字段值
+
+    返回：
+        bool：value 为列表、且每项都是含字符串类型 point（论据要点）与
+        source（数据来源）字段的字典时为 True，否则为 False
+    """
     if not isinstance(value, list):
         return False
     return all(
@@ -48,6 +65,16 @@ def _valid_evidence(value: object) -> bool:
 
 
 def _valid_view(view: object) -> bool:
+    """校验单个标的结论是否满足 v2 契约：字段齐全且各枚举取值合法。
+
+    参数：
+        view: object，待校验的单个标的结论（LLM 输出 asset_views 中的一项）
+
+    返回：
+        bool：必需字段全部存在，方向、置信度、市场状态、技术确认、依据类型
+        均在允许枚举内，horizon 与 narrative 为字符串，证据列表与风险列表
+        结构合法时为 True，否则为 False
+    """
     if not isinstance(view, dict) or not all(field in view for field in _VIEW_FIELDS):
         return False
     if not isinstance(view["contract"], str) or not view["contract"]:
@@ -73,7 +100,17 @@ def parse_v2_payload(
     queried_contracts: set[str],
     data_statuses: dict[str, str],
 ) -> dict | None:
-    """校验白名单、工具调用与逐标的结论集合完全一致。"""
+    """校验研报白名单、市场查询与逐标的结论完全一致，并按数据状态归一化结论。
+
+    参数：
+        text: str，LLM 返回的研报 v2 JSON 文本
+        expected_contracts: tuple[str, ...]，本轮冻结的合约白名单及输出顺序
+        queried_contracts: set[str]，本轮实际调用市场工具查询过的合约集合
+        data_statuses: dict[str, str]，各合约市场数据的可用状态
+
+    返回：
+        dict | None，校验并归一化后的研报载荷；契约不完整或集合不一致时返回 None
+    """
     payload = _json_body(text)
     if payload is None:
         return None

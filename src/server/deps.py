@@ -34,15 +34,65 @@ class IndicatorBundle(Protocol):
 
     oi_task: asyncio.Task | None  # OI 后台刷新任务句柄（主程序 shutdown 取消）
 
-    def panel(self, contract: str, interval: str) -> dict: ...
+    def panel(self, contract: str, interval: str) -> dict:
+        """读取指定合约某周期的全指标面板，并附上当前生效的指标短名单。
 
-    def series(self, contract: str, interval: str, keys: list[str] | None, limit: int) -> dict: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            interval: str，K 线周期（如 4h、1d）
 
-    def config_get(self) -> dict: ...
+        返回：
+            dict：全指标面板（shortlist 已由装配层合并当前值）
+        """
+        ...
 
-    async def config_revise(self, shortlist: list[str], reason: str) -> dict: ...
+    def series(self, contract: str, interval: str, keys: list[str] | None, limit: int) -> dict:
+        """读取指定合约某周期下选定指标的逐根 K 线序列。
 
-    async def config_rollback(self, version_id: int) -> dict: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            interval: str，K 线周期（如 4h、1d）
+            keys: list[str] | None，指标键列表；省略（None）时使用当前短名单
+            limit: int，返回的最近 K 线根数上限
+
+        返回：
+            dict：按指标键组织的逐根序列数据
+        """
+        ...
+
+    def config_get(self) -> dict:
+        """读取当前指标短名单与注册表全集。
+
+        参数：无
+
+        返回：
+            dict：{"shortlist", "available"}，available 取自指标注册表，
+            供前端指标选择器展示
+        """
+        ...
+
+    async def config_revise(self, shortlist: list[str], reason: str) -> dict:
+        """人工修订指标短名单并落为新版本（created_by='human'）。
+
+        参数：
+            shortlist: list[str]，新的指标短名单键列表
+            reason: str，修订原因说明
+
+        返回：
+            dict：{"ok": True, "version_id"}，version_id 为新版本号
+        """
+        ...
+
+    async def config_rollback(self, version_id: int) -> dict:
+        """把指标短名单回滚到指定历史版本（记 created_by='rollback' 新版本）。
+
+        参数：
+            version_id: int，目标历史版本号
+
+        返回：
+            dict：{"rolled_back_to", "version_id"}，分别为回滚目标版本号与新版本号
+        """
+        ...
 
 
 @dataclass
@@ -103,12 +153,25 @@ class ServerDeps:
     web_dist: Path = field(default_factory=lambda: ROOT / "web" / "dist")
 
     def runtime_status(self) -> dict[str, Any]:
-        """读取运行时状态（uptime 等）；未注入时返回空 dict。"""
+        """读取运行时状态（uptime 等）；未注入时返回空 dict。
+
+        参数：无
+
+        返回：
+            dict[str, Any]，读取运行时状态（uptime 等）；未注入时返回空 dict
+        """
         if self.status_provider is None:
             return {}
         return self.status_provider()
 
     def notify_kill_switch(self, enabled: bool) -> None:
-        """kill_switch 写回配置后回调主程序；未注入时静默跳过。"""
+        """kill_switch 写回配置后回调主程序；未注入时静默跳过。
+
+        参数：
+            enabled: bool，熔断开关是否启用
+
+        返回：
+            None，kill_switch 写回配置后回调主程序；未注入时静默跳过
+        """
         if self.on_kill_switch is not None:
             self.on_kill_switch(enabled)

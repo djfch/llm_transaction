@@ -26,7 +26,14 @@ from src.research.tool_handlers import (
 
 
 async def _section_calendar(deps: ResearchToolDeps) -> str:
-    """日历段：今日+明日 star≥3；拉取结果先增量写入事实层（代码管辖）。"""
+    """拉取经济日历并增量写入事实层，再渲染今日与明日的高星事件段落。
+
+    参数：
+        deps: ResearchToolDeps，提供研报数据源与事实仓库的共享依赖
+
+    返回：
+        str，经济日历 Markdown 段落；数据源失败时包含不可用原因
+    """
     today, tomorrow = _today_markers()
     try:
         events = await deps.provider.fetch_calendar()
@@ -74,7 +81,14 @@ async def _section_calendar(deps: ResearchToolDeps) -> str:
 
 
 async def _section_indicators(deps: ResearchToolDeps) -> str:
-    """指标段：硬数据快照。"""
+    """拉取宏观与加密指标硬数据并渲染指标快照段落。
+
+    参数：
+        deps: ResearchToolDeps，提供研报数据源的共享依赖
+
+    返回：
+        str，指标快照文本；数据源失败或无内容时返回对应降级说明
+    """
     try:
         indicators = await deps.provider.fetch_indicators()
     except ResearchSourceError as exc:
@@ -83,7 +97,15 @@ async def _section_indicators(deps: ResearchToolDeps) -> str:
 
 
 async def _section_flash(deps: ResearchToolDeps, hours: int) -> str:
-    """快讯段：全量紧凑，一条不丢；拉取结果先增量写入事实层（代码管辖）。"""
+    """拉取指定窗口的全部快讯、增量写入事实层并渲染紧凑快讯段落。
+
+    参数：
+        deps: ResearchToolDeps，提供研报数据源与事实仓库的共享依赖
+        hours: int，快讯回看窗口小时数
+
+    返回：
+        str，包含时间、来源、标题与摘要的快讯 Markdown 段落
+    """
     try:
         items = await deps.provider.fetch_flash(hours)
     except ResearchSourceError as exc:
@@ -114,7 +136,15 @@ async def _section_flash(deps: ResearchToolDeps, hours: int) -> str:
 
 
 async def _section_timeline(deps: ResearchToolDeps, hours: int = 24) -> str:
-    """时间线段：事实层近 7 天（排除本次拉取窗口，避免与快讯段重复）。"""
+    """读取近七天且早于本次快讯窗口的历史事实并渲染事件时间线。
+
+    参数：
+        deps: ResearchToolDeps，提供事实仓库的共享依赖
+        hours: int，本轮快讯窗口小时数，用于排除重复时间段
+
+    返回：
+        str，按时间展示的事件时间线段落；无记录时返回空状态说明
+    """
     rows = await deps.repo.research.list_timeline(
         time.time() - 7 * 86400, end_ts=time.time() - hours * 3600, limit=300
     )
@@ -127,7 +157,14 @@ async def _section_timeline(deps: ResearchToolDeps, hours: int = 24) -> str:
 
 
 async def _section_judgments(deps: ResearchToolDeps) -> str:
-    """判断史段：近 7 天按报告与合约分组。"""
+    """读取近七天研报并按报告与合约渲染带验证结果的历史判断段落。
+
+    参数：
+        deps: ResearchToolDeps，提供研报仓库的共享依赖
+
+    返回：
+        str，历史研报结论段落；无历史时返回首次研报提示
+    """
     reports = await deps.repo.research.list_reports(7)
     if not reports:
         return "## 历史研报结论\n（暂无记录，这是你的首次研报）"
@@ -139,6 +176,12 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
     """未闭合因果链段：前 10 条待验证当前版，带链 id 供 supersedes_id 引用。
 
     不按时间淘汰（事件发展需要时间）；提示 LLM 事件有新进展时提交修正版。
+
+    参数：
+        deps: ResearchToolDeps，提供因果链仓库的共享依赖
+
+    返回：
+        str，最多十条待验证当前版因果链及其编号的 Markdown 段落
     """
     links = await deps.repo.research.list_pending_causal_links(limit=10)
     if not links:
@@ -160,7 +203,14 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
 
 
 def _section_watchlist(deps: ResearchToolDeps) -> str:
-    """冻结本轮白名单并明确市场工具调用的不变量。"""
+    """渲染本轮已冻结合约白名单与逐标的市场工具调用约束。
+
+    参数：
+        deps: ResearchToolDeps，包含本轮合约白名单快照的共享依赖
+
+    返回：
+        str，本轮白名单及工具调用要求的 Markdown 段落
+    """
     contracts = list(deps.watchlist_snapshot)
     if not contracts:
         return "## 本轮白名单\n（空；本轮不得生成逐标的结论）"
@@ -178,6 +228,13 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
     首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源
     时间串同一时区口径，UTC 部署机不偏移）。
+
+    参数：
+        deps: ResearchToolDeps，研报预注入所需数据源、仓库与白名单依赖
+        hours: int，本轮快讯与去重窗口小时数
+
+    返回：
+        str，按固定顺序拼接的完整研报首轮用户消息数据段
     """
     now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
     return "\n\n".join(

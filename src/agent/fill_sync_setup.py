@@ -30,7 +30,18 @@ def build_trade_sync(
     notify_event: Callable[[dict], None],
     send_alert: AlertFn,
 ) -> tuple[PrivateTradeFeed, ExchangeFillSync] | None:
-    """装配私有成交订阅与同步器；paper 模式返回 None（调用方还需按 mock_market 跳过）。"""
+    """装配私有成交订阅与同步器；paper 模式返回 None（调用方还需按 mock_market 跳过）。
+
+    参数：
+        settings: Settings，当前完整运行配置
+        rest: ExchangeRestSource，交易所 REST 成交数据源
+        db: Database，已打开的数据库实例
+        notify_event: Callable[[dict], None]，成交变更事件通知回调
+        send_alert: AlertFn，异步告警发送回调
+
+    返回：
+        tuple[PrivateTradeFeed, ExchangeFillSync] | None：装配私有成交订阅与同步器；paper 模式返回 None（调用方还需按 mock_market 跳过）
+    """
     if settings.mode == "paper":
         return None
     feed = PrivateTradeFeed(
@@ -44,6 +55,14 @@ def build_trade_sync(
     alerted = False  # 错误告警只发一次：连续异常不骚扰（日志仍有全量记录）
 
     async def on_error(message: str) -> None:
+        """私有成交频道出错时告警一次，连续异常不重复骚扰。
+
+        参数：
+            message: str，频道上报的错误信息，会拼入告警文本
+
+        返回：
+            None，副作用为通过 send_alert 发送一次 Telegram 告警
+        """
         nonlocal alerted
         if alerted:
             return

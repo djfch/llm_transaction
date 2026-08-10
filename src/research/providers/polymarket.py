@@ -22,10 +22,29 @@ class PolymarketSource:
     """Polymarket 预测概率源。"""
 
     def __init__(self, *, base_url: str = BASE_URL) -> None:
+        """保存 Gamma API 基础地址，去除末尾斜杠。
+
+        参数：
+            base_url: str，Polymarket Gamma API 基础地址；省略时使用官方默认地址
+
+        返回：
+            None，初始化实例属性
+        """
         self._base = base_url.rstrip("/")
 
     async def get_prediction_markets(self, topic: str, limit: int = DEFAULT_LIMIT) -> str:
-        """返回主题匹配的未结算市场：隐含概率 + 成交额 + 结算日 + 1 周变动。"""
+        """返回主题匹配的未结算市场：隐含概率 + 成交额 + 结算日 + 1 周变动。
+
+        参数：
+            topic: str，预测市场主题
+            limit: int，返回记录数量上限
+
+        返回：
+            str，返回主题匹配的未结算市场：隐含概率 + 成交额 + 结算日 + 1 周变动
+
+        异常：
+            ResearchSourceError，Polymarket HTTP 请求或响应解析失败时抛出
+        """
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
                 resp = await client.get(
@@ -69,7 +88,15 @@ class PolymarketSource:
 
     @staticmethod
     def _is_forward_looking(market: dict, now: datetime) -> bool:
-        """只保留未结算且结算日在未来的市场（closed 才是可靠标志）。"""
+        """只保留未结算且结算日在未来的市场（closed 才是可靠标志）。
+
+        参数：
+            market: dict，预测市场原始数据
+            now: datetime，当前 Unix 时间戳
+
+        返回：
+            bool，只保留未结算且结算日在未来的市场（closed 才是可靠标志）
+        """
         if market.get("closed"):
             return False
         end = market.get("endDate")
@@ -85,7 +112,14 @@ class PolymarketSource:
 
     @staticmethod
     def _json_list(value) -> list:
-        """Gamma 把 outcomes/outcomePrices 编码为 JSON 字符串数组。"""
+        """Gamma 把 outcomes/outcomePrices 编码为 JSON 字符串数组。
+
+        参数：
+            value: object，待解析的时间、JSON 或指标值
+
+        返回：
+            list，Gamma 把 outcomes/outcomePrices 编码为 JSON 字符串数组
+        """
         if isinstance(value, list):
             return value
         try:
@@ -95,6 +129,14 @@ class PolymarketSource:
 
 
 def _is_num(value) -> bool:
+    """判断一个值能否转换为浮点数。
+
+    参数：
+        value: 任意类型，待判断的值
+
+    返回：
+        bool：能转为浮点数时返回 True，否则返回 False
+    """
     try:
         float(value)
         return True

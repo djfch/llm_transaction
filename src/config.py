@@ -54,6 +54,20 @@ class CredentialConfig(BaseModel):
 
     @model_validator(mode="after")
     def _fill_or_check_api_key_env(self) -> CredentialConfig:
+        """补全或校验 LLM 凭证 key 对应的环境变量名。
+
+        api_key_env 留空时按 `LLM_KEY_<name 大写，非字母数字换下划线>` 自动推导；
+        显式填写时校验大写格式与白名单（防死凭证、防误读交易所 key）。
+
+        参数：无
+
+        返回：
+            CredentialConfig：校验通过后的当前模型实例
+
+        异常：
+            ValueError：api_key_env 不是大写环境变量名（^[A-Z][A-Z0-9_]*$），
+                或不在白名单（ANTHROPIC_API_KEY / OPENAI_API_KEY / LLM_KEY_*）内时抛出
+        """
         if not self.api_key_env:
             self.api_key_env = ENV_KEY_PREFIX + re.sub(r"[^A-Z0-9]", "_", self.name.upper())
         elif not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.api_key_env):
@@ -81,7 +95,16 @@ class LLMConfig(BaseModel):
     credentials: list[CredentialConfig] = []
 
     def resolve_credentials(self) -> list[CredentialConfig]:
-        """返回生效凭证列表：非空校验 name 唯一后返回；为空用旧平铺字段合成 default。"""
+        """返回生效凭证列表：非空校验 name 唯一后返回；为空用旧平铺字段合成 default。
+
+        参数：无
+
+        返回：
+            list[CredentialConfig]，返回生效凭证列表：非空校验 name 唯一后返回；为空用旧平铺字段合成 default
+
+        异常：
+            ValueError，非空凭证列表存在重名 name 时抛出
+        """
         if self.credentials:
             names = [c.name for c in self.credentials]
             if len(set(names)) != len(names):
@@ -134,7 +157,16 @@ class SchedulerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_wake_window(self) -> SchedulerConfig:
-        """取值关系：min ≤ max ≤ 720，default 落在 [min, max] 之间。"""
+        """取值关系：min ≤ max ≤ 720，default 落在 [min, max] 之间。
+
+        参数：无
+
+        返回：
+            SchedulerConfig，取值关系：min ≤ max ≤ 720，default 落在 [min, max] 之间
+
+        异常：
+            ValueError，最小唤醒间隔大于最大值，或默认间隔不在最小值与最大值之间时抛出
+        """
         if self.min_wake_minutes > self.max_wake_minutes:
             raise ValueError("min_wake_minutes 不能大于 max_wake_minutes")
         if not self.min_wake_minutes <= self.default_wake_minutes <= self.max_wake_minutes:
@@ -173,7 +205,16 @@ class ReviewConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_daily_time(self) -> ReviewConfig:
-        """daily_time 必须为 HH:MM（时 0-23、分 0-59）。"""
+        """daily_time 必须为 HH:MM（时 0-23、分 0-59）。
+
+        参数：无
+
+        返回：
+            ReviewConfig，daily_time 必须为 HH:MM（时 0-23、分 0-59）
+
+        异常：
+            ValueError，daily_time 不是合法 HH:MM 时抛出
+        """
         parts = self.daily_time.split(":")
         if (
             len(parts) != 2
@@ -212,7 +253,16 @@ class ResearchConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_schedule_times(self) -> ResearchConfig:
-        """time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）。"""
+        """time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）。
+
+        参数：无
+
+        返回：
+            ResearchConfig，time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）
+
+        异常：
+            ValueError，任一盘口时间不是合法 HH:MM 时抛出
+        """
         for field in ("time_asia", "time_europe", "time_us"):
             parts = getattr(self, field).split(":")
             if (
@@ -253,6 +303,15 @@ class Settings(BaseModel):
 
         researcher（研报 agent）为例外：可选功能（默认关闭），凭证缺失不阻塞
         配置加载——运行时研报会提示 LLM 未配置/不可用。
+
+        参数：无
+
+        返回：
+            Settings，agent 引用的凭证必须存在（凭证重名也在此经 resolve_credentials 拦截）。  researcher（研报 agent）为例外：可选功能（默认关闭），凭证缺失不阻塞 配置加载——运行时研报会提示 LLM 未配置/不可用
+
+        异常：
+            ValueError，任一 Agent 引用了不存在或重名的凭证时抛出
+
         """
         names = {c.name for c in self.llm.resolve_credentials()}
         for agent, binding in self.agents.model_dump().items():
@@ -265,6 +324,15 @@ class Settings(BaseModel):
         return self
 
     def validate_mode(self) -> None:
+        """校验运行模式 mode 是否为合法取值。
+
+        参数：无
+
+        返回：None，校验通过即正常返回，无副作用
+
+        异常：
+            ValueError：mode 不在 paper/testnet/live 之内时抛出
+        """
         if self.mode not in ("paper", "testnet", "live"):
             raise ValueError(f"非法 mode: {self.mode}（可选 paper/testnet/live）")
 
@@ -275,6 +343,16 @@ class Watchlist(BaseModel):
 
     @model_validator(mode="after")
     def validate_contracts(self) -> "Watchlist":
+        """校验关注列表合约非空且不重复。
+
+        参数：无
+
+        返回：
+            Watchlist：校验通过后的当前模型实例
+
+        异常：
+            ValueError：contracts 为空列表，或同一合约被重复配置时抛出
+        """
         if not self.contracts:
             raise ValueError("watchlist.contracts 不能为空，至少包含一个合约")
         if len(self.contracts) != len(set(self.contracts)):
@@ -297,6 +375,16 @@ class IndicatorConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_shortlist(self) -> IndicatorConfig:
+        """校验指标短名单形状：去重保序后须 1~8 个，键只允许小写字母/数字/下划线。
+
+        参数：无
+
+        返回：
+            IndicatorConfig：校验通过、shortlist 已替换为去重后列表的当前实例
+
+        异常：
+            ValueError：去重后数量不在 1~8 个区间，或存在含非法字符的指标键时抛出
+        """
         deduped: list[str] = []
         for key in self.shortlist:
             if key not in deduped:
@@ -311,23 +399,54 @@ class IndicatorConfig(BaseModel):
 
 
 def _load_yaml(path: Path) -> dict:
+    """读取 YAML 文件为字典；文件不存在或内容为空时返回空字典。
+
+    参数：
+        path: Path，YAML 文件路径
+
+    返回：
+        dict：解析后的配置字典；文件缺失或内容为空时返回 {}
+    """
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def load_settings(config_path: Path | None = None) -> Settings:
+    """加载并校验主配置（默认 config.yaml），含运行模式合法性检查。
+
+    参数：
+        config_path: Path | None，配置文件路径；省略时读取项目根目录的 config.yaml
+
+    返回：
+        Settings：字段与运行模式均校验通过的完整配置模型
+    """
     settings = Settings(**_load_yaml(config_path or ROOT / "config.yaml"))
     settings.validate_mode()
     return settings
 
 
 def load_watchlist(path: Path | None = None) -> Watchlist:
+    """加载交易合约关注列表（默认 watchlist.yaml）。
+
+    参数：
+        path: Path | None，配置文件路径；省略时读取项目根目录的 watchlist.yaml
+
+    返回：
+        Watchlist：合约非空且不重复校验通过后的关注列表模型
+    """
     return Watchlist(**_load_yaml(path or ROOT / "watchlist.yaml"))
 
 
 def load_indicator_config(path: Path | None = None) -> IndicatorConfig:
-    """加载指标短名单；文件不存在返回默认基线（首次运行零配置可用）。"""
+    """加载指标短名单；文件不存在返回默认基线（首次运行零配置可用）。
+
+    参数：
+        path: Path | None，指标配置文件路径
+
+    返回：
+        IndicatorConfig，加载指标短名单；文件不存在返回默认基线（首次运行零配置可用）
+    """
     target = path or ROOT / "indicator_config.yaml"
     if not target.exists():
         return IndicatorConfig(shortlist=list(DEFAULT_INDICATOR_SHORTLIST))

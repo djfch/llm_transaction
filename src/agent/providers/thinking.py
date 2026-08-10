@@ -26,11 +26,19 @@ def thinking_wire_kwargs(model: str, effort: str) -> dict:
 
     - 空串/on：默认不传；Qwen 需显式 enable_thinking 开启（老 qwen 系默认关）
     - off：DeepSeek/旧 Kimi k2.5/k2.6 走 thinking 对象；Qwen 走 enable_thinking；
-      始终思考模型（kimi-k2.7 系）官方不可关，降级为不传；
-      其余（GPT/GLM/Kimi k3 等）走 reasoning_effort: "none"
+    始终思考模型（kimi-k2.7 系）官方不可关，降级为不传；
+    其余（GPT/GLM/Kimi k3 等）走 reasoning_effort: "none"
     - low~max：reasoning_effort 原样透传（DeepSeek/GLM/Kimi k3/GPT 通用字段）；
-      Qwen 的 chat 接口只认 enable_thinking 开关（强度由 thinking_budget 控制，
-      本层不做预算映射），档位退化为"开"；旧 Kimi k2.5/k2.6 无强度概念，仅开启
+    Qwen 的 chat 接口只认 enable_thinking 开关（强度由 thinking_budget 控制，
+    本层不做预算映射），档位退化为"开"；旧 Kimi k2.5/k2.6 无强度概念，仅开启
+
+    参数：
+        model: str，模型名称
+        effort: str，统一思考强度档位
+
+    返回：
+        dict，对应档位的 reasoning_effort 与 extra_body 参数
+
     """
     m = model.lower()
     if effort == "on":
@@ -60,6 +68,14 @@ def anthropic_thinking(effort: str, max_tokens: int) -> dict | None:
     {"type": "enabled", "budget_tokens": N}。档位映射为思考 token 预算，并按
     max_tokens 裁剪：官方要求 budget_tokens 严格小于 max_tokens（且 ≥1024），
     max_tokens < 2048 时无合法解，降级为不传（避免请求 400）。
+
+    参数：
+        effort: str，统一思考强度档位
+        max_tokens: int，模型最大输出 token 数
+
+    返回：
+        dict | None，对应档位的 Anthropic thinking 参数；关闭时为 None
+
     """
     if not effort or effort == "off":
         return None

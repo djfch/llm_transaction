@@ -37,11 +37,26 @@ POLYMARKET_BASE = os.environ.get("POLYMARKET_BASE_URL", "https://gamma-api.polym
 
 
 def _section(title: str) -> None:
+    """在终端打印带分隔线的章节标题，便于区分实测输出的各阶段。
+
+    参数：
+        title: str，章节标题文本
+
+    返回：
+        None，向标准输出打印分隔线与标题
+    """
     print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
 
 
 async def test_jin10() -> None:
-    """金十 HTTP MCP：握手 + tools/list + 拉一次日历/快讯。"""
+    """金十 HTTP MCP：握手 + tools/list + 拉一次日历/快讯。
+
+    参数：
+        无
+
+    返回：
+        None：金十 HTTP MCP：握手 + tools/list + 拉一次日历/快讯
+    """
     token = os.environ.get("JIN10_MCP_TOKEN", "")
     if not token:
         print("[FAIL]  金十 MCP：JIN10_MCP_TOKEN 未配置（请填 .env）")
@@ -71,7 +86,14 @@ async def test_jin10() -> None:
 
 
 async def test_blockbeats() -> None:
-    """BlockBeats stdio MCP（Windows 走 cmd /c、POSIX 直接 exec）：握手 + tools/list + 拉一次快讯。"""
+    """BlockBeats stdio MCP（Windows 走 cmd /c、POSIX 直接 exec）：握手 + tools/list + 拉一次快讯。
+
+    参数：
+        无
+
+    返回：
+        None：BlockBeats stdio MCP（Windows 走 cmd /c、POSIX 直接 exec）：握手 + tools/list + 拉一次快讯
+    """
     key = os.environ.get("BLOCKBEATS_API_KEY", "")
     if not key:
         print("[FAIL]  BlockBeats MCP：BLOCKBEATS_API_KEY 未配置（请填 .env）")
@@ -103,7 +125,14 @@ async def test_blockbeats() -> None:
 
 
 async def test_fred() -> None:
-    """FRED 宏观序列：有 key 则实测一条序列。"""
+    """FRED 宏观序列：有 key 则实测一条序列。
+
+    参数：
+        无
+
+    返回：
+        None：FRED 宏观序列：有 key 则实测一条序列
+    """
     key = os.environ.get("FRED_API_KEY", "")
     if not key:
         print(
@@ -135,7 +164,14 @@ async def test_fred() -> None:
 
 
 async def test_polymarket() -> None:
-    """Polymarket 预测市场（公开 API，无 key；注意需跟随重定向）。"""
+    """Polymarket 预测市场（公开 API，无 key；注意需跟随重定向）。
+
+    参数：
+        无
+
+    返回：
+        None：Polymarket 预测市场（公开 API，无 key；注意需跟随重定向）
+    """
     try:
         import httpx
 
@@ -155,6 +191,13 @@ async def test_polymarket() -> None:
 
 
 async def main() -> None:
+    """脚本入口：按命令行参数分发为"只测数据源连通性"或"研报全流程"两种模式。
+
+    参数：无（读取 sys.argv，含 --sources 时只测四类数据源连通性，否则跑完整研报流程）
+
+    返回：
+        None，实测结果打印到标准输出
+    """
     if "--sources" in sys.argv:
         _section("研报数据源连通性实测")
         await test_jin10()
@@ -169,6 +212,12 @@ async def run_full_report() -> None:
     """全流程：装配 → 预注入组装（含 token 估算）→ 跑研报 → 落库确认。
 
     使用项目现有配置与 researcher 凭证的 LLM provider；LLM 未配置时提示。
+
+    参数：
+        无
+
+    返回：
+        None：全流程：装配 → 预注入组装（含 token 估算）→ 跑研报 → 落库确认
     """
     from src.audit.trail import AuditTrail
     from src.agent.providers.factory import build_provider
@@ -246,7 +295,18 @@ async def run_full_report() -> None:
 def build_report_bundle(
     *, report, tool_calls, sources: list[str], briefing_chars: int, token_estimate: int
 ) -> dict:
-    """组装完整研报数据包（JSON/MD/终端三路共用）。"""
+    """组装完整研报数据包（JSON/MD/终端三路共用）。
+
+    参数：
+        report: Any，已保存的研报记录
+        tool_calls: Any，本轮工具调用记录列表
+        sources: list[str]，本轮实际使用的数据源名称
+        briefing_chars: int，预注入简报字符数
+        token_estimate: int，预注入简报的估算 token 数
+
+    返回：
+        dict：组装完整研报数据包（JSON/MD/终端三路共用）
+    """
     import json
     import time
 
@@ -291,7 +351,15 @@ def build_report_bundle(
 
 
 def print_terminal(bundle: dict, result: dict) -> None:
-    """终端输出：研报摘要 + 全文 + 工具调用链（结果截断展示，全文看文件）。"""
+    """终端输出：研报摘要 + 全文 + 工具调用链（结果截断展示，全文看文件）。
+
+    参数：
+        bundle: dict，汇总研报正文、结论与工具链的数据包
+        result: dict，待序列化或返回的执行结果
+
+    返回：
+        None：终端输出：研报摘要 + 全文 + 工具调用链（结果截断展示，全文看文件）
+    """
     print(
         f"\n研报结果：ok={result.get('ok')} direction={bundle['direction']} "
         f"confidence={bundle['confidence']} report_id={bundle['report_id']}"
@@ -328,7 +396,14 @@ def print_terminal(bundle: dict, result: dict) -> None:
 
 
 def write_report_files(bundle: dict) -> list[str]:
-    """落盘 JSON（机器可读完整版）与 MD（人读文档），返回文件路径列表。"""
+    """落盘 JSON（机器可读完整版）与 MD（人读文档），返回文件路径列表。
+
+    参数：
+        bundle: dict，汇总研报正文、结论与工具链的数据包
+
+    返回：
+        list[str]：落盘 JSON（机器可读完整版）与 MD（人读文档），返回文件路径列表
+    """
     import json
     from pathlib import Path
 
@@ -344,7 +419,14 @@ def write_report_files(bundle: dict) -> list[str]:
 
 
 def _render_markdown(bundle: dict) -> str:
-    """渲染人读 MD 文档：研报结论 → 依据/风险 → 正文 → 工具调用链（含完整返回）。"""
+    """渲染人读 MD 文档：研报结论 → 依据/风险 → 正文 → 工具调用链（含完整返回）。
+
+    参数：
+        bundle: dict，汇总研报正文、结论与工具链的数据包
+
+    返回：
+        str：渲染人读 MD 文档：研报结论 → 依据/风险 → 正文 → 工具调用链（含完整返回）
+    """
     lines = [
         f"# 研报 #{bundle['report_id']}（{bundle['generated_at']}）",
         "",

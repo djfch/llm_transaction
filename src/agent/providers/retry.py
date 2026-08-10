@@ -30,12 +30,35 @@ class RetryingProvider:
         max_attempts: int = 3,
         backoff: tuple[float, ...] = (1.0, 3.0),
     ) -> None:
+        """初始化重试装饰器，保存被包裹的 provider 与重试参数。
+
+        参数：
+            inner: LLMProvider，被包裹的真实 provider，所有调用最终委托给它
+            max_attempts: int，单次 chat 的最大尝试次数（含首次），小于 1 时按 1 处理
+            backoff: tuple[float, ...]，第 i 次失败后的等待秒数表；次数超出表长时沿用
+                末档，省略时默认 (1.0, 3.0)，传空元组表示失败后立即重试不等候
+
+        返回：
+            None，仅初始化实例状态（保存 inner、钳位后的 max_attempts 与 backoff）
+        """
         self._inner = inner
         self._max_attempts = max(1, max_attempts)
         self._backoff = backoff
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        """调用 inner.chat；失败同参重发（间隔 backoff），耗尽后抛最后一个异常。"""
+        """调用底层 LLM 提供器，并在普通异常时按退避配置使用原参数重试。
+
+        参数：
+            system: str，系统提示词
+            messages: list[dict]，当前对话消息列表
+            tools: list[dict]，可供模型调用的工具定义
+
+        返回：
+            LLMResponse，首次成功尝试得到的统一模型响应
+
+        异常：
+            Exception: 所有尝试均失败时重新抛出最后一次底层异常
+        """
         last: Exception | None = None
         for attempt in range(self._max_attempts):
             try:
@@ -58,11 +81,26 @@ class RetryingProvider:
         raise last
 
     def _delay(self, attempt: int) -> float:
-        """第 attempt 次（0 起）失败后的等待秒数；backoff 不足时沿用末档，空配置为 0。"""
+        """计算指定失败次数后的等待时长，退避表不足时沿用最后一档。
+
+        参数：
+            attempt: int，从零开始的失败次数索引
+
+        返回：
+            float，本次重试前应等待的秒数；空退避配置返回 0
+        """
         if not self._backoff:
             return 0.0
         return self._backoff[min(attempt, len(self._backoff) - 1)]
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
-        """透传工具结果包装（无状态，直接委托 inner）。"""
+        """委托底层提供器把工具执行结果包装为其原生消息格式。
+
+        参数：
+            call: ToolCall，触发本次执行的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，可追加到对话上下文的厂商原生工具结果消息
+        """
         return self._inner.tool_result_message(call, result)

@@ -33,7 +33,14 @@ _NO_DIFF_REASON = "与当前指标短名单无差异"
 
 
 def _serialize(cfg: IndicatorConfig) -> str:
-    """短名单序列化为 yaml 文本（版本表 content 与落盘内容同源，保证 md5 一致）。"""
+    """把指标短名单模型序列化为版本表与运行时文件共用的 YAML 文本。
+
+    参数：
+        cfg: IndicatorConfig，已校验的指标短名单配置模型
+
+    返回：
+        str，保留中文且不排序字段的 YAML 配置文本
+    """
     return yaml.safe_dump(cfg.model_dump(), allow_unicode=True, sort_keys=False)
 
 
@@ -45,6 +52,15 @@ class IndicatorConfigValidationError(Exception):
     """
 
     def __init__(self, reasons: list[str], *, no_diff_only: bool = False) -> None:
+        """收集全部校验未过项并组装异常消息。
+
+        参数：
+            reasons: list[str]，全部未通过项的描述列表，按序拼接为异常消息
+            no_diff_only: bool，唯一原因是否为"与当前配置无差异"；省略时视为 False
+
+        返回：
+            None，就地初始化实例（挂载 reasons 与 no_diff_only 属性）
+        """
         self.reasons = reasons
         self.no_diff_only = no_diff_only
         super().__init__("；".join(reasons))
@@ -60,6 +76,19 @@ class IndicatorConfigStore:
         valid_keys: frozenset[str],
         on_change: Callable[[], None] | None = None,
     ) -> None:
+        """初始化短名单存储入口，接线配置文件、版本仓库与变更回调。
+
+        参数：
+            path: str | Path，指标配置文件（indicator_config.yaml）路径
+            repo: Repo | IndicatorConfigRepo，整体仓库（自动取其 indicator_config 子仓库）
+                或子仓库本身（细粒度接线/测试用）
+            valid_keys: frozenset[str]，允许写入的指标键集合，由外部注入以解耦指标注册表
+            on_change: Callable[[], None] | None，配置变更回调（revise/rollback 落版本后
+                触发）；省略或未接线时不通知
+
+        返回：
+            None，就地初始化实例
+        """
         self._path = Path(path)
         # 接受整体 Repo（取其 indicator_config 子仓库）或子仓库本身（细粒度接线/测试用）
         self._versions = repo.indicator_config if isinstance(repo, Repo) else repo
@@ -68,18 +97,35 @@ class IndicatorConfigStore:
         self._on_change = on_change
 
     def _notify_change(self) -> None:
-        """变更即通知；未接线时静默跳过。"""
+        """在配置变更后调用已接线回调，未配置回调时静默跳过。
+
+        参数：无
+
+        返回：
+            None，存在回调时同步触发配置更新通知
+        """
         if self._on_change is not None:
             self._on_change()
 
     def load_current(self) -> IndicatorConfig:
-        """当前生效配置；文件不存在返回默认基线（与 load_indicator_config 同语义）。"""
+        """读取当前生效指标短名单，运行时文件不存在时使用默认基线。
+
+        参数：无
+
+        返回：
+            IndicatorConfig，当前文件内容或默认基线构造的配置模型
+        """
         return load_indicator_config(self._path)
 
     async def seed_if_empty(self) -> IndicatorConfigVersion | None:
         """启动播种：版本表为空时记 v1（created_by='human'，reason='初始基线'）。
 
         文件不存在先用默认基线原子写文件；文件已存在则以其原文记 v1（文件不动）。
+
+        参数：无
+
+        返回：
+            IndicatorConfigVersion | None，新建的初始版本；版本表已有记录时返回 None
         """
         if await self._versions.list_versions(limit=1):
             return None
@@ -97,7 +143,17 @@ class IndicatorConfigStore:
         reason: str,
         report_id: int | None = None,
     ) -> IndicatorConfigVersion:
-        """校验通过后原子替换配置文件并落新版本；校验失败抛 IndicatorConfigValidationError。"""
+        """校验并原子替换指标短名单文件，保存新版本后通知配置变更。
+
+        参数：
+            shortlist: list[str]，期望启用的指标键列表
+            created_by: str，本次修订的创建者分类
+            reason: str，本次修订原因
+            report_id: int | None，触发修订的复盘报告编号
+
+        返回：
+            IndicatorConfigVersion，已保存的新指标短名单版本
+        """
         cfg = self._validated(shortlist, reason)
         content = _serialize(cfg)  # yaml.safe_dump 产出纯 LF，无需换行归一化
         self._atomic_write(content)
@@ -108,7 +164,17 @@ class IndicatorConfigStore:
         return version
 
     async def rollback(self, version_id: int) -> IndicatorConfigVersion:
-        """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。"""
+        """把历史指标短名单内容写回运行时文件并创建一条新的回滚版本。
+
+        参数：
+            version_id: int，作为回滚来源的历史版本编号
+
+        返回：
+            IndicatorConfigVersion，回滚操作创建的新版本
+
+        异常：
+            IndicatorConfigValidationError: 指定历史版本不存在时抛出
+        """
         version = await self._versions.get_version(version_id)
         if version is None:
             raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法回滚"])
@@ -121,15 +187,41 @@ class IndicatorConfigStore:
         return new_version
 
     async def list_versions(self, limit: int = 50) -> list[IndicatorConfigVersion]:
+        """读取短名单历史版本列表（最新在前）。
+
+        参数：
+            limit: int，最多返回的条数；省略时取 50，仓库侧钳制到 1..200
+
+        返回：
+            list[IndicatorConfigVersion]：版本列表，按 id 倒序排列（最新版本在前）
+        """
         return await self._versions.list_versions(limit)
 
     async def get_version(self, version_id: int) -> IndicatorConfigVersion | None:
+        """按版本 id 读取单个短名单历史版本。
+
+        参数：
+            version_id: int，版本行 id
+
+        返回：
+            IndicatorConfigVersion | None：对应版本行；id 不存在时返回 None
+        """
         return await self._versions.get_version(version_id)
 
     def _validated(self, shortlist: list[str], reason: str) -> IndicatorConfig:
         """写前校验：形状走 config 模型（去重/长度/字符集），键语义按 valid_keys 校验。
 
         收集全部未过项一次性抛出（LLM 可逐项修正）；通过则返回归一化后的模型。
+
+        参数：
+            shortlist: list[str]，待校验的指标键列表
+            reason: str，本次修订原因
+
+        返回：
+            IndicatorConfig，去重并完成形状与键语义校验的配置模型
+
+        异常：
+            IndicatorConfigValidationError: 列表形状、指标键、差异或原因任一校验失败时抛出
         """
         reasons: list[str] = []
         cfg: IndicatorConfig | None = None
@@ -156,6 +248,12 @@ class IndicatorConfigStore:
         """先写同目录 .tmp 临时文件，再 os.replace 原子替换目标文件（同 StrategyStore）。
 
         newline="" 关闭写入换行转换，保证落盘字节与计算 md5 的内容逐字节一致。
+
+        参数：
+            content: str，待写入运行时指标配置文件的完整 YAML 文本
+
+        返回：
+            None，先写同目录临时文件再原子替换目标文件
         """
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(content, encoding="utf-8", newline="")

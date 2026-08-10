@@ -50,6 +50,14 @@ class ReviewToolRegistry:
     """复盘工具注册表：schemas() 供 provider 转换，execute() 统一捕获错误。"""
 
     def __init__(self, deps: ReviewToolDeps) -> None:
+        """构建注册表：把每个工具的处理函数与同名 schema 组装成 ToolSpec。
+
+        参数：
+            deps: ReviewToolDeps，复盘工具执行所需依赖，经 partial 预绑定到每个处理函数
+
+        返回：
+            None，就地填充实例的 _tools 工具字典
+        """
         self._tools: dict[str, ToolSpec] = {}
         for name, fn in _HANDLERS.items():
             schema = SCHEMAS[name]
@@ -62,17 +70,36 @@ class ReviewToolRegistry:
 
     @property
     def specs(self) -> list[ToolSpec]:
+        """列出全部已注册工具的完整定义。
+
+        参数：无
+
+        返回：
+            list[ToolSpec]：每个工具的中性 schema 与异步执行函数
+        """
         return list(self._tools.values())
 
     def schemas(self) -> list[dict]:
-        """中性格式 [{name, description, parameters}]，provider 各自转换。"""
+        """中性格式 [{name, description, parameters}]，provider 各自转换。
+
+        参数：无
+        返回：
+            list[dict]，中性格式 [{name, description, parameters}]，provider 各自转换
+        """
         return [
             {"name": s.name, "description": s.description, "parameters": s.parameters}
             for s in self._tools.values()
         ]
 
     async def execute(self, name: str, args: dict | None) -> str:
-        """执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）。"""
+        """执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）。
+
+        参数：
+            name: str，工具、凭证或对象名称
+            args: dict | None，工具调用参数
+        返回：
+            str，执行工具；失败返回错误文本而非抛异常（LLM 可据此自我修正）
+        """
         spec = self._tools.get(name)
         if spec is None:
             return f"错误：未知工具 {name}（可用：{', '.join(self._tools)}）"

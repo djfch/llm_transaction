@@ -27,6 +27,13 @@ def parse_ts(value: str) -> float:
     """时间串 → Unix 秒。支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；失败返回当前时间。
 
     无时区的日期时间串按北京时间解释（数据源口径），带 %z 的 ISO 串尊重其自带时区。
+
+    参数：
+        value: str，待解析的时间、JSON 或指标值
+
+    返回：
+        float，时间串 → Unix 秒。支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；失败返回当前时间。  无时区的日期时间串按北京时间解释（数据源口径），带 %z 的 ISO 串尊重其自带时区
+
     """
     if not value:
         return time.time()
@@ -50,6 +57,13 @@ def _flash_from_row(row: dict) -> FlashItem:
 
     title 兜底强制 str：快讯常缺 title，用 id 顶包时 id 可能是 JSON 数字，
     不转 str 会让聚合层 title[:40] 抛 TypeError（M3 修复）。
+
+    参数：
+        row: dict，数据库查询行
+
+    返回：
+        FlashItem，一条金十快讯行 → FlashItem（字段名以实测为准，.get 兜底）。  title 兜底强制 str：快讯常缺 title，用 id 顶包时 id 可能是 JSON 数字， 不转 str 会让聚合层 title[:40] 抛 TypeError（M3 修复）
+
     """
     title = str(row.get("title") or row.get("id") or "")
     content = row.get("content") or ""
@@ -69,15 +83,39 @@ class Jin10Source:
     """金十数据源：持有 MCP 会话配置，方法级容错。"""
 
     def __init__(self, *, url: str, token: str, timeout: float = 60.0) -> None:
+        """保存金十 MCP 服务的连接配置，供后续每次请求建会话使用。
+
+        参数：
+            url: str，金十官方 HTTP MCP 服务地址（mcp.jin10.com）
+            token: str，Bearer 鉴权令牌
+            timeout: float，单次请求超时秒数；省略时默认 60 秒
+
+        返回：
+            None，仅就地保存配置到实例属性
+        """
         self._url = url
         self._token = token
         self._timeout = timeout
 
     def _session(self) -> McpSession:
+        """按已保存的连接配置新建一个金十 HTTP MCP 会话。
+
+        参数：无
+
+        返回：
+            McpSession：携带 url/token/timeout 的 HTTP 会话对象，
+            调用方用 async with 进入后执行 call_tool
+        """
         return McpSession(kind="http", url=self._url, token=self._token, timeout=self._timeout)
 
     async def fetch_calendar(self) -> list[CalendarEvent]:
-        """本周经济日历全量（今日+明日过滤由工具层做）。"""
+        """本周经济日历全量（今日+明日过滤由工具层做）。
+
+        参数：无
+
+        返回：
+            list[CalendarEvent]，本周经济日历全量（今日+明日过滤由工具层做）
+        """
         async with self._session() as s:
             text = await s.call_tool("list_calendar", {})
         rows = _safe_json_rows(text)
@@ -105,6 +143,13 @@ class Jin10Source:
 
         不依赖服务端排序假设：收集全部行后统一按 cutoff 过滤（防御倒序/乱序）；
         20 页硬上限兜底（超限时剩余数据由 24h 全量兜底覆盖）。
+
+        参数：
+            hours: int，回看小时数
+
+        返回：
+            list[FlashItem]，近 hours 小时快讯：cursor 分页拉取（单会话复用），统一按时间窗口过滤。  不依赖服务端排序假设：收集全部行后统一按 cutoff 过滤（防御倒序/乱序）； 20 页硬上限兜底（超限时剩余数据由 24h 全量兜底覆盖）
+
         """
         cutoff = time.time() - hours * 3600
         items: list[FlashItem] = []
@@ -125,7 +170,14 @@ class Jin10Source:
         return [item for item in items if item.published_at >= cutoff]
 
     async def fetch_article_detail(self, item_id: str) -> str:
-        """文章详情全文（get_news）。"""
+        """文章详情全文（get_news）。
+
+        参数：
+            item_id: str，金十文章编号
+
+        返回：
+            str，文章详情全文（get_news）
+        """
         async with self._session() as s:
             text = await s.call_tool("get_news", {"id": item_id})
         return text
@@ -135,6 +187,17 @@ class Jin10Source:
 
         单通道失败降级用另一通道；双通道全挂抛 ResearchSourceError（M2 修复：
         聚合器据此判定源失败，不再把连接故障伪装成"未找到"）。
+
+        参数：
+            keyword: str，新闻搜索关键词
+            limit: int，返回记录数量上限
+
+        返回：
+            list[FlashItem]，关键词搜索：快讯 + 文章两个通道合并，按时间倒序取 limit 条。  单通道失败降级用另一通道；双通道全挂抛 ResearchSourceError（M2 修复： 聚合器据此判定源失败，不再把连接故障伪装成"未找到"）
+
+        异常：
+            ResearchSourceError，快讯与文章搜索两个通道均失败时抛出
+
         """
         items: list[FlashItem] = []
         errors: list[str] = []
@@ -153,7 +216,14 @@ class Jin10Source:
 
 
 def _safe_json_rows(text: str) -> list[dict]:
-    """从 MCP 返回文本中提取 data 列表；解析失败返回空（调用方降级）。"""
+    """从 MCP 返回文本中提取 data 列表；解析失败返回空（调用方降级）。
+
+    参数：
+        text: str，订单说明或 MCP 返回文本
+
+    返回：
+        list[dict]，从 MCP 返回文本中提取 data 列表；解析失败返回空（调用方降级）
+    """
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError):
@@ -165,7 +235,14 @@ def _safe_json_rows(text: str) -> list[dict]:
 
 
 def _cursor_from(text: str) -> str:
-    """提取分页游标（list_flash 返回 next_cursor）。"""
+    """提取分页游标（list_flash 返回 next_cursor）。
+
+    参数：
+        text: str，订单说明或 MCP 返回文本
+
+    返回：
+        str，提取分页游标（list_flash 返回 next_cursor）
+    """
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError):

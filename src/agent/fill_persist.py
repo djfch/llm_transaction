@@ -23,7 +23,13 @@ logger = get_logger(__name__)
 
 
 def trade_source_of(fill: FillRecord) -> str:
-    """落库时的 source 推导：强平 > 止盈止损 > LLM 平仓 > LLM 开仓（user_close 由调用方覆盖）。"""
+    """落库时的 source 推导：强平 > 止盈止损 > LLM 平仓 > LLM 开仓（user_close 由调用方覆盖）。
+
+    参数：
+        fill: FillRecord，单笔模拟成交
+    返回：
+        str，落库时的 source 推导：强平 > 止盈止损 > LLM 平仓 > LLM 开仓（user_close 由调用方覆盖）
+    """
     if fill.order_id == "liquidation":
         return "liquidation"
     if fill.order_id.startswith("tpsl-"):
@@ -40,6 +46,17 @@ class FillPersister:
         mode: str,
         notify_event: Callable[[dict], None] | None = None,
     ) -> None:
+        """注入持久化依赖并初始化三方共用的互斥锁。
+
+        参数：
+            repo: Repo，SQLite 仓储，用于查订单归属（round_id）与写 trades 表
+            mode: str，运行模式（paper/testnet/live），随成交一并落库
+            notify_event: Callable[[dict], None] | None，批次落库成功后的
+                trades_updated 失效信号回调；省略则不通知前端
+
+        返回：
+            None，初始化实例字段（副作用：创建 asyncio.Lock 供三方临界区共用）
+        """
         self._repo = repo
         self._mode = mode
         self._notify_event = notify_event
@@ -47,11 +64,22 @@ class FillPersister:
 
     @property
     def lock(self) -> asyncio.Lock:
-        """手动平仓等「多步操作须同一临界区」的场景持锁用；持锁期间只能调 persist_locked。"""
+        """手动平仓等「多步操作须同一临界区」的场景持锁用；持锁期间只能调 persist_locked。
+
+        参数：无
+        返回：
+            asyncio.Lock，手动平仓等「多步操作须同一临界区」的场景持锁用；持锁期间只能调 persist_locked
+        """
         return self._lock
 
     async def drain_persist(self, drain_fills: Callable[[], list[FillRecord]]) -> int:
-        """锁内 drain（取空网关缓冲）+ 落库：轮末 drain 与行情即时 drain 用。"""
+        """锁内 drain（取空网关缓冲）+ 落库：轮末 drain 与行情即时 drain 用。
+
+        参数：
+            drain_fills: Callable[[], list[FillRecord]]，取空成交缓冲区的回调
+        返回：
+            int，锁内 drain（取空网关缓冲）+ 落库：轮末 drain 与行情即时 drain 用
+        """
         async with self._lock:
             return await self.persist_locked(drain_fills())
 
@@ -60,6 +88,12 @@ class FillPersister:
 
         单笔失败不中断：剩余成交继续落，失败记日志（成交已在网关账本，重试可能双计）。
         返回失败笔数；批次成功 ≥1 笔发一次 trades_updated（contracts 去重，count=成功笔数）。
+
+        参数：
+            fills: list[FillRecord]，待持久化的成交批次
+            source_override: str，调用方指定的成交来源覆盖值
+        返回：
+            int，逐笔继承归属并落 trades 表；调用方须已持 self.lock（或经 drain_persist 进入）
         """
         failures = 0
         saved_contracts: set[str] = set()
@@ -102,6 +136,13 @@ async def _drain_safely(
 
     drain 已取空缓冲，失败笔不可重试——落库/归属失败已在 persist_locked 内逐笔记日志，
     成交仍在网关账本，可事后对账。
+
+    参数：
+        persister: FillPersister，成交持久化协调器
+        drain_fills: Callable[[], list[FillRecord]]，取空成交缓冲区的回调
+        contract: str，合约标识
+    返回：
+        None，即时 drain 的任务体：异常仅记日志（护住行情任务）
     """
     try:
         await persister.drain_persist(drain_fills)
@@ -119,6 +160,13 @@ def schedule_drain(
 
     无运行中事件循环（同步单测直接调 on_ticker）时记 warning 跳过——轮末兜底 drain
     仍会落库，不丢成交。
+
+    参数：
+        persister: FillPersister，成交持久化协调器
+        drain_fills: Callable[[], list[FillRecord]]，取空成交缓冲区的回调
+        contract: str，合约标识
+    返回：
+        None，从同步回调（行情线程）调度一次即时 drain：create_task 后立即返回，不占关键路径
     """
     try:
         task = asyncio.get_running_loop().create_task(

@@ -45,7 +45,14 @@ class ResearchToolDeps:
 
 
 def _fmt_ts(ts: float) -> str:
-    """时间戳 → 'MM-DD HH:MM'（北京时间）：与数据源头串口径一致，UTC 部署机不偏移。"""
+    """时间戳 → 'MM-DD HH:MM'（北京时间）：与数据源头串口径一致，UTC 部署机不偏移。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        str：时间戳 → 'MM-DD HH:MM'（北京时间）：与数据源头串口径一致，UTC 部署机不偏移
+    """
     return datetime.fromtimestamp(ts, tz=BEIJING_TZ).strftime("%m-%d %H:%M")
 
 
@@ -53,6 +60,16 @@ def _parse_int(args: dict, key: str, default: int, lo: int, hi: int) -> tuple[in
     """解析整数参数：缺失用默认值；非数字/越界返回错误文本（L1 参数容错）。
 
     布尔与非整数值（True/1.5）一律拒绝，不做静默截断（与 supersedes_id 同口径）。
+
+    参数：
+        args: dict，调用方传入的工具参数字典
+        key: str，要读取或校验的参数键
+        default: int，参数缺失时采用的默认整数
+        lo: int，允许的最小整数
+        hi: int，允许的最大整数
+
+    返回：
+        tuple[int, str | None]：解析整数参数：缺失用默认值；非数字/越界返回错误文本（L1 参数容错）
     """
     raw = args.get(key)
     if raw is None:
@@ -70,7 +87,14 @@ def _parse_int(args: dict, key: str, default: int, lo: int, hi: int) -> tuple[in
 
 
 def _today_markers() -> tuple[str, str]:
-    """今日/明日日期串（北京时间 YYYY-MM-DD）：与日历 pub_time 同一时区口径。"""
+    """今日/明日日期串（北京时间 YYYY-MM-DD）：与日历 pub_time 同一时区口径。
+
+    参数：
+        无
+
+    返回：
+        tuple[str, str]：今日/明日日期串（北京时间 YYYY-MM-DD）：与日历 pub_time 同一时区口径
+    """
     now = datetime.now(BEIJING_TZ)
     return now.strftime("%Y-%m-%d"), (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -79,7 +103,22 @@ def _today_markers() -> tuple[str, str]:
 
 
 async def get_research_market_data(deps: ResearchToolDeps, args: dict) -> str:
-    """一次返回白名单单合约的 4h/1d K线、指标、资金费率和 OI 结构。"""
+    """一次返回白名单单合约的 4h/1d K线、指标、资金费率和 OI 结构。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：一次返回白名单单合约的 4h/1d K线、指标、资金费率和 OI 结构
+
+    异常：
+        ToolArgError：'contract 不能为空' 所描述的条件发生时
+        ToolArgError：f"contract {contract!r} 不在本轮白名单：{', '.join(deps.watchlist_snapshot)}" 所描述的条件发生时
+        ToolArgError：f'contract {contract!r} 已成功读取，禁止重复调用市场数据工具' 所描述的条件发生时
+        ToolArgError：error 所描述的条件发生时
+        ToolArgError：'研报市场数据服务未装配' 所描述的条件发生时
+    """
     contract = str(args.get("contract") or "").strip()
     if not contract:
         raise ToolArgError("contract 不能为空")
@@ -101,7 +140,15 @@ async def get_research_market_data(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def fetch_calendar(deps: ResearchToolDeps, args: dict) -> str:
-    """日历：今日+明日 star≥3 事件。"""
+    """日历：今日+明日 star≥3 事件。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：日历：今日+明日 star≥3 事件
+    """
     today, tomorrow = _today_markers()
     try:
         events = await deps.provider.fetch_calendar()
@@ -123,7 +170,15 @@ async def fetch_calendar(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def fetch_flash(deps: ResearchToolDeps, args: dict) -> str:
-    """全量快讯紧凑文本（时间+标题+摘要）。"""
+    """全量快讯紧凑文本（时间+标题+摘要）。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：全量快讯紧凑文本（时间+标题+摘要）
+    """
     hours, err = _parse_int(args, "hours", 24, 1, 48)
     if err:
         return err
@@ -144,7 +199,15 @@ async def fetch_flash(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def fetch_indicators(deps: ResearchToolDeps, args: dict) -> str:
-    """硬数据指标快照。"""
+    """硬数据指标快照。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：硬数据指标快照
+    """
     try:
         return await deps.provider.fetch_indicators()
     except ResearchSourceError as exc:
@@ -152,7 +215,15 @@ async def fetch_indicators(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
-    """FRED 宏观序列。"""
+    """FRED 宏观序列。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：FRED 宏观序列
+    """
     indicator = str(args.get("indicator") or "").strip()
     if not indicator:
         return "参数错误：indicator 必填（如 cpi / 10y_treasury / m2）"
@@ -166,7 +237,15 @@ async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def get_prediction_markets(deps: ResearchToolDeps, args: dict) -> str:
-    """Polymarket 预测概率。"""
+    """Polymarket 预测概率。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：Polymarket 预测概率
+    """
     topic = str(args.get("topic") or "").strip()
     if not topic:
         return "参数错误：topic 必填（如 Fed rate cut）"
@@ -180,7 +259,15 @@ async def get_prediction_markets(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def fetch_article_detail(deps: ResearchToolDeps, args: dict) -> str:
-    """单条快讯/文章全文。"""
+    """单条快讯/文章全文。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：单条快讯/文章全文
+    """
     item_id = str(args.get("id") or "").strip()
     if not item_id:
         return "参数错误：id 必填"
@@ -192,7 +279,15 @@ async def fetch_article_detail(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def search_news(deps: ResearchToolDeps, args: dict) -> str:
-    """关键词检索历史快讯/文章。"""
+    """关键词检索历史快讯/文章。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：关键词检索历史快讯/文章
+    """
     keyword = str(args.get("keyword") or "").strip()
     if not keyword:
         return "参数错误：keyword 必填"
@@ -212,7 +307,15 @@ async def search_news(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
-    """事实层近 N 天（客观记录）。"""
+    """事实层近 N 天（客观记录）。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：事实层近 N 天（客观记录）
+    """
     days, err = _parse_int(args, "days", 7, 1, 30)
     if err:
         return err
@@ -229,7 +332,15 @@ async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
-    """判断层近 N 天，按报告与合约分组。"""
+    """判断层近 N 天，按报告与合约分组。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：判断层近 N 天，按报告与合约分组
+    """
     days, err = _parse_int(args, "days", 7, 1, 30)
     if err:
         return err
@@ -241,7 +352,15 @@ async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
-    """读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版。"""
+    """读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版
+    """
     days, err = _parse_int(args, "days", 7, 1, 30)
     if err:
         return err
@@ -282,7 +401,14 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
 
 
 def _parse_await_verification(raw: Any) -> bool | None:
-    """解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None。"""
+    """解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None。
+
+    参数：
+        raw: Any，待解析或保留的原始数据
+
+    返回：
+        bool | None：解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None
+    """
     if raw is None:
         return True
     if isinstance(raw, bool):
@@ -306,6 +432,14 @@ async def _validate_supersedes(
     主题校验放行空主题目标（历史遗留链 topic=''，允许以新主题修正）；
     同轮内已声明替代过该链则拒绝（防止一轮内重复替代产生双当前版）。
     返回 (校验后的 id, 错误文本)；错误文本非空时调用方直接返回。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        topic: str，因果链主题
+        raw: Any，待解析或保留的原始数据
+
+    返回：
+        tuple[int | None, str | None]：supersedes_id 校验：可空；非空须为正整数、链存在、未被替代、主题一致
     """
     if raw in (None, ""):
         return None, None
@@ -339,6 +473,13 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     版本化（V1）：topic 必填（同主题聚合成族）；supersedes_id 声明替代旧链
     （须同主题当前版），落库时旧链标记 superseded；await_verification 声明
     待验证中间态（默认 true，允许 1 节点半成品观察）或结论链（须 2-6 节点）。
+
+    参数：
+        deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：提交链式因果链（唯一写出口）：校验通过后暂存 deps
     """
     chain = args.get("chain")
     confidence = args.get("confidence")

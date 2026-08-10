@@ -28,13 +28,27 @@ _NY_TZ = ZoneInfo("America/New_York")
 
 
 def _day_start(ts: float) -> float:
-    """ts 所在自然日的本地 00:00 时间戳（镜像 review.scheduler.local_day_start）。"""
+    """ts 所在自然日的本地 00:00 时间戳（镜像 review.scheduler.local_day_start）。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        float：ts 所在自然日的本地 00:00 时间戳（镜像 review.scheduler.local_day_start）
+    """
     lt = time.localtime(ts)
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
 def _is_ny_dst(ts: float) -> bool:
-    """ts 时刻纽约是否处于夏令时（dst() 非零即夏令时；绝对时刻换算，与本地时区无关）。"""
+    """ts 时刻纽约是否处于夏令时（dst() 非零即夏令时；绝对时刻换算，与本地时区无关）。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        bool：ts 时刻纽约是否处于夏令时（dst() 非零即夏令时；绝对时刻换算，与本地时区无关）
+    """
     return bool(datetime.fromtimestamp(ts, tz=_NY_TZ).dst())
 
 
@@ -43,6 +57,14 @@ def _slot_fire_ts(daily_time: str, ts: float, *, us_dst_adjust: bool = False) ->
 
     us_dst_adjust=True 且触发时刻纽约为冬令时（非 DST）时 +1h（美盘冬令时顺延）；
     隐含触发时刻 +1h 不跨自然日假设（默认 21:00→22:00 成立）。
+
+    参数：
+        daily_time: str，本地每日触发时间
+        ts: float，Unix 秒时间戳
+        us_dst_adjust: bool，是否按美国冬夏令时调整美盘时刻
+
+    返回：
+        float：ts 当日盘口触发时刻（本地 HH:MM）时间戳
     """
     hour, minute = daily_time.split(":")
     lt = time.localtime(ts)
@@ -56,13 +78,30 @@ class ResearchScheduler:
     """研报调度器：触发逻辑集中在可注入时间的 _tick，巡检循环只是 sleep + 调用。"""
 
     def __init__(self, settings: Settings, agent: ResearchAgent, repo: Repo) -> None:
+        """初始化研报调度器，保存配置、研报 agent 与持久化仓库并创建防重入锁。
+
+        参数：
+            settings: Settings，全局配置（research 热开关每 tick 现读，支持热更新）
+            agent: ResearchAgent，研报 agent，到点或手动触发时执行研报生成
+            repo: Repo，持久化仓库，用于按落库记录判定当日盘口是否已跑
+
+        返回：
+            None，就地初始化实例状态
+        """
         self._settings = settings
         self._agent = agent
         self._repo = repo
         self._lock = asyncio.Lock()
 
     async def run_forever(self) -> None:
-        """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。"""
+        """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。
+
+        参数：
+            无
+
+        返回：
+            None：巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环
+        """
         while True:
             await asyncio.sleep(60)
             try:
@@ -71,7 +110,14 @@ class ResearchScheduler:
                 logger.exception("研报调度巡检异常")
 
     async def _tick(self, now: float | None = None) -> None:
-        """单次巡检：最新到点盘口当日未跑则触发（now 可注入，供测试）。"""
+        """单次巡检：最新到点盘口当日未跑则触发（now 可注入，供测试）。
+
+        参数：
+            now: float | None，可注入的当前时间戳
+
+        返回：
+            None：单次巡检：最新到点盘口当日未跑则触发（now 可注入，供测试）
+        """
         cfg = self._settings.research  # enabled 等热开关每 tick 现读
         if not cfg.enabled:
             return
@@ -85,7 +131,15 @@ class ResearchScheduler:
             await self._agent.run(report_type=slot, hours=24)
 
     async def _due_slot(self, cfg: ResearchConfig, now: float) -> str | None:
-        """当日最新到点盘口未跑则返回其 report_type；未跑判定以落库成功研报（当日锚点）为准。"""
+        """当日最新到点盘口未跑则返回其 report_type；未跑判定以落库成功研报（当日锚点）为准。
+
+        参数：
+            cfg: ResearchConfig，已校验的配置对象
+            now: float，可注入的当前时间戳
+
+        返回：
+            str | None：当日最新到点盘口未跑则返回其 report_type；未跑判定以落库成功研报（当日锚点）为准
+        """
         slot = self._latest_due_slot(cfg, now)
         if slot is None:
             return None
@@ -94,7 +148,15 @@ class ResearchScheduler:
         return slot
 
     def _latest_due_slot(self, cfg: ResearchConfig, now: float) -> str | None:
-        """当日已到触发时刻的最新盘口名（全部未到点返回 None；不回看更早盘口）。"""
+        """当日已到触发时刻的最新盘口名（全部未到点返回 None；不回看更早盘口）。
+
+        参数：
+            cfg: ResearchConfig，已校验的配置对象
+            now: float，可注入的当前时间戳
+
+        返回：
+            str | None：当日已到触发时刻的最新盘口名（全部未到点返回 None；不回看更早盘口）
+        """
         fires = [
             ("asia_open", _slot_fire_ts(cfg.time_asia, now)),
             ("europe_open", _slot_fire_ts(cfg.time_europe, now)),
@@ -108,6 +170,13 @@ class ResearchScheduler:
         """手动触发研报；进行中返回忙（error_code='busy'，server 层映 409）。
 
         agent.run 的结构化结果（ok/report_id/error_code 等）原样并入返回。
+
+        参数：
+            report_type: str，研报盘口类型
+            hours: int，向前回溯的小时数
+
+        返回：
+            dict：手动触发研报；进行中返回忙（error_code='busy'，server 层映 409）
         """
         if self._lock.locked():
             return {"started": False, "error": "研报生成中", "error_code": "busy"}

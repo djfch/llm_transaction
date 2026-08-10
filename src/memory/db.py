@@ -229,18 +229,45 @@ class Database:
     """aiosqlite 连接封装：open 时启用 WAL 并建表，close 释放连接。"""
 
     def __init__(self) -> None:
+        """初始化数据库封装实例，连接与文件路径置空（未打开状态）。
+
+        参数：无
+
+        返回：
+            None，仅初始化内部字段；真正的连接与建表在 open() 中完成
+        """
         self._path: Path | None = None
         self._conn: aiosqlite.Connection | None = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
-        """已打开的连接；未 open 时抛错，防止隐式依赖未初始化状态。"""
+        """已打开的连接；未 open 时抛错，防止隐式依赖未初始化状态。
+
+        参数：
+            无
+
+        返回：
+            aiosqlite.Connection：已打开的连接；未 open 时抛错，防止隐式依赖未初始化状态
+
+        异常：
+            RuntimeError：'数据库未打开，请先调用 open()' 所描述的条件发生时
+        """
         if self._conn is None:
             raise RuntimeError("数据库未打开，请先调用 open()")
         return self._conn
 
     async def open(self, path: str | Path) -> None:
-        """打开（必要时创建）数据库文件，启用 WAL 模式并执行建表与轻量迁移。"""
+        """打开（必要时创建）数据库文件，启用 WAL 模式并执行建表与轻量迁移。
+
+        参数：
+            path: str | Path，目标文件或数据库路径
+
+        返回：
+            None：打开（必要时创建）数据库文件，启用 WAL 模式并执行建表与轻量迁移
+
+        异常：
+            Exception：捕获当前异常后原样重新抛出
+        """
         db_path = Path(path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(str(db_path))
@@ -259,7 +286,20 @@ class Database:
             raise
 
     async def _validate_research_schema(self) -> None:
-        """只接受当前逐标的研报结构；生产基线无研报表时允许直接建表。"""
+        """只接受当前逐标的研报结构；生产基线无研报表时允许直接建表。
+
+        参数：
+            无
+
+        返回：
+            None：只接受当前逐标的研报结构；生产基线无研报表时允许直接建表
+
+        异常：
+            RuntimeError：'检测到旧版研报表 research_reports；当前版本不执行兼容迁移，请先备份数据库并按部署文档重建研报数据' 所描述的条件发生时
+            RuntimeError：'研报表结构不完整：缺少 research_asset_views' 所描述的条件发生时
+            RuntimeError：'研报表结构不完整：research_asset_views 字段不符合当前协议' 所描述的条件发生时
+            RuntimeError：'检测到非 schema_version=2 的研报数据；请先备份数据库并重建研报数据' 所描述的条件发生时
+        """
         cur = await self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_reports'"
         )
@@ -289,7 +329,17 @@ class Database:
 
     @property
     def path(self) -> Path:
-        """当前数据库文件路径；独立事务连接使用同一路径。"""
+        """当前数据库文件路径；独立事务连接使用同一路径。
+
+        参数：
+            无
+
+        返回：
+            Path：当前数据库文件路径；独立事务连接使用同一路径
+
+        异常：
+            RuntimeError：'数据库未打开，请先调用 open()' 所描述的条件发生时
+        """
         if self._path is None:
             raise RuntimeError("数据库未打开，请先调用 open()")
         return self._path
@@ -314,6 +364,12 @@ class Database:
         - causal_links.topic/supersedes_id/await_verification：旧链无主题（''）、无替代关系
           （NULL）、按待验证处理（1），不回填；supersedes 索引只在迁移末尾建（旧库须先补列，
           SCHEMA 阶段建会因缺列报错，同 trades.exchange_trade_id）。
+
+        参数：
+            无
+
+        返回：
+            None：轻量迁移（均幂等，用 PRAGMA table_info 判列存在性）：
         """
         cur = await self._conn.execute("PRAGMA table_info(orders)")
         order_cols = {row["name"] for row in await cur.fetchall()}
@@ -368,7 +424,14 @@ class Database:
         )
 
     async def close(self) -> None:
-        """关闭连接；重复调用安全。"""
+        """关闭连接；重复调用安全。
+
+        参数：
+            无
+
+        返回：
+            None：关闭连接；重复调用安全
+        """
         if self._conn is not None:
             await self._conn.close()
             self._conn = None

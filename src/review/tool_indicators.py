@@ -27,7 +27,13 @@ _STORE_MISSING = "指标功能未配置（indicator_config_store 未注入，装
 
 
 def indicator_menu_items() -> list[str]:
-    """可选指标全集菜单条目（key=label/中文kind）；schema 描述与工具输出共用同一数据源。"""
+    """可选指标全集菜单条目（key=label/中文kind）；schema 描述与工具输出共用同一数据源。
+
+    参数：无
+
+    返回：
+        list[str]，可选指标全集菜单条目（key=label/中文kind）；schema 描述与工具输出共用同一数据源
+    """
     return [f"{key}={defn.label}/{_KIND_ZH[defn.kind]}" for key, defn in REGISTRY.items()]
 
 
@@ -35,7 +41,17 @@ def indicator_menu_items() -> list[str]:
 
 
 def _opt_interval(args: dict) -> str:
-    """可选 K 线周期：缺省 '1h'；非法值抛 ToolArgError（由注册表转中文错误文本）。"""
+    """可选 K 线周期：缺省 '1h'；非法值抛 ToolArgError（由注册表转中文错误文本）。
+
+    参数：
+        args: dict，工具调用参数
+
+    返回：
+        str，可选 K 线周期：缺省 '1h'；非法值抛 ToolArgError（由注册表转中文错误文本）
+
+    异常：
+        ToolArgError，interval 不在 Gate 支持的 K 线周期中时抛出
+    """
     v = args.get("interval")
     if v is None:
         return _DEFAULT_INTERVAL
@@ -47,7 +63,18 @@ def _opt_interval(args: dict) -> str:
 
 
 def _need_str_list(args: dict, name: str) -> list[str]:
-    """必填非空字符串数组（元素 strip 后返回）；形状非法抛 ToolArgError。"""
+    """必填非空字符串数组（元素 strip 后返回）；形状非法抛 ToolArgError。
+
+    参数：
+        args: dict，工具调用参数
+        name: str，工具名或参数名
+
+    返回：
+        list[str]，必填非空字符串数组（元素 strip 后返回）；形状非法抛 ToolArgError
+
+    异常：
+        ToolArgError，参数不是非空列表或任一元素不是非空字符串时抛出
+    """
     v = args.get(name)
     if not isinstance(v, list) or not v:
         raise ToolArgError(f"缺少必填参数 {name}（非空字符串数组）")
@@ -60,7 +87,14 @@ def _need_str_list(args: dict, name: str) -> list[str]:
 
 
 def _render_values(item: dict) -> str:
-    """单指标值文本：单字段只给值；多字段 field=value 逐一列出（None 显示 无数据）。"""
+    """单指标值文本：单字段只给值；多字段 field=value 逐一列出（None 显示 无数据）。
+
+    参数：
+        item: dict，提供商响应中的工具调用项
+
+    返回：
+        str，单指标值文本：单字段只给值；多字段 field=value 逐一列出（None 显示 无数据）
+    """
     rendered = {k: fmt_indicator_value(v) for k, v in item["values"].items()}
     if len(rendered) == 1:
         return next(iter(rendered.values()))
@@ -68,7 +102,14 @@ def _render_values(item: dict) -> str:
 
 
 def _render_panel(panel: dict) -> str:
-    """full_panel 字典 → 逐行中文文本（每指标一行：key | label：值）。"""
+    """full_panel 字典 → 逐行中文文本（每指标一行：key | label：值）。
+
+    参数：
+        panel: dict，完整指标面板字典
+
+    返回：
+        str，full_panel 字典 → 逐行中文文本（每指标一行：key | label：值）
+    """
     ts = panel["time"]
     head = f"{panel['contract']} 指标面板（{panel['interval']}）"
     head += "：无K线数据" if ts is None else f"：截至 {_fmt_time(ts)}"
@@ -82,7 +123,15 @@ def _render_panel(panel: dict) -> str:
 
 
 async def get_indicators(deps: ReviewToolDeps, args: dict) -> str:
-    """查看指定合约当前指标面板；合约须在 watchlist 内（watchlist 未接线时不限制）。"""
+    """查看指定合约当前指标面板；合约须在 watchlist 内（watchlist 未接线时不限制）。
+
+    参数：
+        deps: ReviewToolDeps，工具或服务依赖集合
+        args: dict，工具调用参数
+
+    返回：
+        str，查看指定合约当前指标面板；合约须在 watchlist 内（watchlist 未接线时不限制）
+    """
     if deps.indicator_service is None:
         return _SERVICE_MISSING
     contract = _need_str(args, "contract")
@@ -93,7 +142,15 @@ async def get_indicators(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
-    """当前生效短名单 + 可选指标全集菜单（key=label/分组），供改写前核对。"""
+    """当前生效短名单 + 可选指标全集菜单（key=label/分组），供改写前核对。
+
+    参数：
+        deps: ReviewToolDeps，工具或服务依赖集合
+        args: dict，工具调用参数
+
+    返回：
+        str，当前生效短名单 + 可选指标全集菜单（key=label/分组），供改写前核对
+    """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
     current = deps.indicator_config_store.load_current()
@@ -110,7 +167,15 @@ async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
-    """提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号。"""
+    """提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号。
+
+    参数：
+        deps: ReviewToolDeps，工具或服务依赖集合
+        args: dict，工具调用参数
+
+    返回：
+        str，提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号
+    """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
     shortlist = _need_str_list(args, "shortlist")

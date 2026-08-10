@@ -32,10 +32,28 @@ def make_on_ticker(
     fill_persister 非空且撮合后成交缓冲有货时调度即时落库（create_task 后立即返回，
     落库不在行情回调关键路径；drain 与落库在 FillPersister 锁内完成，与轮末兜底
     drain、手动平仓互斥，不会双计）。
+
+    参数：
+        gateway: Gateway，交易所网关
+        triggers: TriggerManager，价格预警线管理器
+        broadcast: Callable[[dict], None] | None，WebSocket 行情广播回调
+        broadcast_interval: float，同合约行情广播最小间隔秒数
+        fill_persister: FillPersister | None，可选的即时成交持久化器
+    返回：
+        Callable[[Ticker], None]，ticker 总闸：paper 撮合、触发器检查、WS 行情广播各自捕获异常记日志，不外抛（护住 WS 任务）
     """
     last_sent: dict[str, float] = {}
 
     def on_ticker(ticker: Ticker) -> None:
+        """处理单笔 ticker 行情：驱动 paper 撮合、成交即时落库调度、触发器检查与节流广播。
+
+        参数：
+            ticker: Ticker，最新行情快照（含合约名、标记价与最新成交价）
+
+        返回：
+            None，只产生副作用（撮合、落库调度、触发器触发、WS 行情广播）；
+            各分支异常仅记日志不外抛，护住 WS 行情任务
+        """
         if isinstance(gateway, PaperGateway):
             try:
                 gateway.on_price(ticker.contract, ticker.mark_price, ticker.last, ticker.last)

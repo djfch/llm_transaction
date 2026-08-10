@@ -16,7 +16,16 @@ from src.paper.engine import PaperGateway
 def settle_due_funding(
     gateway: PaperGateway, last_settled: dict[str, float], now: float
 ) -> list[str]:
-    """对到达 funding_interval 的持仓合约结算一次资金费，返回本次结算的合约名。"""
+    """对到达 funding_interval 的持仓合约结算一次资金费，返回本次结算的合约名。
+
+    参数：
+        gateway: PaperGateway，交易网关
+        last_settled: dict[str, float]，合约到上次资金费结算时间的映射
+        now: float，当前 Unix 时间戳
+
+    返回：
+        list[str]，对到达 funding_interval 的持仓合约结算一次资金费，返回本次结算的合约名
+    """
     settled: list[str] = []
     for position in gateway.list_positions():
         contract = gateway.get_contract(position.contract)
@@ -30,7 +39,14 @@ def settle_due_funding(
 
 
 async def funding_loop(gateway: Gateway) -> None:
-    """paper 模式资金费结算：按各合约 funding_interval 周期结算（Gate 惯例 8h）。"""
+    """paper 模式资金费结算：按各合约 funding_interval 周期结算（Gate 惯例 8h）。
+
+    参数：
+        gateway: Gateway，交易网关
+
+    返回：
+        None，paper 模式资金费结算：按各合约 funding_interval 周期结算（Gate 惯例 8h）
+    """
     if not isinstance(gateway, PaperGateway):
         return
     last_settled: dict[str, float] = {}

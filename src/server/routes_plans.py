@@ -14,11 +14,24 @@ from src.server.deps import ServerDeps
 
 
 def create_plans_router(deps: ServerDeps) -> APIRouter:
+    """创建交易计划只读路由：GET /api/plan 返回当前唯一一份计划。
+
+    参数：
+        deps: ServerDeps，服务依赖束（计划数据经其 repo.plans 子仓库读取）
+
+    返回：
+        APIRouter：挂载 /api/plan 只读端点的路由器
+    """
     router = APIRouter(prefix="/api")
 
     @router.get("/plan")
     async def get_plan() -> dict[str, Any]:
-        """当前交易计划；无计划时 content 为空串（前端据此显示空态）。"""
+        """当前交易计划；无计划时 content 为空串（前端据此显示空态）。
+
+        参数：无
+        返回：
+            dict[str, Any]，当前交易计划；无计划时 content 为空串（前端据此显示空态）
+        """
         plan = await deps.repo.plans.get_plan()
         if plan is None:
             return {"content": "", "round_id": "", "updated_at": None}

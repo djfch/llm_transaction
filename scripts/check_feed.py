@@ -23,10 +23,23 @@ DURATION = 30
 
 
 def main() -> None:
+    """实连 Gate 永续 WS 订阅 BTC_USDT 行情 30 秒，人工核对各 K 线周期的支持情况。
+
+    参数：无
+
+    返回：None，向终端打印 ticker 推送明细与各周期 K 线推送条数统计
+    """
     ticker_count = 0
     candle_counts: Counter[str] = Counter()
 
     def on_ticker(ticker: Ticker) -> None:
+        """ticker 推送回调：累计条数并打印最新价、标记价、资金费率等行情快照。
+
+        参数：
+            ticker: Ticker，交易所推送的最新 ticker 行情数据
+
+        返回：None，累加外层 ticker_count 计数并向终端打印一条行情
+        """
         nonlocal ticker_count
         ticker_count += 1
         print(
@@ -36,9 +49,25 @@ def main() -> None:
         )
 
     def on_candle(contract: str, interval: str, candle: Candle, closed: bool) -> None:
+        """K 线推送回调：按周期累计收到的 K 线条数，用于判断该周期是否受 WS 支持。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            interval: str，K 线周期（如 1m、4h、1d）
+            candle: Candle，推送的 K 线数据
+            closed: bool，该根 K 线是否已收盘
+
+        返回：None，就地累加外层 candle_counts 中对应周期的计数
+        """
         candle_counts[interval] += 1
 
     async def run() -> None:
+        """启动行情订阅，等待 30 秒后停止，并打印 ticker 总数与各周期 K 线条数统计。
+
+        参数：无
+
+        返回：None，向终端打印订阅统计结果
+        """
         feed = MarketFeed(
             ["BTC_USDT"],
             list(GATE_CANDLE_INTERVALS),

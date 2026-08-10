@@ -83,7 +83,15 @@ class AppContext:
 
 
 def _default_contract(name: str, mark: Decimal) -> Contract:
-    """mock 行情下的默认合约元数据（费率/步长取常见档位，仅供模拟撮合）。"""
+    """mock 行情下的默认合约元数据（费率/步长取常见档位，仅供模拟撮合）。
+
+    参数：
+        name: str，工具名或参数名
+        mark: Decimal，模拟标记价格
+
+    返回：
+        Contract，mock 行情下的默认合约元数据（费率/步长取常见档位，仅供模拟撮合）
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal("0.001"),
@@ -108,7 +116,18 @@ def _build_gateway(
     candle_provider: Callable[..., list[Candle]] | None,
 ) -> Gateway:
     """按运行模式创建网关：paper→模拟撮合；testnet/live→真实 REST。
-    paper 模式 candle_provider 显式注入优先，否则用公共 REST 网关（无签名，合约/K线/持仓量同源委托）。"""
+    paper 模式 candle_provider 显式注入优先，否则用公共 REST 网关（无签名，合约/K线/持仓量同源委托）。
+
+    参数：
+        settings: Settings，应用配置
+        watchlist: Watchlist，关注合约配置
+        mock_market: bool，是否使用模拟行情
+        candle_provider: Callable[..., list[Candle]] | None，可选的历史 K 线提供函数
+
+    返回：
+        Gateway，按运行模式创建网关：paper→模拟撮合；testnet/live→真实 REST。 paper 模式 candle_provider 显式注入优先，否则用公共 REST 网关（无签名，合约/K线/持仓量同源委托）
+
+    """
     if settings.mode != "paper":
         return GateRestGateway(
             settings.gate,
@@ -129,9 +148,27 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
 
     单 agent 重建失败（LLMError）保留其旧 provider 并在 error 中点名（多个错误用
     中文分号连接）；mock 模式直接回报已配置。响应契约：{"llm_configured": bool, "error": str}。
+
+    参数：
+        ctx: AppContext，应用运行上下文
+        mock_llm: bool，是否使用模拟 LLM
+
+    返回：
+        Callable[[], Awaitable[dict]]，生成 LLM 热重建回调：按各 agent 当前绑定凭证逐个重建 provider 并热替换。  单 agent 重建失败（LLMError）保留其旧 provider 并在 error 中点名（多个错误用 中文分号连接）；mock 模式直接回报已配置。响应契约：{"llm_configured": bool, "error": str}
+
     """
 
     async def reconfigure() -> dict:
+        """热重建全部 agent 的 LLM provider 并汇报结果。
+
+        mock 模式直接回报已配置；单个 agent 重建失败保留其旧 provider 并记入 error。
+
+        参数：无
+
+        返回：
+            dict：{"llm_configured": 交易 agent 是否已配置可用,
+            "error": 各 agent 失败原因（中文分号连接，空串表示全部成功）}
+        """
         if mock_llm or os.environ.get("LLM_MOCK") == "1":
             return {"llm_configured": True, "error": ""}
         targets = (
@@ -158,7 +195,16 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
 
 
 def _build_source(settings: Settings, watchlist: Watchlist, mock_market: bool) -> PriceSource:
-    """行情源：mock 用 ManualPriceSource（测试/冒烟手动推送）；否则 Gate WS 订阅。"""
+    """行情源：mock 用 ManualPriceSource（测试/冒烟手动推送）；否则 Gate WS 订阅。
+
+    参数：
+        settings: Settings，应用配置
+        watchlist: Watchlist，关注合约配置
+        mock_market: bool，是否使用模拟行情
+
+    返回：
+        PriceSource，行情源：mock 用 ManualPriceSource（测试/冒烟手动推送）；否则 Gate WS 订阅
+    """
     if mock_market:
         return ManualPriceSource()
     return MarketFeed(
@@ -172,7 +218,17 @@ def _build_source(settings: Settings, watchlist: Watchlist, mock_market: bool) -
 
 def _backfill_candles(candles: CandleCache, contracts: list[str], *, skip: bool) -> None:
     """启动时 REST 回补历史 K 线。单个周期失败由 backfill 内部隔离记 warning；
-    本层 try 仅兜底非周期性异常（WS 仍会逐根积累），不阻断启动。"""
+    本层 try 仅兜底非周期性异常（WS 仍会逐根积累），不阻断启动。
+
+    参数：
+        candles: CandleCache，按时间升序的 K 线序列
+        contracts: list[str]，需要回补或订阅的合约列表
+        skip: bool，是否跳过历史 K 线回补
+
+    返回：
+        None，启动时 REST 回补历史 K 线。单个周期失败由 backfill 内部隔离记 warning； 本层 try 仅兜底非周期性异常（WS 仍会逐根积累），不阻断启动
+
+    """
     if skip:  # mock 行情且无注入 provider：不做真实 REST 回补（可无网运行）
         return
     try:
@@ -200,11 +256,37 @@ def _build_loop(
     """创建决策循环：paper 网关接 drain_fills；真实网关 None（trades 由 fill_sync 落库）。
 
     provider 由 build_app 按 trader 绑定凭证构造传入（与复盘 agent 各自独立实例）。
+
+    参数：
+        settings: Settings，应用配置
+        watchlist: Watchlist，关注合约配置
+        provider: LLMProvider | None，LLM 提供商
+        gateway: Gateway，交易网关
+        repo: Repo，数据仓储
+        candles: CandleCache，按时间升序的 K 线序列
+        triggers: TriggerManager，价格触发器管理器
+        scheduler: WakeupScheduler，唤醒调度器
+        cfg_path: Path，运行配置文件路径
+        audit: AuditTrail，审计轨迹实例
+        notify_event: Callable[[dict], None] | None，可选事件通知回调
+        fill_persister: FillPersister | None，可选成交持久化协调器
+        indicators: IndicatorComponents | None，指标子系统组件
+
+    返回：
+        DecisionLoop，创建决策循环：paper 网关接 drain_fills；真实网关 None（trades 由 fill_sync 落库）。  provider 由 build_app 按 trader 绑定凭证构造传入（与复盘 agent 各自独立实例）
+
     """
     notifier = build_notifier(settings.notify)
 
     def persist_kill_switch(enabled: bool) -> None:
-        """风控锁写回 config.yaml：读原文 → 改字段 → 校验写回（同步回调）。"""
+        """风控锁写回 config.yaml：读原文 → 改字段 → 校验写回（同步回调）。
+
+        参数：
+            enabled: bool，熔断开关是否启用
+
+        返回：
+            None，风控锁写回 config.yaml：读原文 → 改字段 → 校验写回（同步回调）
+        """
         raw = read_settings_raw(cfg_path)
         raw.setdefault("risk", {})["kill_switch"] = enabled
         write_settings(raw, cfg_path)
@@ -241,7 +323,20 @@ async def build_app(
     config_path: Path | None = None,
     candle_provider: Callable[..., list[Candle]] | None = None,
 ) -> AppContext:
-    """创建全部组件并接好依赖（尚未启动行情/调度/HTTP）。"""
+    """创建全部组件并接好依赖（尚未启动行情/调度/HTTP）。
+
+    参数：
+        settings: Settings，应用配置
+        watchlist: Watchlist，关注合约配置
+        mock_llm: bool，是否使用模拟 LLM
+        mock_market: bool，是否使用模拟行情
+        db_path: str | Path，数据库文件路径
+        config_path: Path | None，可选配置文件路径
+        candle_provider: Callable[..., list[Candle]] | None，可选的历史 K 线提供函数
+
+    返回：
+        AppContext，创建全部组件并接好依赖（尚未启动行情/调度/HTTP）
+    """
     db = Database()
     await db.open(db_path)
     repo = Repo(db)
@@ -251,7 +346,16 @@ async def build_app(
     candles = CandleCache(gateway, source)  # 构造时自动注册 on_candle
     _backfill_candles(candles, watchlist.contracts, skip=mock_market and candle_provider is None)
 
-    async def on_wake(wake_source: str) -> None:  # 晚绑定 loop：启动后才会被调度器调用
+    async def on_wake(wake_source: str) -> None:
+        """调度器唤醒回调：先广播 round_start 事件，跑一轮决策，再广播本轮结果。
+
+        闭包晚绑定 loop：本回调在 loop 创建后才会被调度器调用。
+
+        参数：
+            wake_source: str，唤醒来源（定时唤醒/价格触发/手动抢醒等）
+
+        返回：None，向 event_queue 推送 round_start 与 round 两类事件（经 WS 广播给前端）
+        """
         # 轮开始先推 round_start：前端实时决策卡据此立即进入"决策中"轮询态
         await event_queue.put({"type": "round_start", "data": {"wake_source": wake_source}})
         result = await loop.run_once(wake_source)
@@ -355,10 +459,28 @@ async def build_app(
 def _build_server(
     ctx: AppContext, audit: AuditTrail, indicators: IndicatorComponents, *, mock_llm: bool = False
 ) -> tuple[uvicorn.Server, ServerDeps]:
-    """创建监控 HTTP 服务（与 agent 同进程运行）；runtime_* 与决策循环共享同一实例。"""
+    """创建监控 HTTP 服务（与 agent 同进程运行）；runtime_* 与决策循环共享同一实例。
+
+    参数：
+        ctx: AppContext，应用运行上下文
+        audit: AuditTrail，审计轨迹实例
+        indicators: IndicatorComponents，指标子系统组件
+        mock_llm: bool，是否使用模拟 LLM
+
+    返回：
+        tuple[uvicorn.Server, ServerDeps]，同进程运行的 Uvicorn 服务及其服务端依赖
+    """
     settings = ctx.settings
 
     def status_provider() -> dict:
+        """汇总运行时状态供监控接口查询。
+
+        参数：无
+
+        返回：
+            dict：运行模式、启动时长（秒）、风控锁状态、agent 运行/在轮状态及
+            LLM 提供方、模型与配置状态
+        """
         return {
             "mode": settings.mode,
             "uptime_seconds": int(time.time() - ctx.started_at),
@@ -371,12 +493,26 @@ def _build_server(
         }
 
     def on_kill_switch(enabled: bool) -> None:
+        """监控接口的风控锁开关回调。
+
+        参数：
+            enabled: bool，是否开启风控锁（开启后禁止新增敞口）
+
+        返回：None，就地修改 settings.risk.kill_switch（仅内存生效，不落盘）
+        """
         settings.risk.kill_switch = enabled
 
     async def manual_close(contract: str) -> dict:
         """手动平仓适配：调用时解析 loop.manual_close（接口冻结，与 LLM 平仓同一风控路径）。
 
         同步/异步实现均可（isawaitable 消化），server 层统一按异步回调注入。
+
+        参数：
+            contract: str，合约标识
+
+        返回：
+            dict，决策循环人工平仓返回的结构化结果
+
         """
         result = ctx.loop.manual_close(contract)
         if inspect.isawaitable(result):
@@ -384,19 +520,41 @@ def _build_server(
         return result
 
     async def manual_cancel_order(contract: str, order_id: str) -> dict:
-        # 适配决策循环的手动撤单接口，兼容同步和异步实现。
+        """手动撤单适配：调用决策循环的撤单接口，兼容同步和异步实现（isawaitable 消化）。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，待撤销的订单 ID
+
+        返回：
+            dict：撤单结果（透传决策循环 manual_cancel_order 的返回值）
+        """
         result = ctx.loop.manual_cancel_order(contract, order_id)
         if inspect.isawaitable(result):
             result = await result
         return result
 
     def paper_reset(equity: Decimal) -> None:
-        """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。"""
+        """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。
+
+        参数：
+            equity: Decimal，重置后的模拟账户权益
+
+        返回：
+            None，模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）
+        """
         ctx.gateway.reset_account(equity)  # type: ignore[attr-defined]
 
     async def agent_start() -> None:
         """手动启动 agent：启动调度器并立即抢醒第一轮（用户点击"启动"的合理预期是
-        马上开始决策，而非干等 default_wake_minutes 后的首个定时唤醒）。"""
+        马上开始决策，而非干等 default_wake_minutes 后的首个定时唤醒）。
+
+        参数：无
+
+        返回：
+            None，手动启动 agent：启动调度器并立即抢醒第一轮（用户点击"启动"的合理预期是 马上开始决策，而非干等 default_wake_minutes 后的首个定时唤醒）
+
+        """
         await ctx.scheduler.start()
         ctx.scheduler.wake_now("manual_start")
 
@@ -435,7 +593,16 @@ async def run_app(
     duration: float | None = None,
     price_pusher: Callable[[AppContext], Awaitable[None]] | None = None,
 ) -> None:
-    """启动并运行应用；duration 为 None 时长驻（Ctrl+C 退出），否则到时自动关闭。"""
+    """启动并运行应用；duration 为 None 时长驻（Ctrl+C 退出），否则到时自动关闭。
+
+    参数：
+        ctx: AppContext，应用运行上下文
+        duration: float | None，可选运行时长秒数
+        price_pusher: Callable[[AppContext], Awaitable[None]] | None，可选模拟价格推送协程
+
+    返回：
+        None，启动并运行应用；duration 为 None 时长驻（Ctrl+C 退出），否则到时自动关闭
+    """
     assert ctx.server is not None
     await ctx.source.start()
     if ctx.trade_feed is not None and ctx.trade_sync is not None:
@@ -483,7 +650,20 @@ async def shutdown(
     research_task: asyncio.Task,
     safety_task: asyncio.Task | None = None,
 ) -> None:
-    """优雅退出：停调度与行情，关 HTTP，收尾数据库。"""
+    """优雅退出：停调度与行情，关 HTTP，收尾数据库。
+
+    参数：
+        ctx: AppContext，应用运行上下文
+        server_task: asyncio.Task，HTTP 服务任务
+        pusher_task: asyncio.Task | None，可选价格推送任务
+        funding_task: asyncio.Task，资金费巡检任务
+        review_task: asyncio.Task，复盘调度任务
+        research_task: asyncio.Task，研报调度任务
+        safety_task: asyncio.Task | None，可选安全对账任务
+
+    返回：
+        None，优雅退出：停调度与行情，关 HTTP，收尾数据库
+    """
     logger.info("正在关闭应用…")
     await ctx.scheduler.stop()
     await ctx.source.stop()

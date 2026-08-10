@@ -26,11 +26,32 @@ class PromptLoader:
     """策略书加载器：缓存 + mtime 检测热重载。"""
 
     def __init__(self, path: str | Path) -> None:
+        """初始化加载器，记录策略书路径，缓存留空待首次读取时惰性加载。
+
+        参数：
+            path: str | Path，策略书（system_prompt.md）文件路径
+
+        返回：
+            None，就地初始化实例状态（路径、修改时间缓存、正文缓存）
+        """
         self._path = Path(path)
         self._mtime: float | None = None
         self._body: str = ""
 
     def _load_body(self) -> str:
+        """读取策略书原文，文件修改时间变化时自动重新加载（热重载）。
+
+        文件修改时间未变时直接返回缓存正文；运行中文件被删除时沿用
+        已有缓存，不中断决策。
+
+        参数：无
+
+        返回：
+            str：策略书原文（不含工具说明段）
+
+        异常：
+            FileNotFoundError：文件不存在且尚无缓存内容（首次读取即缺失）时抛出
+        """
         try:
             mtime = self._path.stat().st_mtime
         except FileNotFoundError:
@@ -43,19 +64,36 @@ class PromptLoader:
         return self._body
 
     def system_prompt(self, tools: list[ToolSpec]) -> tuple[str, str]:
-        """返回（完整 system prompt, md5）。完整文本 = 策略书 + 工具说明段。"""
+        """返回（完整 system prompt, md5）。完整文本 = 策略书 + 工具说明段。
+
+        参数：
+            tools: list[ToolSpec]，提供给模型的工具定义列表
+        返回：
+            tuple[str, str]，完整 system prompt, md5）。完整文本 = 策略书 + 工具说明段
+        """
         body = self._load_body()
         full = body.rstrip() + "\n\n" + EXECUTION_RESEARCH_POLICY_V2
         full += "\n\n" + render_tool_docs(tools)
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
     def body_md5(self) -> str:
-        """策略书原文（不含工具说明段）的 md5，作为决策/成交与策略版本的关联键。"""
+        """策略书原文（不含工具说明段）的 md5，作为决策/成交与策略版本的关联键。
+
+        参数：无
+        返回：
+            str，策略书原文（不含工具说明段）的 md5，作为决策/成交与策略版本的关联键
+        """
         return hashlib.md5(self._load_body().encode("utf-8")).hexdigest()
 
 
 def render_tool_docs(tools: list[ToolSpec]) -> str:
-    """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。"""
+    """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。
+
+    参数：
+        tools: list[ToolSpec]，提供给模型的工具定义列表
+    返回：
+        str，工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）
+    """
     lines = ["## 可用工具", ""]
     for t in tools:
         required = "、".join(t.parameters.get("required", [])) or "无"

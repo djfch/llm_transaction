@@ -28,14 +28,26 @@ MOCK_EQUITY_MARKER = "10842.36"  # 前端 mock 假权益常量：生产构建应
 
 
 def check_dist() -> None:
-    """前置检查：web/dist 必须已构建（否则静态托管无内容可测）。"""
+    """确认前端生产构建入口存在，否则提示构建命令并终止冒烟流程。
+
+    参数：无
+
+    返回：
+        None，仅执行 web/dist/index.html 前置检查
+    """
     if not (DIST / "index.html").is_file():
         print("未找到 web/dist 构建产物，请先执行：cd web && npm run build", file=sys.stderr)
         sys.exit(1)
 
 
 def check_no_mock_bundle() -> None:
-    """反 mock 检查：dist 的 js 资产不得含 mock 假权益常量（混入了说明构建/引用出错）。"""
+    """确认生产 JavaScript 资产存在且不包含前端模拟权益常量。
+
+    参数：无
+
+    返回：
+        None，扫描构建资产并把通过数量输出到控制台
+    """
     assets = list((DIST / "assets").glob("*.js"))
     assert assets, "web/dist/assets 下应有 js 资产"
     for path in assets:
@@ -47,7 +59,18 @@ def check_no_mock_bundle() -> None:
 
 
 async def wait_ready(client: httpx.AsyncClient, timeout: float = 15.0) -> None:
-    """带超时的重试循环：/api/status 应答 200 即视为 uvicorn 就绪。"""
+    """轮询状态接口直至真实服务就绪或超过等待时限。
+
+    参数：
+        client: httpx.AsyncClient，已配置冒烟服务基础地址的客户端
+        timeout: float，允许服务启动的最长秒数
+
+    返回：
+        None，服务首次返回状态码 200 时结束轮询
+
+    异常：
+        TimeoutError: 服务在限定时间内始终未就绪时抛出
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while True:
@@ -62,7 +85,14 @@ async def wait_ready(client: httpx.AsyncClient, timeout: float = 15.0) -> None:
 
 
 async def check_paper_reset_chain(client: httpx.AsyncClient) -> None:
-    """操作链：reset 12345 → 账户读出 12345 → 复位 10000（无论成败都复位，防脏写 config.yaml）。"""
+    """验证模拟权益重置与账户读取链路，并在结束前恢复默认权益。
+
+    参数：
+        client: httpx.AsyncClient，已连接真实冒烟服务的客户端
+
+    返回：
+        None，执行两次权益写入、一次账户读取并输出通过信息
+    """
     r = await client.post("/api/paper/reset", json={"equity": 12345})
     assert r.status_code == 200, f"paper reset 12345 → {r.status_code}"
     try:
@@ -75,7 +105,14 @@ async def check_paper_reset_chain(client: httpx.AsyncClient) -> None:
 
 
 async def check_http(client: httpx.AsyncClient) -> None:
-    """HTTP 断言链：首页静态托管 / 状态端点 / paper reset 操作链 / agent live。"""
+    """验证首页静态托管、监控接口、模拟重置和实时决策接口的 HTTP 契约。
+
+    参数：
+        client: httpx.AsyncClient，已连接真实冒烟服务的客户端
+
+    返回：
+        None，依次执行 HTTP 断言与模拟账户写读操作
+    """
     r = await client.get("/")
     assert r.status_code == 200, f"GET / → {r.status_code}"
     assert "/assets/" in r.text and ".js" in r.text, "首页 HTML 应引用 dist 构建的 js 资产"
@@ -93,6 +130,12 @@ async def check_http(client: httpx.AsyncClient) -> None:
 
 
 async def main() -> None:
+    """整机冒烟主流程：备份配置、干净库起真实服务、跑 HTTP 断言链，最后优雅关闭并恢复现场。
+
+    参数：无
+
+    返回：None，副作用为启动并停止 uvicorn 服务、删除并重建冒烟数据库、备份并原样恢复 config.yaml
+    """
     check_dist()
     print("1. 前置检查通过（web/dist 已构建）")
     # paper reset 会经 write_settings 重写 config.yaml（丢手写注释）：先备份，跑完原样恢复

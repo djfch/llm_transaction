@@ -57,6 +57,18 @@ class ReviewToolDeps:
 
 
 def _need_str(args: dict, name: str) -> str:
+    """读取必填的字符串参数并去除首尾空白。
+
+    参数：
+        args: dict，工具调用参数字典
+        name: str，参数名
+
+    返回：
+        str：非空字符串参数值（已 strip）
+
+    异常：
+        ToolArgError：参数缺失、不是字符串或仅含空白时抛出
+    """
     v = args.get(name)
     if not isinstance(v, str) or not v.strip():
         raise ToolArgError(f"缺少必填参数 {name}（非空字符串）")
@@ -64,6 +76,18 @@ def _need_str(args: dict, name: str) -> str:
 
 
 def _opt_str(args: dict, name: str) -> str | None:
+    """读取可选的字符串参数；未提供时返回 None。
+
+    参数：
+        args: dict，工具调用参数字典
+        name: str，参数名
+
+    返回：
+        str | None：非空字符串参数值（已 strip）；参数未提供时返回 None
+
+    异常：
+        ToolArgError：参数已提供但不是非空字符串时抛出
+    """
     v = args.get(name)
     if v is None:
         return None
@@ -73,6 +97,18 @@ def _opt_str(args: dict, name: str) -> str | None:
 
 
 def _to_int(v: Any, name: str) -> int:
+    """把参数值转换为整数（拒绝 None 与布尔值）。
+
+    参数：
+        v: Any，待转换的参数值
+        name: str，参数名（用于错误提示）
+
+    返回：
+        int：转换后的整数
+
+    异常：
+        ToolArgError：值为 None、布尔值或无法转为整数时抛出
+    """
     if v is None or isinstance(v, bool):
         raise ToolArgError(f"参数 {name} 必须是整数")
     try:
@@ -82,11 +118,33 @@ def _to_int(v: Any, name: str) -> int:
 
 
 def _opt_int(args: dict, name: str, default: int) -> int:
+    """读取可选整数参数；未提供时返回默认值。
+
+    参数：
+        args: dict，工具调用参数字典
+        name: str，参数名
+        default: int，参数未提供时的默认值
+
+    返回：
+        int：参数转换后的整数；未提供时返回 default
+    """
     return default if args.get(name) is None else _to_int(args[name], name)
 
 
 def _need_ts(args: dict, name: str) -> float:
-    """必填 Unix 秒时间戳（数字；bool 拒绝）。"""
+    """必填 Unix 秒时间戳（数字；bool 拒绝）。
+
+    参数：
+        args: dict，调用方传入的工具参数字典
+        name: str，字段、工具或资源名称
+
+    返回：
+        float：必填 Unix 秒时间戳（数字；bool 拒绝）
+
+    异常：
+        ToolArgError：f'缺少必填参数 {name}（Unix 秒数字）' 所描述的条件发生时
+        ToolArgError：f'参数 {name} 必须是数字' 所描述的条件发生时
+    """
     v = args.get(name)
     if v is None:
         raise ToolArgError(f"缺少必填参数 {name}（Unix 秒数字）")
@@ -99,6 +157,16 @@ def _need_ts(args: dict, name: str) -> float:
 
 
 def _clamp(v: int, lo: int, hi: int) -> int:
+    """把整数限制在闭区间 [lo, hi] 内。
+
+    参数：
+        v: int，待限制的数值
+        lo: int，下界
+        hi: int，上界
+
+    返回：
+        int：不小于 lo 且不大于 hi 的数值
+    """
     return max(lo, min(hi, v))
 
 
@@ -106,18 +174,41 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 
 
 def _fmt_time(ts: float) -> str:
-    """Unix 秒 → 本地时间字符串。"""
+    """Unix 秒 → 本地时间字符串。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        str：Unix 秒 → 本地时间字符串
+    """
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
 def _one_line(text: str, limit: int = 60) -> str:
-    """取首行并截断，作为一行摘要。"""
+    """取首行并截断，作为一行摘要。
+
+    参数：
+        text: str，待处理的文本
+        limit: int，最多读取或返回的记录数量
+
+    返回：
+        str：取首行并截断，作为一行摘要
+    """
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line[:limit] + ("…" if len(line) > limit else "") if line else "（空）"
 
 
 def _truncate(text: str, max_chars: int) -> str:
-    """超长截断并标注原文长度。"""
+    """超长截断并标注原文长度。
+
+    参数：
+        text: str，待处理的文本
+        max_chars: int，允许保留的最大字符数
+
+    返回：
+        str：超长截断并标注原文长度
+    """
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n…（已截断，原文共 {len(text)} 字符）"
@@ -127,6 +218,16 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 async def get_review_stats(deps: ReviewToolDeps, args: dict) -> str:
+    """统计指定时间区间内的成交记录，输出盈亏等复盘指标文本。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 repo 与 mode 取数）
+        args: dict，工具参数：start_ts/end_ts（Unix 秒，必填）、
+            strategy_md5、contract（可选过滤条件）
+
+    返回：
+        str：区间概要与格式化统计文本，供 LLM 阅读
+    """
     start_ts = _need_ts(args, "start_ts")
     end_ts = _need_ts(args, "end_ts")
     strategy_md5 = _opt_str(args, "strategy_md5")
@@ -146,6 +247,16 @@ async def get_review_stats(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def list_decision_rounds(deps: ReviewToolDeps, args: dict) -> str:
+    """列出指定时间区间内的决策轮次清单（最新在前）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        args: dict，工具参数：start_ts/end_ts（Unix 秒，必填）、
+            strategy_md5（可选过滤）、limit（可选，默认 20，限制在 1~100）
+
+    返回：
+        str：轮次列表文本（含唤醒来源、摘要与错误信息）；无记录时返回提示
+    """
     start_ts = _need_ts(args, "start_ts")
     end_ts = _need_ts(args, "end_ts")
     strategy_md5 = _opt_str(args, "strategy_md5")
@@ -169,6 +280,16 @@ async def list_decision_rounds(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def get_decision_detail(deps: ReviewToolDeps, args: dict) -> str:
+    """查看单个决策轮次的上下文摘要与 LLM 原始输出。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        args: dict，工具参数：round_id（必填，决策轮次 ID）、max_chars（可选，
+            默认 4000，上限 20000，LLM 原始输出的截断长度）
+
+    返回：
+        str：轮次详情文本；轮次不存在时返回核对提示
+    """
     round_id = _need_str(args, "round_id")
     max_chars = _clamp(_opt_int(args, "max_chars", 4000), 1, _MAX_CHARS_LIMIT)
     d = await deps.repo.get_decision_by_round(round_id)
@@ -188,6 +309,15 @@ async def get_decision_detail(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def get_tool_call_chain(deps: ReviewToolDeps, args: dict) -> str:
+    """按调用顺序列出某个决策轮次的全部工具调用链。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        args: dict，工具参数：round_id（必填，决策轮次 ID）
+
+    返回：
+        str：逐次调用的工具名、耗时、风控结论及截断后的参数与结果；无记录时返回提示
+    """
     round_id = _need_str(args, "round_id")
     calls = await deps.repo.list_audit_tool_calls(round_id)
     if not calls:
@@ -206,6 +336,16 @@ async def get_tool_call_chain(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def list_trades(deps: ReviewToolDeps, args: dict) -> str:
+    """列出指定时间区间内的成交流水（按时间正序）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        args: dict，工具参数：start_ts/end_ts（Unix 秒，必填）、contract、
+            source（可选过滤）、limit（可选，默认 50，限制在 1~200）
+
+    返回：
+        str：成交列表文本（含方向张数、价格、费用、盈亏与来源）；无记录时返回提示
+    """
     start_ts = _need_ts(args, "start_ts")
     end_ts = _need_ts(args, "end_ts")
     contract = _opt_str(args, "contract")
@@ -227,6 +367,16 @@ async def list_trades(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def get_round_context(deps: ReviewToolDeps, args: dict) -> str:
+    """查看某个决策轮次当时的上下文快照。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        args: dict，工具参数：round_id（必填，决策轮次 ID）、max_chars（可选，
+            默认 4000，上限 20000，快照截断长度）
+
+    返回：
+        str：上下文快照文本；轮次不存在时返回核对提示
+    """
     round_id = _need_str(args, "round_id")
     max_chars = _clamp(_opt_int(args, "max_chars", 4000), 1, _MAX_CHARS_LIMIT)
     r = await deps.repo.get_audit_round(round_id)
@@ -239,6 +389,16 @@ async def get_round_context(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def get_strategy_versions(deps: ReviewToolDeps, args: dict) -> str:
+    """查看策略书版本历史或指定版本全文，并附当前策略全文。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 store 读取策略版本）
+        args: dict，工具参数：version_id（可选；提供时返回该版本详情与全文，
+            缺省时返回版本列表与当前策略全文）
+
+    返回：
+        str：版本详情或版本列表文本；指定版本不存在时返回提示
+    """
     vid_arg = args.get("version_id")
     if vid_arg is not None:
         v = await deps.store.get_version(_to_int(vid_arg, "version_id"))
@@ -260,7 +420,15 @@ async def get_strategy_versions(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def calc(deps: ReviewToolDeps, args: dict) -> str:
-    """数学表达式计算（纯函数，不碰任何依赖）；错误以中文文本返回。"""
+    """数学表达式计算（纯函数，不碰任何依赖）；错误以中文文本返回。
+
+    参数：
+        deps: ReviewToolDeps，当前模块所需的运行依赖集合
+        args: dict，调用方传入的工具参数字典
+
+    返回：
+        str：数学表达式计算（纯函数，不碰任何依赖）；错误以中文文本返回
+    """
     return calc_expression(_need_str(args, "expression"))
 
 
@@ -268,6 +436,16 @@ async def calc(deps: ReviewToolDeps, args: dict) -> str:
 
 
 async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
+    """提交修订后的策略书；校验通过则生成新版本，下一轮决策生效。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（成功时回写 created_version_id）
+        args: dict，工具参数：new_prompt_md（必填，新策略书全文）、
+            reason（必填，修订理由）
+
+    返回：
+        str：提交结果文本；校验拒绝时列出原因且原策略书不变
+    """
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
     try:

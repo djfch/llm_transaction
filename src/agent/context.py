@@ -27,13 +27,27 @@ logger = get_logger(__name__)
 
 
 def compute_equity(account: Account, positions: list[Position]) -> Decimal:
-    """账户权益估值 = 可用余额 + Σ持仓保证金 + 账户级未实现盈亏（与 paper 记账口径一致）。"""
+    """账户权益估值 = 可用余额 + Σ持仓保证金 + 账户级未实现盈亏（与 paper 记账口径一致）。
+
+    参数：
+        account: Account，账户快照
+        positions: list[Position]，当前持仓列表
+    返回：
+        Decimal，账户权益估值 = 可用余额 + Σ持仓保证金 + 账户级未实现盈亏（与 paper 记账口径一致）
+    """
     margin = sum((p.margin for p in positions), Decimal(0))
     return account.available + margin + account.unrealised_pnl
 
 
 def position_snapshots(gateway: Gateway, positions: list[Position]) -> list[PositionSnapshot]:
-    """持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）。"""
+    """持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）。
+
+    参数：
+        gateway: Gateway，交易所网关
+        positions: list[Position]，当前持仓列表
+    返回：
+        list[PositionSnapshot]，持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）
+    """
     snaps = []
     for p in positions:
         meta = gateway.get_contract(p.contract)
@@ -50,7 +64,15 @@ def position_snapshots(gateway: Gateway, positions: list[Position]) -> list[Posi
 
 
 def summarize_candles(contract: str, interval: str, candles: list[Candle]) -> str:
-    """K 线序列压缩为一行摘要：首 open → 末 close、区间高低、简单变化率。"""
+    """K 线序列压缩为一行摘要：首 open → 末 close、区间高低、简单变化率。
+
+    参数：
+        contract: str，合约标识
+        interval: str，K 线或持仓量周期
+        candles: list[Candle]，按时间排序的 K 线序列
+    返回：
+        str，K 线序列压缩为一行摘要：首 open → 末 close、区间高低、简单变化率
+    """
     if not candles:
         return f"{contract} {interval}: 无 K 线数据"
     o, c = candles[0].o, candles[-1].c
@@ -90,6 +112,29 @@ class ContextBuilder:
         indicator_shortlist: Callable[[], list[str]] | None = None,
         research_config: ResearchConfig | None = None,
     ) -> None:
+        """注入网关、存储与行情等依赖，并固化本轮上下文的截断与指标配置。
+
+        参数：
+            gateway: Gateway，交易所网关，用于读取账户、持仓与行情数据
+            repo: Repo，存储仓库，用于读取研报结论、交易计划、近期笔记与成交
+            candles: CandleCache，K 线缓存，用于按白名单取最近若干根 K 线
+            triggers: TriggerManager，价格预警线管理器，提供未触发预警列表
+            watchlist: list[str]，白名单合约列表，行情与研报段落按它逐个组装
+            interval: str，K 线周期；省略时默认为 "1h"
+            candle_n: int，每合约展示的最近 K 线根数；省略时默认为 24
+            alerts_n: int，最多展示的预警线条数；省略时默认为 20
+            notes_n: int，最多展示的近期笔记条数；省略时默认为 10
+            trades_n: int，最多展示的近期成交笔数；省略时默认为 20
+            indicator_service: IndicatorService | None，指标服务；
+                省略时默认为 None（行情段落不含指标行）
+            indicator_shortlist: Callable[[], list[str]] | None，指标短名单来源；
+                省略时回退内置基线 DEFAULT_INDICATOR_SHORTLIST
+            research_config: ResearchConfig | None，研报配置（含方向闸门开关）；
+                省略时默认为 None（视为闸门关闭）
+
+        返回：
+            None，初始化实例依赖与配置并写入实例属性
+        """
         self._gateway = gateway
         self._repo = repo
         self._candles = candles
@@ -108,6 +153,18 @@ class ContextBuilder:
         self._research_config = research_config
 
     async def build(self, wake_source: str) -> AgentContext:
+        """组装一轮决策的完整上下文文本与一行摘要。
+
+        汇总账户/持仓、白名单行情、价格预警线、研报前瞻、交易计划、
+        近期笔记与近期成交各段落；某个研报段落为空时自动省略。
+
+        参数：
+            wake_source: str，本轮唤醒来源（如定时、预警触发），写入头部与摘要
+
+        返回：
+            AgentContext：text 为完整上下文（user 消息与审计快照），
+            summary 为一行摘要（落 decisions.context_summary）
+        """
         account = self._gateway.get_account()
         positions = self._gateway.list_positions()
         equity = compute_equity(account, positions)
@@ -126,10 +183,29 @@ class ContextBuilder:
         return AgentContext(text=text, summary=summary)
 
     def _header(self, wake_source: str) -> str:
+        """生成上下文头部：标题、本轮唤醒来源与当前本地时间。
+
+        参数：
+            wake_source: str，本轮唤醒来源（如定时、预警触发）
+
+        返回：
+            str：上下文头部文本（Markdown 标题段）
+        """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return f"# 交易决策上下文\n本轮唤醒来源：{wake_source}\n当前时间：{now}"
 
     def _account_section(self, account: Account, positions: list[Position], equity: Decimal) -> str:
+        """生成账户段落：权益估值、可用余额、未实现盈亏与逐持仓明细。
+
+        参数：
+            account: Account，合约账户（可用余额、未实现盈亏）
+            positions: list[Position]，当前持仓列表；为空时标注"持仓: 无"
+            equity: Decimal，账户权益估值（由 compute_equity 预先算好）
+
+        返回：
+            str：账户段落文本（含每个持仓的方向张数、入场价、标记价、
+            杠杆、保证金、浮盈与止盈止损设置）
+        """
         lines = [
             "## 账户",
             f"权益(估值): {equity}；可用余额: {account.available}；"
@@ -147,6 +223,14 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _market_section(self) -> str:
+        """生成行情段落：按白名单逐合约给出 ticker 行、K 线摘要行与指标行。
+
+        参数：无
+
+        返回：
+            str：行情段落文本（每合约依次为 ticker 摘要、K 线摘要，
+            指标服务接入时追加指标短名单行）
+        """
         tickers = {t.contract: t for t in self._gateway.get_tickers()}
         lines = ["## 行情"]
         for contract in self._watchlist:
@@ -163,6 +247,11 @@ class ContextBuilder:
 
         服务未接入返回 None（整行省略，不留痕迹）；服务未就绪/数据异常降级为
         提示文本（同 _ticker_line 风格），不拖垮其余 section。
+
+        参数：
+            contract: str，合约标识
+        返回：
+            str | None，短名单指标单行（每合约第三行，紧随 K 线摘要行）
         """
         if self._indicator_service is None:
             return None
@@ -174,6 +263,17 @@ class ContextBuilder:
             return f"{contract} 指标({self._interval}): 暂不可用"
 
     def _ticker_line(self, contract: str, ticker) -> str:
+        """生成单合约 ticker 摘要行；ticker 缺失时降级回退，不让行情行断档。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            ticker: Ticker | None，合约 ticker 摘要；为 None 时回退读取
+                合约元数据中的标记价与资金费率
+
+        返回：
+            str：单行摘要（标记价、资金费率、24h 涨跌与高低）；
+            ticker 与元数据都不可用时返回"无行情数据"提示行
+        """
         if ticker is not None:
             return (
                 f"{contract}: 标记价 {ticker.mark_price}，资金费率 {ticker.funding_rate}，"
@@ -191,6 +291,10 @@ class ContextBuilder:
 
         条数超 alerts_n 时按 id 升序截断（旧的优先展示），标题保留总数、尾部标注未显示
         条数，避免预警线异常累积时上下文无界膨胀。
+
+        参数：无
+        返回：
+            str，未触发价格预警线（内存唯一存储，重启即失效——如实暴露给 LLM，供其决定重设/取消）
         """
         triggers = sorted(self._triggers.list(), key=lambda t: t.id)
         lines = [f"## 价格预警线（内存·重启即失效，{len(triggers)}/{MAX_ALERTS} 条）"]
@@ -204,7 +308,12 @@ class ContextBuilder:
         return "\n".join(lines)
 
     async def _research_section(self) -> str | None:
-        """按白名单逐合约注入当前研报结论。"""
+        """按白名单逐合约注入当前研报结论。
+
+        参数：无
+        返回：
+            str | None，按白名单逐合约注入当前研报结论
+        """
         try:
             views = [
                 view
@@ -222,6 +331,16 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _research_view_lines(self, view: ResearchAssetView) -> list[str]:
+        """把单合约研报结论渲染为多行文本（方向/置信度/结构等要素 + 正文摘要）。
+
+        参数：
+            view: ResearchAssetView，单合约研报结论及当时市场输入快照；
+                narrative 超 500 字时截断并加省略号
+
+        返回：
+            list[str]：该合约研报段落的各行文本；方向硬闸门生效时
+            末行追加风控提示
+        """
         narrative = view.narrative[:500] + ("…" if len(view.narrative) > 500 else "")
         lines = [
             f"### {view.contract}",
@@ -237,7 +356,13 @@ class ContextBuilder:
         return lines
 
     def _gate_active(self, view: ResearchAssetView) -> bool:
-        """与下单硬闸门保持同一口径。"""
+        """与下单硬闸门保持同一口径。
+
+        参数：
+            view: ResearchAssetView，逐标的研报结论
+        返回：
+            bool，与下单硬闸门保持同一口径
+        """
         cfg = self._research_config
         if cfg is None or not cfg.gate_enabled:
             return False
@@ -251,6 +376,13 @@ class ContextBuilder:
         return eligible and time.time() - view.created_at <= cfg.gate_max_age_hours * 3600
 
     async def _notes_section(self) -> str:
+        """生成近期笔记段落：取最近 notes_n 条笔记，附创建时间逐条列出。
+
+        参数：无
+
+        返回：
+            str：近期笔记段落文本；无笔记时标注"（无）"
+        """
         notes = await self._repo.recent_notes(self._notes_n)
         lines = [f"## 近期笔记（近 {self._notes_n} 条）"]
         if not notes:
@@ -264,6 +396,10 @@ class ContextBuilder:
 
         计划原文逐行加引用前缀定界：自由文本每轮重复注入，不加护栏则可伪装成
         其他系统 section（跨轮自我强化注入面）。
+
+        参数：无
+        返回：
+            str，当前交易计划（全局唯一一份）：每轮必看并核对，更新时间供 LLM 判断新旧
         """
         plan = await self._repo.plans.get_plan()
         if plan is None:
@@ -276,6 +412,13 @@ class ContextBuilder:
         )
 
     async def _trades_section(self) -> str:
+        """生成近期成交段落：取最近 trades_n 笔成交，逐笔列出合约、张数、价格与盈亏。
+
+        参数：无
+
+        返回：
+            str：近期成交段落文本；无成交时标注"（无）"
+        """
         trades = (await self._repo.trades_between(0.0, time.time()))[-self._trades_n :]
         lines = [f"## 近期成交（近 {self._trades_n} 笔）"]
         if not trades:
@@ -289,4 +432,12 @@ class ContextBuilder:
 
 
 def _fmt_ts(ts: float) -> str:
+    """把 Unix 时间戳格式化为 "月-日 时:分" 短文本，供上下文各行引用时间。
+
+    参数：
+        ts: float，Unix 时间戳（秒，本地时区解释）
+
+    返回：
+        str：形如 "08-10 15:30" 的格式化时间串
+    """
     return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
