@@ -92,6 +92,7 @@ flowchart LR
 | `src/agent/` | 上下文构造、LLM Provider、决策循环、工具和成交落库/对账 | LLM 只能经 ToolRegistry 影响系统 |
 | `src/scheduler/` | 定时、手动和价格告警唤醒 | 保证同一时间最多执行一轮决策 |
 | `src/review/` | 复盘 LLM 循环、只读工具集、策略版本管理与每日调度 | 无任何交易工具、不持有 Gateway；唯一写出口经 StrategyStore 校验 |
+| `src/research/` | 前瞻研报、数据工具、逐标的市场快照、因果链与三盘调度 | 每轮冻结白名单；完整输入快照留后端，逐合约结论供执行上下文和方向闸门读取 |
 | `src/memory/` | SQLite 建表、模型与 Repo | 业务层不直接写 SQL |
 | `src/audit/` | 决策轮与工具调用审计 | 保存输入、输出、风控结论和耗时 |
 | `src/server/` | FastAPI、WebSocket、静态文件与依赖容器 | 通过 `ServerDeps(服务依赖容器)` 调用运行时能力 |
@@ -228,7 +229,23 @@ sequenceDiagram
 
 价格预警线以内存为唯一存储（`TriggerManager(触发器管理器)`），进程重启即失效，由 LLM 在后续决策轮按需重设；`set_price_alert` 对同合约、同方向、同价格（Decimal 数值相等）的重复设置直接回复"已设置"，不创建第二条。当前预警线会随决策上下文注入 LLM，并在触发时以 `price_trigger(价格触发)` 原因抢醒调度器。
 
+
 工具异常会被转换为可读结果返回给 LLM，使其有机会在本轮修正参数；工具内部异常仍写日志，但不会直接击穿整轮循环。
+### 研报链路
+
+研报 Agent 每轮先冻结 `watchlist.contracts(白名单合约)`，预注入宏观日历、指标、快讯、
+历史判断与待验证因果链。LLM 必须对每个白名单合约恰好调用一次
+`get_research_market_data(获取研报市场数据)`；工具固定返回 `4h(K线)` 与
+`1d(K线)`，指标使用最多 200 根已收盘历史预热，原始 K 线根数由
+`limit(K线根数)` 控制。最终输出的 `asset_views(逐标的结论)` 必须与白名单及工具
+调用集合完全相等，否则整份研报失败。
+
+`schema_version(结构版本)=2`报告头与全部逐标的结论在同一事务中保存，逐标的行同时冻结
+`market_context_json(当轮市场输入快照)` 和 `verify_result(后续验证占位)`。执行
+上下文只注入当前白名单合约对应的结论；方向闸门也只查询订单合约，且纯结构延续只作
+软参考。生产基线从未部署研报结构，因此当前实现不提供 v1 迁移或展示兼容；若启动时
+检测到旧研报表，会明确拒绝启动并要求人工备份、重建。
+
 
 复盘 agent 使用独立注册表：7 个查询工具（`get_review_stats`、`list_decision_rounds`、`get_decision_detail`、`get_tool_call_chain`、`list_trades`、`get_round_context`、`get_strategy_versions`）只经 `Repo` 与审计表查询历史，`calc(精确计算)` 只处理数学表达式；`submit_strategy_revision(提交策略修订)` 是唯一业务写出口，提交的策略书新文本经 `StrategyStore` 校验后才生效。该注册表不含任何交易工具。
 
@@ -320,6 +337,8 @@ flowchart LR
 | `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)` |
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |
+| `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议固定为 v2 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)` |
+| `research_asset_views(研报逐标的结论)` | 一个报告内每个合约唯一，保存结论、输入快照与验证占位 | `contract(合约)`、`basis_type(依据类型)`、`market_context_json(市场输入快照)`、`verify_result(验证结果)` |
 | `review_reports(复盘报告)` | 每次复盘的区间统计、报告全文与策略动作 | `period_start/period_end(复盘区间)`、`strategy_action(策略动作)`、`new_version_id(产生的新版本)`、`round_id(产生报告的审计轮，老报告为空串不回填)` |
 
 注意 `decisions.strategy_version(策略版本摘要)` 与 `strategy_md5(策略书原文摘要)` 语义不同：前者是“策略书+工具说明段”拼装后的 md5（与 `audit_rounds.prompt_md5` 同值），后者是策略书原文的 md5（与 `strategy_versions.md5` 关联，供按策略版本统计）。历史数据的 `strategy_md5` 保持空串不回填；`round_id` 无法 join 到 `decisions` 的成交不参与按策略统计。
@@ -337,6 +356,7 @@ flowchart LR
 | `watchlist.yaml` | 可交易合约白名单 | 否，仅跟踪模板 |
 | `system_prompt.md` | 每轮加载的策略提示词 | 否，仅跟踪模板 |
 | `review_prompt.md` | 复盘 agent 的 system prompt（模板为 `review_prompt.example.md`） | 否，仅跟踪模板 |
+| `research_prompt.md` | 研报 agent 的 system prompt（模板为 `research_prompt.example.md`） | 否，仅跟踪模板 |
 | `Settings(运行时配置对象)` | 已校验并注入各组件的内存配置 | 进程内 |
 | `ServerDeps(服务依赖容器)` | FastAPI 可调用的运行时能力与路径 | 进程内 |
 

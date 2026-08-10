@@ -5,8 +5,82 @@
 """
 
 import aiosqlite
+import pytest
 
 from src.memory import Database, Repo
+
+_LEGACY_RESEARCH_REPORTS_DDL = """
+CREATE TABLE research_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_type TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    created_at REAL NOT NULL
+)
+"""
+
+
+async def test_pre_research_database_creates_only_current_research_schema(tmp_path):
+    """生产基线没有研报表时，首次启动直接创建当前逐标的结构。"""
+    path = tmp_path / "pre-research.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute("CREATE TABLE deployment_baseline (sha TEXT NOT NULL)")
+    await conn.execute("INSERT INTO deployment_baseline VALUES ('c7ee59b')")
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)
+    cur = await db.conn.execute("PRAGMA table_info(research_reports)")
+    columns = {row["name"] for row in await cur.fetchall()}
+    assert columns == {
+        "id",
+        "report_type",
+        "schema_version",
+        "summary",
+        "cross_market_view",
+        "global_risks_json",
+        "raw_json",
+        "error",
+        "round_id",
+        "created_at",
+    }
+    await db.close()
+
+
+async def test_legacy_research_schema_is_rejected_without_mutation(tmp_path):
+    """不在支持范围的旧研报库应明确失败，不能静默迁移或部分建表。"""
+    path = tmp_path / "legacy-research.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(_LEGACY_RESEARCH_REPORTS_DDL)
+    await conn.execute(
+        "INSERT INTO research_reports(report_type,direction,confidence,created_at)"
+        " VALUES('manual','偏多','高',1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    with pytest.raises(RuntimeError, match="旧版研报表"):
+        await db.open(path)
+    with pytest.raises(RuntimeError, match="数据库未打开"):
+        _ = db.conn
+
+    conn = await aiosqlite.connect(str(path))
+    cur = await conn.execute("PRAGMA table_info(research_reports)")
+    assert {row[1] for row in await cur.fetchall()} == {
+        "id",
+        "report_type",
+        "direction",
+        "confidence",
+        "created_at",
+    }
+    cur = await conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='research_asset_views'"
+    )
+    assert await cur.fetchone() is None
+    await conn.close()
+
 
 # 旧版 review_reports 表结构（无 round_id 列），与功能上线前的生产库一致
 _OLD_REVIEW_REPORTS_DDL = """

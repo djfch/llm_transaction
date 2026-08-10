@@ -15,6 +15,7 @@ import pytest
 
 from src.config import ResearchConfig, Settings
 from src.memory import Database, Repo
+from tests.research_helpers import save_report_fixture
 from src.research.scheduler import ResearchScheduler, _slot_fire_ts
 
 
@@ -62,7 +63,7 @@ def _today(hh: int, mm: int) -> float:
 
 async def _save_report(repo: Repo, report_type: str) -> None:
     """落库一份成功研报（created_at 为真实当前时刻，供幂等判定）。"""
-    await repo.research.save_report(report_type=report_type, direction="中性", confidence="低")
+    await save_report_fixture(repo, report_type=report_type, direction="中性", confidence="低")
 
 
 # ---------- 定时触发 ----------
@@ -104,8 +105,8 @@ async def test_tick_skips_after_failed_report(repo):
     """当日失败研报也计入幂等：error 非空落库后不自动重跑（防 LLM 故障每分钟重发）。"""
     agent = StubAgent()
     scheduler = ResearchScheduler(_settings(), agent, repo)
-    await repo.research.save_report(
-        report_type="asia_open", direction="中性", confidence="低", error="LLM 故障"
+    await save_report_fixture(
+        repo, report_type="asia_open", direction="中性", confidence="低", error="LLM 故障"
     )
     await scheduler._tick(now=_today(8, 31))
     assert agent.calls == []

@@ -16,19 +16,21 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 
 from __future__ import annotations
 
+from pathlib import Path
 import time
 
 import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, CausalLink, ResearchReport, Timeline
+from src.memory.research_asset_repo import ResearchAssetRepoMixin
 
 
 def _now() -> float:
     return time.time()
 
 
-class ResearchRepo:
+class ResearchRepo(ResearchAssetRepoMixin):
     """研报系统存取方法集合。所有写操作立即 commit。"""
 
     def __init__(self, db: Database) -> None:
@@ -39,6 +41,10 @@ class ResearchRepo:
         return self._db.conn
 
     # ---------- timeline（事实层，代码写入） ----------
+
+    @property
+    def _db_path(self) -> Path:
+        return self._db.path
 
     async def append_timeline_many(self, items: list[dict]) -> int:
         """批量增量追加事实记录，返回实际新插入条数。
@@ -83,54 +89,29 @@ class ResearchRepo:
 
     # ---------- research_reports（判断层，研报 agent 产出） ----------
 
-    async def save_report(
+    async def save_failed_report(
         self,
         *,
         report_type: str,
-        direction: str,
-        confidence: str,
-        horizon: str = "",
-        evidence_json: str = "[]",
-        risks_json: str = "[]",
-        narrative: str = "",
+        error: str,
         raw_json: str = "{}",
-        error: str = "",
         round_id: str = "",
     ) -> ResearchReport:
-        """落库一份研报；error 非空表示该次研报失败（只留错误记录）。
-
-        round_id 为产生本研报的审计轮 id；省略默认 ''（无关联）。
-        """
+        """保存当前结构的失败报告头；失败报告不生成逐标的结论。"""
+        if not error:
+            raise ValueError("失败报告必须包含 error")
         ts = _now()
         cur = await self._conn.execute(
-            "INSERT INTO research_reports(report_type,direction,confidence,horizon,"
-            "evidence_json,risks_json,narrative,raw_json,verify_result,error,round_id,"
-            "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                report_type,
-                direction,
-                confidence,
-                horizon,
-                evidence_json,
-                risks_json,
-                narrative,
-                raw_json,
-                "",
-                error,
-                round_id,
-                ts,
-            ),
+            "INSERT INTO research_reports(report_type,schema_version,summary,"
+            "cross_market_view,global_risks_json,raw_json,error,round_id,created_at)"
+            " VALUES(?,2,?,?,?,?,?,?,?)",
+            (report_type, "", "", "[]", raw_json, error, round_id, ts),
         )
         await self._conn.commit()
         return ResearchReport(
             id=cur.lastrowid or 0,
             report_type=report_type,
-            direction=direction,
-            confidence=confidence,
-            horizon=horizon,
-            evidence_json=evidence_json,
-            risks_json=risks_json,
-            narrative=narrative,
+            schema_version=2,
             raw_json=raw_json,
             error=error,
             round_id=round_id,

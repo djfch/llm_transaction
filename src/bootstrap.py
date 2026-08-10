@@ -42,6 +42,7 @@ from src.memory.repo import Repo
 from src.notify.telegram import build_notifier
 from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import funding_loop
+from src.paper.setup import build_paper_gateway
 from src.review.setup import ReviewComponents, build_review
 from src.research.setup import ResearchComponents, build_research
 from src.risk.engine import RiskEngine
@@ -120,12 +121,7 @@ def _build_gateway(
         contracts = [_default_contract(name, Decimal("60000")) for name in watchlist.contracts]
     else:
         contracts = [public.get_contract(name) for name in watchlist.contracts]
-    provider = candle_provider or (public.get_candlesticks if public else None)
-    oi = public.fetch_open_interest if public else None
-    gateway = PaperGateway(settings.paper, candle_provider=provider, oi_provider=oi)
-    for contract in contracts:
-        gateway.upsert_contract(contract)
-    return gateway
+    return build_paper_gateway(settings.paper, contracts, candle_provider, public)
 
 
 def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Awaitable[dict]]:
@@ -336,6 +332,9 @@ async def build_app(
             audit,
             researcher_provider,
             notify_event=event_queue.put_nowait,
+            candle_cache=candles,
+            gateway=gateway,
+            watchlist=watchlist.contracts,
         ),
         scheduler=scheduler,
         event_queue=event_queue,

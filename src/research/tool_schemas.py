@@ -10,6 +10,26 @@ from __future__ import annotations
 from typing import Any
 
 SCHEMAS: dict[str, dict[str, Any]] = {
+    "get_research_market_data": {
+        "description": (
+            "获取本轮白名单中单个合约的研报市场快照：4h/1d K线、EMA20/EMA50及斜率、"
+            "ATR14、量比、资金费率、持仓量变化和价格/成交量/OI背离。每个白名单合约都必须调用"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contract": {
+                    "type": "string",
+                    "description": "本轮白名单合约，如 BTC_USDT",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "每个周期返回的原始K线根数（1-100），默认30",
+                },
+            },
+            "required": ["contract"],
+        },
+    },
     "fetch_calendar": {
         "description": "获取经济日历今日+明日高星事件（star≥3）：事件名、公布时间、实际/预期/前值、影响方向",
         "parameters": {"type": "object", "properties": {}, "required": []},

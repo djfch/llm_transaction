@@ -189,27 +189,43 @@ class Timeline(BaseModel):
 
 
 class ResearchReport(BaseModel):
-    """研报（判断层）：研报 agent 产出的结构化方向结论。
+    """研报报告头：逐标的结论统一存于 ResearchAssetView。
 
     report_type 取值：manual（手动触发）/ asia_open / europe_open / us_open（三盘定时 slot）；
-    direction 取值：偏多/偏空/中性；confidence 取值：高/中/低；
-    verify_result 预留：第二期复盘 agent 对照后写入（''= 未验证）。
-    error 非空表示本次研报失败（只落错误记录）。
+    schema_version 固定为 2；error 非空表示本次研报失败且没有逐标的结论；
     round_id 为产生本研报的审计轮 id。
     """
 
     id: int
     report_type: str
+    schema_version: int = 2
+    summary: str = ""
+    cross_market_view: str = ""
+    global_risks_json: str = "[]"
+    raw_json: str = "{}"
+    error: str = ""
+    round_id: str = ""
+    created_at: float
+
+
+class ResearchAssetView(BaseModel):
+    """研报 v2 的单合约结论及当时市场输入快照。"""
+
+    id: int
+    report_id: int
+    contract: str
     direction: str
     confidence: str
     horizon: str = ""
+    market_regime: str = ""
+    technical_confirmation: str = ""
+    basis_type: str = ""
+    data_status: str = ""
     evidence_json: str = "[]"
     risks_json: str = "[]"
     narrative: str = ""
-    raw_json: str = "{}"
+    market_context_json: str = "{}"
     verify_result: str = ""
-    error: str = ""
-    round_id: str = ""
     created_at: float
 
 

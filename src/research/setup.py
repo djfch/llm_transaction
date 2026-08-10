@@ -14,6 +14,7 @@ from src.audit.trail import AuditTrail
 from src.config import ROOT, ResearchConfig, Settings
 from src.memory.repo import Repo
 from src.research.agent import ResearchAgent
+from src.research.market_data import ResearchMarketDataService
 from src.research.providers.base import ResearchDataProvider
 from src.research.providers.blockbeats import BlockbeatsSource
 from src.research.providers.fred import FredSource
@@ -61,6 +62,9 @@ def build_research(
     audit: AuditTrail,
     provider: object | None,
     notify_event: Callable[[dict], None] | None = None,
+    candle_cache: object | None = None,
+    gateway: object | None = None,
+    watchlist: list[str] | None = None,
 ) -> ResearchComponents:
     """装配研报子系统。provider 为 LLM provider（可为 None：LLM 未配置时研报直接失败）。
 
@@ -68,6 +72,9 @@ def build_research(
     """
     cfg = settings.research
     data_provider = _build_data_provider(cfg)
+    market_data = None
+    if candle_cache is not None and gateway is not None:
+        market_data = ResearchMarketDataService(candle_cache, gateway)  # type: ignore[arg-type]
     agent = ResearchAgent(
         settings=settings,
         provider=provider,  # type: ignore[arg-type]
@@ -77,6 +84,8 @@ def build_research(
         data_provider=data_provider,
         notify_event=notify_event,
         max_turns=cfg.max_turns,
+        market_data=market_data,
+        watchlist=watchlist or [],
         timeout_seconds=cfg.timeout_seconds,
     )
     scheduler = ResearchScheduler(settings, agent, repo)

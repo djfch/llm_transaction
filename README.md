@@ -58,7 +58,10 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 - `config.yaml`、`watchlist.yaml`、`system_prompt.md`、`review_prompt.md`、`research_prompt.md`、`indicator_config.yaml` 为运行时文件（会被 API/程序写回），**不入库**；仓库只存 `.example` 模板，克隆后需复制（见快速开始）
 - `config.yaml`：运行模式（paper/testnet/live）、风控参数、LLM provider、通知、端口；`scheduler.autostart` 控制启动后是否自动开始决策（默认 false，在监控主页点击"启动 agent"才开始）
 - `config.yaml` 的 `review` 节：复盘 agent 配置——`review.enabled(复盘开关)` 默认 true、`review.interval_days(复盘间隔天数)` 默认 1（每隔 N 天复盘最近 N 天）、`review.daily_time(到达间隔后的触发时刻，本地 HH:MM)` 默认 03:00，保存后热生效；复盘报告与策略版本历史（含 diff 与回滚）在监控页查看；人工改策略请走监控页/PUT /api/strategy（直接编辑 system_prompt.md 会热生效但不会留下版本记录）
-- `config.yaml` 的 `research` 节：研报 agent（前瞻角色，独立于交易循环）配置——`research.enabled(研报开关)` 默认 false、`research.max_turns(工具调用上限)` 默认 30、`research.timeout_seconds(单次超时)` 默认 900；定时调度已接入：每天亚盘 `research.time_asia`(默认 08:30) / 欧盘 `research.time_europe`(默认 14:30) / 美盘 `research.time_us`(默认 21:00) 自动产出，`research.us_dst_adjust(美盘整冬令时顺延)` 默认开（冬令时 22:00），失败计入幂等不自动重试；方向闸门：`research.gate_enabled(闸门开关)` 开启时，高置信研报在 `research.gate_max_age_hours(结论有效期)`（默认 13h）内反向开仓被风控硬拒（平仓不挡），所有成功研报结论注入决策上下文；手动触发走监控页研报面板「生成研报」按钮或 `uv run python scripts/verify_research.py`；数据源密钥只存 `.env`：`JIN10_MCP_TOKEN(金十 MCP)` / `BLOCKBEATS_API_KEY(律动 MCP)` / `FRED_API_KEY(宏观序列，免费注册 fred.stlouisfed.org)`；研报产出结构化方向结论（direction/confidence）落库，报告列表与详情（含因果链、工具链）在监控页研报面板查看
+- `config.yaml` 的 `research` 节：研报 agent（前瞻角色，独立于交易循环）配置——`research.enabled(研报开关)` 默认 false、`research.max_turns(工具调用上限)` 默认 30、`research.timeout_seconds(单次超时)` 默认 900；每天按亚盘、欧盘、美盘时间自动产出，失败计入幂等不自动重试。
+  - 每轮冻结 `watchlist.contracts(白名单合约)`，逐合约读取 `4h(K线)`、`1d(K线)`、EMA、ATR、量比、资金费率、持仓量变化与背离结构，并生成 `asset_views(逐标的结论)`；完整市场输入快照仅保存在后端。
+  - `research.gate_enabled(闸门开关)` 开启时，只有当前订单合约对应的高置信、方向明确、未过期、数据可用、技术面不冲突且由事件/宏观/混合驱动的结论，才会在 `research.gate_max_age_hours(结论有效期)` 内硬拒反向开仓；纯 `结构延续(依据类型)` 只作软参考。
+  - 手动触发走监控页研报面板「生成研报」或 `uv run python scripts/verify_research.py`；数据源密钥只存 `.env`。报告列表与详情按合约展示方向、结构、依据、技术确认、证据和风险。
 - **安全提示**：监控 API 目前无鉴权且为明文 HTTP。`server.host` 默认 `127.0.0.1`（仅本机可达）——**绑定 `0.0.0.0` 或任何非回环地址前须知**：同网段任何人可改配置、解 kill_switch、写入 LLM key，且密钥明文过网。对外暴露前必须先加鉴权与 TLS，并配置访问控制。
 - `watchlist.yaml`：允许新增仓位的合约白名单（平仓不受白名单限制）
 - `system_prompt.md`：策略书，LLM 每轮决策的 system prompt，改完下一轮自动生效

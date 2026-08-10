@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,17 +139,33 @@ CREATE TABLE IF NOT EXISTS timeline (
 CREATE TABLE IF NOT EXISTS research_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_type TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    confidence TEXT NOT NULL,
-    horizon TEXT NOT NULL DEFAULT '',
-    evidence_json TEXT NOT NULL DEFAULT '[]',
-    risks_json TEXT NOT NULL DEFAULT '[]',
-    narrative TEXT NOT NULL DEFAULT '',
+    schema_version INTEGER NOT NULL DEFAULT 2,
+    summary TEXT NOT NULL DEFAULT '',
+    cross_market_view TEXT NOT NULL DEFAULT '',
+    global_risks_json TEXT NOT NULL DEFAULT '[]',
     raw_json TEXT NOT NULL DEFAULT '{}',
-    verify_result TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
     round_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_asset_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    horizon TEXT NOT NULL DEFAULT '',
+    market_regime TEXT NOT NULL DEFAULT '',
+    technical_confirmation TEXT NOT NULL DEFAULT '',
+    basis_type TEXT NOT NULL DEFAULT '',
+    data_status TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    risks_json TEXT NOT NULL DEFAULT '[]',
+    narrative TEXT NOT NULL DEFAULT '',
+    market_context_json TEXT NOT NULL DEFAULT '{}',
+    verify_result TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    UNIQUE(report_id, contract)
 );
 CREATE TABLE IF NOT EXISTS causal_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,14 +188,48 @@ CREATE INDEX IF NOT EXISTS idx_strategy_versions_md5 ON strategy_versions(md5);
 CREATE INDEX IF NOT EXISTS idx_review_reports_created ON review_reports(created_at);
 CREATE INDEX IF NOT EXISTS idx_timeline_published ON timeline(published_at);
 CREATE INDEX IF NOT EXISTS idx_research_reports_created ON research_reports(created_at);
+CREATE INDEX IF NOT EXISTS idx_research_asset_report ON research_asset_views(report_id);
+CREATE INDEX IF NOT EXISTS idx_research_asset_contract ON research_asset_views(contract, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id);
 """
+
+_RESEARCH_REPORT_COLUMNS = {
+    "id",
+    "report_type",
+    "schema_version",
+    "summary",
+    "cross_market_view",
+    "global_risks_json",
+    "raw_json",
+    "error",
+    "round_id",
+    "created_at",
+}
+_RESEARCH_ASSET_COLUMNS = {
+    "id",
+    "report_id",
+    "contract",
+    "direction",
+    "confidence",
+    "horizon",
+    "market_regime",
+    "technical_confirmation",
+    "basis_type",
+    "data_status",
+    "evidence_json",
+    "risks_json",
+    "narrative",
+    "market_context_json",
+    "verify_result",
+    "created_at",
+}
 
 
 class Database:
     """aiosqlite 连接封装：open 时启用 WAL 并建表，close 释放连接。"""
 
     def __init__(self) -> None:
+        self._path: Path | None = None
         self._conn: aiosqlite.Connection | None = None
 
     @property
@@ -193,11 +244,55 @@ class Database:
         db_path = Path(path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(str(db_path))
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.executescript(SCHEMA)
-        await self._migrate()
-        await self._conn.commit()
+        try:
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._validate_research_schema()
+            await self._conn.executescript(SCHEMA)
+            await self._migrate()
+            await self._conn.commit()
+            self._path = db_path
+        except Exception:
+            await self._conn.close()
+            self._conn = None
+            self._path = None
+            raise
+
+    async def _validate_research_schema(self) -> None:
+        """只接受当前逐标的研报结构；生产基线无研报表时允许直接建表。"""
+        cur = await self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_reports'"
+        )
+        if await cur.fetchone() is None:
+            return
+        cur = await self._conn.execute("PRAGMA table_info(research_reports)")
+        report_columns = {row["name"] for row in await cur.fetchall()}
+        if report_columns != _RESEARCH_REPORT_COLUMNS:
+            raise RuntimeError(
+                "检测到旧版研报表 research_reports；当前版本不执行兼容迁移，"
+                "请先备份数据库并按部署文档重建研报数据"
+            )
+        cur = await self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_asset_views'"
+        )
+        if await cur.fetchone() is None:
+            raise RuntimeError("研报表结构不完整：缺少 research_asset_views")
+        cur = await self._conn.execute("PRAGMA table_info(research_asset_views)")
+        asset_columns = {row["name"] for row in await cur.fetchall()}
+        if asset_columns != _RESEARCH_ASSET_COLUMNS:
+            raise RuntimeError("研报表结构不完整：research_asset_views 字段不符合当前协议")
+        cur = await self._conn.execute(
+            "SELECT 1 FROM research_reports WHERE schema_version != 2 LIMIT 1"
+        )
+        if await cur.fetchone() is not None:
+            raise RuntimeError("检测到非 schema_version=2 的研报数据；请先备份数据库并重建研报数据")
+
+    @property
+    def path(self) -> Path:
+        """当前数据库文件路径；独立事务连接使用同一路径。"""
+        if self._path is None:
+            raise RuntimeError("数据库未打开，请先调用 open()")
+        return self._path
 
     async def _migrate(self) -> None:
         """轻量迁移（均幂等，用 PRAGMA table_info 判列存在性）：

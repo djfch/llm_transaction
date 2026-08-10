@@ -255,9 +255,11 @@ async def test_build_research_receives_notify_event(build_ctx, monkeypatch):
     """build_research 收到 notify_event=event_queue.put_nowait（研报轮始/轮末事件经 WS 广播）。"""
     captured: list = []
 
-    def _wrap(settings, repo, audit, provider, notify_event=None):
+    def _wrap(settings, repo, audit, provider, notify_event=None, **kwargs):
         captured.append(notify_event)
-        return _build_research_impl(settings, repo, audit, provider, notify_event=notify_event)
+        return _build_research_impl(
+            settings, repo, audit, provider, notify_event=notify_event, **kwargs
+        )
 
     monkeypatch.setattr("src.bootstrap.build_research", _wrap)
     ctx = await build_ctx()

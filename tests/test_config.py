@@ -33,6 +33,23 @@ def test_load_watchlist():
     assert "BTC_USDT" in watchlist.contracts
 
 
+def test_load_watchlist_empty_rejected(tmp_path: Path):
+    path = tmp_path / "watchlist.yaml"
+    path.write_text("settle: usdt\ncontracts: []\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="至少包含一个合约"):
+        load_watchlist(path)
+
+
+def test_load_watchlist_duplicate_contracts_rejected(tmp_path: Path):
+    path = tmp_path / "watchlist.yaml"
+    path.write_text(
+        "settle: usdt\ncontracts:\n  - BTC_USDT\n  - BTC_USDT\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="不能重复"):
+        load_watchlist(path)
+
+
 def test_invalid_mode_rejected(tmp_path: Path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mode: mars", encoding="utf-8")
@@ -56,6 +73,14 @@ def test_write_settings_invalid_risk(tmp_path: Path):
 def test_write_watchlist_empty_rejected(tmp_path: Path):
     with pytest.raises(ConfigError, match="不能为空"):
         write_watchlist({"contracts": []}, tmp_path / "w.yaml")
+
+
+def test_write_watchlist_duplicate_contracts_rejected(tmp_path: Path):
+    with pytest.raises(ConfigError, match="不能重复"):
+        write_watchlist(
+            {"contracts": ["BTC_USDT", "BTC_USDT"]},
+            tmp_path / "w.yaml",
+        )
 
 
 # ---------- SchedulerConfig 取值关系校验 ----------

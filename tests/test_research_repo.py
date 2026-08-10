@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from src.memory import Database, Repo
+from tests.research_helpers import save_report_fixture
 
 
 @pytest.fixture
@@ -84,7 +85,8 @@ async def test_latest_dedup_keys(repo: Repo) -> None:
 
 async def test_save_and_list_reports(repo: Repo) -> None:
     """研报落库与按天查询；失败研报（error 非空）不进列表。"""
-    ok = await repo.research.save_report(
+    ok = await save_report_fixture(
+        repo,
         report_type="us",
         direction="偏多",
         confidence="高",
@@ -92,22 +94,23 @@ async def test_save_and_list_reports(repo: Repo) -> None:
         evidence_json='[{"point": "ETF 流入"}]',
         narrative="美盘前瞻",
     )
-    fail = await repo.research.save_report(
-        report_type="asia", direction="中性", confidence="中", error="解析失败"
+    fail = await save_report_fixture(
+        repo, report_type="asia", direction="中性", confidence="中", error="解析失败"
     )
     assert ok.id > 0
     assert fail.id > ok.id
     reports = await repo.research.list_reports(days=7)
     assert len(reports) == 1
     assert reports[0].id == ok.id
-    assert reports[0].direction == "偏多"
+    views = await repo.research.list_asset_views_by_report(ok.id)
+    assert len(views) == 1 and views[0].direction == "偏多"
     latest = await repo.research.latest_report()
     assert latest is not None and latest.id == ok.id
 
 
 async def test_save_and_list_causal_links(repo: Repo) -> None:
     """因果链落库：默认 pending 状态，按 report_id 关联。"""
-    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     link = await repo.research.save_causal_link(
         report_id=report.id,
         chain_json='[{"node": "油价上涨", "kind": "事件"}]',
@@ -123,7 +126,7 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
 
 async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
     """版本化字段落库：topic/supersedes_id/await_verification 存取一致。"""
-    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     link = await repo.research.save_causal_link(
         report_id=report.id,
         chain_json='[{"node": "a"}]',
@@ -148,7 +151,7 @@ async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
 
 async def test_save_causal_link_supersede_marks_old(repo: Repo) -> None:
     """版本化事务：新链替代旧链时，同一次落库把旧链 status 标记 superseded。"""
-    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "旧推断"}]', confidence=0.5, topic="非农"
     )
@@ -174,7 +177,7 @@ async def test_get_causal_link_missing(repo: Repo) -> None:
 
 async def test_list_pending_causal_links(repo: Repo) -> None:
     """未闭合池口径：只收 待验证声明 + 未被替代；排除 结论链/已被替代；按时间正序取前 N。"""
-    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     p1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.6, topic="关税"
     )  # 待验证（默认）
@@ -210,7 +213,7 @@ async def test_list_pending_causal_links(repo: Repo) -> None:
 
 async def test_list_causal_links_topic_filter(repo: Repo) -> None:
     """按主题过滤：只返回该主题链；limit 截取最新 N 条按时间正序。"""
-    report = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     a1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a1"}]', confidence=0.6, topic="关税"
     )
@@ -233,12 +236,12 @@ async def test_list_reports_page(repo: Repo) -> None:
     """分页：最新在前、含失败记录、越界页 items 空但 total 准确。"""
     ids = []
     for i in range(3):
-        r = await repo.research.save_report(
-            report_type="us", direction="偏多", confidence="高", narrative=f"第{i}份"
+        r = await save_report_fixture(
+            repo, report_type="us", direction="偏多", confidence="高", narrative=f"第{i}份"
         )
         ids.append(r.id)
-    fail = await repo.research.save_report(
-        report_type="asia", direction="中性", confidence="中", error="解析失败"
+    fail = await save_report_fixture(
+        repo, report_type="asia", direction="中性", confidence="中", error="解析失败"
     )
     # 最新在前：失败记录 id 最大，第一页第一条就是它
     page1, total = await repo.research.list_reports_page(limit=2, offset=0)
@@ -254,8 +257,8 @@ async def test_list_reports_page(repo: Repo) -> None:
 
 async def test_list_causal_links_by_report(repo: Repo) -> None:
     """按研报取因果链：id 正序，只返回该研报的。"""
-    r1 = await repo.research.save_report(report_type="us", direction="看空", confidence="高")
-    r2 = await repo.research.save_report(report_type="asia", direction="中性", confidence="中")
+    r1 = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
+    r2 = await save_report_fixture(repo, report_type="asia", direction="中性", confidence="中")
     for i in range(2):
         await repo.research.save_causal_link(
             report_id=r1.id, chain_json=f'[{{"node": "A{i}", "kind": "事件"}}]', confidence=0.6
@@ -271,9 +274,9 @@ async def test_list_causal_links_by_report(repo: Repo) -> None:
 
 async def test_has_report_since(repo: Repo) -> None:
     """幂等判定：恰好等于 since_ts 算有；成功或失败都算已跑（失败不自动重试）；类型不匹配不算。"""
-    ok = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
-    fail = await repo.research.save_report(
-        report_type="asia", direction="中性", confidence="中", error="解析失败"
+    ok = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
+    fail = await save_report_fixture(
+        repo, report_type="asia", direction="中性", confidence="中", error="解析失败"
     )
     assert await repo.research.has_report_since("us", ok.created_at) is True  # 恰好等于
     assert await repo.research.has_report_since("us", ok.created_at + 1) is False  # 之后无

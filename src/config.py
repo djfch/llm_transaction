@@ -273,6 +273,14 @@ class Watchlist(BaseModel):
     settle: str = "usdt"
     contracts: list[str]
 
+    @model_validator(mode="after")
+    def validate_contracts(self) -> "Watchlist":
+        if not self.contracts:
+            raise ValueError("watchlist.contracts 不能为空，至少包含一个合约")
+        if len(self.contracts) != len(set(self.contracts)):
+            raise ValueError("watchlist.contracts 不能重复，同一合约只能配置一次")
+        return self
+
 
 # 指标短名单默认基线：文件缺失/首次运行时的兜底配置（去重后 1~8 个，键为小写字母/数字/下划线）
 DEFAULT_INDICATOR_SHORTLIST = ["ema20", "ema50", "rsi14", "macd", "atr14", "oi"]

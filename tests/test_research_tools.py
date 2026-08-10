@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from datetime import datetime
 
 import pytest
 
 from src.memory import Database, Repo
+from tests.research_helpers import save_report_fixture
 from src.research.preinject import build_preinjection
 from src.research.providers.base import (
     CalendarEvent,
@@ -24,10 +26,13 @@ from src.research.tools import ResearchToolRegistry
 
 
 @pytest.fixture
-async def repo(tmp_path) -> Repo:
+async def repo(tmp_path) -> AsyncIterator[Repo]:
     db = Database()
     await db.open(tmp_path / "research.db")
-    return Repo(db)
+    try:
+        yield Repo(db)
+    finally:
+        await db.close()
 
 
 class _FakeJin10:
@@ -110,7 +115,12 @@ class _FakeBb:
 @pytest.fixture
 async def deps(repo: Repo) -> ResearchToolDeps:
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
-    return ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    return ResearchToolDeps(
+        provider=provider,
+        repo=repo,
+        mode="paper",
+        watchlist_snapshot=("BTC_USDT", "ETH_USDT"),
+    )
 
 
 async def _run(deps, name: str, args: dict | None = None) -> str:
@@ -286,7 +296,7 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
 
 async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
     """supersedes_id 校验：不存在/已被替代/主题不一致分别报错；合法替代通过。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
     )
@@ -325,7 +335,7 @@ async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
 
 async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
     """supersedes_id 输入形态：0/负数/浮点/布尔被拒；数字字符串容错接受。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     target = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
     )
@@ -355,7 +365,7 @@ async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
 
 async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> None:
     """同轮内两次声明替代同一旧链：第二次被拒（防双当前版进池）。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     target = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
     )
@@ -380,7 +390,7 @@ async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> No
 
 async def test_submit_causal_links_supersede_legacy_empty_topic(repo: Repo) -> None:
     """遗留链（topic=''，旧库迁移）可被新主题修正：空主题目标放行。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     legacy = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "老链"}]', confidence=0.5, topic=""
     )
@@ -440,7 +450,7 @@ async def test_read_causal_links_empty(deps) -> None:
 
 async def test_read_causal_links_lists_family(repo: Repo) -> None:
     """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id,
         chain_json='[{"node": "旧推断", "kind": "推断"}]',
@@ -522,6 +532,9 @@ async def test_build_preinjection_sections(deps) -> None:
     """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。"""
     text = await build_preinjection(deps, hours=24)
     assert "经济日历" in text
+    assert "本轮白名单" in text
+    assert "BTC_USDT" in text and "ETH_USDT" in text
+    assert "get_research_market_data" in text
     assert "美国7月非农就业人口" in text
     assert "BTC ETF 净流入" in text  # 指标段内容
     assert "快讯" in text and "金十新闻" in text and "律动新闻" in text
@@ -543,7 +556,7 @@ async def test_build_preinjection_sections(deps) -> None:
 
 async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
     """预注入未闭合链段：带链 id/主题/节点链，且排除结论链与被替代链。"""
-    report = await repo.research.save_report(report_type="us", direction="偏多", confidence="高")
+    report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     p1 = await repo.research.save_causal_link(
         report_id=report.id,
         chain_json='[{"node": "非农数据", "kind": "事件"}, {"node": "观望"}]',

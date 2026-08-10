@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 
 # 工具名 → 执行函数（schema 在 tool_schemas.SCHEMAS 中同名定义）
 _HANDLERS: dict[str, Callable[[ResearchToolDeps, dict], Awaitable[str]]] = {
+    "get_research_market_data": tool_handlers.get_research_market_data,
     "fetch_calendar": tool_handlers.fetch_calendar,
     "fetch_flash": tool_handlers.fetch_flash,
     "fetch_indicators": tool_handlers.fetch_indicators,
