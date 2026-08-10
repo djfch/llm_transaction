@@ -21,7 +21,13 @@ CREATE TABLE research_reports (
 
 
 async def test_pre_research_database_creates_only_current_research_schema(tmp_path):
-    """生产基线没有研报表时，首次启动直接创建当前逐标的结构。"""
+    """生产基线没有研报表时，首次启动直接创建当前逐标的结构。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     path = tmp_path / "pre-research.db"
     conn = await aiosqlite.connect(str(path))
     await conn.execute("CREATE TABLE deployment_baseline (sha TEXT NOT NULL)")
@@ -49,7 +55,13 @@ async def test_pre_research_database_creates_only_current_research_schema(tmp_pa
 
 
 async def test_legacy_research_schema_is_rejected_without_mutation(tmp_path):
-    """不在支持范围的旧研报库应明确失败，不能静默迁移或部分建表。"""
+    """不在支持范围的旧研报库应明确失败，不能静默迁移或部分建表。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     path = tmp_path / "legacy-research.db"
     conn = await aiosqlite.connect(str(path))
     await conn.execute(_LEGACY_RESEARCH_REPORTS_DDL)
@@ -99,7 +111,13 @@ CREATE TABLE review_reports (
 
 
 async def test_review_reports_round_id_migration(tmp_path):
-    """旧库（review_reports 无 round_id 列）迁移补列；老行保持 ''，重复 open 幂等。"""
+    """旧库（review_reports 无 round_id 列）迁移补列；老行保持 ''，重复 open 幂等。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     path = tmp_path / "old.db"
     conn = await aiosqlite.connect(str(path))
     await conn.execute(_OLD_REVIEW_REPORTS_DDL)
@@ -145,7 +163,13 @@ CREATE TABLE causal_links (
 
 
 async def test_causal_links_versioning_migration(tmp_path):
-    """旧库（causal_links 缺三列）迁移补列；老行保持 主题''/无替代/待验证，重复 open 幂等。"""
+    """旧库（causal_links 缺三列）迁移补列；老行保持 主题''/无替代/待验证，重复 open 幂等。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     path = tmp_path / "old-causal.db"
     conn = await aiosqlite.connect(str(path))
     await conn.execute(_OLD_CAUSAL_LINKS_DDL)

@@ -30,7 +30,12 @@ from src.server.deps import ServerDeps
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    """用例前后恢复环境变量原状（端点经 set_env_keys 直接写 os.environ，须手动快照恢复）。"""
+    """用例前后恢复环境变量原状（端点经 set_env_keys 直接写 os.environ，须手动快照恢复）。
+
+    参数：无
+    返回：
+        Iterator[None]，yield 给用例执行，并在收尾恢复或删除相关 LLM 环境变量
+    """
     names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
     names += [k for k in os.environ if k.startswith("LLM_KEY_")]
     saved = {k: os.environ.get(k) for k in names}
@@ -48,7 +53,13 @@ def _clean_env():
 
 @pytest.fixture
 async def deps(tmp_path: Path):
-    """fake 依赖：tmp 配置/.env + 共享 runtime Settings + 记录调用的假 reconfigure。"""
+    """fake 依赖：tmp 配置/.env + 共享 runtime Settings + 记录调用的假 reconfigure。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        AsyncIterator[ServerDeps]，yield 热重建测试依赖，并在夹具收尾关闭数据库
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)
     db = Database()
@@ -56,6 +67,12 @@ async def deps(tmp_path: Path):
     calls: list[dict] = []
 
     async def fake_reconfigure() -> dict:
+        """模拟 LLM 热重建成功：记录一次调用并回报已配置。
+
+        参数：无
+        返回：
+            dict，返回该测试辅助函数构造或记录的结果
+        """
         calls.append({})
         return {"llm_configured": True, "error": ""}
 
@@ -76,6 +93,13 @@ async def deps(tmp_path: Path):
 
 @pytest.fixture
 async def client(deps: ServerDeps):
+    """创建注入测试依赖的测试客户端。
+
+    参数：
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        AsyncIterator[AsyncClient]，yield 直连测试应用的客户端并在退出上下文时关闭
+    """
     app = create_app(deps)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -85,7 +109,14 @@ async def client(deps: ServerDeps):
 
 
 async def test_post_secrets_writes_env_without_leaking(client: AsyncClient, deps: ServerDeps):
-    """写 .env 成功并热重建；响应契约逐字、永不回显明文；空值跳过。"""
+    """写 .env 成功并热重建；响应契约逐字、永不回显明文；空值跳过。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     r = await client.post(
         "/api/secrets",
         json={"anthropic_api_key": "sk-ant-秘密-xyz", "openai_api_key": ""},
@@ -102,11 +133,27 @@ async def test_post_secrets_writes_env_without_leaking(client: AsyncClient, deps
 async def test_post_secrets_calls_set_env_keys(
     client: AsyncClient, deps: ServerDeps, monkeypatch: pytest.MonkeyPatch
 ):
-    """端点经 set_env_keys 落盘（spy 包装断言传参：只写 LLM key、指向 deps.env_path）。"""
+    """端点经 set_env_keys 落盘（spy 包装断言传参：只写 LLM key、指向 deps.env_path）。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     calls: list[tuple[dict, Path]] = []
     real = routes_config.set_env_keys
 
     def spy(mapping: dict, env_path: Path) -> list:
+        """记录待写入环境文件的密钥映射。
+
+        参数：
+            mapping: dict，环境变量名与密钥值映射
+            env_path: Path，环境文件路径
+        返回：
+            list，返回该测试辅助函数构造或记录的结果
+        """
         calls.append((dict(mapping), env_path))
         return real(mapping, env_path)
 
@@ -119,7 +166,14 @@ async def test_post_secrets_calls_set_env_keys(
 
 
 async def test_post_secrets_without_reconfigure_wiring(client: AsyncClient, deps: ServerDeps):
-    """llm_reconfigure 未接线：诚实回报 agent 未接线（不假装已配置）。"""
+    """llm_reconfigure 未接线：诚实回报 agent 未接线（不假装已配置）。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     deps.llm_reconfigure = None
     r = await client.post("/api/secrets", json={})
     assert r.json() == {"saved": True, "llm_configured": False, "error": "agent 未接线"}
@@ -129,7 +183,14 @@ async def test_post_secrets_without_reconfigure_wiring(client: AsyncClient, deps
 
 
 async def test_put_config_llm_model_triggers_reconfigure(client: AsyncClient, deps: ServerDeps):
-    """llm.model 移出 needs_restart：原地写回 runtime 并触发热重建。"""
+    """llm.model 移出 needs_restart：原地写回 runtime 并触发热重建。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     raw = (await client.get("/api/config")).json()
     raw["llm"]["model"] = "claude-opus-4"
     r = await client.put("/api/config", json=raw)
@@ -146,10 +207,23 @@ async def test_put_config_llm_model_triggers_reconfigure(client: AsyncClient, de
 
 
 async def test_put_config_llm_reconfigure_error_not_422(client: AsyncClient, deps: ServerDeps):
-    """热重建失败不 422：配置合法已落盘，响应携带 llm_error。"""
+    """热重建失败不 422：配置合法已落盘，响应携带 llm_error。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     assert deps.runtime_settings is not None
 
     async def failing() -> dict:
+        """模拟模型重配置失败。
+
+        参数：无
+        返回：
+            dict，不会正常返回，用于模拟失败路径
+        """
         return {"llm_configured": False, "error": "缺少 ANTHROPIC_API_KEY 环境变量"}
 
     deps.llm_reconfigure = failing
@@ -165,7 +239,14 @@ async def test_put_config_llm_reconfigure_error_not_422(client: AsyncClient, dep
 
 
 async def test_put_config_non_llm_change_skips_reconfigure(client: AsyncClient, deps: ServerDeps):
-    """非 llm 热键变更不触发热重建，响应不追加 llm 键（旧契约不变）。"""
+    """非 llm 热键变更不触发热重建，响应不追加 llm 键（旧契约不变）。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     raw = (await client.get("/api/config")).json()
     raw["risk"]["max_position_pct"] = 0.5
     r = await client.put("/api/config", json=raw)
@@ -177,13 +258,25 @@ async def test_put_config_non_llm_change_skips_reconfigure(client: AsyncClient, 
 
 
 def test_env_path_defaults_to_root_env():
-    """env_path 缺省指向项目根 .env（生产接线免配置）。"""
+    """env_path 缺省指向项目根 .env（生产接线免配置）。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     deps = ServerDeps(repo=None)  # 仅取默认路径，不触碰 repo
     assert deps.env_path == ROOT / ".env"
 
 
 async def test_post_secrets_rejects_newline_injection(client: AsyncClient, deps: ServerDeps):
-    """对抗：值含换行可注入任意 .env 行（LLM_MOCK=1/GATE_API_KEY 覆写），必须 422。"""
+    """对抗：值含换行可注入任意 .env 行（LLM_MOCK=1/GATE_API_KEY 覆写），必须 422。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     r = await client.post(
         "/api/secrets", json={"openai_api_key": "sk-x\nLLM_MOCK=1\nGATE_API_KEY=attacker"}
     )
@@ -193,7 +286,13 @@ async def test_post_secrets_rejects_newline_injection(client: AsyncClient, deps:
 
 
 async def test_post_secrets_rejects_nul_and_cr(client: AsyncClient):
-    """NUL 与回车同样拒绝（pydantic 校验层）。"""
+    """NUL 与回车同样拒绝（pydantic 校验层）。
+
+    参数：
+        client: AsyncClient，测试客户端
+    返回：
+        None，执行断言验证目标行为
+    """
     for bad in ("sk-x\0y", "sk-x\ry"):
         r = await client.post("/api/secrets", json={"anthropic_api_key": bad})
         assert r.status_code == 422, f"应拒绝: {bad!r}"
@@ -208,9 +307,10 @@ async def test_post_secrets_rejects_nul_and_cr(client: AsyncClient):
 async def _put_two_credentials(client: AsyncClient) -> None:
     """登记两条凭证并分配：trader→main，reviewer→backup。
 
-    凭证列表只能经 POST /api/credentials 专用端点变更（PUT /api/config 会剥离
-    llm.credentials 键）；首次创建物化 default，落盘为 [default, main, backup]；
-    agents.*.credential 分配仍归 PUT /api/config 管辖。
+    参数：
+        client: AsyncClient，测试客户端
+    返回：
+        None，返回该测试辅助函数构造或记录的结果
     """
     r = await client.post("/api/credentials", json={"name": "main", "model": "claude-sonnet-4-5"})
     assert r.status_code == 200
@@ -231,7 +331,14 @@ async def _put_two_credentials(client: AsyncClient) -> None:
 
 
 async def test_post_secrets_credential_writes_mapped_env_key(client: AsyncClient, deps: ServerDeps):
-    """{credential, api_key}：按凭证 api_key_env 写 .env（缺省推导 LLM_KEY_<NAME>）并热重建。"""
+    """{credential, api_key}：按凭证 api_key_env 写 .env（缺省推导 LLM_KEY_<NAME>）并热重建。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     await _put_two_credentials(client)
     reconfigure_before = len(deps.reconfigure_calls)
     r = await client.post("/api/secrets", json={"credential": "backup", "api_key": "sk-b-秘密"})
@@ -245,7 +352,14 @@ async def test_post_secrets_credential_writes_mapped_env_key(client: AsyncClient
 
 
 async def test_post_secrets_credential_and_legacy_fields_mix(client: AsyncClient, deps: ServerDeps):
-    """credential 形式与旧字段可同请求混用，两者都落盘。"""
+    """credential 形式与旧字段可同请求混用，两者都落盘。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     await _put_two_credentials(client)
     r = await client.post(
         "/api/secrets",
@@ -258,7 +372,14 @@ async def test_post_secrets_credential_and_legacy_fields_mix(client: AsyncClient
 
 
 async def test_post_secrets_unknown_credential_422(client: AsyncClient, deps: ServerDeps):
-    """credential 名不存在 → 422 凭证不存在，.env 不被写入。"""
+    """credential 名不存在 → 422 凭证不存在，.env 不被写入。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     r = await client.post("/api/secrets", json={"credential": "ghost", "api_key": "sk-x"})
     assert r.status_code == 422
     assert "凭证不存在" in r.json()["detail"]
@@ -269,7 +390,13 @@ async def test_post_secrets_unknown_credential_422(client: AsyncClient, deps: Se
 
 
 def _all_strings(obj: object) -> list[str]:
-    """递归收集 JSON 结构里的全部字符串（泄漏扫描用）。"""
+    """递归收集 JSON 结构里的全部字符串（泄漏扫描用）。
+
+    参数：
+        obj: object，待递归遍历的 JSON 值
+    返回：
+        list[str]，返回该测试辅助函数构造或记录的结果
+    """
     if isinstance(obj, str):
         return [obj]
     if isinstance(obj, dict):
@@ -280,7 +407,13 @@ def _all_strings(obj: object) -> list[str]:
 
 
 async def test_post_secrets_422_never_echoes_api_key(client: AsyncClient):
-    """422 不得回显明文：剔除 detail[].input，其余字段与数组结构保持不变。"""
+    """422 不得回显明文：剔除 detail[].input，其余字段与数组结构保持不变。
+
+    参数：
+        client: AsyncClient，测试客户端
+    返回：
+        None，执行断言验证目标行为
+    """
     secret = "sk-逐字明文-9f27ac"
     r = await client.post(
         "/api/secrets", json={"anthropic_api_key": f"{secret}\nGATE_API_KEY=attacker"}
@@ -300,7 +433,13 @@ async def test_post_secrets_422_never_echoes_api_key(client: AsyncClient):
 
 
 async def test_secrets_status_default_credential(client: AsyncClient):
-    """旧配置（无 credentials）：status 含一条合成的 default 凭证，两个 agent 都引用它。"""
+    """旧配置（无 credentials）：status 含一条合成的 default 凭证，两个 agent 都引用它。
+
+    参数：
+        client: AsyncClient，测试客户端
+    返回：
+        None，执行断言验证目标行为
+    """
     r = await client.get("/api/secrets/status")
     assert r.status_code == 200
     body = r.json()
@@ -320,7 +459,14 @@ async def test_secrets_status_default_credential(client: AsyncClient):
 async def test_secrets_status_lists_credentials_without_plaintext(
     client: AsyncClient, deps: ServerDeps
 ):
-    """多凭证：status 列出各凭证的 key 配置状态与被引用 agent，永不回显明文。"""
+    """多凭证：status 列出各凭证的 key 配置状态与被引用 agent，永不回显明文。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     await _put_two_credentials(client)
     assert deps.runtime_settings is not None  # status 数据源为运行时共享实例
     os.environ["LLM_KEY_BACKUP"] = "sk-secret-backup"
@@ -344,7 +490,14 @@ async def test_secrets_status_lists_credentials_without_plaintext(
 async def test_secrets_status_llm_key_true_with_only_llm_key_prefix(
     client: AsyncClient, deps: ServerDeps
 ):
-    """llm_key = 任一生效凭证的 api_key_env 已配置（多凭证下不限于两个旧键名）。"""
+    """llm_key = 任一生效凭证的 api_key_env 已配置（多凭证下不限于两个旧键名）。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     await _put_two_credentials(client)
     os.environ["LLM_KEY_BACKUP"] = "sk-only-llm-key"
     r = await client.get("/api/secrets/status")
@@ -360,7 +513,14 @@ async def test_secrets_status_llm_key_true_with_only_llm_key_prefix(
 async def test_put_config_agent_assignment_triggers_reconfigure(
     client: AsyncClient, deps: ServerDeps
 ):
-    """agents.*.credential 变更：原地写回 runtime 并触发热重建（凭证登记走专用端点）。"""
+    """agents.*.credential 变更：原地写回 runtime 并触发热重建（凭证登记走专用端点）。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
+    """
     assert deps.runtime_settings is not None
     await _put_two_credentials(client)  # 专用端点登记凭证 + PUT 分配 trader→main / reviewer→backup
     runtime = deps.runtime_settings
@@ -381,8 +541,10 @@ async def test_put_config_agent_assignment_triggers_reconfigure(
 async def test_put_config_agents_unknown_credential_422(client: AsyncClient):
     """agent 引用不存在的凭证：PUT /api/config 映 422，配置落不了盘。
 
-    （"credentials 非空但缺 default 绑定 → 422"的 Settings 级校验由
-    tests/test_config.py 锁定；本用例只锁 server 端点 422 映射。）
+    参数：
+        client: AsyncClient，测试客户端
+    返回：
+        None，执行断言验证目标行为
     """
     r = await client.post("/api/credentials", json={"name": "main", "model": "m1"})
     assert r.status_code == 200  # 经专用端点登记 main（PUT 不再受理 credentials）
@@ -396,8 +558,11 @@ async def test_put_config_agents_unknown_credential_422(client: AsyncClient):
 async def test_put_config_ignores_llm_credentials_snapshot(client: AsyncClient, deps: ServerDeps):
     """PUT /api/config 忽略 llm.credentials，只让专用凭证端点拥有写权。
 
-    磁盘与 runtime 凭证列表不变、不触发不必要热重建、响应 saved=true；
-    同请求中的 llm.model（仍由 PUT 管辖的热键）正常生效。
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，服务端测试依赖
+    返回：
+        None，执行断言验证目标行为
     """
     r = await client.post("/api/credentials", json={"name": "main", "model": "m1"})
     assert r.status_code == 200  # 磁盘与 runtime 凭证列表现为 [default, main]

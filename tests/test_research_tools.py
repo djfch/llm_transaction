@@ -27,6 +27,14 @@ from src.research.tools import ResearchToolRegistry
 
 @pytest.fixture
 async def repo(tmp_path) -> AsyncIterator[Repo]:
+    """创建隔离数据库的仓储夹具。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        AsyncIterator[Repo]：yield 连接 research.db 的仓储，并在夹具收尾关闭数据库
+    """
     db = Database()
     await db.open(tmp_path / "research.db")
     try:
@@ -39,6 +47,14 @@ class _FakeJin10:
     async def fetch_calendar(self):
         # 事件日期按北京时区动态生成（复审 #6 修复）：写死日期会在跨天后被
         # 今日/明日过滤器排空，测试次日必红
+        """返回当天一条五星事件和一条低星事件供过滤测试。
+
+        参数：
+            无
+
+        返回：
+            list[CalendarEvent]：包含高星与低星事件的模拟财经日历
+        """
         today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         return [
             CalendarEvent(
@@ -62,6 +78,14 @@ class _FakeJin10:
         ]
 
     async def fetch_flash(self, hours=24):
+        """返回一条固定的金十快讯。
+
+        参数：
+            hours: int，回溯小时数
+
+        返回：
+            list[FlashItem]：包含摘要与全文的金十模拟快讯
+        """
         return [
             FlashItem(
                 id="j1",
@@ -75,9 +99,26 @@ class _FakeJin10:
         ]
 
     async def fetch_article_detail(self, item_id):
+        """返回固定的金十文章全文。
+
+        参数：
+            item_id: str，资讯条目编号
+
+        返回：
+            str：固定文本“金十详情全文”
+        """
         return "金十详情全文"
 
     async def search_news(self, keyword, limit=20):
+        """返回标题包含关键词的一条金十搜索结果。
+
+        参数：
+            keyword: str，搜索关键词
+            limit: int，待校验的数量上限
+
+        返回：
+            list[FlashItem]：标题带搜索关键词的模拟新闻列表
+        """
         return [
             FlashItem(
                 id="j9",
@@ -93,6 +134,14 @@ class _FakeJin10:
 
 class _FakeBb:
     async def fetch_flash(self, hours=24):
+        """返回一条固定的律动快讯。
+
+        参数：
+            hours: int，回溯小时数
+
+        返回：
+            list[FlashItem]：包含摘要与全文的律动模拟快讯
+        """
         return [
             FlashItem(
                 id="b1",
@@ -106,14 +155,39 @@ class _FakeBb:
         ]
 
     async def fetch_indicators(self):
+        """返回固定的 BTC ETF 净流入指标文本。
+
+        参数：
+            无
+
+        返回：
+            str：包含 BTC ETF 净流入金额的 Markdown 文本
+        """
         return "## BTC ETF 净流入\n+2.1 亿美元"
 
     async def search_news(self, keyword, limit=20):
+        """返回空的律动新闻搜索结果。
+
+        参数：
+            keyword: str，搜索关键词
+            limit: int，待校验的数量上限
+
+        返回：
+            list[FlashItem]：空的模拟新闻列表
+        """
         return []
 
 
 @pytest.fixture
 async def deps(repo: Repo) -> ResearchToolDeps:
+    """组装研报工具所需的测试依赖。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        ResearchToolDeps：绑定双数据源、临时仓储、paper 模式与关注列表的工具依赖
+    """
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
     return ResearchToolDeps(
         provider=provider,
@@ -124,6 +198,16 @@ async def deps(repo: Repo) -> ResearchToolDeps:
 
 
 async def _run(deps, name: str, args: dict | None = None) -> str:
+    """执行指定研报工具并返回文本结果。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+        name: str，待执行的工具名称
+        args: dict | None，传给工具的参数
+
+    返回：
+        str：指定研报工具执行后的文本结果
+    """
     return await ResearchToolRegistry(deps).execute(name, args)
 
 
@@ -131,14 +215,28 @@ async def _run(deps, name: str, args: dict | None = None) -> str:
 
 
 async def test_fetch_calendar_filters_star(deps) -> None:
-    """日历：只保留 star≥3 且今日/明日的条目。"""
+    """日历：只保留 star≥3 且今日/明日的条目。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "fetch_calendar")
     assert "美国7月非农就业人口" in text
     assert "低星事件" not in text
 
 
 async def test_fetch_flash_compact(deps) -> None:
-    """快讯：紧凑格式含时间/来源/标题/摘要。"""
+    """快讯：紧凑格式含时间/来源/标题/摘要。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "fetch_flash")
     assert "[jin10] 金十新闻" in text
     assert "[blockbeats] 律动新闻" in text
@@ -146,37 +244,79 @@ async def test_fetch_flash_compact(deps) -> None:
 
 
 async def test_fetch_indicators(deps) -> None:
-    """指标快照直通。"""
+    """指标快照直通。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "fetch_indicators")
     assert "BTC ETF 净流入" in text and "+2.1" in text
 
 
 async def test_get_macro_series_arg_validation(deps) -> None:
-    """FRED：缺参数返回错误文本；非法 look_back 返回错误文本。"""
+    """FRED：缺参数返回错误文本；非法 look_back 返回错误文本。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "必填" in await _run(deps, "get_macro_series", {})
     assert "参数错误" in await _run(deps, "get_macro_series", {"indicator": "cpi", "look_back": 1})
 
 
 async def test_search_news(deps) -> None:
-    """搜索合并去重。"""
+    """搜索合并去重。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "search_news", {"keyword": "美联储"})
     assert "搜到美联储" in text
 
 
 async def test_read_timeline_empty(deps) -> None:
-    """事实层无记录时返回提示。"""
+    """事实层无记录时返回提示。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "read_timeline")
     assert "无记录" in text
 
 
 async def test_read_judgments_empty(deps) -> None:
-    """判断层无记录时返回提示。"""
+    """判断层无记录时返回提示。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "read_judgments")
     assert "无研报记录" in text
 
 
 async def test_unknown_tool_returns_error(deps) -> None:
-    """未知工具：返回错误文本而非抛异常。"""
+    """未知工具：返回错误文本而非抛异常。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(deps, "not_a_tool")
     assert "未知工具" in text
 
@@ -189,6 +329,12 @@ async def test_submit_causal_links_staged(deps) -> None:
 
     本轮研报 id 在工具循环结束后才生成，LLM 无法预知；提交先暂存 deps，
     由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待验证。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
     """
     text = await _run(
         deps,
@@ -214,7 +360,14 @@ async def test_submit_causal_links_staged(deps) -> None:
 
 
 async def test_submit_causal_links_invalid(deps) -> None:
-    """非法因果链：缺 topic/节点数/置信度校验返回错误文本，且不留暂存。"""
+    """非法因果链：缺 topic/节点数/置信度校验返回错误文本，且不留暂存。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "参数错误" in await _run(
         deps, "submit_causal_links", {"chain": [{"node": "x"}], "confidence": 0.5}
     )  # 缺 topic
@@ -237,7 +390,14 @@ async def test_submit_causal_links_invalid(deps) -> None:
 
 
 async def test_submit_causal_links_evidence_not_list(deps) -> None:
-    """T10：evidence 非 list 被拒绝，且不留暂存。"""
+    """T10：evidence 非 list 被拒绝，且不留暂存。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(
         deps,
         "submit_causal_links",
@@ -253,7 +413,14 @@ async def test_submit_causal_links_evidence_not_list(deps) -> None:
 
 
 async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
-    """待验证中间态：1 节点半成品（事件未走完的观察）放行。"""
+    """待验证中间态：1 节点半成品（事件未走完的观察）放行。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(
         deps,
         "submit_causal_links",
@@ -268,7 +435,14 @@ async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
 
 
 async def test_submit_causal_links_await_verification_parsing(deps) -> None:
-    """await_verification 解析：false 字符串/数字 0 → 结论链；非法值报错。"""
+    """await_verification 解析：false 字符串/数字 0 → 结论链；非法值报错。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _run(
         deps,
         "submit_causal_links",
@@ -295,7 +469,14 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
 
 
 async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
-    """supersedes_id 校验：不存在/已被替代/主题不一致分别报错；合法替代通过。"""
+    """supersedes_id 校验：不存在/已被替代/主题不一致分别报错；合法替代通过。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
@@ -317,6 +498,14 @@ async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
     )
 
     def _args(**extra) -> dict:
+        """构造默认因果链参数并合并调用方覆盖项。
+
+        参数：
+            **extra: object，额外关键字参数
+
+        返回：
+            dict：包含两节点因果链、置信度、主题及覆盖项的工具参数
+        """
         return {
             "chain": [{"node": "x"}, {"node": "y"}],
             "confidence": 0.6,
@@ -334,7 +523,14 @@ async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
 
 
 async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
-    """supersedes_id 输入形态：0/负数/浮点/布尔被拒；数字字符串容错接受。"""
+    """supersedes_id 输入形态：0/负数/浮点/布尔被拒；数字字符串容错接受。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     target = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
@@ -346,6 +542,14 @@ async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
     )
 
     def _args(**extra) -> dict:
+        """构造默认因果链参数并合并调用方覆盖项。
+
+        参数：
+            **extra: object，额外关键字参数
+
+        返回：
+            dict：包含两节点因果链、置信度、主题及覆盖项的工具参数
+        """
         return {
             "chain": [{"node": "x"}, {"node": "y"}],
             "confidence": 0.6,
@@ -364,7 +568,14 @@ async def test_submit_causal_links_supersedes_shapes(repo: Repo) -> None:
 
 
 async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> None:
-    """同轮内两次声明替代同一旧链：第二次被拒（防双当前版进池）。"""
+    """同轮内两次声明替代同一旧链：第二次被拒（防双当前版进池）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     target = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.5, topic="非农"
@@ -376,6 +587,14 @@ async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> No
     )
 
     def _args(**extra) -> dict:
+        """构造默认因果链参数并合并调用方覆盖项。
+
+        参数：
+            **extra: object，额外关键字参数
+
+        返回：
+            dict：包含两节点因果链、置信度、主题及覆盖项的工具参数
+        """
         return {
             "chain": [{"node": "x"}, {"node": "y"}],
             "confidence": 0.6,
@@ -389,7 +608,14 @@ async def test_submit_causal_links_same_round_double_supersede(repo: Repo) -> No
 
 
 async def test_submit_causal_links_supersede_legacy_empty_topic(repo: Repo) -> None:
-    """遗留链（topic=''，旧库迁移）可被新主题修正：空主题目标放行。"""
+    """遗留链（topic=''，旧库迁移）可被新主题修正：空主题目标放行。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     legacy = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "老链"}]', confidence=0.5, topic=""
@@ -414,7 +640,14 @@ async def test_submit_causal_links_supersede_legacy_empty_topic(repo: Repo) -> N
 
 
 async def test_read_causal_links_arg_boundaries(deps) -> None:
-    """read_causal_links 参数边界：days/limit 越界、非法类型（含布尔/浮点不截断）返回错误文本。"""
+    """read_causal_links 参数边界：days/limit 越界、非法类型（含布尔/浮点不截断）返回错误文本。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "参数错误" in await _run(deps, "read_causal_links", {"days": 0})
     assert "参数错误" in await _run(deps, "read_causal_links", {"days": 31})
     assert "参数错误" in await _run(deps, "read_causal_links", {"limit": 0})
@@ -426,7 +659,14 @@ async def test_read_causal_links_arg_boundaries(deps) -> None:
 
 
 async def test_submit_causal_links_await_verification_shapes(deps) -> None:
-    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别。"""
+    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     for raw, expected in [(1, True), (0, False), ("true", True), ("是", True), ("否", False)]:
         text = await _run(
             deps,
@@ -443,13 +683,27 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
 
 
 async def test_read_causal_links_empty(deps) -> None:
-    """read_causal_links：无提交过链时返回提示（含主题过滤提示）。"""
+    """read_causal_links：无提交过链时返回提示（含主题过滤提示）。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "无已提交因果链" in await _run(deps, "read_causal_links")
     assert "无已提交因果链" in await _run(deps, "read_causal_links", {"topic": "非农"})
 
 
 async def test_read_causal_links_lists_family(repo: Repo) -> None:
-    """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。"""
+    """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id,
@@ -491,7 +745,14 @@ async def test_read_causal_links_lists_family(repo: Repo) -> None:
 
 
 async def test_fetch_flash_hours_boundaries(deps) -> None:
-    """T9：hours 边界——0 与 49 被拒，1 与 48 接受。"""
+    """T9：hours 边界——0 与 49 被拒，1 与 48 接受。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "参数错误" in await _run(deps, "fetch_flash", {"hours": 0})
     assert "参数错误" in await _run(deps, "fetch_flash", {"hours": 49})
     assert "参数错误" in await _run(deps, "fetch_flash", {"hours": "abc"})
@@ -500,7 +761,14 @@ async def test_fetch_flash_hours_boundaries(deps) -> None:
 
 
 async def test_macro_series_boundaries(deps) -> None:
-    """T9：look_back 边界与非法值。"""
+    """T9：look_back 边界与非法值。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert "参数错误" in await _run(deps, "get_macro_series", {"indicator": "cpi", "look_back": 29})
     assert "参数错误" in await _run(
         deps, "get_macro_series", {"indicator": "cpi", "look_back": 2000}
@@ -515,11 +783,29 @@ async def test_macro_series_boundaries(deps) -> None:
 
 class _BrokenProvider(ResearchDataProvider):
     async def fetch_calendar(self):
+        """模拟经济日历数据源连接超时。
+
+        参数：
+            无
+
+        返回：
+            None：不会正常返回
+
+        异常：
+            ResearchSourceError：每次调用均抛出，用于模拟数据源连接超时
+        """
         raise ResearchSourceError("连接超时")
 
 
 async def test_source_failure_returns_sentinel(repo: Repo) -> None:
-    """数据源失败：返回中文哨兵（不编造、不中断）。"""
+    """数据源失败：返回中文哨兵（不编造、不中断）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     deps = ResearchToolDeps(provider=_BrokenProvider(), repo=repo, mode="paper")
     text = await _run(deps, "fetch_calendar")
     assert "数据不可用" in text and "连接超时" in text
@@ -529,7 +815,14 @@ async def test_source_failure_returns_sentinel(repo: Repo) -> None:
 
 
 async def test_build_preinjection_sections(deps) -> None:
-    """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。"""
+    """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await build_preinjection(deps, hours=24)
     assert "经济日历" in text
     assert "本轮白名单" in text
@@ -555,7 +848,14 @@ async def test_build_preinjection_sections(deps) -> None:
 
 
 async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
-    """预注入未闭合链段：带链 id/主题/节点链，且排除结论链与被替代链。"""
+    """预注入未闭合链段：带链 id/主题/节点链，且排除结论链与被替代链。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     report = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     p1 = await repo.research.save_causal_link(
         report_id=report.id,
@@ -594,11 +894,29 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
 
 
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:
-    """预注入单段失败：标注不可用，其余段正常。"""
+    """预注入单段失败：标注不可用，其余段正常。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
     deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
 
     async def broken_calendar():
+        """模拟预注入阶段的经济日历接口故障。
+
+        参数：
+            无
+
+        返回：
+            None：不会正常返回
+
+        异常：
+            ResearchSourceError：每次调用均抛出，用于验证单段失败降级
+        """
         raise ResearchSourceError("日历接口挂了")
 
     provider._jin10.fetch_calendar = broken_calendar  # type: ignore[method-assign]
@@ -612,10 +930,24 @@ async def test_preinject_dedup_key_second_normalized(repo: Repo) -> None:
 
     与聚合器内存去重键 (int(published_at), title[:40]) 同口径；修复前
     dedup_key 带亚秒小数，commit 声称的"按秒归一化"未真正落地。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
     """
 
     class _FracFlashJin10(_FakeJin10):
         async def fetch_flash(self, hours=24):
+            """返回发布时间带亚秒小数的金十快讯。
+
+            参数：
+                hours: int，回溯小时数
+
+            返回：
+                list[FlashItem]：包含一条亚秒时间戳快讯的列表
+            """
             return [
                 FlashItem(
                     id="j1",
@@ -630,6 +962,14 @@ async def test_preinject_dedup_key_second_normalized(repo: Repo) -> None:
 
     class _EmptyBb(_FakeBb):
         async def fetch_flash(self, hours=24):
+            """返回空律动快讯列表以隔离去重键测试。
+
+            参数：
+                hours: int，回溯小时数
+
+            返回：
+                list[FlashItem]：空的模拟快讯列表
+            """
             return []
 
     provider = ResearchDataProvider(jin10=_FracFlashJin10(), blockbeats=_EmptyBb())

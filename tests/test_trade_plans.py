@@ -29,6 +29,14 @@ _PLAN_MD = "## BTC 做空\n入场：反弹 64200-64300 受阻；止损 64500；�
 
 @pytest.fixture
 async def repo(tmp_path):
+    """构造指向临时数据库的 Repo 实例，测试结束后关闭数据库。
+
+    参数：
+        tmp_path: pytest 临时目录夹具，plans.db 数据库文件落在其中
+
+    返回：
+        AsyncIterator[Repo]，yield 已打开临时数据库的仓储对象，清理时关闭连接
+    """
     db = Database()
     await db.open(tmp_path / "plans.db")
     yield Repo(db)
@@ -39,7 +47,14 @@ async def repo(tmp_path):
 
 
 async def test_save_overwrites_single_plan(repo: Repo):
-    """全局唯一：两次 save 只有最新全文生效（UPSERT 单行）。"""
+    """全局唯一：两次 save 只有最新全文生效（UPSERT 单行）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert await repo.plans.get_plan() is None
     await repo.plans.save_plan("r1", "旧计划")
     plan = await repo.plans.save_plan("r2", _PLAN_MD)
@@ -50,13 +65,28 @@ async def test_save_overwrites_single_plan(repo: Repo):
 
 
 async def test_clear_plan(repo: Repo):
+    """校验清空计划后读取为 None（空串语义即无计划）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言 clear_plan 后 get_plan 返回 None
+    """
     await repo.plans.save_plan("r1", _PLAN_MD)
     await repo.plans.clear_plan("r2")
     assert await repo.plans.get_plan() is None  # 空串 = 无计划
 
 
 async def test_repo_rejects_overlong_content(repo: Repo):
-    """长度不变量与数据同层：绕过工具层直写 repo 同样被拒。"""
+    """长度不变量与数据同层：绕过工具层直写 repo 同样被拒。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     with pytest.raises(ValueError, match="超长"):
         await repo.plans.save_plan("r1", "x" * 4001)
 
@@ -65,7 +95,15 @@ async def test_repo_rejects_overlong_content(repo: Repo):
 
 
 def _tool_deps(repo: Repo, notify_event=None) -> ToolDeps:
-    """计划工具只用 repo 与 round_id：其余依赖空占位。"""
+    """计划工具只用 repo 与 round_id：其余依赖空占位。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        notify_event: asyncio.Event，计划变更通知事件
+
+    返回：
+        ToolDeps：接入计划仓库、固定轮次和可选通知回调的工具依赖
+    """
     none = SimpleNamespace()
     return ToolDeps(
         gateway=none,
@@ -83,6 +121,14 @@ def _tool_deps(repo: Repo, notify_event=None) -> ToolDeps:
 
 
 async def test_tool_update_and_clear(repo: Repo):
+    """校验工具层更新再清空计划的链路：落库成功、纯记录不经风控、清空后读回 None。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言 update 后计划按工具轮次落库且 risk_verdict 为空串、clear 后计划为 None
+    """
     registry = ToolRegistry(_tool_deps(repo))
     out = await registry.execute("update_trade_plan", {"content": _PLAN_MD})
     assert "交易计划已更新" in out.text
@@ -96,6 +142,14 @@ async def test_tool_update_and_clear(repo: Repo):
 
 
 async def test_tool_validation_errors(repo: Repo):
+    """校验工具参数护栏：缺 content、超长、缺 reason 均报参数错误，恰好 4000 字可过。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言各类非法入参返回"参数错误"，4000 字上限边界（off-by-one 护栏）可正常更新
+    """
     registry = ToolRegistry(_tool_deps(repo))
     out = await registry.execute("update_trade_plan", {})
     assert "参数错误" in out.text  # 缺 content
@@ -108,7 +162,14 @@ async def test_tool_validation_errors(repo: Repo):
 
 
 async def test_tool_content_stripped(repo: Repo):
-    """_need_str 的 strip 行为固化：落库的是去首尾空白后的全文。"""
+    """_need_str 的 strip 行为固化：落库的是去首尾空白后的全文。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     registry = ToolRegistry(_tool_deps(repo))
     await registry.execute("update_trade_plan", {"content": "  计划正文  "})
     plan = await repo.plans.get_plan()
@@ -116,13 +177,28 @@ async def test_tool_content_stripped(repo: Repo):
 
 
 async def test_tool_clear_when_empty(repo: Repo):
+    """校验本无计划时执行清空，返回"本就没有交易计划"提示而非报错。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言空清空返回"本就没有交易计划"提示文本
+    """
     registry = ToolRegistry(_tool_deps(repo))
     out = await registry.execute("clear_trade_plan", {"reason": "x"})
     assert "本就没有交易计划" in out.text
 
 
 async def test_tool_emits_plan_updated_event(repo: Repo):
-    """计划变更即推 plan_updated（前端据此立即重拉）；无效变更（空清空）不推。"""
+    """计划变更即推 plan_updated（前端据此立即重拉）；无效变更（空清空）不推。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     events: list[dict] = []
     registry = ToolRegistry(_tool_deps(repo, notify_event=events.append))
     await registry.execute("update_trade_plan", {"content": _PLAN_MD})
@@ -141,6 +217,14 @@ async def test_tool_emits_plan_updated_event(repo: Repo):
 
 
 async def _context_text(repo: Repo) -> str:
+    """用最小依赖装配 ContextBuilder，返回 timer 唤醒构建出的上下文文本。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具，注入 ContextBuilder 以读取交易计划
+
+    返回：
+        str：以 "timer" 为唤醒原因构建的完整上下文文本
+    """
     gateway = MockGateway()
     candles = CandleCache(gateway, ManualPriceSource())
     builder = ContextBuilder(
@@ -150,12 +234,28 @@ async def _context_text(repo: Repo) -> str:
 
 
 async def test_context_plan_empty(repo: Repo):
+    """没有交易计划时，上下文保留交易计划章节并显示无内容。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     text = await _context_text(repo)
     assert "## 交易计划（全局唯一一份，用 update_trade_plan 全文覆盖更新）" in text
     assert "（无）" in text
 
 
 async def test_context_plan_full_text_injected(repo: Repo):
+    """交易计划全文以引用格式注入上下文，避免其标题伪装成系统章节。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     await repo.plans.save_plan("r1", _PLAN_MD)
     text = await _context_text(repo)
     assert "## 交易计划（更新于" in text
@@ -170,6 +270,15 @@ async def test_context_plan_full_text_injected(repo: Repo):
 
 @pytest.fixture
 async def client(repo: Repo, tmp_path: Path):
+    """创建已注入测试依赖的 FastAPI 客户端夹具。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        AsyncIterator[AsyncClient]：提供注入依赖的异步客户端，并在夹具退出时关闭客户端上下文
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)
     watchlist_path = tmp_path / "watchlist.yaml"
@@ -194,6 +303,15 @@ async def client(repo: Repo, tmp_path: Path):
 
 
 async def test_api_plan_empty_and_present(client: AsyncClient, repo: Repo):
+    """计划接口在空库返回空结构，保存后返回正文、轮次和更新时间。
+
+    参数：
+        client: AsyncClient，FastAPI 测试客户端夹具
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     r = await client.get("/api/plan")
     assert r.status_code == 200
     assert r.json() == {"content": "", "round_id": "", "updated_at": None}

@@ -11,6 +11,15 @@ from src.review.stats import compute_review_stats, format_stats_text
 
 
 def _trade(pnl: str, source: str = "llm_close", contract: str = "BTC_USDT") -> Trade:
+    """构造用于复盘统计的平仓成交记录。
+
+    参数：
+        pnl: str，已实现盈亏文本
+        source: str，唤醒或成交来源
+        contract: str，合约标识
+    返回：
+        Trade，返回该测试辅助函数构造或记录的结果
+    """
     return Trade(
         id=0,
         round_id="r1",
@@ -26,6 +35,12 @@ def _trade(pnl: str, source: str = "llm_close", contract: str = "BTC_USDT") -> T
 
 
 def test_empty_sample():
+    """验证空交易样本会生成零值复盘统计。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     stats = compute_review_stats([])
     assert stats.close_count == 0
     assert stats.total_pnl == Decimal(0)
@@ -38,7 +53,12 @@ def test_empty_sample():
 
 
 def test_all_losses():
-    """全亏：总亏损非 0 → 盈亏比为 0（不是 None）；胜率 0。"""
+    """全亏：总亏损非 0 → 盈亏比为 0（不是 None）；胜率 0。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     stats = compute_review_stats([_trade("-10"), _trade("-5")])
     assert stats.close_count == 2
     assert stats.win_count == 0
@@ -52,7 +72,12 @@ def test_all_losses():
 
 
 def test_all_wins_profit_factor_none():
-    """全盈：总亏损为 0 → 盈亏比 None（当前唯一的 null 条件）。"""
+    """全盈：总亏损为 0 → 盈亏比 None（当前唯一的 null 条件）。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     stats = compute_review_stats([_trade("10"), _trade("20")])
     assert stats.win_rate == Decimal(1)
     assert stats.profit_factor is None
@@ -61,6 +86,12 @@ def test_all_wins_profit_factor_none():
 
 
 def test_mixed_sample():
+    """验证盈亏混合样本会生成正确的复盘统计。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     trades = [
         _trade("10"),
         _trade("20", contract="ETH_USDT"),
@@ -85,7 +116,12 @@ def test_mixed_sample():
 
 
 def test_non_close_sources_excluded():
-    """llm_open 与 ''（历史/未知）不计入平仓样本。"""
+    """llm_open 与 ''（历史/未知）不计入平仓样本。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     trades = [
         _trade("100", source="llm_open"),
         _trade("50", source=""),
@@ -98,7 +134,12 @@ def test_non_close_sources_excluded():
 
 
 def test_to_dict_decimal_as_str():
-    """stats_json 结构：Decimal 转字符串、None 保留，供落库。"""
+    """stats_json 结构：Decimal 转字符串、None 保留，供落库。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     stats = compute_review_stats([_trade("10"), _trade("-4", contract="ETH_USDT")])
     data = stats.to_dict()
     assert data["total_pnl"] == "6"

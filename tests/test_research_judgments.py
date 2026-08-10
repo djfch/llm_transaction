@@ -5,6 +5,15 @@ from src.research.judgments import render_judgments
 
 
 async def test_render_judgments_groups_assets_by_report(tmp_path):
+    """校验判断史按报告分组渲染：报告头带编号与总览，逐标的结论跟随其后，且不出现旧版结构。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库文件落在其中
+
+    返回：
+        None，断言渲染文本含「报告#」编号与总览「分化」、各合约行含
+        「BTC_USDT：偏多/高」「ETH_USDT：中性/低」，且不含旧版结构标记
+    """
     db = Database()
     await db.open(tmp_path / "judgments.db")
     try:

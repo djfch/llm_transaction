@@ -31,17 +31,40 @@ WATCHLIST = Watchlist(contracts=[BTC])
 
 @pytest.fixture
 def no_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """模拟全新机器：环境中没有任何 LLM key / mock 标记。"""
+    """模拟全新机器：环境中没有任何 LLM key / mock 标记。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LLM_MOCK"):
         monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
 async def build_ctx(tmp_path: Path) -> AsyncIterator[Callable[..., AppContext]]:
-    """build_app 工厂 + 统一清理（关闭数据库，避免 aiosqlite 线程跨用例泄漏）。"""
+    """build_app 工厂 + 统一清理（关闭数据库，避免 aiosqlite 线程跨用例泄漏）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        AsyncIterator[Callable[..., AppContext]]，通过夹具向测试提供上述临时依赖，并在结束后清理资源
+    """
     ctxs: list[AppContext] = []
 
     async def _factory(settings: Settings | None = None, **kwargs) -> AppContext:
+        """调用 build_app 构造应用上下文并登记，供 fixture 收尾统一关闭数据库。
+
+        参数：
+            settings: Settings | None，应用配置；为 None 时使用默认 Settings()
+            **kwargs: 透传给 build_app 的额外关键字参数（如 mock_llm）
+
+        返回：
+            AppContext：已构造并登记到清理列表的应用上下文
+        """
         ctx = await build_app(
             settings or Settings(),
             WATCHLIST,
@@ -61,7 +84,15 @@ async def build_ctx(tmp_path: Path) -> AsyncIterator[Callable[..., AppContext]]:
 
 
 async def test_build_app_without_llm_key_degrades_gracefully(no_llm_key, build_ctx):
-    """无 LLM key：build_app 不崩，provider 降级 None，status_provider 透出 False。"""
+    """无 LLM key：build_app 不崩，provider 降级 None，status_provider 透出 False。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=False)
     assert ctx.loop.llm_configured is False
     deps = ctx.server_deps
@@ -70,7 +101,15 @@ async def test_build_app_without_llm_key_degrades_gracefully(no_llm_key, build_c
 
 
 async def test_run_once_without_provider_skips_round(no_llm_key, build_ctx):
-    """provider=None：run_once 直接返回（不崩），不落审计、不计连续失败。"""
+    """provider=None：run_once 直接返回（不崩），不落审计、不计连续失败。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=False)
     result = await ctx.loop.run_once("test_wake")
     assert result.ok is False
@@ -80,7 +119,15 @@ async def test_run_once_without_provider_skips_round(no_llm_key, build_ctx):
 
 
 async def test_set_provider_hot_swap_marks_configured(no_llm_key, build_ctx):
-    """set_provider 热替换后 llm_configured=True（status_provider 同步透出）。"""
+    """set_provider 热替换后 llm_configured=True（status_provider 同步透出）。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=False)
     ctx.loop.set_provider(MockProvider())
     assert ctx.loop.llm_configured is True
@@ -92,7 +139,15 @@ async def test_set_provider_hot_swap_marks_configured(no_llm_key, build_ctx):
 
 
 async def test_llm_reconfigure_keeps_old_provider_on_error(no_llm_key, build_ctx):
-    """重建失败（仍无 key）：保留旧 provider（None），回报 llm_configured=False + error。"""
+    """重建失败（仍无 key）：保留旧 provider（None），回报 llm_configured=False + error。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=False)
     deps = ctx.server_deps
     assert deps is not None and deps.llm_reconfigure is not None
@@ -103,7 +158,16 @@ async def test_llm_reconfigure_keeps_old_provider_on_error(no_llm_key, build_ctx
 
 
 async def test_llm_reconfigure_recovers_after_key_saved(no_llm_key, build_ctx, monkeypatch):
-    """补齐 key 后重建成功：热替换生效，llm_configured=True。"""
+    """补齐 key 后重建成功：热替换生效，llm_configured=True。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=False)
     assert ctx.server_deps is not None and ctx.server_deps.llm_reconfigure is not None
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
@@ -113,7 +177,14 @@ async def test_llm_reconfigure_recovers_after_key_saved(no_llm_key, build_ctx, m
 
 
 async def test_llm_reconfigure_short_circuits_in_mock(build_ctx):
-    """mock_llm：直接回报已配置（不重建真实 provider）。"""
+    """mock_llm：直接回报已配置（不重建真实 provider）。
+
+    参数：
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(mock_llm=True)
     assert ctx.server_deps is not None and ctx.server_deps.llm_reconfigure is not None
     result = await ctx.server_deps.llm_reconfigure()
@@ -121,7 +192,15 @@ async def test_llm_reconfigure_short_circuits_in_mock(build_ctx):
 
 
 async def test_skip_round_still_drains_fills(no_llm_key, build_ctx):
-    """provider=None 跳轮也先泄放成交缓冲，避免未配置 LLM 时成交滞留。"""
+    """provider=None 跳轮也先泄放成交缓冲，避免未配置 LLM 时成交滞留。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from decimal import Decimal
 
     from src.gateway.base import OrderRequest, Ticker
@@ -151,7 +230,13 @@ async def test_skip_round_still_drains_fills(no_llm_key, build_ctx):
 
 
 def _dual_settings() -> Settings:
-    """trader→main（anthropic / LLM_KEY_MAIN），reviewer→review（openai_compat / LLM_KEY_REVIEW）。"""
+    """构造分别为决策与复盘 agent 指定独立模型凭证的测试配置。
+
+    参数：无
+
+    返回：
+        Settings，决策 agent 使用 main 凭证、复盘 agent 使用 review 凭证的配置
+    """
     return Settings(
         llm=LLMConfig(
             credentials=[
@@ -179,13 +264,30 @@ def _dual_settings() -> Settings:
 
 @pytest.fixture
 def no_dual_llm_key(no_llm_key, monkeypatch: pytest.MonkeyPatch) -> None:
-    """在 no_llm_key 基础上再清掉多凭证环境变量。"""
+    """在 no_llm_key 基础上再清掉多凭证环境变量。
+
+    参数：
+        no_llm_key: None，已清空 LLM 密钥的环境隔离夹具
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     for name in ("LLM_KEY_MAIN", "LLM_KEY_REVIEW"):
         monkeypatch.delenv(name, raising=False)
 
 
 async def test_dual_credentials_built_per_agent(no_dual_llm_key, build_ctx, monkeypatch):
-    """双凭证：两个 agent 按其绑定凭证各自构造 provider（独立实例、独立降级）。"""
+    """双凭证：两个 agent 按其绑定凭证各自构造 provider（独立实例、独立降级）。
+
+    参数：
+        no_dual_llm_key: None，已清空双凭证密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     monkeypatch.setenv("LLM_KEY_MAIN", "sk-main")
     ctx = await build_ctx(_dual_settings(), mock_llm=False)
     assert ctx.loop.llm_configured is True  # trader 凭证有 key
@@ -196,7 +298,16 @@ async def test_dual_credentials_built_per_agent(no_dual_llm_key, build_ctx, monk
 async def test_dual_reconfigure_failure_names_agent_and_keeps_other(
     no_dual_llm_key, build_ctx, monkeypatch
 ):
-    """单 agent 重建失败：error 点名该 agent 与环境变量，另一个 agent 不受影响。"""
+    """单 agent 重建失败：error 点名该 agent 与环境变量，另一个 agent 不受影响。
+
+    参数：
+        no_dual_llm_key: None，已清空双凭证密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     monkeypatch.setenv("LLM_KEY_MAIN", "sk-main")
     ctx = await build_ctx(_dual_settings(), mock_llm=False)
     assert ctx.server_deps is not None and ctx.server_deps.llm_reconfigure is not None
@@ -214,7 +325,14 @@ async def test_dual_reconfigure_failure_names_agent_and_keeps_other(
 
 
 async def test_mock_mode_shares_mock_provider(build_ctx):
-    """mock 模式行为不变：两个 agent 共享同一 MockProvider，reconfigure 短路已配置。"""
+    """mock 模式行为不变：两个 agent 共享同一 MockProvider，reconfigure 短路已配置。
+
+    参数：
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ctx = await build_ctx(_dual_settings(), mock_llm=True)
     assert isinstance(ctx.loop._provider, MockProvider)
     assert ctx.review.agent._provider is ctx.loop._provider

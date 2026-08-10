@@ -28,9 +28,30 @@ class SeqProvider:
     """预置响应序列的 mock provider；元素为异常则抛出。"""
 
     def __init__(self, responses: list) -> None:
+        """保存预置响应序列，供 chat 按调用顺序依次消费。
+
+        参数：
+            responses: list，预置的 LLM 响应或异常实例列表，按顺序逐次弹出
+
+        返回：
+            None，就地初始化内部响应队列
+        """
         self._responses = deque(responses)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按预置顺序返回响应，并把队列中的异常原样抛出。
+
+        参数：
+            system: str，系统提示词，本桩不解析其内容
+            messages: list[dict]，对话消息列表，本桩不解析其内容
+            tools: list[dict]，可调用工具定义，本桩不解析其内容
+
+        返回：
+            LLMResponse，队首预置响应；队列为空时返回兜底文本
+
+        异常：
+            Exception: 当队首预置元素是异常实例时原样抛出
+        """
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
         item = self._responses.popleft()
@@ -39,10 +60,29 @@ class SeqProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具执行结果包装为 OpenAI 风格的工具消息。
+
+        参数：
+            call: ToolCall，包含调用编号的工具调用
+            result: str，工具执行后返回的文本
+
+        返回：
+            dict，关联原工具调用编号的消息字典
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
 def _resp(text: str, calls: list[ToolCall], raw: str = "{}") -> LLMResponse:
+    """构造带可选工具调用的测试用 LLM 响应。
+
+    参数：
+        text: str，助手回复正文
+        calls: list[ToolCall]，本轮提出的工具调用列表
+        raw: str，原始响应文本，默认空 JSON
+
+    返回：
+        LLMResponse，字段完整的模拟模型响应
+    """
     return LLMResponse(
         text=text,
         tool_calls=calls,
@@ -52,6 +92,16 @@ def _resp(text: str, calls: list[ToolCall], raw: str = "{}") -> LLMResponse:
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造指定名称、合约乘数和标记价的测试合约。
+
+    参数：
+        name: str，永续合约名称
+        quanto: str，合约乘数的十进制字符串
+        mark: str，标记价的十进制字符串
+
+    返回：
+        Contract，具有固定手续费和交易边界的合约元数据
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -70,7 +120,15 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 async def _make_paper_loop(tmp_path, provider: SeqProvider) -> SimpleNamespace:
-    """paper 全链路决策循环（PaperGateway + drain_fills），审计快照隔离到 tmp_path。"""
+    """组装包含模拟撮合与成交排空链路的 paper 决策循环测试环境。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离数据库、审计与提示词文件
+        provider: SeqProvider，按序提供决策响应的模拟模型
+
+    返回：
+        SimpleNamespace，包含 db(数据库)、repo(仓储)、gateway(paper 网关)和 loop(决策循环)
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -98,6 +156,14 @@ async def _make_paper_loop(tmp_path, provider: SeqProvider) -> SimpleNamespace:
 
 
 async def test_drain_trade_source_open_close_liquidation(tmp_path):
+    """验证 paper 成交排空时按开仓、平仓与强平三种来源准确落库。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证四笔成交的 source(成交来源)顺序
+    """
     provider = SeqProvider(
         [
             _resp(

@@ -22,12 +22,23 @@ BTC = "BTC_USDT"
 
 
 def make_gateway() -> GateRestGateway:
-    """构造真实网关（仅初始化 SDK 客户端，不触网）。"""
+    """构造真实网关（仅初始化 SDK 客户端，不触网）。
+
+    参数：无
+    返回：
+        GateRestGateway，返回该测试辅助函数构造或记录的结果
+    """
     return GateRestGateway(GateConfig())
 
 
 def make_sdk_order(order_id: str = "12345") -> SimpleNamespace:
-    """模拟 SDK 返回的 FuturesOrder（仅 _to_order 读取的字段）。"""
+    """模拟 SDK 返回的 FuturesOrder（仅 _to_order 读取的字段）。
+
+    参数：
+        order_id: str，订单标识
+    返回：
+        SimpleNamespace，返回该测试辅助函数构造或记录的结果
+    """
     return SimpleNamespace(
         id=order_id,
         contract=BTC,
@@ -46,14 +57,26 @@ def make_sdk_order(order_id: str = "12345") -> SimpleNamespace:
 
 
 def make_gate_exc(label: str) -> GateApiException:
-    """构造带 label 的 GateApiException（同 test_gateway_mock 的构造方式）。"""
+    """构造带 label 的 GateApiException（同 test_gateway_mock 的构造方式）。
+
+    参数：
+        label: str，Gate 异常标签
+    返回：
+        GateApiException，返回该测试辅助函数构造或记录的结果
+    """
     exp = ApiException(status=400, reason="Bad Request")
     return GateApiException(label=label, message="msg", exp=exp)
 
 
 @pytest.fixture
 def gw(monkeypatch: pytest.MonkeyPatch) -> GateRestGateway:
-    """首次下单调用固定抛网络层异常（模拟超时）。"""
+    """首次下单调用固定抛网络层异常（模拟超时）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        GateRestGateway，返回该测试辅助函数构造或记录的结果
+    """
     gateway = make_gateway()
     monkeypatch.setattr(
         gateway._api, "create_futures_order", Mock(side_effect=ConnectionError("下单请求超时"))
@@ -64,7 +87,14 @@ def gw(monkeypatch: pytest.MonkeyPatch) -> GateRestGateway:
 def test_place_order_timeout_recheck_finds_order(
     gw: GateRestGateway, monkeypatch: pytest.MonkeyPatch
 ):
-    """首次超时、回查返回订单 → 返回该订单（不重单）。"""
+    """首次超时、回查返回订单 → 返回该订单（不重单）。
+
+    参数：
+        gw: GateRestGateway，模拟交易或 Gate 网关
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     monkeypatch.setattr(gw._api, "get_futures_order", Mock(return_value=make_sdk_order()))
     result = gw.place_order(OrderRequest(contract=BTC, size=Decimal(1)))
     assert result.id == "12345"
@@ -74,7 +104,14 @@ def test_place_order_timeout_recheck_finds_order(
 def test_place_order_timeout_recheck_not_created(
     gw: GateRestGateway, monkeypatch: pytest.MonkeyPatch
 ):
-    """首次超时、回查抛 ORDER_NOT_FOUND → 可安全重试语义。"""
+    """首次超时、回查抛 ORDER_NOT_FOUND → 可安全重试语义。
+
+    参数：
+        gw: GateRestGateway，模拟交易或 Gate 网关
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     monkeypatch.setattr(
         gw._api, "get_futures_order", Mock(side_effect=make_gate_exc("ORDER_NOT_FOUND"))
     )
@@ -87,7 +124,14 @@ def test_place_order_timeout_recheck_not_created(
 def test_place_order_timeout_recheck_network_error_unknown(
     gw: GateRestGateway, monkeypatch: pytest.MonkeyPatch
 ):
-    """首次超时、回查遇网络层异常（非 GateApiException）→ OrderStateUnknown。"""
+    """首次超时、回查遇网络层异常（非 GateApiException）→ OrderStateUnknown。
+
+    参数：
+        gw: GateRestGateway，模拟交易或 Gate 网关
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     monkeypatch.setattr(gw._api, "get_futures_order", Mock(side_effect=ConnectionError("回查断连")))
     with pytest.raises(OrderStateUnknown) as excinfo:
         gw.place_order(OrderRequest(contract=BTC, size=Decimal(1)))
@@ -97,7 +141,14 @@ def test_place_order_timeout_recheck_network_error_unknown(
 def test_place_order_timeout_recheck_other_gate_error_unknown(
     gw: GateRestGateway, monkeypatch: pytest.MonkeyPatch
 ):
-    """首次超时、回查抛非 ORDER_NOT_FOUND 的 GateApiException → OrderStateUnknown。"""
+    """首次超时、回查抛非 ORDER_NOT_FOUND 的 GateApiException → OrderStateUnknown。
+
+    参数：
+        gw: GateRestGateway，模拟交易或 Gate 网关
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     monkeypatch.setattr(
         gw._api, "get_futures_order", Mock(side_effect=make_gate_exc("CONTRACT_NOT_FOUND"))
     )
@@ -107,7 +158,13 @@ def test_place_order_timeout_recheck_other_gate_error_unknown(
 
 
 def test_place_order_gate_reject_no_recheck(monkeypatch: pytest.MonkeyPatch):
-    """首次调用被服务端明确拒绝（GateApiException）→ 直接包装抛出，不回查。"""
+    """首次调用被服务端明确拒绝（GateApiException）→ 直接包装抛出，不回查。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     monkeypatch.setattr(
         gateway._api, "create_futures_order", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
@@ -123,6 +180,13 @@ def test_place_order_gate_reject_no_recheck(monkeypatch: pytest.MonkeyPatch):
 def test_list_open_orders_supports_all_contracts_pagination_and_snapshot_fields(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """校验全部合约挂单查询的分页参数透传与订单快照字段映射。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     list_orders = Mock(return_value=[make_sdk_order("open-1")])
     monkeypatch.setattr(gateway._api, "list_futures_orders", list_orders)
@@ -140,6 +204,13 @@ def test_list_open_orders_supports_all_contracts_pagination_and_snapshot_fields(
 
 
 def test_list_open_orders_maps_attached_tpsl_prices(monkeypatch: pytest.MonkeyPatch):
+    """校验挂单附带止盈止损触发价映射为订单的止损/止盈价字段。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     sdk_order = make_sdk_order("protected")
     sdk_order.tpsl_sl_trigger_price = "58000"
@@ -153,7 +224,12 @@ def test_list_open_orders_maps_attached_tpsl_prices(monkeypatch: pytest.MonkeyPa
 
 
 def make_sdk_position() -> SimpleNamespace:
-    """模拟 SDK 返回的 Position（仅 _to_position 读取的字段）。"""
+    """模拟 SDK 返回的 Position（仅 _to_position 读取的字段）。
+
+    参数：无
+    返回：
+        SimpleNamespace，返回该测试辅助函数构造或记录的结果
+    """
     return SimpleNamespace(
         contract=BTC,
         size="0",
@@ -169,10 +245,23 @@ def make_sdk_position() -> SimpleNamespace:
 def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):
     """当前 SDK 的 update_contract_position_leverage 不接受 x_gate_exptime。
 
-    用严格签名（无 **kwargs）的 stub：若实现多传任何关键字参数会立刻 TypeError。
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
     """
 
     def strict_leverage_api(settle: str, contract: str, leverage: str, margin_mode: str):
+        """严格签名（无 **kwargs）的杠杆设置桩：实现多传任何关键字参数会立刻 TypeError。
+
+        参数：
+        settle: str，结算币种
+            contract: str，合约标识
+        leverage: str，目标杠杆倍数
+        margin_mode: str，保证金模式
+        返回：
+        SimpleNamespace，模拟 SDK 返回的持仓对象
+        """
         assert margin_mode in ("isolated", "cross")
         return make_sdk_position()
 
@@ -187,7 +276,12 @@ def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):
 
 
 def make_sdk_my_trade() -> SimpleNamespace:
-    """模拟 SDK 返回的 MyFuturesTrade（仅 _to_exchange_trade 读取的字段）。"""
+    """模拟 SDK 返回的 MyFuturesTrade（仅 _to_exchange_trade 读取的字段）。
+
+    参数：无
+    返回：
+        SimpleNamespace，返回该测试辅助函数构造或记录的结果
+    """
     return SimpleNamespace(
         id=987,
         order_id=12345,
@@ -202,6 +296,13 @@ def make_sdk_my_trade() -> SimpleNamespace:
 
 
 def test_list_my_trades_maps_fields_and_default_args(monkeypatch: pytest.MonkeyPatch):
+    """校验我的成交查询的默认参数与成交字段映射。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     get_my_trades = Mock(return_value=[make_sdk_my_trade()])
     monkeypatch.setattr(gateway._api, "get_my_trades", get_my_trades)
@@ -218,6 +319,13 @@ def test_list_my_trades_maps_fields_and_default_args(monkeypatch: pytest.MonkeyP
 
 
 def test_list_my_trades_with_contract_and_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    """校验带合约过滤的我的成交查询参数透传，以及 SDK 异常的包装。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     get_my_trades = Mock(return_value=[])
     monkeypatch.setattr(gateway._api, "get_my_trades", get_my_trades)
@@ -235,7 +343,12 @@ def test_list_my_trades_with_contract_and_wraps_error(monkeypatch: pytest.Monkey
 
 
 def make_sdk_position_close() -> SimpleNamespace:
-    """模拟 SDK 返回的 PositionClose（仅 _to_position_close_record 读取的字段）。"""
+    """模拟 SDK 返回的 PositionClose（仅 _to_position_close_record 读取的字段）。
+
+    参数：无
+    返回：
+        SimpleNamespace，返回该测试辅助函数构造或记录的结果
+    """
     return SimpleNamespace(
         time=1700.75,
         contract=BTC,
@@ -250,6 +363,13 @@ def make_sdk_position_close() -> SimpleNamespace:
 
 
 def test_list_position_close_maps_fields_and_int_window(monkeypatch: pytest.MonkeyPatch):
+    """验证平仓记录查询会映射字段并使用整数时间窗口。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     list_position_close = Mock(return_value=[make_sdk_position_close()])
     monkeypatch.setattr(gateway._api, "list_position_close", list_position_close)
@@ -266,6 +386,13 @@ def test_list_position_close_maps_fields_and_int_window(monkeypatch: pytest.Monk
 
 
 def test_list_position_close_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    """验证平仓记录查询会将 SDK 异常包装为网关异常。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     monkeypatch.setattr(
         gateway._api, "list_position_close", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
@@ -279,7 +406,13 @@ def test_list_position_close_wraps_error(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_fetch_open_interest_takes_latest_stat(monkeypatch: pytest.MonkeyPatch):
-    """按 time 取最新一条的 open_interest（str -> Decimal），不依赖响应排序。"""
+    """按 time 取最新一条的 open_interest（str -> Decimal），不依赖响应排序。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     list_stats = Mock(
         return_value=[
@@ -294,12 +427,26 @@ def test_fetch_open_interest_takes_latest_stat(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_fetch_open_interest_empty_returns_none(monkeypatch: pytest.MonkeyPatch):
+    """验证持仓量接口返回空数据时结果为 None。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     monkeypatch.setattr(gateway._api, "list_contract_stats", Mock(return_value=[]))
     assert gateway.fetch_open_interest(BTC) is None
 
 
 def test_fetch_open_interest_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    """验证持仓量查询会将 SDK 异常包装为网关异常。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     monkeypatch.setattr(
         gateway._api, "list_contract_stats", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
@@ -312,6 +459,13 @@ def test_fetch_open_interest_wraps_error(monkeypatch: pytest.MonkeyPatch):
 def test_fetch_open_interest_history_sorts_and_skips_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """验证持仓量历史会按时间排序并跳过字段不完整的记录。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     list_stats = Mock(
         return_value=[
@@ -333,6 +487,13 @@ def test_fetch_open_interest_history_sorts_and_skips_incomplete(
 
 
 def test_fetch_open_interest_history_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    """验证持仓量历史查询会将 SDK 异常包装为网关异常。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     gateway = make_gateway()
     monkeypatch.setattr(
         gateway._api, "list_contract_stats", Mock(side_effect=make_gate_exc("INVALID_PARAM"))

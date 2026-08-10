@@ -28,6 +28,14 @@ _LONG_NARRATIVE = "叙事：美联储转向预期升温，风险资产回暖。"
 
 @pytest.fixture
 async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
+    """提供指向临时数据库的 Repo 实例，用毕自动关闭连接。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库文件落在其中
+
+    返回：
+        AsyncIterator[Repo]：已打开临时数据库的仓储对象
+    """
     db = Database()
     await db.open(tmp_path / "t.db")
     yield Repo(db)
@@ -35,7 +43,16 @@ async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
 
 
 def _deps(repo: Repo, tmp_path: Path, **overrides: Any) -> ServerDeps:
-    """组装 fake 依赖：tmp 配置 + 指定回调覆盖。"""
+    """组装 fake 依赖：tmp 配置 + 指定回调覆盖。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+        **overrides: Any，覆盖默认依赖的键值
+
+    返回：
+        ServerDeps，使用临时配置路径并合并指定回调覆盖的服务端依赖
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)  # 默认配置（mode=paper）
     return ServerDeps(
@@ -48,6 +65,14 @@ def _deps(repo: Repo, tmp_path: Path, **overrides: Any) -> ServerDeps:
 
 
 def _client_of(deps: ServerDeps) -> AsyncClient:
+    """构造挂在 fake 应用上的异步 HTTP 测试客户端。
+
+    参数：
+        deps: ServerDeps，由 _deps 组装的服务端依赖（fake 仓储与配置）
+
+    返回：
+        AsyncClient：以 ASGI 传输直连 create_app 应用的 httpx 客户端
+    """
     return AsyncClient(transport=ASGITransport(app=create_app(deps)), base_url="http://test")
 
 
@@ -55,7 +80,15 @@ def _client_of(deps: ServerDeps) -> AsyncClient:
 
 
 async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path: Path):
-    """列表：分页、最新在前、成功给逐标的摘要，失败给空数组与错误。"""
+    """列表：分页、最新在前、成功给逐标的摘要，失败给空数组与错误。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r1 = await save_report_fixture(
         repo,
         report_type="asia",
@@ -105,7 +138,15 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
 
 
 async def test_report_detail_asset_fields_and_no_raw_snapshot(repo: Repo, tmp_path: Path):
-    """详情：逐标的证据、风险和研判展开；报告原文与市场快照不外泄。"""
+    """详情：逐标的证据、风险和研判展开；报告原文与市场快照不外泄。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     report = await save_report_fixture(
         repo,
         report_type="manual",
@@ -140,7 +181,15 @@ async def test_report_detail_asset_fields_and_no_raw_snapshot(repo: Repo, tmp_pa
 
 
 async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
-    """详情因果链：chain/evidence 解析为对象、键集契约；他研报的链不串台。"""
+    """详情因果链：chain/evidence 解析为对象、键集契约；他研报的链不串台。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r1 = await save_report_fixture(repo, report_type="manual", direction="偏多", confidence="高")
     r2 = await save_report_fixture(repo, report_type="asia", direction="偏空", confidence="中")
     link = await repo.research.save_causal_link(
@@ -185,14 +234,30 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
 
 
 async def test_research_live_empty(repo: Repo, tmp_path: Path):
-    """空库：无研报轮时 round 为 null、tool_calls 为空。"""
+    """空库：无研报轮时 round 为 null、tool_calls 为空。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     async with _client_of(_deps(repo, tmp_path)) as c:
         body = (await c.get("/api/research/live")).json()
         assert body == {"round": None, "tool_calls": []}
 
 
 async def test_research_live_returns_in_progress_round(repo: Repo, tmp_path: Path):
-    """种研报轮 + 工具调用：round 键集不含 mode、args/result 已解析；交易轮不串台。"""
+    """种研报轮 + 工具调用：round 键集不含 mode、args/result 已解析；交易轮不串台。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=1000.0)
     await repo.save_audit_tool_call(
         "rs1", 1, "get_fact_timeline", '{"hours": 24}', result_json='{"events": []}'
@@ -232,14 +297,36 @@ async def test_research_live_returns_in_progress_round(repo: Repo, tmp_path: Pat
 
 
 async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
-    """状态码映射走结构化 error_code（busy→409、llm_not_configured→503），不依赖错误文案。"""
+    """状态码映射走结构化 error_code（busy→409、llm_not_configured→503），不依赖错误文案。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     async with _client_of(_deps(repo, tmp_path)) as c:  # 未接线
         assert (await c.post("/api/research/run")).status_code == 503
 
     async def _busy() -> dict:
+        """假研报回调：返回 busy 错误码，触发 409。
+
+        参数：无
+
+        返回：
+            dict：未启动、error_code 为 busy 的假研报运行结果
+        """
         return {"started": False, "error": "研报生成中", "error_code": "busy"}
 
     async def _no_llm() -> dict:
+        """假研报回调：返回 llm_not_configured 错误码，触发 503。
+
+        参数：无
+
+        返回：
+            dict：未启动、error_code 为 llm_not_configured 的假研报运行结果
+        """
         return {
             "started": False,
             "ok": False,
@@ -248,6 +335,13 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
         }
 
     async def _ok() -> dict:
+        """假研报回调：返回成功结果，验证 200 原样透传。
+
+        参数：无
+
+        返回：
+            dict：启动成功的假研报运行结果（含 report_id 与 round_id）
+        """
         return {"started": True, "ok": True, "report_id": 7, "round_id": "rs-7"}
 
     async with _client_of(_deps(repo, tmp_path, research_run=_busy)) as c:
@@ -266,10 +360,26 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
 
 
 async def test_research_run_body_passthrough_and_validation(repo: Repo, tmp_path: Path):
-    """body 透传 report_type+hours；无 body 走无参回调（调度默认值）；hours 非法 422。"""
+    """body 透传 report_type+hours；无 body 走无参回调（调度默认值）；hours 非法 422。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     calls: list[dict] = []
 
     async def _run(**kwargs) -> dict:
+        """假研报回调：记录收到的 kwargs，返回带序号的假结果。
+
+        参数：
+            kwargs: dict，POST body 透传给研报回调的参数（如 report_type、hours）
+
+        返回：
+            dict：启动成功的假研报运行结果，report_id 取累计调用次数
+        """
         calls.append(kwargs)
         return {"started": True, "ok": True, "report_id": len(calls)}
 

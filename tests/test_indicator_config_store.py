@@ -25,6 +25,13 @@ _NEW_SHORTLIST = ["rsi14", "adx14"]
 
 @pytest.fixture
 async def repo(tmp_path):
+    """构造指向临时 SQLite 数据库的 Repo 实例，用毕关闭。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        AsyncIterator[Repo]，yield 已打开临时数据库的仓储，并在夹具收尾关闭数据库
+    """
     db = Database()
     await db.open(tmp_path / "test.db")
     yield Repo(db)
@@ -33,15 +40,37 @@ async def repo(tmp_path):
 
 @pytest.fixture
 def config_path(tmp_path):
+    """提供临时目录下的指标配置文件路径（只给路径，不创建文件）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        Path，临时目录下的指标配置文件路径
+    """
     return tmp_path / "indicator_config.yaml"
 
 
 @pytest.fixture
 async def store(config_path, repo):
+    """构造接入临时配置文件与临时仓储的 IndicatorConfigStore。
+
+    参数：
+        config_path: Path，指标配置文件路径
+        repo: Repo，测试数据库仓库
+    返回：
+        IndicatorConfigStore，接入临时文件与仓库的指标配置存储
+    """
     return IndicatorConfigStore(config_path, repo, VALID_KEYS)
 
 
 def _file_shortlist(path) -> list[str]:
+    """读取指标配置文件并解析出 shortlist 列表。
+
+    参数：
+        path: object，配置文件路径
+    返回：
+        list[str]，返回该测试辅助函数构造或记录的结果
+    """
     return yaml.safe_load(path.read_text(encoding="utf-8"))["shortlist"]
 
 
@@ -49,6 +78,15 @@ def _file_shortlist(path) -> list[str]:
 
 
 async def test_revise_rejects_unknown_key(store, repo, config_path):
+    """校验短名单含未知指标键时 revise 被拒绝，不落盘也不落版本。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     with pytest.raises(IndicatorConfigValidationError) as exc_info:
         await store.revise(["ema20", "nope"], "review_agent", "换指标")
     assert any("未知指标键" in r and "nope" in r for r in exc_info.value.reasons)
@@ -57,6 +95,14 @@ async def test_revise_rejects_unknown_key(store, repo, config_path):
 
 
 async def test_revise_rejects_too_many(store, repo):
+    """校验短名单超过 8 个指标时 revise 被拒绝。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     nine = ["ema20", "ema50", "ema200", "rsi14", "macd", "atr14", "oi", "adx14", "vol"]
     with pytest.raises(IndicatorConfigValidationError) as exc_info:
         await store.revise(nine, "review_agent", "加太多")
@@ -65,6 +111,15 @@ async def test_revise_rejects_too_many(store, repo):
 
 
 async def test_revise_rejects_empty_reason(store, repo, config_path):
+    """校验 reason 去空白后为空时 revise 被拒绝。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     with pytest.raises(IndicatorConfigValidationError) as exc_info:
         await store.revise(_NEW_SHORTLIST, "review_agent", "   ")  # strip 后为空
     assert any("reason 不能为空" in r for r in exc_info.value.reasons)
@@ -73,7 +128,14 @@ async def test_revise_rejects_empty_reason(store, repo, config_path):
 
 
 async def test_revise_rejects_bad_charset(store, repo):
-    """形状校验在 config 层：大写/非法字符键被拒绝（不进 valid_keys 判定）。"""
+    """形状校验在 config 层：大写/非法字符键被拒绝（不进 valid_keys 判定）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     with pytest.raises(IndicatorConfigValidationError) as exc_info:
         await store.revise(["EMA20"], "review_agent", "大写键")
     assert any("小写字母/数字/下划线" in r for r in exc_info.value.reasons)
@@ -81,6 +143,15 @@ async def test_revise_rejects_bad_charset(store, repo):
 
 
 async def test_revise_rejects_no_diff(store, repo, config_path):
+    """校验新短名单与当前配置无差异时 revise 被拒绝（标记 no_diff_only）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     await store.seed_if_empty()  # 当前配置 = 默认基线
     with pytest.raises(IndicatorConfigValidationError) as exc_info:
         await store.revise(list(DEFAULT_INDICATOR_SHORTLIST), "review_agent", "原样提交")
@@ -90,7 +161,15 @@ async def test_revise_rejects_no_diff(store, repo, config_path):
 
 
 async def test_revise_dedupes_keys(store, repo, config_path):
-    """重复键去重保序后照常落盘/落版本。"""
+    """重复键去重保序后照常落盘/落版本。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     v = await store.revise(["rsi14", "ema20", "rsi14"], "review_agent", "带重复键")
     assert _file_shortlist(config_path) == ["rsi14", "ema20"]
     assert store.load_current().shortlist == ["rsi14", "ema20"]
@@ -101,6 +180,14 @@ async def test_revise_dedupes_keys(store, repo, config_path):
 
 
 async def test_revise_success_atomic_persist_and_notify(config_path, repo):
+    """校验 revise 成功路径：原子写文件、版本落库、md5 与文件一致、on_change 触发一次。
+
+    参数：
+        config_path: Path，指标配置文件路径
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     calls: list[int] = []
     store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
     v = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", report_id=7)
@@ -118,6 +205,15 @@ async def test_revise_success_atomic_persist_and_notify(config_path, repo):
 
 
 async def test_rollback_writes_back_and_records(store, repo, config_path):
+    """校验 rollback 把历史版本内容回写文件，并新增一条 created_by='rollback' 的版本。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     v1 = await store.seed_if_empty()
     v2 = await store.revise(_NEW_SHORTLIST, "review_agent", "改进")
     v3 = await store.rollback(v1.id)
@@ -129,6 +225,13 @@ async def test_rollback_writes_back_and_records(store, repo, config_path):
 
 
 async def test_rollback_missing_version(store):
+    """验证回滚不存在的指标配置版本时会被拒绝。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     with pytest.raises(IndicatorConfigValidationError, match="不存在"):
         await store.rollback(999)
 
@@ -137,6 +240,15 @@ async def test_rollback_missing_version(store):
 
 
 async def test_seed_creates_baseline_when_file_missing(store, repo, config_path):
+    """验证配置文件缺失时会创建基线指标配置版本。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     v = await store.seed_if_empty()
     assert v is not None
     assert v.id == 1 and v.created_by == "human" and v.reason == "初始基线"
@@ -149,6 +261,15 @@ async def test_seed_creates_baseline_when_file_missing(store, repo, config_path)
 
 
 async def test_seed_uses_existing_file(store, repo, config_path):
+    """验证初始化基线时会采用现有指标配置文件。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，执行断言验证目标行为
+    """
     config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")
     v = await store.seed_if_empty()
     assert v is not None and v.id == 1 and v.created_by == "human"
@@ -161,6 +282,13 @@ async def test_seed_uses_existing_file(store, repo, config_path):
 
 
 async def test_load_indicator_config_missing_returns_default(tmp_path):
+    """验证指标配置文件缺失时会返回默认配置。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     cfg = load_indicator_config(tmp_path / "nope.yaml")
     assert cfg.shortlist == DEFAULT_INDICATOR_SHORTLIST
 
@@ -169,7 +297,14 @@ async def test_load_indicator_config_missing_returns_default(tmp_path):
 
 
 async def test_store_accepts_sub_repo_directly(config_path, repo):
-    """构造参数 repo 也接受子仓库本身（细粒度接线/测试用）。"""
+    """构造参数 repo 也接受子仓库本身（细粒度接线/测试用）。
+
+    参数：
+        config_path: Path，指标配置文件路径
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     store = IndicatorConfigStore(config_path, repo.indicator_config, VALID_KEYS)
     v = await store.revise(_NEW_SHORTLIST, "human", "直连子仓库")
     assert v.md5 == content_md5(config_path.read_text(encoding="utf-8"))
@@ -179,6 +314,14 @@ async def test_store_accepts_sub_repo_directly(config_path, repo):
 
 
 async def test_on_change_not_fired_on_validation_failure(config_path, repo):
+    """验证配置校验失败时不会触发变更回调。
+
+    参数：
+        config_path: Path，指标配置文件路径
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     calls: list[int] = []
     store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
     v1 = await store.seed_if_empty()
@@ -198,7 +341,13 @@ async def test_on_change_not_fired_on_validation_failure(config_path, repo):
 
 
 async def test_attach_report_to_version(repo):
-    """版本先落库、报告后落库：attach_report_to_version 回填 report_id（对齐策略版本模式）。"""
+    """版本先落库、报告后落库：attach_report_to_version 回填 report_id（对齐策略版本模式）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     v = await repo.indicator_config.save_version("shortlist: [ema20]", "md5-1", "review_agent", "r")
     assert v.report_id is None
     await repo.indicator_config.attach_report_to_version(v.id, 7)

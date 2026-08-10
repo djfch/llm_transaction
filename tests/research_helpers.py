@@ -32,7 +32,33 @@ async def save_report_fixture(
     round_id: str = "",
     market_context: dict[str, Any] | None = None,
 ) -> ResearchReport:
-    """创建当前结构测试报告；失败报告不生成逐标的结论。"""
+    """创建当前结构测试报告；失败报告不生成逐标的结论。
+
+    参数：
+        repo: Repo，研报仓储对象
+        report_type: str，研报类型
+        contract: str，合约名称，默认 BTC_USDT
+        direction: str，方向结论
+        confidence: str，结论置信度
+        horizon: str，结论时间范围
+        market_regime: str，市场状态判断
+        technical_confirmation: str，技术面确认结论
+        basis_type: str，证据基础类型
+        data_status: str，输入数据完整状态
+        evidence_json: str，证据列表 JSON 文本
+        risks_json: str，风险列表 JSON 文本
+        narrative: str，逐标的分析正文
+        raw_json: str，研报原始 JSON 文本
+        summary: str，研报摘要
+        cross_market_view: str，跨市场观点
+        global_risks_json: str，全局风险 JSON 文本
+        error: str，研报生成错误文本
+        round_id: str，关联审计轮次编号
+        market_context: dict[str, Any] | None，生成研报时的市场上下文快照
+
+    返回：
+        ResearchReport：新建的成功或失败研报记录
+    """
     if error:
         return await repo.research.save_failed_report(
             report_type=report_type,

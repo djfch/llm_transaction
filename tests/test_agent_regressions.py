@@ -26,9 +26,30 @@ class SeqProvider:
     """预置响应序列的 mock provider；元素为异常则抛出。"""
 
     def __init__(self, responses: list) -> None:
+        """初始化并保存预置响应队列。
+
+        参数：
+            responses: list，按序消费的响应列表；元素为 LLMResponse 则返回，为异常则抛出
+
+        返回：
+            None，将响应存入内部双端队列供 chat 依次弹出
+        """
         self._responses = deque(responses)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按预置顺序返回下一条响应；队列耗尽时返回占位响应。
+
+        参数：
+            system: str，系统提示词（本 mock 不读取）
+            messages: list[dict]，对话消息列表（本 mock 不读取）
+            tools: list[dict]，工具定义列表（本 mock 不读取）
+
+        返回：
+            LLMResponse：预置序列弹出的下一条响应；序列为空时返回固定占位文本
+
+        异常：
+            Exception：弹出的预置元素为异常实例时原样抛出，模拟 LLM 调用失败
+        """
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
         item = self._responses.popleft()
@@ -37,10 +58,29 @@ class SeqProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具执行结果包装成对话消息字典。
+
+        参数：
+            call: ToolCall，已执行的工具调用，取其 call_id 关联结果
+            result: str，工具执行结果的文本内容
+
+        返回：
+            dict：role 为 tool 的消息字典，携带 tool_call_id 与结果内容
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
 def _resp(text: str, calls: list[ToolCall], raw: str = "{}") -> LLMResponse:
+    """构造一条预置进 SeqProvider 的 LLMResponse。
+
+    参数：
+        text: str，助手可见文本；为空时 assistant 消息用占位文案
+        calls: list[ToolCall]，本轮要执行的工具调用列表
+        raw: str，LLM 原始输出文本，默认 "{}"
+
+    返回：
+        LLMResponse：携带文本、工具调用、原始输出与 assistant 消息的响应对象
+    """
     return LLMResponse(
         text=text,
         tool_calls=calls,
@@ -50,6 +90,16 @@ def _resp(text: str, calls: list[ToolCall], raw: str = "{}") -> LLMResponse:
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造一个最小可用的测试合约，下单精度与费率取固定值。
+
+    参数：
+        name: str，合约名（如 BTC_USDT）
+        quanto: str，合约乘数（每张合约对应的标的数量）
+        mark: str，标记价格
+
+    返回：
+        Contract：trading 状态、未退市的永续合约对象
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -76,7 +126,19 @@ async def _make_loop(
     persist_kill_switch=None,
     max_failures: int = 3,
 ) -> SimpleNamespace:
-    """组装最小决策循环；审计快照目录隔离到 tmp_path。新依赖参数按名透传。"""
+    """组装最小决策循环；审计快照目录隔离到 tmp_path。新依赖参数按名透传。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+        provider: SeqProvider，LLM 提供者测试替身
+        gateway: Gateway，交易所网关测试替身
+    drain_fills: Callable | None，决策轮结束后排空模拟成交的可选回调
+    persist_kill_switch: Callable[[bool], None] | None，写回熔断开关的可选回调
+        max_failures: int，最大连续失败数
+
+    返回：
+    SimpleNamespace：包含数据库、仓储、网关与已注入依赖的决策循环环境
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -113,6 +175,15 @@ async def _make_loop(
 
 
 async def test_paper_fills_persisted_to_trades(tmp_path):
+    """验证 paper 全链路开平仓成交经 drain_fills 落 trades 表且不双计。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，隔离数据库与审计目录
+
+    返回：
+        None，断言开/平各落一条 mode 为 paper 且 round_id 一致的 trades 记录，
+        且滑点平仓的已实现盈亏计入 daily_stats 统计
+    """
     gateway = PaperGateway(PaperConfig(initial_equity=Decimal("10000")))
     gateway.upsert_contract(_contract("BTC_USDT", "0.001", "60000"))
     gateway.on_price("BTC_USDT", Decimal("60000"))
@@ -155,6 +226,15 @@ async def test_paper_fills_persisted_to_trades(tmp_path):
 
 
 async def test_default_daily_stats_via_repo(tmp_path):
+    """验证 default_daily_stats 经 repo 公共方法按 mode 过滤统计当日数据。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，隔离统计数据库文件
+
+    返回：
+        None，断言 paper 模式 realized_pnl 为 -5（live 模式成交不计入）、
+        orders_today 为 1
+    """
     db = Database()
     await db.open(tmp_path / "stats.db")
     repo = Repo(db)
@@ -191,6 +271,15 @@ async def test_default_daily_stats_via_repo(tmp_path):
 
 
 async def test_round_writes_audit_json_snapshot(tmp_path):
+    """验证一轮决策结束后生成审计 JSON 全文快照（双轨合一）。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，隔离数据库与审计快照目录
+
+    返回：
+        None，断言 round_<id>.json 真实生成，内容含提示词快照、上下文快照、
+        各轮原始输出拼接，以及带 risk_verdict 的工具调用记录
+    """
     provider = SeqProvider(
         [
             _resp(
@@ -221,8 +310,27 @@ async def test_round_writes_audit_json_snapshot(tmp_path):
 
 
 async def test_context_build_failure_leaves_audit_trace(tmp_path):
+    """验证上下文构建阶段网关抛错时，失败轮仍留下审计痕迹。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，隔离数据库与审计目录
+
+    返回：
+        None，断言决策结果失败且错误含网关异常信息，审计行已落库并记录结束时间
+    """
+
     class BrokenGateway(MockGateway):
         def get_account(self):  # context.build 的首个网关调用即失败
+            """模拟 context.build 首个网关调用即失败的账户查询。
+
+            参数：无
+
+            返回：
+                无正常返回，直接抛出异常
+
+            异常：
+                RuntimeError：恒抛出 "market down"，模拟行情网关不可用
+            """
             raise RuntimeError("market down")
 
     gateway = BrokenGateway(contracts={"BTC_USDT": _contract("BTC_USDT", "0.001", "60000")})
@@ -241,10 +349,26 @@ async def test_context_build_failure_leaves_audit_trace(tmp_path):
 
 
 async def test_lock_persists_kill_switch_to_config_yaml(tmp_path):
+    """验证首次 LLM 失败触发风控锁并把 kill_switch 写回配置文件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mode: paper\nrisk:\n  kill_switch: false\n", encoding="utf-8")
 
     def persist_kill_switch(enabled: bool) -> None:
+        """把决策循环给出的熔断状态写入临时配置。
+
+        参数：
+            enabled: bool，是否启用风险熔断开关
+
+        返回：
+            None：更新临时 YAML 中的 risk.kill_switch 字段
+        """
         raw = read_settings_raw(cfg)
         raw.setdefault("risk", {})["kill_switch"] = enabled
         write_settings(raw, cfg)

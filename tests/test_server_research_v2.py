@@ -14,6 +14,14 @@ from src.server.deps import ServerDeps
 
 @pytest.fixture
 async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
+    """构造指向临时数据库的 Repo 实例，测试结束后关闭数据库连接。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库文件落在其中
+
+    返回：
+        AsyncIterator[Repo]：已打开临时数据库的仓储对象
+    """
     db = Database()
     await db.open(tmp_path / "research-v2.db")
     yield Repo(db)
@@ -21,6 +29,15 @@ async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
 
 
 def _client(repo: Repo, tmp_path: Path) -> AsyncClient:
+    """构造挂载临时配置的 FastAPI 测试客户端（ASGI 直连，不起真实端口）。
+
+    参数：
+        repo: Repo，仓储夹具，注入服务依赖
+        tmp_path: Path，pytest 临时目录夹具，配置文件与提示词路径落在其中
+
+    返回：
+        AsyncClient：指向 create_app 所建应用的 HTTP 测试客户端
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)
     deps = ServerDeps(
@@ -33,6 +50,15 @@ def _client(repo: Repo, tmp_path: Path) -> AsyncClient:
 
 
 async def test_v2_report_api_returns_asset_summaries_and_safe_detail(repo: Repo, tmp_path: Path):
+    """校验研报 v2 接口：列表只给逐标的摘要字段，详情给安全字段且不泄漏原始市场快照。
+
+    参数：
+        repo: Repo，仓储夹具，预置一条含敏感 market_context_json 的研报
+        tmp_path: Path，pytest 临时目录夹具，供测试客户端写配置
+
+    返回：
+        None，断言列表项为 schema v2 摘要、详情含 evidence/risks 且不含 secret_snapshot
+    """
     report, _ = await repo.research.save_report_bundle(
         report_type="manual",
         summary="BTC 与 ETH 分化",

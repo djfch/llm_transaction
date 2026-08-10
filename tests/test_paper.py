@@ -14,6 +14,15 @@ D = Decimal
 
 
 def make_contract(taker: str = "0.0005", maker: str = "0.0002") -> Contract:
+    """构造测试用 BTC_USDT 永续合约定义，标记价 100、资金费率 0.0001、乘数 1。
+
+    参数：
+        taker: str，taker 手续费率（十进制字符串）
+        maker: str，maker 手续费率（十进制字符串）
+
+    返回：
+        Contract：状态为交易中的 BTC 永续合约静态定义
+    """
     return Contract(
         name=BTC,
         quanto_multiplier=D("1"),
@@ -32,6 +41,15 @@ def make_contract(taker: str = "0.0005", maker: str = "0.0002") -> Contract:
 
 
 def make_gateway(slippage: str = "0", taker: str = "0.0005") -> PaperGateway:
+    """构造初始权益 10000 的模拟网关，并喂入首口行情（mark 100 / bid 99.9 / ask 100.1）。
+
+    参数：
+        slippage: str，市价单滑点比例（十进制字符串）
+        taker: str，taker 手续费率（十进制字符串）
+
+    返回：
+        PaperGateway：已注册 BTC 合约、维持保证金率 0.005 且可直接下单的模拟网关
+    """
     cfg = PaperConfig(initial_equity=10000.0, slippage=float(slippage))
     gw = PaperGateway(cfg, contracts={BTC: make_contract(taker=taker)}, maintenance_rate=D("0.005"))
     gw.on_price(BTC, D("100"), D("99.9"), D("100.1"))
@@ -39,14 +57,39 @@ def make_gateway(slippage: str = "0", taker: str = "0.0005") -> PaperGateway:
 
 
 def buy(gw: PaperGateway, size, price=None):
+    """BTC 下单便捷封装：size 正数开多、负数开空，price 为 None 即市价单。
+
+    参数：
+        gw: PaperGateway，目标模拟网关
+        size: 委托张数，正数买入开多、负数卖出开空
+        price: 限价价格；None 表示市价单
+
+    返回：
+        OrderResult：下单结果，含成交状态与成交均价
+    """
     return gw.place_order(OrderRequest(contract=BTC, size=D(size), price=price))
 
 
 def close_all(gw: PaperGateway):
+    """对 BTC 当前持仓下市价平仓单（close=True），一键整仓平仓。
+
+    参数：
+        gw: PaperGateway，目标模拟网关
+
+    返回：
+        OrderResult：平仓单结果，含平仓成交价与完成状态
+    """
     return gw.place_order(OrderRequest(contract=BTC, close=True))
 
 
 def test_long_profit():
+    """验证做多盈利全链路算账：开仓占保证金与 taker 费、涨后浮盈、平仓释放保证金入已实现盈亏。
+
+    参数：无
+
+    返回：
+        None，断言可用余额、浮动/已实现盈亏与平仓成交价全部符合手工算账结果
+    """
     gw = make_gateway()
     buy(gw, 10)
     assert gw.account.available == D("8999.5")  # 10000 - 1000 保证金 - 0.5 taker 费
@@ -59,6 +102,13 @@ def test_long_profit():
 
 
 def test_long_loss():
+    """验证做多亏损平仓：可用余额扣掉亏损与双边手续费，已实现盈亏为负。
+
+    参数：无
+
+    返回：
+        None，断言平仓后可用余额为 9899.05、累计已实现盈亏为 -100
+    """
     gw = make_gateway()
     buy(gw, 10)
     gw.on_price(BTC, D("90"), D("89.9"), D("90.1"))
@@ -68,6 +118,13 @@ def test_long_loss():
 
 
 def test_short_profit():
+    """验证做空下跌盈利：平仓后可用余额增加盈利并扣除双边手续费。
+
+    参数：无
+
+    返回：
+        None，断言平仓后可用余额为 10099.05（+100 盈亏，双边费 0.95）
+    """
     gw = make_gateway()
     buy(gw, -10)
     gw.on_price(BTC, D("90"), D("89.9"), D("90.1"))
@@ -76,6 +133,13 @@ def test_short_profit():
 
 
 def test_short_loss():
+    """验证做空上涨亏损：平仓后可用余额扣掉亏损与双边手续费。
+
+    参数：无
+
+    返回：
+        None，断言平仓后可用余额为 9898.95
+    """
     gw = make_gateway()
     buy(gw, -10)
     gw.on_price(BTC, D("110"), D("109.9"), D("110.1"))
@@ -84,6 +148,13 @@ def test_short_loss():
 
 
 def test_fee_taker_and_maker():
+    """验证手续费按成交角色分别计费：挂单成交按 maker 费率，市价平仓按 taker 费率并累计。
+
+    参数：无
+
+    返回：
+        None，断言 maker 成交费 0.198、平仓 taker 费 0.495，累计手续费为两者之和
+    """
     gw = make_gateway()
     result = buy(gw, 10, price=D("99"))  # 低于 ask 100.1 → 挂单
     assert result.status == "open" and result.left == D("10")
@@ -96,6 +167,13 @@ def test_fee_taker_and_maker():
 
 
 def test_limit_conservative_fill_price():
+    """验证限价单价格穿越对手价时立即按对手价保守成交（记 taker），不吃自报价的更优价。
+
+    参数：无
+
+    返回：
+        None，断言买单按 ask 100.1、卖单按 bid 99.9 立即成交且标记为非 maker
+    """
     gw = make_gateway()
     result = buy(gw, 10, price=D("100.1"))  # ≥ ask → 立即成交，吃对手价而非更优价
     assert result.status == "finished" and result.fill_price == D("100.1")
@@ -105,6 +183,13 @@ def test_limit_conservative_fill_price():
 
 
 def test_limit_ioc_cancelled_when_not_crossed():
+    """验证 IOC 限价单未穿越对手价时立即撤销，不留挂单。
+
+    参数：无
+
+    返回：
+        None，断言订单以 cancelled 结束且挂单列表为空
+    """
     gw = make_gateway()
     result = gw.place_order(OrderRequest(contract=BTC, size=D(10), price=D("99"), tif="ioc"))
     assert result.status == "finished" and result.finish_as == "cancelled"
@@ -112,6 +197,13 @@ def test_limit_ioc_cancelled_when_not_crossed():
 
 
 def test_limit_order_keeps_attached_stop_loss_without_take_profit():
+    """验证仅挂止损价的限价单：下单结果与挂单快照都保留止损价，止盈价为 None。
+
+    参数：无
+
+    返回：
+        None，断言返回结果与在挂订单的 stop_loss_price 为 95、take_profit_price 为 None
+    """
     gw = make_gateway()
     result = gw.place_order(
         OrderRequest(
@@ -128,6 +220,13 @@ def test_limit_order_keeps_attached_stop_loss_without_take_profit():
 
 
 def test_market_slippage():
+    """验证配置滑点后市价单成交价偏移：买单按标记价 ×(1+滑点)、卖单 ×(1-滑点)。
+
+    参数：无
+
+    返回：
+        None，断言 0.001 滑点下买单成交于 100.1、卖单成交于 99.9
+    """
     gw = make_gateway(slippage="0.001")
     result = buy(gw, 10)
     assert result.fill_price == D("100.1")  # mark × (1 + 0.001)
@@ -136,6 +235,13 @@ def test_market_slippage():
 
 
 def test_funding_long_pays_short_receives():
+    """验证正资金费率下多头支付、空头收取，翻仓后方向切换仍按新持仓方向结算。
+
+    参数：无
+
+    返回：
+        None，断言两次资金费结算差额分别为 -1 与 +1，并正确计入可用余额与累计资金费
+    """
     gw = make_gateway()
     buy(gw, 10)
     delta = gw.settle_funding(BTC, D("0.001"))  # 正费率：多头付 0.001 × 1000
@@ -148,6 +254,13 @@ def test_funding_long_pays_short_receives():
 
 
 def test_funding_negative_rate():
+    """验证负资金费率下多头收取资金费，零费率不产生结算。
+
+    参数：无
+
+    返回：
+        None，断言负费率结算差额为 +1、零费率结算差额为 0
+    """
     gw = make_gateway()
     buy(gw, 10)
     assert gw.settle_funding(BTC, D("-0.001")) == D("1")  # 负费率：多头收
@@ -155,6 +268,13 @@ def test_funding_negative_rate():
 
 
 def test_liquidation():
+    """验证高杠杆多仓跌穿维持保证金触发强平：仓位清零、保证金全损无返还、记录强平事件。
+
+    参数：无
+
+    返回：
+        None，断言强平事件张数/亏损/返还保证金及强平后可用余额与持仓清空
+    """
     gw = make_gateway(taker="0")
     gw.set_leverage(BTC, 10)
     buy(gw, 10)  # 保证金 = 1000 / 10 = 100
@@ -170,6 +290,13 @@ def test_liquidation():
 
 
 def test_average_entry_on_add():
+    """验证同方向加仓后持仓张数与保证金累加、开仓均价按加权平均更新。
+
+    参数：无
+
+    返回：
+        None，断言加仓后持仓 10 张、均价 110、保证金 1100
+    """
     gw = make_gateway()
     buy(gw, 5)
     gw.on_price(BTC, D("120"), D("119.9"), D("120.1"))
@@ -180,6 +307,13 @@ def test_average_entry_on_add():
 
 
 def test_close_releases_margin():
+    """验证平仓后保证金全额释放回可用余额，仅扣除开平两次手续费。
+
+    参数：无
+
+    返回：
+        None，断言持仓清空、保证金归零、可用余额为 9999（仅扣 1 元双边费）
+    """
     gw = make_gateway()
     buy(gw, 10)
     assert gw.account.positions[BTC].margin == D("1000")
@@ -190,12 +324,26 @@ def test_close_releases_margin():
 
 
 def test_insufficient_balance_rejected():
+    """验证委托所需保证金超过可用余额时下单被拒绝。
+
+    参数：无
+
+    返回：
+        None，断言下 200 张单（需 20000 保证金）抛出 GatewayError
+    """
     gw = make_gateway()
     with pytest.raises(GatewayError):
         buy(gw, 200)  # 需 20000 保证金 > 10000 可用
 
 
 def test_set_leverage_reduces_margin():
+    """验证设置杠杆后同等仓位按杠杆倍数降低保证金占用。
+
+    参数：无
+
+    返回：
+        None，断言 5 倍杠杆下 10 张持仓保证金为 200、杠杆字段为 5
+    """
     gw = make_gateway()
     gw.set_leverage(BTC, 5)
     buy(gw, 10)
@@ -204,6 +352,13 @@ def test_set_leverage_reduces_margin():
 
 
 def test_cancel_order():
+    """验证撤销挂单成功后订单从挂单列表消失，重复撤同一单抛 OrderNotFound。
+
+    参数：无
+
+    返回：
+        None，断言撤单结果 finish_as 为 cancelled、挂单清空、二次撤单抛 OrderNotFound
+    """
     gw = make_gateway()
     result = buy(gw, 10, price=D("99"))
     cancelled = gw.cancel_order(BTC, result.id)
@@ -214,6 +369,13 @@ def test_cancel_order():
 
 
 def test_account_position_interface():
+    """验证账户、持仓、权益与 ticker 只读接口的字段随行情更新保持一致。
+
+    参数：无
+
+    返回：
+        None，断言可用余额、浮动盈亏、持仓四元组、总权益与 ticker 标记价均符合预期
+    """
     gw = make_gateway()
     buy(gw, 10)
     account = gw.get_account()
@@ -232,6 +394,13 @@ def test_account_position_interface():
 
 
 def test_candle_provider_injection():
+    """验证 K 线数据经注入的 provider 获取：未注入返回空列表，limit 与 from/to 同传被拒。
+
+    参数：无
+
+    返回：
+        None，断言默认返回空、注入后透传哨兵对象、limit 与 from_ts 互斥抛 ValueError
+    """
     gw = make_gateway()
     assert gw.get_candlesticks(BTC) == []  # 无 provider 默认空
     sentinel = [object()]
@@ -244,12 +413,26 @@ def test_candle_provider_injection():
 
 
 def test_reduce_only_requires_opposite_position():
+    """验证无反向持仓时 reduce_only 委托被拒绝。
+
+    参数：无
+
+    返回：
+        None，断言无持仓下 reduce_only 卖单抛出 GatewayError
+    """
     gw = make_gateway()
     with pytest.raises(GatewayError):
         gw.place_order(OrderRequest(contract=BTC, size=D(-5), reduce_only=True))
 
 
 def test_close_without_position_is_noop():
+    """验证无持仓时整仓平仓单为空操作：以 no_position 完成且不产生成交记录。
+
+    参数：无
+
+    返回：
+        None，断言结果 finish_as 为 no_position、剩余量 0、成交列表为空
+    """
     gw = make_gateway()
     result = close_all(gw)
     assert result.status == "finished" and result.finish_as == "no_position"
@@ -257,6 +440,13 @@ def test_close_without_position_is_noop():
 
 
 def test_open_interest_delegation():
+    """验证持仓量查询的诚实降级与委托：未注入数据源返回 None，注入后透传其返回值。
+
+    参数：无
+
+    返回：
+        None，断言默认网关返回 None、注入 oi_provider 后返回委托值 123456
+    """
     # 未注入公共行情源（纯离线 mock 行情）：诚实降级 None
     assert make_gateway().fetch_open_interest(BTC) is None
     # 注入公共行情网关的 fetch_open_interest：委托真实数据（paper 非 mock 行情接线）
@@ -266,10 +456,27 @@ def test_open_interest_delegation():
 
 
 def test_open_interest_history_delegation():
+    """验证历史持仓量查询透传参数给注入的 provider 并返回其数据，未注入时返回空列表。
+
+    参数：无
+
+    返回：
+        None，断言 provider 收到 (合约, 粒度, 条数) 三元组、返回预设数据点，默认网关返回 []
+    """
     points = [OpenInterestPoint(time=100, value=D("10"))]
     calls = []
 
     def provider(contract: str, interval: str, limit: int):
+        """假的历史持仓量数据源：记录每次调用参数并返回预设数据点。
+
+        参数：
+            contract: str，合约名
+            interval: str，时间粒度
+            limit: int，返回条数上限
+
+        返回：
+            list：预设的 OpenInterestPoint 列表
+        """
         calls.append((contract, interval, limit))
         return points
 

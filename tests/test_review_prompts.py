@@ -5,7 +5,15 @@ from src.review.prompts import ReviewPromptLoader
 
 
 def test_missing_file_warns_once(tmp_path, monkeypatch):
-    """首次加载即缺文件：logger.warning 一次；重复加载不再告警（不重复骚扰）。"""
+    """验证缺少复盘提示词文件时只告警一次并返回可用兜底正文。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，用于拦截日志告警调用
+
+    返回：
+        None，通过断言验证重复加载不会重复告警
+    """
     warnings: list[str] = []
     monkeypatch.setattr(prompts.logger, "warning", lambda *args: warnings.append(str(args)))
     loader = ReviewPromptLoader(tmp_path / "review_prompt.md")  # 文件不存在
@@ -17,7 +25,15 @@ def test_missing_file_warns_once(tmp_path, monkeypatch):
 
 
 def test_existing_file_no_warning(tmp_path, monkeypatch):
-    """文件存在：正常加载，不告警。"""
+    """验证复盘提示词文件存在时正常加载且不产生告警。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，用于拦截日志告警调用
+
+    返回：
+        None，通过断言验证正文拼接结果和空告警列表
+    """
     warnings: list[str] = []
     monkeypatch.setattr(prompts.logger, "warning", lambda *args: warnings.append(str(args)))
     path = tmp_path / "review_prompt.md"

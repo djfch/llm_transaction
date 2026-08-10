@@ -19,7 +19,16 @@ GATE_LINE = "⚠ 高置信结论有效期内：反向开仓已被风控硬约束
 
 
 async def _build_text(tmp_path, research_config=None, seed=None) -> str:
-    """带研报种子构建上下文；seed 为 async 回调 (repo, db)，用于落库/篡改。"""
+    """在临时数据库中执行可选研报种子回调并构建完整决策上下文文本。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离上下文数据库
+        research_config: ResearchConfig | None，研报方向闸门配置
+        seed: Callable | None，接收 repo(仓储)与 db(数据库)的异步种子回调
+
+    返回：
+        str，ContextBuilder 生成的决策上下文正文
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     try:
@@ -42,7 +51,19 @@ async def _build_text(tmp_path, research_config=None, seed=None) -> str:
 async def _seed_report(
     repo, db, *, direction="偏多", confidence="高", narrative="n" * 600, hours_ago=0.0
 ) -> None:
-    """落库一份研报；hours_ago>0 时把 created_at 改写为 n 小时前（模拟过期）。"""
+    """落库一份研报观点，并可回拨创建时间以模拟过期数据。
+
+    参数：
+        repo: Repo，提供研报持久化接口的仓储对象
+        db: Database，用于在需要时直接回拨研报时间戳
+        direction: str，逐标的方向，默认偏多
+        confidence: str，观点置信度，默认高
+        narrative: str，观点正文，默认生成 600 字长文本
+        hours_ago: float，创建时间回拨小时数，0 表示保持当前时间
+
+    返回：
+        None，副作用为写入研报及其逐标的观点，并可更新创建时间
+    """
     r, _ = await repo.research.save_report_bundle(
         report_type="us",
         summary="市场总览",
@@ -80,7 +101,14 @@ async def _seed_report(
 
 
 async def test_research_section_renders_report(tmp_path):
-    """有研报：方向/置信度/周期/创建时间/正文摘要齐全，narrative 超 500 截断。"""
+    """验证有研报时上下文完整展示观点元数据并把超长正文截断到 500 字。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证研报段标题、字段、时间和摘要截断
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(),
@@ -95,7 +123,14 @@ async def test_research_section_renders_report(tmp_path):
 
 
 async def test_research_gate_annotation_high_confidence_fresh(tmp_path):
-    """高置信未过期且 gate_enabled：标注硬约束行。"""
+    """验证高置信且未过期的研报观点会在闸门开启时标注风控硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证硬约束提示行已注入上下文
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(),
@@ -106,7 +141,14 @@ async def test_research_gate_annotation_high_confidence_fresh(tmp_path):
 
 
 async def test_research_no_annotation_mid_confidence(tmp_path):
-    """中置信：不标注（gate 只认高置信）。"""
+    """验证中置信研报只展示正文而不会标注方向硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证研报段存在而硬约束提示不存在
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(),
@@ -118,7 +160,14 @@ async def test_research_no_annotation_mid_confidence(tmp_path):
 
 
 async def test_research_no_annotation_stale_report(tmp_path):
-    """created_at 在 14h 前（gate 有效期 13h）：过期不标注。"""
+    """验证超过研报闸门有效期的高置信观点不会标注硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证 14 小时前的研报仍展示但不参与硬约束
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(),
@@ -130,7 +179,14 @@ async def test_research_no_annotation_stale_report(tmp_path):
 
 
 async def test_research_no_annotation_config_none(tmp_path):
-    """research_config 未装配（None）：不标注，但研报正文照常注入。"""
+    """验证未装配研报配置时仍注入正文但不附加方向硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证观点可见且硬约束提示缺失
+    """
     text = await _build_text(
         tmp_path,
         seed=lambda repo, db: _seed_report(repo, db),
@@ -141,7 +197,14 @@ async def test_research_no_annotation_config_none(tmp_path):
 
 
 async def test_research_no_annotation_gate_disabled(tmp_path):
-    """gate_enabled=False：不标注。"""
+    """验证显式关闭研报闸门时只展示研报而不标注硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证研报段存在且硬约束提示不存在
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(gate_enabled=False),
@@ -153,7 +216,14 @@ async def test_research_no_annotation_gate_disabled(tmp_path):
 
 
 async def test_research_no_annotation_neutral_direction(tmp_path):
-    """高置信但方向中性：不标注（gate 只约束多/空结论）。"""
+    """验证高置信中性观点不触发只面向偏多或偏空结论的硬约束。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证中性方向可见且硬约束提示不存在
+    """
     text = await _build_text(
         tmp_path,
         research_config=ResearchConfig(),
@@ -165,7 +235,14 @@ async def test_research_no_annotation_neutral_direction(tmp_path):
 
 
 async def test_research_section_omitted_without_report(tmp_path):
-    """无研报：整段省略不留痕迹，其余 section 照常。"""
+    """验证没有研报时省略整个前瞻段且不影响其他上下文区块。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证研报段缺失而交易计划和价格预警段仍存在
+    """
     text = await _build_text(tmp_path, research_config=ResearchConfig())
 
     assert "研报前瞻" not in text
@@ -174,9 +251,26 @@ async def test_research_section_omitted_without_report(tmp_path):
 
 
 async def test_research_section_degrades_on_repo_error(tmp_path):
-    """latest_asset_view 抛异常：build() 正常完成，研报段降级为「暂不可用」。"""
+    """验证研报仓储查询失败时上下文降级提示且其余区块继续构建。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证研报段显示暂不可用且账户段仍存在
+    """
 
     async def _seed_broken(repo, db):
+        """把研报查询方法替换为抛异常的 mock，模拟研报库故障。
+
+        参数：
+            repo: Repo，仓储对象，其 research.latest_asset_view 被就地替换为
+                抛 RuntimeError 的 AsyncMock
+            db: Database，数据库连接对象，本回调未使用（仅保持 seed 回调统一签名）
+
+        返回：
+            None，副作用：就地篡改 repo.research.latest_asset_view 使其调用即抛异常
+        """
         repo.research.latest_asset_view = AsyncMock(side_effect=RuntimeError("研报库不可用"))
 
     text = await _build_text(tmp_path, research_config=ResearchConfig(), seed=_seed_broken)

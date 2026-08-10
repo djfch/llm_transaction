@@ -15,7 +15,13 @@ from src.config_io import ConfigError, set_env_keys
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    """用例前后恢复环境变量原状（set_env_keys 直接写 os.environ，须手动快照恢复）。"""
+    """用例前后恢复环境变量原状（set_env_keys 直接写 os.environ，须手动快照恢复）。
+
+    参数：无
+
+    返回：
+        Iterator[None]，用例前清理密钥变量并在结束后恢复原环境
+    """
     names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
     names += [k for k in os.environ if k.startswith("LLM_KEY_")]
     saved = {k: os.environ.get(k) for k in names}
@@ -33,7 +39,14 @@ def _clean_env():
 
 @pytest.fixture
 def env_file(tmp_path: Path) -> Path:
-    """预置一份含注释/空行/已注释 key 的 .env。"""
+    """预置一份含注释/空行/已注释 key 的 .env。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        Path，已写入预置注释、空行和密钥示例的临时 .env 路径
+    """
     path = tmp_path / ".env"
     path.write_text(
         "# Gate.io APIv4 密钥\n"
@@ -48,7 +61,14 @@ def env_file(tmp_path: Path) -> Path:
 
 
 def test_replaces_existing_key(env_file: Path):
-    """已存在的 key：替换该行（不新增重复行），并同步 os.environ。"""
+    """已存在的 key：替换该行（不新增重复行），并同步 os.environ。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert set_env_keys({"ANTHROPIC_API_KEY": "ant-new"}, env_file) == ["ANTHROPIC_API_KEY"]
     lines = env_file.read_text(encoding="utf-8").splitlines()
     assert lines.count("ANTHROPIC_API_KEY=ant-new") == 1
@@ -57,7 +77,14 @@ def test_replaces_existing_key(env_file: Path):
 
 
 def test_appends_missing_key_at_eof(env_file: Path):
-    """缺失的 key：文件末尾追加，已有行原样保留。"""
+    """缺失的 key：文件末尾追加，已有行原样保留。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert set_env_keys({"OPENAI_API_KEY": "oai-new"}, env_file) == ["OPENAI_API_KEY"]
     lines = env_file.read_text(encoding="utf-8").splitlines()
     assert lines[-1] == "OPENAI_API_KEY=oai-new"
@@ -65,7 +92,14 @@ def test_appends_missing_key_at_eof(env_file: Path):
 
 
 def test_preserves_comments_and_other_lines(env_file: Path):
-    """注释行（含 # KEY= 形式）与非目标行逐字保留，原内容一行不动。"""
+    """注释行（含 # KEY= 形式）与非目标行逐字保留，原内容一行不动。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     before = env_file.read_text(encoding="utf-8").splitlines()
     set_env_keys({"OPENAI_API_KEY": "oai-new"}, env_file)
     after = env_file.read_text(encoding="utf-8").splitlines()
@@ -74,7 +108,14 @@ def test_preserves_comments_and_other_lines(env_file: Path):
 
 
 def test_skips_empty_values(tmp_path: Path):
-    """空值跳过：不写文件（不存在则不创建）、不同步 environ、不进返回值。"""
+    """空值跳过：不写文件（不存在则不创建）、不同步 environ、不进返回值。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     path = tmp_path / ".env"
     assert set_env_keys({"OPENAI_API_KEY": ""}, path) == []
     assert not path.exists()
@@ -82,14 +123,28 @@ def test_skips_empty_values(tmp_path: Path):
 
 
 def test_returns_only_key_names(env_file: Path):
-    """返回值只含 key 名，永不携带 value（密钥铁规）。"""
+    """返回值只含 key 名，永不携带 value（密钥铁规）。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     written = set_env_keys({"OPENAI_API_KEY": "oai-秘密值"}, env_file)
     assert written == ["OPENAI_API_KEY"]
     assert "oai-秘密值" not in str(written)
 
 
 def test_rejects_control_chars_in_value(env_file: Path):
-    """防御纵深：set_env_keys 边界拒绝换行注入（即使调用方未校验）。"""
+    """防御纵深：set_env_keys 边界拒绝换行注入（即使调用方未校验）。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     with pytest.raises(ConfigError, match="控制字符"):
         set_env_keys({"OPENAI_API_KEY": "sk-x\nLLM_MOCK=1"}, env_file)
     # 文件未被污染
@@ -97,7 +152,14 @@ def test_rejects_control_chars_in_value(env_file: Path):
 
 
 def test_rejects_control_chars_in_key(env_file: Path):
-    """key 含控制字符同样拒绝。"""
+    """key 含控制字符同样拒绝。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     with pytest.raises(ConfigError, match="控制字符"):
         set_env_keys({"OPENAI_API_KEY\r": "x"}, env_file)
 
@@ -106,7 +168,14 @@ def test_rejects_control_chars_in_key(env_file: Path):
 
 
 def test_whitelist_allows_llm_key_prefix(env_file: Path):
-    """LLM_KEY_* 键可写（多凭证的 key 落盘通道）。"""
+    """LLM_KEY_* 键可写（多凭证的 key 落盘通道）。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert set_env_keys({"LLM_KEY_BACKUP": "sk-x"}, env_file) == ["LLM_KEY_BACKUP"]
     lines = env_file.read_text(encoding="utf-8").splitlines()
     assert lines[-1] == "LLM_KEY_BACKUP=sk-x"
@@ -114,13 +183,27 @@ def test_whitelist_allows_llm_key_prefix(env_file: Path):
 
 
 def test_whitelist_allows_builtin_llm_keys(env_file: Path):
-    """ANTHROPIC_API_KEY / OPENAI_API_KEY 均在允许写入的白名单内。"""
+    """ANTHROPIC_API_KEY / OPENAI_API_KEY 均在允许写入的白名单内。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     written = set_env_keys({"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, env_file)
     assert written == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 
 
 def test_whitelist_rejects_gate_and_arbitrary_keys(env_file: Path):
-    """白名单外键名（GATE_API_KEY 等）一律拒绝，文件不被污染。"""
+    """白名单外键名（GATE_API_KEY 等）一律拒绝，文件不被污染。
+
+    参数：
+        env_file: Path，预置内容的临时 .env 文件
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     for bad in ("GATE_API_KEY", "GATE_API_SECRET", "TELEGRAM_BOT_TOKEN", "LLM_KEY", "llm_key_x"):
         with pytest.raises(ConfigError, match="白名单"):
             set_env_keys({bad: "attacker"}, env_file)

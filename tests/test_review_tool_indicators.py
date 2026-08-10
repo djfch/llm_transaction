@@ -34,9 +34,27 @@ class _CandleStub:
     """K 线缓存 stub：按合约返回预置序列（鸭子类型对齐 CandleCache.get_recent）。"""
 
     def __init__(self, candles: list[Candle]) -> None:
+        """初始化测试替身并保存后续调用所需的预设数据。
+
+        参数：
+            candles: list[Candle]，预设 K 线序列
+
+        返回：
+            None，初始化当前测试替身，无返回值
+        """
         self._candles = candles
 
     def get_recent(self, contract: str, interval: str, n: int) -> list[Candle]:
+        """返回测试替身中预设的最近 K 线。
+
+        参数：
+            contract: str，目标合约标识
+            interval: str，K 线周期
+            n: int，需要读取或生成的记录数量
+
+        返回：
+            list[Candle]，预置 K 线序列末尾最多 n 根记录
+        """
         return self._candles[-n:]
 
 
@@ -44,14 +62,37 @@ class _OiStub:
     """OI 缓存 stub（鸭子类型对齐 OpenInterestCache.get）。"""
 
     def __init__(self, value: Decimal | None) -> None:
+        """初始化测试替身并保存后续调用所需的预设数据。
+
+        参数：
+            value: Decimal | None，待设置或预置的值
+
+        返回：
+            None，初始化当前测试替身，无返回值
+        """
         self._value = value
 
     def get(self, contract: str) -> Decimal | None:
+        """返回测试替身中指定合约的预设值。
+
+        参数：
+            contract: str，目标合约标识
+
+        返回：
+            Decimal | None，当前替身保存的持仓量值
+        """
         return self._value
 
 
 def _candles(n: int) -> list[Candle]:
-    """n 根 1h 阳线（收盘 100+i 递增），保证各指标有确定非 None 值。"""
+    """n 根 1h 阳线（收盘 100+i 递增），保证各指标有确定非 None 值。
+
+    参数：
+        n: int，需要读取或生成的记录数量
+
+    返回：
+        list[Candle]，时间递增且收盘价逐根上涨的 n 根模拟 K 线
+    """
     return [
         Candle(
             t=1_700_000_000 + i * 3600,
@@ -67,6 +108,14 @@ def _candles(n: int) -> list[Candle]:
 
 @pytest.fixture
 async def repo(tmp_path):
+    """提供连接临时数据库的仓储夹具。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        AsyncIterator[Repo]，提供临时数据库仓储并在测试结束后关闭连接
+    """
     db = Database()
     await db.open(tmp_path / "test.db")
     yield Repo(db)
@@ -75,7 +124,15 @@ async def repo(tmp_path):
 
 @pytest.fixture
 async def deps(tmp_path, repo):
-    """完整接线 deps：指标服务（60 根 K 线 + OI=12345）+ 短名单 store + watchlist。"""
+    """完整接线 deps：指标服务（60 根 K 线 + OI=12345）+ 短名单 store + watchlist。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        ReviewToolDeps，指标服务与配置仓储均已接线的复盘工具依赖
+    """
     store = StrategyStore(tmp_path / "system_prompt.md", repo)
     indicator_store = IndicatorConfigStore(
         tmp_path / "indicator_config.yaml", repo, valid_keys=frozenset(REGISTRY)
@@ -93,13 +150,29 @@ async def deps(tmp_path, repo):
 
 @pytest.fixture
 async def bare_deps(tmp_path, repo):
-    """未接线指标依赖的 deps（indicator_service / indicator_config_store 均为 None）。"""
+    """未接线指标依赖的 deps（indicator_service / indicator_config_store 均为 None）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        ReviewToolDeps，指标服务与配置仓储均未接线的降级依赖
+    """
     store = StrategyStore(tmp_path / "system_prompt.md", repo)
     return ReviewToolDeps(repo=repo, store=store, mode="paper")
 
 
 @pytest.fixture
 async def registry(deps):
+    """组装已注册测试工具的注册表夹具。
+
+    参数：
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        ToolRegistry，绑定完整复盘依赖的工具注册表
+    """
     return ReviewToolRegistry(deps)
 
 
@@ -107,6 +180,14 @@ async def registry(deps):
 
 
 async def test_get_indicators_panel(registry):
+    """验证复盘指标面板工具返回完整指标文本。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_indicators", {"contract": "BTC_USDT"})
     assert "BTC_USDT 指标面板（1h）" in text  # 缺省周期与执行 agent 惯例一致
     assert "截至" in text  # 有 K 线时给面板时刻
@@ -117,7 +198,14 @@ async def test_get_indicators_panel(registry):
 
 
 async def test_get_indicators_no_data_fallback(deps):
-    """K 线不足 min_candles 的指标与缺失 OI 均显示 无数据。"""
+    """K 线不足 min_candles 的指标与缺失 OI 均显示 无数据。
+
+    参数：
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     deps.indicator_service = IndicatorService(_CandleStub(_candles(10)), _OiStub(None))
     text = await ReviewToolRegistry(deps).execute("get_indicators", {"contract": "BTC_USDT"})
     assert "- ema50 | EMA50(指数均线)：无数据" in text  # ema50 需 50 根
@@ -126,6 +214,14 @@ async def test_get_indicators_no_data_fallback(deps):
 
 
 async def test_get_indicators_interval_param(registry):
+    """验证指标面板工具透传指定 K 线周期。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_indicators", {"contract": "ETH_USDT", "interval": "4h"})
     assert "ETH_USDT 指标面板（4h）" in text
     bad = await registry.execute("get_indicators", {"contract": "BTC_USDT", "interval": "3h"})
@@ -133,6 +229,14 @@ async def test_get_indicators_interval_param(registry):
 
 
 async def test_get_indicators_watchlist_guard(registry):
+    """验证指标工具拒绝查询关注列表外合约。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_indicators", {"contract": "DOGE_USDT"})
     assert "不在 watchlist" in text and "BTC_USDT" in text  # 给出可选集合
     missing = await registry.execute("get_indicators", {})
@@ -143,6 +247,14 @@ async def test_get_indicators_watchlist_guard(registry):
 
 
 async def test_get_indicator_config(registry):
+    """验证指标配置工具返回当前短名单与参数。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_indicator_config", {})
     assert "当前指标短名单" in text
     for key in DEFAULT_INDICATOR_SHORTLIST:
@@ -156,6 +268,16 @@ async def test_get_indicator_config(registry):
 
 
 async def test_submit_indicator_config_success(registry, deps, repo):
+    """验证合法指标配置修订成功落库并生效。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     new_list = ["ema20", "rsi14", "macd", "boll"]
     reason = "round-aaa 的 BTC_USDT 亏损源于 ema50 全程无信号，换 boll 捕捉波动"
     text = await registry.execute(
@@ -175,7 +297,15 @@ async def test_submit_indicator_config_success(registry, deps, repo):
 
 
 async def test_submit_indicator_config_dedup(registry, deps):
-    """重复键去重保序后生效（提交 3 个含重复键，生效 2 个）。"""
+    """重复键去重保序后生效（提交 3 个含重复键，生效 2 个）。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute(
         "submit_indicator_config",
         {"shortlist": ["rsi14", "ema20", "rsi14"], "reason": "去重验证"},
@@ -185,6 +315,15 @@ async def test_submit_indicator_config_dedup(registry, deps):
 
 
 async def test_submit_indicator_config_unknown_key(registry, deps):
+    """验证指标配置拒绝未知指标键。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute(
         "submit_indicator_config", {"shortlist": ["ema20", "sma20"], "reason": "尝试未知键"}
     )
@@ -194,6 +333,15 @@ async def test_submit_indicator_config_unknown_key(registry, deps):
 
 
 async def test_submit_indicator_config_too_many(registry, deps):
+    """验证指标配置拒绝超过上限的短名单。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     nine = ["ema9", "ema20", "ema50", "macd", "rsi7", "rsi14", "kdj", "roc10", "atr14"]
     text = await registry.execute(
         "submit_indicator_config", {"shortlist": nine, "reason": "堆叠 9 个指标"}
@@ -203,6 +351,15 @@ async def test_submit_indicator_config_too_many(registry, deps):
 
 
 async def test_submit_indicator_config_no_diff(registry, deps):
+    """验证无实际变化的指标配置不会生成新版本。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute(
         "submit_indicator_config",
         {"shortlist": list(DEFAULT_INDICATOR_SHORTLIST), "reason": "与当前相同"},
@@ -212,6 +369,15 @@ async def test_submit_indicator_config_no_diff(registry, deps):
 
 
 async def test_submit_indicator_config_bad_args(registry, deps):
+    """验证指标配置工具拒绝错误参数形状。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     empty_reason = await registry.execute(
         "submit_indicator_config", {"shortlist": ["ema20"], "reason": "  "}
     )
@@ -227,6 +393,14 @@ async def test_submit_indicator_config_bad_args(registry, deps):
 
 
 async def test_indicator_tools_not_configured(bare_deps):
+    """验证指标依赖未接线时工具明确降级。
+
+    参数：
+        bare_deps: ReviewToolDeps，未接线指标服务的复盘工具依赖
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     registry = ReviewToolRegistry(bare_deps)
     text = await registry.execute("get_indicators", {"contract": "BTC_USDT"})
     assert "指标功能未配置" in text
@@ -238,6 +412,14 @@ async def test_indicator_tools_not_configured(bare_deps):
 
 
 async def test_indicator_tools_registered(registry):
+    """验证指标相关工具均已注册并可调用。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     specs = {s.name: s for s in registry.specs}
     assert {"get_indicators", "get_indicator_config", "submit_indicator_config"} <= specs.keys()
     submit = specs["submit_indicator_config"]
@@ -254,21 +436,66 @@ class _StubProvider:
     """按脚本回放响应的 stub（鸭子类型对齐复盘 provider 协议，不 import src/agent）。"""
 
     def __init__(self, script: list) -> None:
+        """初始化测试替身并保存后续调用所需的预设数据。
+
+        参数：
+            script: list，按调用顺序消费的模拟响应脚本
+
+        返回：
+            None，初始化当前测试替身，无返回值
+        """
         self._script = deque(script)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        """按测试脚本顺序返回模拟的 LLM 响应或异常。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            SimpleNamespace，脚本队首的模拟 LLM 响应
+        """
         return self._script.popleft()
 
     def tool_result_message(self, call, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息。
+
+        参数：
+            call: ToolCall，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool 与结果内容的模拟工具消息
+        """
         return {"role": "tool", "content": result}
 
 
 def _resp(text: str = "", calls: tuple = ()) -> SimpleNamespace:
+    """构造带文本和工具调用的模拟 LLM 响应。
+
+    参数：
+        text: str，响应或待校验文本
+        calls: tuple，模拟工具调用序列
+
+    返回：
+        SimpleNamespace，包含文本、原始响应、空助手消息与工具调用列表的模拟响应
+    """
     return SimpleNamespace(text=text, raw="{}", assistant_message=None, tool_calls=list(calls))
 
 
 async def test_review_agent_wires_indicator_deps(tmp_path, repo, deps):
-    """构造期注入的指标依赖进入每轮 deps：LLM 调 get_indicator_config 返回配置文本。"""
+    """构造期注入的指标依赖进入每轮 deps：LLM 调 get_indicator_config 返回配置文本。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     review_prompt = tmp_path / "review_prompt.md"
     review_prompt.write_text("# 复盘", encoding="utf-8")
     provider = _StubProvider(
@@ -296,7 +523,16 @@ async def test_review_agent_wires_indicator_deps(tmp_path, repo, deps):
 
 
 async def test_build_review_wires_indicator_params(tmp_path, repo, deps):
-    """build_review 逐项接通指标依赖：装配出的 agent 轮内 deps 拿到实例（工具非降级）。"""
+    """build_review 逐项接通指标依赖：装配出的 agent 轮内 deps 拿到实例（工具非降级）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     review_prompt = tmp_path / "review_prompt.md"
     review_prompt.write_text("# 复盘", encoding="utf-8")
     provider = _StubProvider(
@@ -323,7 +559,15 @@ async def test_build_review_wires_indicator_params(tmp_path, repo, deps):
 
 
 async def test_build_review_passes_notify_event_to_agent(tmp_path, repo):
-    """build_review 透传 notify_event：装配出的 agent 轮始/轮末事件经装配层广播（透传不断）。"""
+    """build_review 透传 notify_event：装配出的 agent 轮始/轮末事件经装配层广播（透传不断）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     review_prompt = tmp_path / "review_prompt.md"
     review_prompt.write_text("# 复盘", encoding="utf-8")
     events: list[dict] = []

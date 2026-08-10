@@ -64,9 +64,23 @@ class FakeGateway:
     """注入用假网关：固定账户/持仓/K 线，保证列表端点非空（键断言才有意义）。"""
 
     def get_account(self) -> Account:
+        """返回固定假账户，保证账户类端点响应非空（键断言才有意义）。
+
+        参数：无
+
+        返回：
+            Account：available=9000、unrealised_pnl=100 的固定账户
+        """
         return Account(available=D("9000"), unrealised_pnl=D("100"))
 
     def list_positions(self) -> list[Position]:
+        """返回一条固定 BTC 多头持仓，保证持仓列表端点响应非空（键断言才有意义）。
+
+        参数：无
+
+        返回：
+            list[Position]：单个 BTC_USDT 多头仓位（杠杆 5、强平价 40000 等固定字段）
+        """
         # fmt: skip 保持紧凑表格写法（字段多，炸开一人一行反而难读）
         return [  # fmt: skip
             Position(
@@ -82,18 +96,50 @@ class FakeGateway:
         ]
 
     def get_candlesticks(self, contract: str, interval: str = "1m", limit: int | None = None):
+        """返回一根固定 K 线，保证 /api/candles 响应非空（键断言才有意义）。
+
+        参数：
+            contract: str，合约代码（本 fake 忽略，恒返回同一根 K 线）
+            interval: str，K 线周期（本 fake 忽略）
+            limit: int | None，根数上限（本 fake 忽略）
+
+        返回：
+            list[Candle]：单根固定 OHLCV K 线（t=3600，收盘 60050）
+        """
         return [Candle(t=3600, o=D("60000.5"), h=D("60100"), l=D("59900"), c=D("60050"), v=D("12"))]
 
 
 async def _close(contract: str) -> dict:
+    """假手动平仓回调：恒返回成功结果，供手动平仓端点断言响应键。
+
+    参数：
+        contract: str，待平仓合约代码（本回调忽略，恒返回 _CLOSE_RESULT）
+
+    返回：
+        dict：固定平仓结果（contract/status=finished/fill_price/text）
+    """
     return _CLOSE_RESULT
 
 
 async def _reconfigure() -> dict:
+    """假 LLM 重配回调：恒报配置成功，供 POST /api/secrets 断言响应键。
+
+    参数：无
+
+    返回：
+        dict：{"llm_configured": True, "error": ""} 固定结果
+    """
     return {"llm_configured": True, "error": ""}
 
 
 async def _review_run() -> dict:
+    """假复盘执行回调：恒报启动成功，供 POST /api/review/run 断言响应键。
+
+    参数：无
+
+    返回：
+        dict：固定复盘结果（started/ok/report_id/round_id/strategy_action/new_version_id）
+    """
     return {
         "started": True,
         "ok": True,
@@ -105,11 +151,25 @@ async def _review_run() -> dict:
 
 
 async def _strategy_rollback(version_id: int) -> dict:
+    """假策略回滚回调：恒报回滚成功，供 POST /api/strategy/rollback/{id} 断言。
+
+    参数：
+        version_id: int，目标版本号（原样回填进 rolled_back_to）
+
+    返回：
+        dict：{"rolled_back_to": version_id, "version": 3} 固定结果
+    """
     return {"rolled_back_to": version_id, "version": 3}
 
 
 def _indicators_bundle() -> SimpleNamespace:
-    """fake 指标回调束：形状与 IndicatorComponents 回调面一致（冻结前端消费的响应键）。"""
+    """fake 指标回调束：形状与 IndicatorComponents 回调面一致（冻结前端消费的响应键）。
+
+    参数：无
+
+    返回：
+        SimpleNamespace，提供面板、序列、配置读取与配置修订回调的指标替身
+    """
     return SimpleNamespace(
         panel=lambda contract, interval: {
             "contract": contract,
@@ -157,7 +217,14 @@ _LONG_REPORT_MD = "# 复盘报告\n\n" + "区间成交 3 笔，胜率 66.7%，�
 
 
 async def _seed(repo: Repo) -> None:
-    """种子数据：决策/审计/工具调用/成交/笔记各一条，保证列表端点非空（键断言才有意义）。"""
+    """种子数据：决策/审计/工具调用/成交/笔记各一条，保证列表端点非空（键断言才有意义）。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     # 无笔记决策轮（先落库保持 r1 为最新轮）：锁 /api/rounds 无归属轮 note=null 的契约形态
     await repo.save_decision(round_id="r0-nonote", mode="paper", wake_source="timer")
     await repo.save_decision(round_id="r1", mode="paper", wake_source="timer")
@@ -187,14 +254,28 @@ async def _seed(repo: Repo) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_llm_env(monkeypatch: pytest.MonkeyPatch):
-    """隔离真实 LLM key 环境变量（POST /api/secrets 会写 os.environ，monkeypatch 自动复原）。"""
+    """隔离真实 LLM key 环境变量（POST /api/secrets 会写 os.environ，monkeypatch 自动复原）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，清除真实 LLM 环境变量并由 monkeypatch 在用例后恢复
+    """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 @pytest.fixture
 async def deps(tmp_path: Path):
-    """组装 fake 依赖：tmp 配置/名单/.env + 内存 DB 种子数据 + 各写操作假回调。"""
+    """组装 fake 依赖：tmp 配置/名单/.env + 内存 DB 种子数据 + 各写操作假回调。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        AsyncIterator[ServerDeps]，通过夹具向测试提供上述临时依赖，并在结束后清理资源
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)  # 默认 paper 配置
     watchlist_path = tmp_path / "watchlist.yaml"
@@ -208,6 +289,14 @@ async def deps(tmp_path: Path):
     state = {"running": False}
 
     async def _set_running(value: bool) -> None:
+        """切换假 agent 运行状态，供 agent 启停端点回读 agent_running。
+
+        参数：
+            value: bool，目标运行状态（True=启动，False=停止）
+
+        返回：
+            None，就地修改外层 state 字典
+        """
         state["running"] = value
 
     d = ServerDeps(
@@ -237,6 +326,14 @@ async def deps(tmp_path: Path):
 
 @pytest.fixture
 async def client(deps: ServerDeps):
+    """基于 fake 依赖创建 FastAPI 应用并提供 httpx 异步测试客户端。
+
+    参数：
+        deps: ServerDeps，fake 依赖夹具（假网关/内存库种子数据/各写操作假回调）
+
+    返回：
+        AsyncIterator[AsyncClient]，yield 走 ASGI 直连应用的客户端，退出时关闭客户端上下文
+    """
     app = create_app(deps)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -248,7 +345,14 @@ _KINDS = {"s": str, "b": bool, "i": int, "l": list, "d": dict}
 
 
 def _is_num(value: object) -> bool:
-    """number 或可解析的数字字符串（Decimal 金额序列化为字符串，前端 Number() 适配）。"""
+    """number 或可解析的数字字符串（Decimal 金额序列化为字符串，前端 Number() 适配）。
+
+    参数：
+        value: object，待设置或预置的值
+
+    返回：
+        bool，值为非布尔数字或可解析数字字符串时返回 True
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
@@ -261,7 +365,16 @@ def _is_num(value: object) -> bool:
 
 
 def _typed(obj: dict, spec: str, where: str) -> None:
-    """按紧凑契约表断言键存在且类型对：s=str b=bool i=int l=list d=dict n=number。"""
+    """按紧凑契约表断言键存在且类型对：s=str b=bool i=int l=list d=dict n=number。
+
+    参数：
+        obj: dict，待校验的响应对象
+        spec: str，字段类型契约字符串
+        where: str，断言失败时标识响应位置的上下文
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     for pair in spec.split():
         key, code = pair.rsplit(":", 1)
         assert key in obj, f"{where} 缺少契约键: {key}"
@@ -271,13 +384,29 @@ def _typed(obj: dict, spec: str, where: str) -> None:
 
 
 def _no_leak(text: str, where: str) -> None:
-    """安全护栏：响应原始文本（JSON 全量递归）不得含密钥字样与注入的假 key 值。"""
+    """安全护栏：响应原始文本（JSON 全量递归）不得含密钥字样与注入的假 key 值。
+
+    参数：
+        text: str，响应或待校验文本
+        where: str，断言失败时标识响应位置的上下文
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     for token in _FORBIDDEN:
         assert token not in text, f"{where} 响应泄漏敏感串: {token}"
 
 
 async def _get(client: AsyncClient, path: str) -> dict:
-    """GET → 200 + 泄漏扫描，返回响应 json。"""
+    """GET → 200 + 泄漏扫描，返回响应 json。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        path: str，待请求的 API 路径
+
+    返回：
+        dict，状态码与密钥泄漏检查均通过后的响应 JSON
+    """
     r = await client.get(path)
     assert r.status_code == 200, f"GET {path} → {r.status_code}"
     _no_leak(r.text, f"GET {path}")
@@ -285,7 +414,16 @@ async def _get(client: AsyncClient, path: str) -> dict:
 
 
 async def _post(client: AsyncClient, path: str, body: dict | None = None) -> dict:
-    """POST → 200 + 泄漏扫描，返回响应 json。"""
+    """POST → 200 + 泄漏扫描，返回响应 json。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        path: str，待请求的 API 路径
+        body: dict | None，POST 请求体
+
+    返回：
+        dict，状态码与密钥泄漏检查均通过后的响应 JSON
+    """
     r = await client.post(path, json=body)
     assert r.status_code == 200, f"POST {path} → {r.status_code}: {r.text}"
     _no_leak(r.text, f"POST {path}")
@@ -293,6 +431,14 @@ async def _post(client: AsyncClient, path: str, body: dict | None = None) -> dic
 
 
 async def test_status_account_positions_contract(client: AsyncClient):
+    """冻结状态/账户/持仓/组合快照端点的响应键与类型（含 portfolio 嵌套账户与非空持仓）。
+
+    参数：
+        client: AsyncClient，httpx 异步测试客户端夹具
+
+    返回：
+        None，断言 /api/status、/api/account、/api/positions、/api/portfolio 契约键齐且类型正确
+    """
     body = await _get(client, "/api/status")
     _typed(
         body,
@@ -316,6 +462,14 @@ async def test_status_account_positions_contract(client: AsyncClient):
 
 
 async def test_trades_equity_notes_contract(client: AsyncClient):
+    """冻结成交、权益曲线与笔记接口的响应契约。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _get(client, "/api/trades")
     _typed(body, "total:i offset:i limit:i", "/api/trades")
     assert body["items"], "/api/trades items 应非空"
@@ -340,6 +494,14 @@ async def test_trades_equity_notes_contract(client: AsyncClient):
 
 
 async def test_rounds_contract(client: AsyncClient):
+    """冻结决策轮次列表与详情接口的响应契约。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _get(client, "/api/rounds")
     assert body["items"], "/api/rounds items 应非空"
     _typed(body, "total:i offset:i limit:i", "/api/rounds")
@@ -378,6 +540,14 @@ async def test_rounds_contract(client: AsyncClient):
 
 
 async def test_candles_config_watchlist_secrets_contract(client: AsyncClient):
+    """冻结 K 线、配置、关注列表与密钥接口契约。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _get(client, f"/api/candles?contract={BTC}")
     assert body["items"], "/api/candles items 应非空"
     _typed(body["items"][0], "t:n o:n h:n l:n c:n v:n", "/api/candles items[0]")
@@ -392,7 +562,14 @@ async def test_candles_config_watchlist_secrets_contract(client: AsyncClient):
 
 
 async def test_write_ops_contract(client: AsyncClient):
-    """kill_switch、agent 启停、paper reset、手动平仓、PUT config（响应均过泄漏扫描）。"""
+    """kill_switch、agent 启停、paper reset、手动平仓、PUT config（响应均过泄漏扫描）。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _post(client, "/api/kill_switch", {"enabled": True})
     _typed(body, "kill_switch:b", "POST /api/kill_switch")
     assert (await _post(client, "/api/agent/start"))["agent_running"] is True
@@ -409,7 +586,15 @@ async def test_write_ops_contract(client: AsyncClient):
 
 
 async def test_post_secrets_contract_and_no_echo(client: AsyncClient, deps: ServerDeps):
-    """POST /api/secrets：契约键齐 + 假 key 落盘后任何后续响应不回显明文。"""
+    """POST /api/secrets：契约键齐 + 假 key 落盘后任何后续响应不回显明文。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _post(
         client,
         "/api/secrets",
@@ -428,7 +613,14 @@ _REPORT_SPEC = (
 
 
 async def test_review_strategy_contract(client: AsyncClient):
-    """复盘/策略版本端点契约：响应键与类型冻结（diff 为 PlainText，只断状态码）。"""
+    """复盘/策略版本端点契约：响应键与类型冻结（diff 为 PlainText，只断状态码）。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = await _get(client, "/api/review/reports?limit=10&offset=0")
     _typed(body, "total:i", "/api/review/reports")
     assert body["items"], "/api/review/reports items 应非空"
@@ -491,7 +683,14 @@ async def test_review_strategy_contract(client: AsyncClient):
 
 
 async def test_indicators_contract(client: AsyncClient):
-    """指标端点契约：面板/序列/当前配置的响应键冻结（前端 getIndicatorConfig/getIndicatorSeries）。"""
+    """指标端点契约：面板/序列/当前配置的响应键冻结（前端 getIndicatorConfig/getIndicatorSeries）。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     panel = await _get(client, "/api/indicators?contract=BTC_USDT&interval=1h")
     _typed(panel, "contract:s interval:s time:i indicators:d shortlist:l", "/api/indicators")
     _typed(panel["indicators"]["ema20"], "label:s kind:s values:d", "/api/indicators ema20")

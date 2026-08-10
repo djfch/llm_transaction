@@ -13,12 +13,29 @@ from tests.research_helpers import save_report_fixture
 
 @pytest.fixture
 async def repo(tmp_path) -> Repo:
+    """创建测试数据库仓库并在用例结束后关闭连接。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        Repo，返回该测试辅助函数构造或记录的结果
+    """
     db = Database()
     await db.open(tmp_path / "research.db")
     return Repo(db)
 
 
 def _item(source: str, title: str, ts: float, dedup: str) -> dict:
+    """构造研报时间线测试条目。
+
+    参数：
+        source: str，唤醒或成交来源
+        title: str，时间线条目标题
+        ts: float，事件时间戳
+        dedup: str，时间线去重键
+    返回：
+        dict，返回该测试辅助函数构造或记录的结果
+    """
     return {
         "source": source,
         "kind": "flash",
@@ -32,7 +49,13 @@ def _item(source: str, title: str, ts: float, dedup: str) -> dict:
 
 
 async def test_append_timeline_dedup_idempotent(repo: Repo) -> None:
-    """同 dedup_key 重复追加只插入一次（幂等），返回新插入条数正确。"""
+    """同 dedup_key 重复追加只插入一次（幂等），返回新插入条数正确。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     item = _item("jin10", "美联储决议", 1000.0, "k1")
     inserted1 = await repo.research.append_timeline_many([item])
     inserted2 = await repo.research.append_timeline_many([item])
@@ -44,7 +67,13 @@ async def test_append_timeline_dedup_idempotent(repo: Repo) -> None:
 
 
 async def test_append_timeline_batch_partial_dup(repo: Repo) -> None:
-    """批量中部分重复：只插入新的，重复的跳过。"""
+    """批量中部分重复：只插入新的，重复的跳过。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     items = [
         _item("jin10", "A", 1000.0, "k1"),
         _item("blockbeats", "B", 2000.0, "k2"),
@@ -57,7 +86,13 @@ async def test_append_timeline_batch_partial_dup(repo: Repo) -> None:
 
 
 async def test_list_timeline_window(repo: Repo) -> None:
-    """时间窗口过滤 [start, end)：半开区间，边界外不返回。"""
+    """时间窗口过滤 [start, end)：半开区间，边界外不返回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.research.append_timeline_many(
         [
             _item("jin10", "旧", 100.0, "k1"),
@@ -72,7 +107,13 @@ async def test_list_timeline_window(repo: Repo) -> None:
 
 
 async def test_latest_dedup_keys(repo: Repo) -> None:
-    """增量定位：latest_dedup_keys 返回最近插入的 dedup 集合。"""
+    """增量定位：latest_dedup_keys 返回最近插入的 dedup 集合。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.research.append_timeline_many(
         [
             _item("jin10", "A", 1000.0, "k1"),
@@ -84,7 +125,13 @@ async def test_latest_dedup_keys(repo: Repo) -> None:
 
 
 async def test_save_and_list_reports(repo: Repo) -> None:
-    """研报落库与按天查询；失败研报（error 非空）不进列表。"""
+    """研报落库与按天查询；失败研报（error 非空）不进列表。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     ok = await save_report_fixture(
         repo,
         report_type="us",
@@ -109,7 +156,13 @@ async def test_save_and_list_reports(repo: Repo) -> None:
 
 
 async def test_save_and_list_causal_links(repo: Repo) -> None:
-    """因果链落库：默认 pending 状态，按 report_id 关联。"""
+    """因果链落库：默认 pending 状态，按 report_id 关联。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     link = await repo.research.save_causal_link(
         report_id=report.id,
@@ -125,7 +178,13 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
 
 
 async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
-    """版本化字段落库：topic/supersedes_id/await_verification 存取一致。"""
+    """版本化字段落库：topic/supersedes_id/await_verification 存取一致。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     link = await repo.research.save_causal_link(
         report_id=report.id,
@@ -150,7 +209,13 @@ async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
 
 
 async def test_save_causal_link_supersede_marks_old(repo: Repo) -> None:
-    """版本化事务：新链替代旧链时，同一次落库把旧链 status 标记 superseded。"""
+    """版本化事务：新链替代旧链时，同一次落库把旧链 status 标记 superseded。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     v1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "旧推断"}]', confidence=0.5, topic="非农"
@@ -171,12 +236,24 @@ async def test_save_causal_link_supersede_marks_old(repo: Repo) -> None:
 
 
 async def test_get_causal_link_missing(repo: Repo) -> None:
-    """get_causal_link：不存在的 id 返回 None。"""
+    """get_causal_link：不存在的 id 返回 None。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     assert await repo.research.get_causal_link(999) is None
 
 
 async def test_list_pending_causal_links(repo: Repo) -> None:
-    """未闭合池口径：只收 待验证声明 + 未被替代；排除 结论链/已被替代；按时间正序取前 N。"""
+    """未闭合池口径：只收 待验证声明 + 未被替代；排除 结论链/已被替代；按时间正序取前 N。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     p1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.6, topic="关税"
@@ -212,7 +289,13 @@ async def test_list_pending_causal_links(repo: Repo) -> None:
 
 
 async def test_list_causal_links_topic_filter(repo: Repo) -> None:
-    """按主题过滤：只返回该主题链；limit 截取最新 N 条按时间正序。"""
+    """按主题过滤：只返回该主题链；limit 截取最新 N 条按时间正序。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     a1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a1"}]', confidence=0.6, topic="关税"
@@ -233,7 +316,13 @@ async def test_list_causal_links_topic_filter(repo: Repo) -> None:
 
 
 async def test_list_reports_page(repo: Repo) -> None:
-    """分页：最新在前、含失败记录、越界页 items 空但 total 准确。"""
+    """分页：最新在前、含失败记录、越界页 items 空但 total 准确。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     ids = []
     for i in range(3):
         r = await save_report_fixture(
@@ -256,7 +345,13 @@ async def test_list_reports_page(repo: Repo) -> None:
 
 
 async def test_list_causal_links_by_report(repo: Repo) -> None:
-    """按研报取因果链：id 正序，只返回该研报的。"""
+    """按研报取因果链：id 正序，只返回该研报的。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     r1 = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     r2 = await save_report_fixture(repo, report_type="asia", direction="中性", confidence="中")
     for i in range(2):
@@ -273,7 +368,13 @@ async def test_list_causal_links_by_report(repo: Repo) -> None:
 
 
 async def test_has_report_since(repo: Repo) -> None:
-    """幂等判定：恰好等于 since_ts 算有；成功或失败都算已跑（失败不自动重试）；类型不匹配不算。"""
+    """幂等判定：恰好等于 since_ts 算有；成功或失败都算已跑（失败不自动重试）；类型不匹配不算。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     ok = await save_report_fixture(repo, report_type="us", direction="偏多", confidence="高")
     fail = await save_report_fixture(
         repo, report_type="asia", direction="中性", confidence="中", error="解析失败"
@@ -285,7 +386,13 @@ async def test_has_report_since(repo: Repo) -> None:
 
 
 async def test_latest_research_audit_round(repo: Repo) -> None:
-    """latest_research_audit_round：只取 wake_source='research' 的最新一轮，交易轮不参与。"""
+    """latest_research_audit_round：只取 wake_source='research' 的最新一轮，交易轮不参与。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     assert await repo.research.latest_research_audit_round("paper") is None  # 空表
     await repo.start_audit_round("r-t1", "paper", wake_source="timer", started_at=1000.0)
     await repo.start_audit_round("r-r1", "paper", wake_source="research", started_at=2000.0)
