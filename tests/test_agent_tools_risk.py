@@ -324,10 +324,40 @@ _GATE_ON = ResearchConfig(gate_enabled=True, gate_max_age_hours=13)
 _OPEN_LONG = {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
 
 
-async def _save_report(env: SimpleNamespace, direction: str, confidence: str) -> None:
-    """落一份最新成功研报（created_at 为当前时刻，有效期内）。"""
-    await env.repo.research.save_report(
-        report_type="manual", direction=direction, confidence=confidence
+async def _save_report(
+    env: SimpleNamespace,
+    direction: str,
+    confidence: str,
+    *,
+    contract: str = "BTC_USDT",
+    basis_type: str = "混合",
+    technical_confirmation: str = "确认",
+    data_status: str = "完整",
+) -> None:
+    """落一份最新 v2 逐标的研报（created_at 为当前时刻）。"""
+    await env.repo.research.save_report_bundle(
+        report_type="manual",
+        summary="逐标的研报",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="r-research",
+        asset_views=[
+            {
+                "contract": contract,
+                "direction": direction,
+                "confidence": confidence,
+                "horizon": "24h",
+                "market_regime": "下跌趋势",
+                "technical_confirmation": technical_confirmation,
+                "basis_type": basis_type,
+                "data_status": data_status,
+                "evidence_json": "[]",
+                "risks_json": "[]",
+                "narrative": "",
+                "market_context_json": "{}",
+            }
+        ],
     )
 
 
@@ -371,6 +401,9 @@ async def test_research_gate_expired_report_allows(tmp_path):
             "UPDATE research_reports SET created_at = ?", (time.time() - 14 * 3600,)
         )
         await env.db.conn.commit()
+        await env.db.conn.execute(
+            "UPDATE research_asset_views SET created_at = ?", (time.time() - 14 * 3600,)
+        )
         out = await env.registry.execute("place_order", _OPEN_LONG)
         assert out.risk_verdict == "allow", out.text
     finally:
@@ -411,11 +444,61 @@ async def test_research_gate_latest_report_error_degrades(tmp_path, monkeypatch)
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
 
-        async def _boom():
+        async def _boom(contract: str):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(env.repo.research, "latest_report", _boom)
+        monkeypatch.setattr(env.repo.research, "latest_asset_view", _boom)
         out = await env.registry.execute("place_order", _OPEN_LONG)
         assert out.risk_verdict == "allow", out.text  # 读取异常降级放行，不阻塞交易
     finally:
         await env.db.close()
+
+
+async def test_research_gate_failed_report_is_ignored(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await env.repo.research.save_failed_report(
+            report_type="manual",
+            error="LLM 输出解析失败",
+        )
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_btc_view_does_not_block_eth(tmp_path):
+    env = await _make_tools(tmp_path, extra_contracts=("ETH_USDT",), research_config=_GATE_ON)
+    try:
+        env.deps.watchlist.append("ETH_USDT")
+        await _save_report(env, "偏空", "高", contract="BTC_USDT")
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "ETH_USDT", "size": 1, "stop_loss_price": 58000},
+        )
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_structure_continuation_is_soft_reference(tmp_path):
+    env = await _make_tools(tmp_path, research_config=_GATE_ON)
+    try:
+        await _save_report(env, "偏空", "高", basis_type="结构延续")
+        out = await env.registry.execute("place_order", _OPEN_LONG)
+        assert out.risk_verdict == "allow", out.text
+    finally:
+        await env.db.close()
+
+
+async def test_research_gate_conflict_or_unavailable_data_allows(tmp_path):
+    for technical, status in (("冲突", "完整"), ("确认", "不可用")):
+        env = await _make_tools(tmp_path / f"{technical}-{status}", research_config=_GATE_ON)
+        try:
+            await _save_report(
+                env, "偏空", "高", technical_confirmation=technical, data_status=status
+            )
+            out = await env.registry.execute("place_order", _OPEN_LONG)
+            assert out.risk_verdict == "allow", out.text
+        finally:
+            await env.db.close()

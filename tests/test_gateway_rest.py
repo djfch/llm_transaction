@@ -307,3 +307,36 @@ def test_fetch_open_interest_wraps_error(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(GatewayError) as excinfo:
         gateway.fetch_open_interest(BTC)
     assert excinfo.value.label == "INVALID_PARAM"
+
+
+def test_fetch_open_interest_history_sorts_and_skips_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    gateway = make_gateway()
+    list_stats = Mock(
+        return_value=[
+            SimpleNamespace(time=200, open_interest="120"),
+            SimpleNamespace(time=None, open_interest="999"),
+            SimpleNamespace(time=100, open_interest="100"),
+            SimpleNamespace(time=150, open_interest=None),
+        ]
+    )
+    monkeypatch.setattr(gateway._api, "list_contract_stats", list_stats)
+
+    points = gateway.fetch_open_interest_history(BTC, "4h", limit=3)
+
+    assert [(point.time, point.value) for point in points] == [
+        (100, Decimal("100")),
+        (200, Decimal("120")),
+    ]
+    list_stats.assert_called_once_with(gateway._settle, BTC, interval="4h", limit=3)
+
+
+def test_fetch_open_interest_history_wraps_error(monkeypatch: pytest.MonkeyPatch):
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gateway._api, "list_contract_stats", Mock(side_effect=make_gate_exc("INVALID_PARAM"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.fetch_open_interest_history(BTC, "4h")
+    assert excinfo.value.label == "INVALID_PARAM"

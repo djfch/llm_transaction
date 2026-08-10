@@ -1,4 +1,4 @@
-"""研报工具实现：10 只读 + 1 写（submit_causal_links）。
+"""研报工具实现：11 只读 + 1 写（submit_causal_links）。
 
 安全不变量：本层无任何交易工具；数据源失败（ResearchSourceError）一律转中文
 "数据不可用"哨兵返回给 LLM（不编造数值、不中断本轮）；参数校验失败返回错误文本。
@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from src.research.judgments import render_judgments
 from src.memory.repo import Repo
 from src.research.providers.base import (
     ResearchDataProvider,
@@ -36,6 +37,10 @@ class ResearchToolDeps:
     provider: ResearchDataProvider
     repo: Repo
     mode: str
+    market_data: Any | None = None
+    watchlist_snapshot: tuple[str, ...] = ()
+    market_data_contracts: set[str] = field(default_factory=set)
+    market_snapshots: dict[str, dict] = field(default_factory=dict)
     pending_causal_links: list[dict] = field(default_factory=list)
 
 
@@ -71,6 +76,28 @@ def _today_markers() -> tuple[str, str]:
 
 
 # ---------- 只读工具 ----------
+
+
+async def get_research_market_data(deps: ResearchToolDeps, args: dict) -> str:
+    """一次返回白名单单合约的 4h/1d K线、指标、资金费率和 OI 结构。"""
+    contract = str(args.get("contract") or "").strip()
+    if not contract:
+        raise ToolArgError("contract 不能为空")
+    if contract not in deps.watchlist_snapshot:
+        raise ToolArgError(
+            f"contract {contract!r} 不在本轮白名单：{', '.join(deps.watchlist_snapshot)}"
+        )
+    limit, error = _parse_int(args, "limit", 30, 1, 100)
+    if contract in deps.market_data_contracts:
+        raise ToolArgError(f"contract {contract!r} 已成功读取，禁止重复调用市场数据工具")
+    if error:
+        raise ToolArgError(error)
+    if deps.market_data is None:
+        raise ToolArgError("研报市场数据服务未装配")
+    snapshot = await deps.market_data.snapshot(contract, limit=limit)
+    deps.market_data_contracts.add(contract)
+    deps.market_snapshots[contract] = snapshot
+    return json.dumps(snapshot, ensure_ascii=False)
 
 
 async def fetch_calendar(deps: ResearchToolDeps, args: dict) -> str:
@@ -202,21 +229,15 @@ async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
-    """判断层近 N 天（含验证结果与错因，自我纠错输入）。"""
+    """判断层近 N 天，按报告与合约分组。"""
     days, err = _parse_int(args, "days", 7, 1, 30)
     if err:
         return err
     reports = await deps.repo.research.list_reports(days)
     if not reports:
         return f"近 {days} 天无研报记录"
-    lines = [f"## 历史研报结论（近 {days} 天，{len(reports)} 条）"]
-    for r in reports:
-        verify = r.verify_result or "未验证"
-        lines.append(
-            f"- [{_fmt_ts(r.created_at)}] {r.direction}/{r.confidence}（{r.horizon}）"
-            f" 依据：{r.evidence_json[:100]} 验证：{verify}"
-        )
-    return "\n".join(lines)
+    title = f"## 历史研报结论（近 {days} 天，{len(reports)} 份）"
+    return await render_judgments(deps.repo.research, reports, title)
 
 
 async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:

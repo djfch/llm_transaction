@@ -19,7 +19,7 @@ from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
 from src.market.triggers import MAX_ALERTS, TriggerManager
-from src.memory.models import ResearchReport
+from src.memory.models import ResearchAssetView
 from src.memory.repo import Repo
 from src.risk.models import PositionSnapshot
 
@@ -204,42 +204,51 @@ class ContextBuilder:
         return "\n".join(lines)
 
     async def _research_section(self) -> str | None:
-        """最新研报前瞻（宏观与消息面）：方向结论 + 高置信硬约束标注。
-
-        无研报返回 None（整段省略，对齐指标服务未接入惯例）；读取/渲染异常降级为
-        提示段，不拖垮其余 section。高置信（偏多/偏空）且未过 gate 有效期时，
-        如实标注风控已对反向开仓硬约束——软上下文与硬闸门口径一致。
-        """
+        """按白名单逐合约注入当前研报结论。"""
         try:
-            report = await self._repo.research.latest_report()
-            if report is None:
-                return None
-            lines = [
-                "## 研报前瞻（宏观与消息面）",
-                f"方向：{report.direction} · 置信度：{report.confidence} · 周期：{report.horizon}",
-                f"创建时间：{_fmt_ts(report.created_at)}",
+            views = [
+                view
+                for contract in self._watchlist
+                if (view := await self._repo.research.latest_asset_view(contract)) is not None
             ]
-            narrative = report.narrative
-            if len(narrative) > 500:
-                narrative = narrative[:500] + "…"
-            if narrative:
-                lines.append(f"正文摘要：{narrative}")
-            if self._gate_active(report):
-                lines.append("⚠ 高置信结论有效期内：反向开仓已被风控硬约束")
-            return "\n".join(lines)
         except Exception as e:
             logger.exception("研报前瞻段生成失败：%s", e)
             return "## 研报前瞻（宏观与消息面）\n暂不可用"
+        if not views:
+            return None
+        lines = ["## 研报前瞻（宏观与消息面）"]
+        for view in views:
+            lines.extend(self._research_view_lines(view))
+        return "\n".join(lines)
 
-    def _gate_active(self, report: ResearchReport) -> bool:
-        """研报方向闸门当前是否生效（gate 开启 + 高置信多/空 + 未过有效期）。"""
+    def _research_view_lines(self, view: ResearchAssetView) -> list[str]:
+        narrative = view.narrative[:500] + ("…" if len(view.narrative) > 500 else "")
+        lines = [
+            f"### {view.contract}",
+            f"方向：{view.direction} · 置信度：{view.confidence} · 周期：{view.horizon}",
+            f"结构：{view.market_regime} · 依据：{view.basis_type} · "
+            f"技术确认：{view.technical_confirmation} · 数据：{view.data_status}",
+            f"创建时间：{_fmt_ts(view.created_at)}",
+        ]
+        if narrative:
+            lines.append(f"正文摘要：{narrative}")
+        if self._gate_active(view):
+            lines.append("⚠ 高置信结论有效期内：反向开仓已被风控硬约束")
+        return lines
+
+    def _gate_active(self, view: ResearchAssetView) -> bool:
+        """与下单硬闸门保持同一口径。"""
         cfg = self._research_config
         if cfg is None or not cfg.gate_enabled:
             return False
-        if report.confidence != "高" or report.direction not in ("偏多", "偏空"):
-            return False
-        age = time.time() - report.created_at
-        return age <= cfg.gate_max_age_hours * 3600
+        eligible = (
+            view.confidence == "高"
+            and view.direction in ("偏多", "偏空")
+            and view.basis_type in ("事件驱动", "宏观驱动", "混合")
+            and view.data_status != "不可用"
+            and view.technical_confirmation not in ("冲突", "不可用")
+        )
+        return eligible and time.time() - view.created_at <= cfg.gate_max_age_hours * 3600
 
     async def _notes_section(self) -> str:
         notes = await self._repo.recent_notes(self._notes_n)

@@ -1,113 +1,74 @@
-/**
- * mock 实现一致性测试：mockApi 的研报方法与 ApiClient 契约形态对齐
- * （分页/详情/手动触发/实时状态），供 VITE_USE_MOCK 预览与组件测试复用。
- * 注意 mock 为内存态：用例内一律取「操作前后」相对断言，不假定绝对条数；
- * 初始固定 2 条假研报（id=2 失败 roundId 空串、id=1 成功带因果链 roundId='rs-mock-1'）。
- */
+/** 研报 mock 与当前逐标的 API 契约一致性。 */
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/http'
 import { mockApi } from '../api/mock'
 
-// 注意：runResearch 会向 mock 内存态追加研报（模块级状态），
-// 「初始 2 条」断言必须先于文件内任何 runResearch 调用执行，故本用例置于文件顶部。
-describe('mock 初始研报列表', () => {
-  it('getResearchReports：初始固定 2 条、分页切片 + total 全量 + 列表 narrative 截断 200 字符', async () => {
+describe('mock 初始研报', () => {
+  it('列表包含一条失败报告和一条成功逐标的报告', async () => {
     const page = await mockApi.getResearchReports(0, 2)
     expect(page.total).toBe(2)
-    expect(page.items).toHaveLength(2)
-    for (const item of page.items) expect(item.narrative.length).toBeLessThanOrEqual(200)
-    // 最新在前：id=2 失败行在前、id=1 成功行在后
-    expect(page.items[0].id).toBe(2)
     expect(page.items[0].error).not.toBe('')
-    expect(page.items[1].id).toBe(1)
-    // evidenceJson 与后端契约同形状：对象数组 [{point, source}] 的 JSON 原文
-    const ev0 = JSON.parse(page.items[1].evidenceJson)[0]
-    expect(ev0).toMatchObject({ point: expect.any(String), source: expect.any(String) })
-    const rest = await mockApi.getResearchReports(2, 2)
-    expect(rest.items).toHaveLength(0)
-  })
-})
-
-describe('mock 实时研报状态', () => {
-  it('getResearchLive：恒无进行中研报轮（round 为 null、tool_calls 为空），进度条保持隐藏', async () => {
-    // 与 getReviewLive 的「无轮次」契约同形：研报轮要么瞬时完成、要么由 WS 事件驱动，不落实时轮
-    const live = await mockApi.getResearchLive()
-    expect(live.round).toBeNull()
-    expect(live.tool_calls).toEqual([])
+    expect(page.items[0].assetViews).toEqual([])
+    expect(page.items[1].schemaVersion).toBe(2)
+    expect(page.items[1].assetViews[0].contract).toBe('BTC_USDT')
+    expect(['确认', '冲突', '中性', '不可用']).toContain(
+      page.items[1].assetViews[0].technicalConfirmation,
+    )
   })
 
-  it('getResearchLive：手动触发研报后仍无进行中轮（研报完成即落库，不留实时状态）', async () => {
-    await mockApi.runResearch()
-    const live = await mockApi.getResearchLive()
-    expect(live.round).toBeNull()
-    expect(live.tool_calls).toEqual([])
-  })
-})
-
-describe('mock 研报端点', () => {
-  it('getResearchReport：详情 narrative 全文（长于列表截断）+ evidence 对象数组（{point,source}）+ risks 字符串数组 + 因果链 2 条；未知 id 抛 404 ApiError', async () => {
-    const full = await mockApi.getResearchReport(1)
-    expect(full.narrative.length).toBeGreaterThan(200) // 列表截断 200，详情给全文
-    expect(full.evidence).toHaveLength(3)
-    // mock 内部与后端契约同形状（{point,source} 对象数组），返回前经 http 同一适配逻辑转「point（source）」展示串
-    expect(full.evidence[0]).toBe('美国 6 月 CPI 同比 3.0%，低于预期 3.1%（金十日历）')
-    expect(full.risks).toHaveLength(2)
-    expect(typeof full.risks[0]).toBe('string') // risks 为真字符串数组，不受对象适配影响
-    expect(full.raw).toEqual({ direction: '偏多', confidence: '中', horizon: '24h' })
-    // 因果链：已确认结论 / 待验证修正版（替代链#3）/ 已被替代旧版 三条，chain 均为节点数组、confidence 为数值
-    expect(full.causalLinks).toHaveLength(3)
-    const verified = full.causalLinks.find((l) => l.status === 'verified')
-    const pending = full.causalLinks.find((l) => l.status === 'pending')
-    const superseded = full.causalLinks.find((l) => l.status === 'superseded')
-    expect(verified).toBeDefined()
-    expect(verified!.chain).toHaveLength(3)
-    expect(verified!.chain[0]).toMatchObject({ node: '美国 6 月 CPI 同比回落至 3.0%', kind: '事件', timeline_id: 1287 })
-    expect(typeof verified!.confidence).toBe('number')
-    expect(pending).toBeDefined()
-    expect(pending!.brokenAt).toBeNull()
-    expect(pending!.supersedesId).toBe(3) // 修正版声明替代旧版链#3
-    expect(superseded).toBeDefined()
-    expect(superseded!.topic).toBe('美联储')
-    expect(verified!.topic).toBe('CPI')
-    expect(verified!.awaitVerification).toBe(false) // 结论链
-    expect(pending!.awaitVerification).toBe(true) // 待验证
-
-    const err: unknown = await mockApi.getResearchReport(99999).catch((e: unknown) => e)
-    expect(err).toBeInstanceOf(ApiError)
-    expect((err as ApiError).status).toBe(404)
+  it('成功详情包含逐标的研判和版本化因果链', async () => {
+    const detail = await mockApi.getResearchReport(1)
+    const asset = detail.assetViews[0]
+    expect(asset.narrative).toContain('亚盘时段宏观面偏多')
+    expect(asset.evidence[0]).toBe('美国 6 月 CPI 同比 3.0%，低于预期 3.1%（金十日历）')
+    expect(asset.risks).toHaveLength(2)
+    expect(detail.causalLinks).toHaveLength(3)
+    const verified = detail.causalLinks.find((link) => link.status === 'verified')
+    const pending = detail.causalLinks.find((link) => link.status === 'pending')
+    const superseded = detail.causalLinks.find((link) => link.status === 'superseded')
+    expect(verified?.chain[0]).toMatchObject({
+      node: '美国 6 月 CPI 同比回落至 3.0%',
+      kind: '事件',
+      timeline_id: 1287,
+    })
+    expect(verified?.awaitVerification).toBe(false)
+    expect(pending?.supersedesId).toBe(3)
+    expect(superseded?.topic).toBe('美联储')
   })
 
-  it('getResearchReport：失败研报（id=2）详情为错误记录形态（error 非空、narrative 空、无因果链）', async () => {
+  it('失败详情没有逐标的结论，未知 ID 返回 404', async () => {
     const failed = await mockApi.getResearchReport(2)
     expect(failed.error).not.toBe('')
-    expect(failed.narrative).toBe('')
+    expect(failed.assetViews).toEqual([])
     expect(failed.causalLinks).toEqual([])
-    expect(failed.roundId).toBe('') // 空串 = 无关联，演示工具链降级
+    const error: unknown = await mockApi.getResearchReport(99999).catch((item: unknown) => item)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(404)
   })
+})
 
-  it('runResearch：started/ok 且列表最前新增一条成功研报（reportId 与 roundId 自洽）', async () => {
+describe('mock 手动研报与实时状态', () => {
+  it('手动生成后列表新增两个白名单结论', async () => {
     const before = (await mockApi.getResearchReports(0, 1)).total
     const result = await mockApi.runResearch('manual', 24)
-    expect(result.started).toBe(true)
-    expect(result.ok).toBe(true)
     const after = await mockApi.getResearchReports(0, 1)
+    expect(result).toMatchObject({ started: true, ok: true, assetCount: 2 })
     expect(after.total).toBe(before + 1)
-    const newest = after.items[0]
-    expect(newest.id).toBe(result.reportId)
-    expect(newest.error).toBe('')
-    // roundId 自洽：新增研报的 roundId 与 run 返回一致，且 getRound 对该 roundId 可回退通用详情
-    expect(newest.roundId).toBe(result.roundId)
-    expect(newest.roundId).not.toBe('')
+    expect(after.items[0].roundId).toBe(result.roundId)
+    expect(after.items[0].assetViews.map((view) => view.contract)).toEqual([
+      'BTC_USDT',
+      'ETH_USDT',
+    ])
+    expect(
+      after.items[0].assetViews.every((view) =>
+        ['确认', '冲突', '中性', '不可用'].includes(view.technicalConfirmation),
+      ),
+    ).toBe(true)
+    const detail = await mockApi.getResearchReport(result.reportId!)
+    expect(detail.globalRisks).toEqual(['临近美盘开盘，事件驱动风险上升'])
   })
 
-  it('roundId 自洽：非空 roundId 的研报经 getRound 可取到工具链；空串样例演示老研报降级', async () => {
-    const list = await mockApi.getResearchReports(0, 50)
-    const withRound = list.items.find((r) => r.roundId !== '')
-    expect(withRound).toBeDefined()
-    const detail = await mockApi.getRound(withRound!.roundId)
-    expect(detail.round_id).toBe(withRound!.roundId)
-    expect(Array.isArray(detail.tool_calls)).toBe(true)
-    // 至少一条空串 roundId（演示「该研报无工具调用记录」降级形态）
-    expect(list.items.some((r) => r.roundId === '')).toBe(true)
+  it('没有进行中研报轮', async () => {
+    expect(await mockApi.getResearchLive()).toEqual({ round: null, tool_calls: [] })
   })
 })

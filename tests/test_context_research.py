@@ -43,16 +43,37 @@ async def _seed_report(
     repo, db, *, direction="偏多", confidence="高", narrative="n" * 600, hours_ago=0.0
 ) -> None:
     """落库一份研报；hours_ago>0 时把 created_at 改写为 n 小时前（模拟过期）。"""
-    r = await repo.research.save_report(
+    r, _ = await repo.research.save_report_bundle(
         report_type="us",
-        direction=direction,
-        confidence=confidence,
-        horizon="24h",
-        narrative=narrative,
+        summary="市场总览",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="r-research",
+        asset_views=[
+            {
+                "contract": "BTC_USDT",
+                "direction": direction,
+                "confidence": confidence,
+                "horizon": "24h",
+                "market_regime": "上涨趋势",
+                "technical_confirmation": "确认",
+                "basis_type": "混合",
+                "data_status": "完整",
+                "evidence_json": "[]",
+                "risks_json": "[]",
+                "narrative": narrative,
+                "market_context_json": "{}",
+            }
+        ],
     )
     if hours_ago:
         await db.conn.execute(
             "UPDATE research_reports SET created_at=? WHERE id=?",
+            (time.time() - hours_ago * 3600, r.id),
+        )
+        await db.conn.execute(
+            "UPDATE research_asset_views SET created_at=? WHERE report_id=?",
             (time.time() - hours_ago * 3600, r.id),
         )
         await db.conn.commit()
@@ -153,10 +174,10 @@ async def test_research_section_omitted_without_report(tmp_path):
 
 
 async def test_research_section_degrades_on_repo_error(tmp_path):
-    """latest_report 抛异常：build() 正常完成，研报段降级为「暂不可用」。"""
+    """latest_asset_view 抛异常：build() 正常完成，研报段降级为「暂不可用」。"""
 
     async def _seed_broken(repo, db):
-        repo.research.latest_report = AsyncMock(side_effect=RuntimeError("研报库不可用"))
+        repo.research.latest_asset_view = AsyncMock(side_effect=RuntimeError("研报库不可用"))
 
     text = await _build_text(tmp_path, research_config=ResearchConfig(), seed=_seed_broken)
 

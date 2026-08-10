@@ -6,6 +6,7 @@ provider 用确定性 Mock（不触网）；数据源用假实现；审计落 tm
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import datetime
 
 import pytest
@@ -29,12 +30,23 @@ logger = get_logger(__name__)
 
 GOOD_JSON = json.dumps(
     {
-        "direction": "偏多",
-        "confidence": "高",
-        "horizon": "当日",
-        "evidence": [{"point": "ETF 连续流入", "source": "指标快照"}],
-        "risks": ["高利率"],
-        "narrative": "流动性宽松，看多",
+        "summary": "BTC 流动性改善",
+        "cross_market_view": "单标的研报，无跨标的比较",
+        "global_risks": ["高利率"],
+        "asset_views": [
+            {
+                "contract": "BTC_USDT",
+                "direction": "偏多",
+                "confidence": "高",
+                "horizon": "当日",
+                "market_regime": "上涨趋势",
+                "technical_confirmation": "确认",
+                "basis_type": "混合",
+                "evidence": [{"point": "ETF 连续流入", "source": "指标快照"}],
+                "risks": ["高利率"],
+                "narrative": "流动性宽松，技术结构确认",
+            }
+        ],
     },
     ensure_ascii=False,
 )
@@ -87,8 +99,19 @@ class _FakeBb:
         return []
 
 
+class _ResearchMarketData:
+    async def snapshot(self, contract: str, limit: int = 30) -> dict:
+        return {
+            "contract": contract,
+            "requested_limit": limit,
+            "data_status": "完整",
+            "funding_rate": "0.0001",
+            "timeframes": {},
+        }
+
+
 class _SequentialProvider:
-    """确定性 Mock：第一轮调 2 个工具，第二轮直接输出 JSON。"""
+    """确定性 Mock：第一轮取公共信息和白名单行情，第二轮输出 JSON。"""
 
     def __init__(self) -> None:
         self._calls = 0
@@ -103,6 +126,7 @@ class _SequentialProvider:
                 tool_calls=[
                     ToolCall("fetch_calendar", {}),
                     ToolCall("fetch_indicators", {}),
+                    ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
                 ],
                 raw=f"raw-{self._calls}",
                 assistant_message={"role": "assistant", "content": "工具轮"},
@@ -142,10 +166,13 @@ class _BadJsonProvider(_SequentialProvider):
 
 
 @pytest.fixture
-async def repo(tmp_path) -> Repo:
+async def repo(tmp_path) -> AsyncIterator[Repo]:
     db = Database()
     await db.open(tmp_path / "research.db")
-    return Repo(db)
+    try:
+        yield Repo(db)
+    finally:
+        await db.close()
 
 
 @pytest.fixture
@@ -165,6 +192,8 @@ async def _build_agent(
         audit=audit,
         prompt_loader=ResearchPromptLoader(tmp_path / "research_prompt.md"),
         data_provider=data,
+        market_data=_ResearchMarketData(),
+        watchlist=("BTC_USDT",),
         notify_event=notify_event,
         max_turns=10,
         timeout_seconds=60,
@@ -176,18 +205,23 @@ async def test_full_round_success(repo: Repo, settings: Settings, tmp_path) -> N
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
     result = await agent.run(report_type="us")
     assert result["ok"] is True
-    assert result["direction"] == "偏多" and result["confidence"] == "高"
+    assert result["asset_count"] == 1
     report = await repo.research.latest_report()
     assert report is not None
-    assert report.direction == "偏多"
+    views = await repo.research.list_asset_views_by_report(report.id)
+    assert len(views) == 1 and views[0].direction == "偏多"
     assert report.report_type == "us"
-    # 审计轮完整：1 轮 + 2 次工具调用
+    # 审计轮完整：1 轮 + 3 次工具调用
     audit_round = await repo.latest_audit_round("paper")
     assert audit_round is not None
     assert audit_round.wake_source == "research"
     assert audit_round.error == ""
     calls = await repo.list_audit_tool_calls(result["round_id"])
-    assert [c.tool for c in calls] == ["fetch_calendar", "fetch_indicators"]
+    assert [c.tool for c in calls] == [
+        "fetch_calendar",
+        "fetch_indicators",
+        "get_research_market_data",
+    ]
 
 
 async def test_bad_json_falls_to_error_report(repo: Repo, settings: Settings, tmp_path) -> None:
@@ -213,15 +247,16 @@ async def test_no_provider_returns_failure(repo: Repo, settings: Settings, tmp_p
 
 
 def test_parse_payload_edge_cases() -> None:
-    """JSON 解析容错：代码块包裹、缺字段、非法取值、合法。"""
-    assert _parse_payload(f"```json\n{GOOD_JSON}\n```")["direction"] == "偏多"
-    assert _parse_payload('{"direction": "偏多"}') is None  # 缺 confidence
-    assert _parse_payload('{"direction": "大涨", "confidence": "高"}') is None  # 非法取值
-    assert _parse_payload("not json") is None
-    assert _parse_payload(GOOD_JSON)["confidence"] == "高"
-    # L6 回归：evidence/risks 非 list 必须拒绝（触发重试规范化）
-    assert _parse_payload('{"direction": "偏多", "confidence": "高", "evidence": "字符串"}') is None
-    assert _parse_payload('{"direction": "偏多", "confidence": "高", "risks": 5}') is None
+    """JSON 解析容错：代码块包裹、缺字段、非法文本、合法。"""
+    kwargs = {
+        "expected_contracts": ("BTC_USDT",),
+        "queried_contracts": {"BTC_USDT"},
+        "data_statuses": {"BTC_USDT": "完整"},
+    }
+    parsed = _parse_payload(GOOD_JSON, **kwargs)
+    assert parsed is not None and parsed["asset_views"][0]["direction"] == "偏多"
+    assert _parse_payload('{"summary": "缺逐标的"}', **kwargs) is None
+    assert _parse_payload("not json", **kwargs) is None
 
 
 async def test_tool_call_failure_does_not_abort(repo: Repo, settings: Settings, tmp_path) -> None:
@@ -235,7 +270,10 @@ async def test_tool_call_failure_does_not_abort(repo: Repo, settings: Settings, 
             if self._calls == 1:
                 return LLMResponse(
                     text="调个不存在的工具",
-                    tool_calls=[ToolCall("not_a_tool", {})],
+                    tool_calls=[
+                        ToolCall("not_a_tool", {}),
+                        ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
+                    ],
                     raw=f"raw-{self._calls}",
                     assistant_message={"role": "assistant", "content": "工具轮"},
                 )
@@ -284,11 +322,18 @@ async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path)
             self.seen: list[list[dict]] = []  # 每次调用收到的 messages 快照
 
         async def chat(self, system, messages, tools):
-            from src.agent.providers.base import LLMResponse
+            from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
             self.seen.append([dict(m) for m in messages])
             if self._calls == 1:
+                return LLMResponse(
+                    text="先取行情",
+                    tool_calls=[ToolCall("get_research_market_data", {"contract": "BTC_USDT"})],
+                    raw="raw-market",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            if self._calls == 2:
                 return LLMResponse(
                     text="坏JSON",
                     raw="raw1",
@@ -304,11 +349,11 @@ async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path)
     provider = _RetryProvider()
     agent = await _build_agent(repo, settings, provider, tmp_path)
     result = await agent.run()
-    assert result["ok"] is True and result["direction"] == "偏多"
+    assert result["ok"] is True and result["asset_count"] == 1
     assert provider._retry_called  # 确实走了重试
     # 同上下文重发：重试请求与产生坏输出的请求一致，未追加纠错/失败内容
-    assert provider._calls == 2
-    assert provider.seen[1] == provider.seen[0]
+    assert provider._calls == 3
+    assert provider.seen[2] == provider.seen[1]
 
 
 async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, tmp_path) -> None:
@@ -320,11 +365,18 @@ async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, 
             self.seen: list[list[dict]] = []
 
         async def chat(self, system, messages, tools):
-            from src.agent.providers.base import LLMResponse
+            from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
             self.seen.append([dict(m) for m in messages])
-            if self._calls <= 2:
+            if self._calls == 1:
+                return LLMResponse(
+                    text="先取行情",
+                    tool_calls=[ToolCall("get_research_market_data", {"contract": "BTC_USDT"})],
+                    raw="raw-market",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            if self._calls <= 3:
                 return LLMResponse(
                     text=f"坏JSON{self._calls}",
                     raw=f"raw-{self._calls}",
@@ -339,9 +391,9 @@ async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, 
     provider = _ThirdTimeProvider()
     agent = await _build_agent(repo, settings, provider, tmp_path)
     result = await agent.run()
-    assert result["ok"] is True and result["direction"] == "偏多"
-    assert provider._calls == 3  # 初始 + 2 次同参重发
-    assert provider.seen[0] == provider.seen[1] == provider.seen[2]
+    assert result["ok"] is True and result["asset_count"] == 1
+    assert provider._calls == 4  # 行情工具 + 初始 + 2 次同参重发
+    assert provider.seen[1] == provider.seen[2] == provider.seen[3]
 
 
 async def test_reask_uses_full_context_after_tool_round(
@@ -362,7 +414,10 @@ async def test_reask_uses_full_context_after_tool_round(
             if self._calls == 1:
                 return LLMResponse(
                     text="先查日历",
-                    tool_calls=[ToolCall("fetch_calendar", {})],
+                    tool_calls=[
+                        ToolCall("fetch_calendar", {}),
+                        ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
+                    ],
                     raw="raw-1",
                     assistant_message={"role": "assistant", "content": "工具轮"},
                 )
@@ -386,7 +441,7 @@ async def test_reask_uses_full_context_after_tool_round(
     # 重发（第 3 次调用）请求与产生坏 JSON（第 2 次调用）的请求上下文完全一致：
     # [user 预注入, assistant 工具轮, 工具结果] 全序列，坏 JSON 文本本身未回灌
     assert provider.seen[2] == provider.seen[1]
-    assert len(provider.seen[2]) == 3
+    assert len(provider.seen[2]) == 4
     assert provider.seen[2][0]["role"] == "user"
     assert provider.seen[2][1] == {"role": "assistant", "content": "工具轮"}
     assert "坏JSON" not in str(provider.seen[2])
@@ -507,7 +562,8 @@ class _CausalLinkProvider(_SequentialProvider):
                             "evidence": ["金十快讯"],
                             "topic": "油价",
                         },
-                    )
+                    ),
+                    ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
                 ],
                 raw=f"raw-{self._calls}",
                 assistant_message={"role": "assistant", "content": "工具轮"},
@@ -605,6 +661,7 @@ async def test_flush_causal_links_partial_failure(
                                 "topic": "非农",
                             },
                         ),
+                        ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
                     ],
                     raw="raw-1",
                     assistant_message={"role": "assistant", "content": "工具轮"},
@@ -643,13 +700,20 @@ async def test_retry_round_tool_calls_executed_and_flushed(
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
-            if self._calls == 1:  # 首轮坏 JSON → 触发重试
+            if self._calls == 1:
+                return LLMResponse(
+                    text="先取行情",
+                    tool_calls=[ToolCall("get_research_market_data", {"contract": "BTC_USDT"})],
+                    raw="raw-market",
+                    assistant_message={"role": "assistant", "content": "工具轮"},
+                )
+            if self._calls == 2:  # 首轮坏 JSON → 触发重试
                 return LLMResponse(
                     text="坏JSON",
                     raw="raw-1",
                     assistant_message={"role": "assistant", "content": "坏JSON"},
                 )
-            if self._calls == 2:  # 重试轮带工具调用（L7 路径）
+            if self._calls == 3:  # 重试轮带工具调用（L7 路径）
                 return LLMResponse(
                     text="补条链",
                     tool_calls=[
@@ -662,12 +726,12 @@ async def test_retry_round_tool_calls_executed_and_flushed(
                             },
                         )
                     ],
-                    raw="raw-2",
+                    raw="raw-4",
                     assistant_message={"role": "assistant", "content": "补条链"},
                 )
             return LLMResponse(  # 工具回填后输出合法 JSON
                 text=GOOD_JSON,
-                raw="raw-3",
+                raw="raw-4",
                 assistant_message={"role": "assistant", "content": GOOD_JSON},
             )
 
@@ -733,3 +797,78 @@ async def test_event_notifier_raise_does_not_break(
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, _boom)
     result = await agent.run(report_type="us")
     assert result["ok"] is True
+
+
+V2_JSON = json.dumps(
+    {
+        "summary": "逐标的研报",
+        "cross_market_view": "BTC 与 ETH 同步",
+        "global_risks": ["CPI"],
+        "asset_views": [
+            {
+                "contract": contract,
+                "direction": "偏多",
+                "confidence": "高",
+                "horizon": "3日",
+                "market_regime": "上涨趋势",
+                "technical_confirmation": "确认",
+                "basis_type": "宏观驱动",
+                "evidence": [{"point": "资金流入", "source": "快讯"}],
+                "risks": ["数据反转"],
+                "narrative": f"{contract} 结构向上",
+            }
+            for contract in ("BTC_USDT", "ETH_USDT")
+        ],
+    },
+    ensure_ascii=False,
+)
+
+
+class _V2Provider(_SequentialProvider):
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        from src.agent.providers.base import LLMResponse, ToolCall
+
+        self._calls += 1
+        if self._calls == 1:
+            return LLMResponse(
+                text="读取白名单市场快照",
+                tool_calls=[
+                    ToolCall("get_research_market_data", {"contract": "BTC_USDT"}),
+                    ToolCall("get_research_market_data", {"contract": "ETH_USDT", "limit": 20}),
+                ],
+                raw="raw-v2-tools",
+                assistant_message={"role": "assistant", "content": "工具轮"},
+            )
+        return LLMResponse(
+            text=V2_JSON,
+            raw="raw-v2-final",
+            assistant_message={"role": "assistant", "content": V2_JSON},
+        )
+
+
+async def test_v2_round_saves_every_whitelist_asset(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    audit = AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit-v2")))
+    agent = ResearchAgent(
+        settings=settings,
+        provider=_V2Provider(),
+        repo=repo,
+        audit=audit,
+        prompt_loader=ResearchPromptLoader(tmp_path / "research_prompt-v2.md"),
+        data_provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
+        market_data=_ResearchMarketData(),
+        watchlist=("BTC_USDT", "ETH_USDT"),
+        max_turns=10,
+        timeout_seconds=60,
+    )
+
+    result = await agent.run(report_type="us_open")
+
+    assert result["ok"] is True
+    assert result["asset_count"] == 2
+    report = await repo.research.get_report(result["report_id"])
+    assert report is not None and report.schema_version == 2
+    views = await repo.research.list_asset_views_by_report(report.id)
+    assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
+    assert json.loads(views[0].market_context_json)["contract"] == "BTC_USDT"

@@ -13,14 +13,12 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from src.config import load_settings
-from src.memory.models import CausalLink, ResearchReport
+from src.memory.models import CausalLink, ResearchAssetView, ResearchReport
 from src.server.deps import ServerDeps
 from src.server.routes_status import (  # tool_calls/JSON 字段与 /agent/live 同一序列化口径
     _parse_json_field,
     _tool_call_item,
 )
-
-_LIST_NARRATIVE_LIMIT = 200  # 列表项 narrative 截断长度（省流量，详情端点给全文）
 
 
 class _ResearchRunBody(BaseModel):
@@ -30,20 +28,54 @@ class _ResearchRunBody(BaseModel):
     hours: int = Field(default=24, ge=1, le=48)
 
 
-def _report_item(report: ResearchReport, *, truncate: bool) -> dict[str, Any]:
-    """报告响应项：model_dump 全量键；truncate 时 narrative 截断（列表省流量，键名不变）。"""
-    item = report.model_dump()
-    if truncate:
-        item["narrative"] = item["narrative"][:_LIST_NARRATIVE_LIMIT]
+def _asset_summary(view: ResearchAssetView) -> dict[str, Any]:
+    keys = (
+        "contract",
+        "direction",
+        "confidence",
+        "horizon",
+        "market_regime",
+        "technical_confirmation",
+        "basis_type",
+        "data_status",
+    )
+    dumped = view.model_dump()
+    return {key: dumped[key] for key in keys}
+
+
+def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
+    item = _asset_summary(view)
+    item.update(
+        {
+            "evidence": _parse_json_field(view.evidence_json),
+            "risks": _parse_json_field(view.risks_json),
+            "narrative": view.narrative,
+            "verify_result": view.verify_result,
+            "created_at": view.created_at,
+        }
+    )
     return item
 
 
-def _report_detail(report: ResearchReport) -> dict[str, Any]:
-    """详情响应项：evidence/risks/raw 三段 JSON 文本解析为对象（非法 JSON 保留原文）。"""
-    item = report.model_dump()
-    item["evidence"] = _parse_json_field(item.pop("evidence_json"))
-    item["risks"] = _parse_json_field(item.pop("risks_json"))
-    item["raw"] = _parse_json_field(item.pop("raw_json"))
+def _report_item(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
+    """报告头只暴露当前协议字段；逐标的列表使用摘要形状。"""
+    return {
+        "id": report.id,
+        "report_type": report.report_type,
+        "schema_version": report.schema_version,
+        "summary": report.summary,
+        "cross_market_view": report.cross_market_view,
+        "global_risks": _parse_json_field(report.global_risks_json),
+        "error": report.error,
+        "round_id": report.round_id,
+        "created_at": report.created_at,
+        "asset_views": [_asset_summary(view) for view in views],
+    }
+
+
+def _report_detail(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
+    item = _report_item(report, views)
+    item["asset_views"] = [_asset_detail(view) for view in views]
     return item
 
 
@@ -71,17 +103,22 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
     async def list_research_reports(
         offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200)
     ) -> dict[str, Any]:
-        """研报分页列表（最新在前，含失败记录）；narrative 截断 200 字符省流量。"""
+        """研报分页列表（最新在前，含失败记录与逐标的摘要）。"""
         reports, total = await deps.repo.research.list_reports_page(limit=limit, offset=offset)
-        return {"items": [_report_item(r, truncate=True) for r in reports], "total": total}
+        items = []
+        for report in reports:
+            views = await deps.repo.research.list_asset_views_by_report(report.id)
+            items.append(_report_item(report, views))
+        return {"items": items, "total": total}
 
     @router.get("/research/reports/{report_id}")
     async def get_research_report(report_id: int) -> dict[str, Any]:
-        """研报详情：narrative 全文 + evidence/risks/raw 解析对象 + 该研报因果链（空为 []）。"""
+        """研报详情：逐标的证据/风险/研判 + 该研报因果链（空为 []）。"""
         report = await deps.repo.research.get_report(report_id)
         if report is None:
             raise HTTPException(status_code=404, detail=f"研报不存在: {report_id}")
-        item = _report_detail(report)
+        views = await deps.repo.research.list_asset_views_by_report(report_id)
+        item = _report_detail(report, views)
         links = await deps.repo.research.list_causal_links_by_report(report_id)
         item["causal_links"] = [_causal_link_item(link) for link in links]
         return item

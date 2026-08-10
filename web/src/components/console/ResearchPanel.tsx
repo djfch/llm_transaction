@@ -17,6 +17,7 @@ import { usePageState } from '../../hooks/usePageState'
 import { fmtTime } from '../../utils/format'
 import StateHint from '../StateHint'
 import PaginationControls from './PaginationControls'
+import { ResearchAssetBadges, ResearchAssetDetails } from './ResearchAssetViews'
 import ResearchLiveStrip from './ResearchLiveStrip'
 import ReviewToolChain from './ReviewToolChain'
 
@@ -31,19 +32,6 @@ const REPORT_TYPE_LABELS: Record<string, string> = {
   asia_open: '亚盘',
   europe_open: '欧盘',
   us_open: '美盘',
-}
-
-/** 方向徽标配色：偏多=绿 / 偏空=红 / 其余（中性及未知值）=灰 */
-const DIRECTION_STYLES: Record<string, string> = {
-  偏多: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300',
-  偏空: 'border-rose-400/40 bg-rose-400/10 text-rose-300',
-}
-
-/** 置信度徽标配色：高=蓝 / 中=黄 / 低=灰（与方向红绿区分开，避免误读为涨跌） */
-const CONFIDENCE_STYLES: Record<string, string> = {
-  高: 'border-sky-400/40 bg-sky-400/10 text-sky-300',
-  中: 'border-amber-400/40 bg-amber-400/10 text-amber-300',
-  低: 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400',
 }
 
 /** 因果链验证状态 → 文案与配色（未知值原样灰显） */
@@ -90,20 +78,6 @@ function TypeBadge({ type }: { type: string }) {
       {REPORT_TYPE_LABELS[type] ?? type}
     </span>
   )
-}
-
-/** 方向徽标：偏多绿 / 偏空红 / 中性灰；空串不渲染 */
-function DirectionBadge({ direction }: { direction: string }) {
-  if (direction === '') return null
-  const style = DIRECTION_STYLES[direction] ?? 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400'
-  return <span className={`${BADGE_BASE} ${style}`}>{direction}</span>
-}
-
-/** 置信度徽标：高蓝 / 中黄 / 低灰；空串不渲染 */
-function ConfidenceBadge({ confidence }: { confidence: string }) {
-  if (confidence === '') return null
-  const style = CONFIDENCE_STYLES[confidence] ?? 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400'
-  return <span className={`${BADGE_BASE} ${style}`}>置信度 {confidence}</span>
 }
 
 /** 单个因果链节点 chip：kind 徽标 + 节点内容 + timeline 溯源小字（有值时） */
@@ -222,70 +196,48 @@ function ReportItem({
     }
   }, [expanded, report.id, retryTick])
 
+  const failed = report.error !== ''
+
   return (
     <article className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-      <button type="button" onClick={onToggle} aria-expanded={expanded} className="block w-full text-left">
+      <button
+        type="button"
+        onClick={failed ? undefined : onToggle}
+        disabled={failed}
+        aria-expanded={failed ? false : expanded}
+        className="block w-full text-left disabled:cursor-default"
+      >
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[11px] tabular-nums text-zinc-500">{fmtTime(report.time)}</span>
           <TypeBadge type={report.reportType} />
-          <DirectionBadge direction={report.direction} />
-          <ConfidenceBadge confidence={report.confidence} />
-          <span className={`ml-auto text-[10px] text-zinc-600 transition-transform ${expanded ? 'rotate-90' : ''}`}>
-            ▸
-          </span>
+          {!failed && <ResearchAssetBadges assets={report.assetViews} />}
+          {!failed && (
+            <span className={'ml-auto text-[10px] text-zinc-600 transition-transform ' + (expanded ? 'rotate-90' : '')}>
+              ▸
+            </span>
+          )}
         </div>
-        {report.error !== '' ? (
+        {failed ? (
           <p className="mt-2 text-xs text-rose-400">研报失败：{report.error}</p>
         ) : (
-          report.narrative !== '' && (
-            <p className="mt-2 line-clamp-2 text-[13px] leading-6 text-zinc-400">{report.narrative}</p>
+          report.summary !== '' && (
+            <p className="mt-2 line-clamp-2 text-[13px] leading-6 text-zinc-400">{report.summary}</p>
           )
         )}
       </button>
 
-      {expanded && (
+      {!failed && expanded && (
         <div className="mt-3 border-t border-zinc-800/80 pt-3">
           {loading && <p className="py-3 text-xs text-zinc-500">研报全文加载中…</p>}
           {error && <p className="py-3 text-xs text-rose-400">加载失败：{error}</p>}
           {detail && (
             <>
-              {/* 结论条：方向 + 置信度 + 前瞻窗口（horizon 空串时不渲染） */}
-              <div className="flex flex-wrap items-center gap-2">
-                <DirectionBadge direction={detail.direction} />
-                <ConfidenceBadge confidence={detail.confidence} />
-                {detail.horizon !== '' && (
-                  <span className={`${BADGE_BASE} border-zinc-600/50 bg-zinc-700/30 text-zinc-400`}>
-                    前瞻窗口 {detail.horizon}
-                  </span>
-                )}
-              </div>
-              {detail.narrative !== '' && (
-                <div className="mt-3 whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-[13px] leading-6 text-zinc-300">
-                  {detail.narrative}
-                </div>
-              )}
-              {/* 证据/风险：无数据整块不渲染 */}
-              {detail.evidence.length > 0 && (
-                <div className="mt-3">
-                  <h4 className="text-[10px] text-zinc-500">证据</h4>
-                  <ul className="mt-1 space-y-0.5">
-                    {detail.evidence.map((item, i) => (
-                      <li key={i} className="text-xs leading-5 text-zinc-400">· {item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {detail.risks.length > 0 && (
-                <div className="mt-3">
-                  <h4 className="text-[10px] text-zinc-500">风险</h4>
-                  <ul className="mt-1 space-y-0.5">
-                    {detail.risks.map((item, i) => (
-                      <li key={i} className="text-xs leading-5 text-zinc-400">· {item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {/* 因果链：按主题分族展示（当前版在前，被替代链灰显折叠）；无数据整块不渲染 */}
+              <ResearchAssetDetails
+                summary={detail.summary}
+                crossMarketView={detail.crossMarketView}
+                globalRisks={detail.globalRisks}
+                assets={detail.assetViews}
+              />
               {detail.causalLinks.length > 0 && (
                 <div className="mt-3">
                   <h4 className="text-[10px] text-zinc-500">因果链（按主题分族）</h4>
@@ -307,7 +259,6 @@ function ReportItem({
                   </div>
                 </div>
               )}
-              {/* 工具调用链：roundId 非空时内嵌该轮研报审计详情；空串 = 无工具调用记录，灰字降级 */}
               {detail.roundId !== '' ? (
                 <ReviewToolChain roundId={detail.roundId} />
               ) : (

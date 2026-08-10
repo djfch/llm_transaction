@@ -21,19 +21,19 @@ from .base import (
     Account,
     Candle,
     Contract,
-    ContractNotFound,
-    ExchangeTrade,
     GatewayError,
     OrderNotFound,
+    ExchangeTrade,
     OrderRequest,
     OrderResult,
     OrderStateUnknown,
     Position,
     PositionCloseRecord,
-    PositionNotFound,
     TpslOrder,
     Ticker,
 )
+from .errors import wrap_gate_exception
+from .gate_market_stats import GateOpenInterestMixin
 
 _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
@@ -41,13 +41,6 @@ _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤�
 _FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
-
-# Gate 私有错误 label -> 自定义异常
-_LABEL_EXCEPTIONS: dict[str, type[GatewayError]] = {
-    "ORDER_NOT_FOUND": OrderNotFound,
-    "POSITION_NOT_FOUND": PositionNotFound,
-    "CONTRACT_NOT_FOUND": ContractNotFound,
-}
 
 
 def gen_client_order_id() -> str:
@@ -109,15 +102,6 @@ def build_order_payload(req: OrderRequest) -> dict:
         ),
         "text": text,
     }
-
-
-def wrap_gate_exception(exc: GateApiException) -> GatewayError:
-    """按 GateApiException.label 分类包装成自定义异常。"""
-    label = getattr(exc, "label", "") or ""
-    message = getattr(exc, "message", "") or str(exc)
-    status = getattr(exc, "status", None)
-    exc_type = _LABEL_EXCEPTIONS.get(label, GatewayError)
-    return exc_type(f"[{label or 'UNKNOWN'}] {message}", label=label, status=status)
 
 
 def _dec(value: str | None) -> Decimal:
@@ -241,7 +225,7 @@ def _to_position_close_record(r: gate_api.PositionClose) -> PositionCloseRecord:
     )
 
 
-class GateRestGateway:
+class GateRestGateway(GateOpenInterestMixin):
     """真实网关：只做 SDK 调用与异常/超时处理，下单语义由 build_order_payload 组装。"""
 
     def __init__(
@@ -473,17 +457,6 @@ class GateRestGateway:
             return [_to_ticker(t) for t in self._api.list_futures_tickers(self._settle)]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
-
-    def fetch_open_interest(self, contract: str) -> Decimal | None:
-        """持仓量（张数）：contract_stats 最新一条（limit=1 依 API 默认取最近记录）。"""
-        try:
-            stats = self._api.list_contract_stats(self._settle, contract, limit=1)
-        except GateApiException as exc:
-            raise wrap_gate_exception(exc) from exc
-        if not stats:
-            return None
-        latest = max(stats, key=lambda s: int(s.time or 0))
-        return _dec(latest.open_interest)
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
         """通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数。"""

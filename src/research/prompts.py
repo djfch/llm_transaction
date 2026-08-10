@@ -15,6 +15,23 @@ from src.audit.logger import get_logger
 
 logger = get_logger(__name__)
 
+RESEARCH_PROTOCOL_V2 = """## 强制协议附录：RESEARCH_ASSET_VIEWS_PROTOCOL_V2
+
+本附录优先级高于运行时策略正文中的旧输出格式。
+- 本轮白名单已冻结。必须对每个合约恰好调用一次 get_research_market_data，可用 limit 控制
+  同时返回的 4h 与 1d K 线根数；不得查询白名单外合约。
+- 1d 判断结构方向，4h 判断近期节奏。新闻和宏观数据解释催化剂；K 线、成交量、持仓量与
+  资金费率验证市场是否真正响应。
+- 新闻与技术结构冲突时降低置信度，并把 technical_confirmation 写为 冲突。
+- 无重要新闻时允许 basis_type=结构延续，但 confidence 最高只能为 中。
+- 行情不可用仍须给该合约输出 direction=中性、confidence=低、technical_confirmation=不可用。
+- 最终只输出一个 JSON 对象，根字段必须为 summary、cross_market_view、global_risks、
+  asset_views。asset_views 每项必须含 contract、direction、confidence、horizon、
+  market_regime、technical_confirmation、basis_type、evidence、risks、narrative。
+- 白名单集合、成功调用市场工具的合约集合、asset_views 合约集合必须完全相等，不得遗漏、
+  重复或增加未知合约。
+"""
+
 
 class _ToolSpecLike(Protocol):
     """工具说明渲染所需的最小结构（鸭子类型，不绑定任何具体注册表）。"""
@@ -57,7 +74,7 @@ class ResearchPromptLoader:
     def system_prompt(self, tool_docs: str) -> tuple[str, str]:
         """返回（完整 system prompt, md5）。完整文本 = 研报提示词正文 + 工具说明段。"""
         body = self._load_body()
-        full = body.rstrip() + "\n\n" + tool_docs
+        full = body.rstrip() + "\n\n" + RESEARCH_PROTOCOL_V2 + "\n\n" + tool_docs
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
 

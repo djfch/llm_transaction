@@ -6,6 +6,7 @@ import pytest
 
 from src.config import PaperConfig
 from src.gateway.base import Contract, GatewayError, OrderNotFound, OrderRequest
+from src.gateway.market_stats import OpenInterestPoint
 from src.paper import PaperGateway
 
 BTC = "BTC_USDT"
@@ -262,3 +263,18 @@ def test_open_interest_delegation():
     cfg = PaperConfig(initial_equity=10000.0)
     gw = PaperGateway(cfg, contracts={BTC: make_contract()}, oi_provider=lambda c: D("123456"))
     assert gw.fetch_open_interest(BTC) == D("123456")
+
+
+def test_open_interest_history_delegation():
+    points = [OpenInterestPoint(time=100, value=D("10"))]
+    calls = []
+
+    def provider(contract: str, interval: str, limit: int):
+        calls.append((contract, interval, limit))
+        return points
+
+    cfg = PaperConfig(initial_equity=10000.0)
+    gw = PaperGateway(cfg, oi_history_provider=provider)
+    assert gw.fetch_open_interest_history(BTC, "4h", limit=3) == points
+    assert calls == [(BTC, "4h", 3)]
+    assert make_gateway().fetch_open_interest_history(BTC, "1d") == []

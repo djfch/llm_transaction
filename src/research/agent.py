@@ -2,10 +2,10 @@
 
 不变量：
 - provider 为 None（LLM 未配置）→ 直接返回失败，不落审计、不落研报；
-- 正常路径：wake_source='research' 开审计轮 → 预注入组装（五段数据）作第一轮
+- 正常路径：wake_source='research' 开审计轮 → 预注入组装（时间、白名单及六类数据）作第一轮
   user 消息 → ≤max_turns 工具循环（整体超时强制终止）→ 最终文本解析 JSON
-  （direction/confidence 必填）→ 成功落 research_reports → 回填落库本轮暂存的
-  因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败以同一
+  （白名单、市场工具与 asset_views 集合相等）→ 报告头和逐标的结论原子落库 →
+  回填本轮暂存的因果链（submit_causal_links 只暂存，LLM 无需预知研报 id）；解析失败以同一
   上下文原样重发（累计 3 次输出，不回灌失败内容；重试阶段同受超时保险丝
   约束），仍失败落 error 报告，暂存链随 deps 丢弃；
 - WS 事件（notify_event 注入时）：begin_round 后 research_round_start、审计轮结束
@@ -29,6 +29,7 @@ from src.audit.trail import AuditTrail
 from src.config import Settings
 from src.memory.repo import Repo
 from src.research.payload import _parse_payload
+from src.research.persist import persist_payload, success_result
 from src.research.preinject import build_preinjection
 from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
@@ -62,6 +63,8 @@ class ResearchAgent:
         audit: AuditTrail,
         prompt_loader: ResearchPromptLoader,
         data_provider: Any,  # ResearchDataProvider（鸭子类型，防循环 import）
+        market_data: Any | None = None,
+        watchlist: list[str] | tuple[str, ...] = (),
         notify_event: Callable[[dict], None] | None = None,  # WS 事件广播（轮始/轮末）
         max_turns: int = 30,
         timeout_seconds: int = 900,
@@ -71,6 +74,8 @@ class ResearchAgent:
         self._repo = repo
         self._audit = audit
         self._prompts = prompt_loader
+        self._market_data = market_data
+        self._watchlist = watchlist
         self._data_provider = data_provider
         self._notify_event = notify_event  # None 则不广播（测试/未接线场景零事件）
         self._max_turns = max(1, max_turns)
@@ -89,10 +94,13 @@ class ResearchAgent:
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次研报")
             return {"ok": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
+        expected_contracts = tuple(self._watchlist)
         if not 1 <= hours <= 48:  # L10：与工具层同口径
             return {"ok": False, "error": f"参数错误：hours 须在 1-48 之间（当前 {hours}）"}
         deps = ResearchToolDeps(
             provider=self._data_provider,
+            market_data=self._market_data,
+            watchlist_snapshot=expected_contracts,
             repo=self._repo,
             mode=self._settings.mode,
         )
@@ -111,20 +119,23 @@ class ResearchAgent:
             # JSON 重试会放大该阶段调用数，与工具循环同受超时保险丝约束
             payload = await asyncio.wait_for(
                 self._parse_json_with_retry(
-                    full_prompt, ask_messages, registry, round_id, raw_parts, text
+                    full_prompt,
+                    ask_messages,
+                    registry,
+                    round_id,
+                    deps,
+                    expected_contracts,
+                    raw_parts,
+                    text,
                 ),
                 timeout=self._timeout,
             )
-            report = await self._repo.research.save_report(
+            report, asset_count = await persist_payload(
+                self._repo,
                 report_type=report_type,
-                direction=payload["direction"],
-                confidence=payload["confidence"],
-                horizon=payload.get("horizon", ""),
-                evidence_json=json.dumps(payload.get("evidence", []), ensure_ascii=False),
-                risks_json=json.dumps(payload.get("risks", []), ensure_ascii=False),
-                narrative=payload.get("narrative", ""),
-                raw_json=json.dumps(payload, ensure_ascii=False),
+                payload=payload,
                 round_id=round_id,
+                deps=deps,
             )
             links_saved = await self._flush_causal_links(deps, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
@@ -132,20 +143,13 @@ class ResearchAgent:
                 {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
             )
             logger.info(
-                "研报完成 report_id=%s type=%s %s/%s 因果链=%d",
+                "研报完成 report_id=%s type=%s asset_count=%d 因果链=%d",
                 report.id,
                 report_type,
-                report.direction,
-                report.confidence,
+                asset_count,
                 links_saved,
             )
-            return {
-                "ok": True,
-                "report_id": report.id,
-                "round_id": round_id,
-                "direction": report.direction,
-                "confidence": report.confidence,
-            }
+            return success_result(report, round_id, asset_count)
         except asyncio.CancelledError:
             # 外部取消：落 error 报告收尾审计后重新抛出（保持 asyncio 取消语义，M6）
             await self._fail(round_id, raw_parts, report_type, asyncio.CancelledError("研报被取消"))
@@ -232,6 +236,8 @@ class ResearchAgent:
         ask_messages: list[dict],
         registry: ResearchToolRegistry,
         round_id: str,
+        deps: ResearchToolDeps,
+        expected_contracts: tuple[str, ...],
         raw_parts: list[str],
         text: str,
     ) -> dict:
@@ -242,7 +248,15 @@ class ResearchAgent:
         坏 JSON；系统性格式错误 3 次后抛 ValueError，按既有口径落 error 报告。
         """
         for attempt in range(3):
-            payload = _parse_payload(text)
+            payload = _parse_payload(
+                text,
+                expected_contracts=expected_contracts,
+                queried_contracts=deps.market_data_contracts,
+                data_statuses={
+                    contract: str(snapshot.get("data_status", "不可用"))
+                    for contract, snapshot in deps.market_snapshots.items()
+                },
+            )
             if payload is not None:
                 return payload
             if attempt < 2:
@@ -309,10 +323,8 @@ class ResearchAgent:
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("研报失败：%s", error)
         try:
-            await self._repo.research.save_report(
+            await self._repo.research.save_failed_report(
                 report_type=report_type,
-                direction="中性",
-                confidence="低",
                 error=error,
                 round_id=round_id,
             )

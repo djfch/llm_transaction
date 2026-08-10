@@ -1,4 +1,4 @@
-"""预注入组装：第一轮 user 消息的六段数据（日历→指标→快讯→时间线→判断史→未闭合因果链）。
+"""预注入组装：冻结白名单与七类研报上下文（时间→日历→指标→快讯→时间线→判断史→因果链）。
 
 数据源失败段标注不可用（不中断研报轮）；返回 Markdown 文本。
 从 tool_handlers 复用 ResearchToolDeps / 时间格式化 / 日期标记（单向依赖，无循环）。
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from src.research.judgments import render_judgments
 
 from src.research.providers.base import (
     KIND_CALENDAR,
@@ -126,18 +127,12 @@ async def _section_timeline(deps: ResearchToolDeps, hours: int = 24) -> str:
 
 
 async def _section_judgments(deps: ResearchToolDeps) -> str:
-    """判断史段：近 7 天研报结论（含验证结果）。"""
+    """判断史段：近 7 天按报告与合约分组。"""
     reports = await deps.repo.research.list_reports(7)
     if not reports:
         return "## 历史研报结论\n（暂无记录，这是你的首次研报）"
-    lines = [f"## 历史研报结论（近 7 天，{len(reports)} 条，含验证结果）"]
-    for r in reports:
-        verify = r.verify_result or "未验证"
-        lines.append(
-            f"- [{_fmt_ts(r.created_at)}] {r.direction}/{r.confidence}（{r.horizon}）"
-            f" 依据：{r.evidence_json[:80]} 验证：{verify}"
-        )
-    return "\n".join(lines)
+    title = f"## 历史研报结论（近 7 天，{len(reports)} 份，含验证结果）"
+    return await render_judgments(deps.repo.research, reports, title)
 
 
 async def _section_pending_links(deps: ResearchToolDeps) -> str:
@@ -164,6 +159,19 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
     return "\n".join(lines)
 
 
+def _section_watchlist(deps: ResearchToolDeps) -> str:
+    """冻结本轮白名单并明确市场工具调用的不变量。"""
+    contracts = list(deps.watchlist_snapshot)
+    if not contracts:
+        return "## 本轮白名单\n（空；本轮不得生成逐标的结论）"
+    listed = "\n".join(f"- {contract}" for contract in contracts)
+    return (
+        "## 本轮白名单（已冻结）\n"
+        + listed
+        + "\n必须对以上每个合约恰好调用一次 get_research_market_data。"
+    )
+
+
 async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
     """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→未闭合因果链）。
 
@@ -175,6 +183,7 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
     return "\n\n".join(
         [
             f"## 当前时间\n{now}（北京时间，所有分析以此为准）",
+            _section_watchlist(deps),
             await _section_calendar(deps),
             await _section_indicators(deps),
             await _section_flash(deps, hours),

@@ -38,26 +38,29 @@ logger = get_logger(__name__)
 # ---------- 风控辅助 ----------
 
 
-async def _research_gate_direction(deps: ToolDeps) -> str | None:
-    """研报方向闸门取值：仅高置信、方向明确且未过期的最新研报才约束开仓方向。
-
-    降级约定（一律返回 None，不阻塞交易）：闸门关闭（research_config 为 None 或
-    gate_enabled=False）、无研报、置信度非"高"、方向非偏多/偏空、研报超过
-    gate_max_age_hours 有效期，以及读取研报抛异常。
-    """
+async def _research_gate_direction(deps: ToolDeps, contract: str) -> str | None:
+    """按订单合约读取 v2 研报；仅可靠的高置信催化结论进入硬闸门。"""
     cfg = deps.research_config
     if cfg is None or not cfg.gate_enabled:
         return None
     try:
-        report = await deps.repo.research.latest_report()
+        view = await deps.repo.research.latest_asset_view(contract)
     except Exception:
-        logger.exception("研报方向闸门读取最新研报失败，降级为不约束方向")
+        logger.exception("研报方向闸门读取逐标的结论失败，降级为不约束方向")
         return None
-    if report is None or report.confidence != "高" or report.direction not in ("偏多", "偏空"):
+    if view is None or view.confidence != "高":
         return None
-    if time.time() - report.created_at > cfg.gate_max_age_hours * 3600:
+    if view.direction not in ("偏多", "偏空"):
         return None
-    return report.direction
+    if view.basis_type not in ("事件驱动", "宏观驱动", "混合"):
+        return None
+    if view.data_status == "不可用":
+        return None
+    if view.technical_confirmation in ("冲突", "不可用"):
+        return None
+    if time.time() - view.created_at > cfg.gate_max_age_hours * 3600:
+        return None
+    return view.direction
 
 
 async def _risk_check(
@@ -78,7 +81,7 @@ async def _risk_check(
         return ToolOutcome("风控拒绝：账户权益非正，禁止交易", "deny", "账户权益非正")
     snap = AccountSnapshot(equity=equity, unrealised_pnl=account.unrealised_pnl)
     daily = await deps.daily_stats_fn()
-    gate_direction = await _research_gate_direction(deps)
+    gate_direction = await _research_gate_direction(deps, contract)
     try:
         intent = TradeIntent(
             contract=contract,

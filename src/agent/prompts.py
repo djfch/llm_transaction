@@ -13,6 +13,15 @@ from pathlib import Path
 from src.agent.tools import ToolSpec
 
 
+EXECUTION_RESEARCH_POLICY_V2 = """## 强制策略附录：EXECUTION_RESEARCH_POLICY_V2
+
+- 研报仅按当前下单合约参考，禁止把 BTC_USDT 的结论套用到其他合约。
+- technical_confirmation=冲突 或 不可用时优先等待确认，不得把研报当成下单指令。
+- basis_type=结构延续 属于软参考，即使方向明确也不能当成风控硬闸门或自动开仓理由。
+- 研报提供方向背景，不替代当轮行情、入场条件、止损和代码风控。
+"""
+
+
 class PromptLoader:
     """策略书加载器：缓存 + mtime 检测热重载。"""
 
@@ -36,7 +45,8 @@ class PromptLoader:
     def system_prompt(self, tools: list[ToolSpec]) -> tuple[str, str]:
         """返回（完整 system prompt, md5）。完整文本 = 策略书 + 工具说明段。"""
         body = self._load_body()
-        full = body.rstrip() + "\n\n" + render_tool_docs(tools)
+        full = body.rstrip() + "\n\n" + EXECUTION_RESEARCH_POLICY_V2
+        full += "\n\n" + render_tool_docs(tools)
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
     def body_md5(self) -> str:

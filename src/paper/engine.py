@@ -26,6 +26,7 @@ from ..gateway.base import (
     OrderNotFound,
     OrderRequest,
     OrderResult,
+    OpenInterestPoint,
     Position,
     Ticker,
     TpslOrder,
@@ -35,8 +36,10 @@ from .convert import PriceSnap, RestingOrder, synth_ticker, to_position
 from .funding import settle_funding as _settle_funding
 from .liquidation import LiquidationEvent, liquidate, should_liquidate
 
+from .market_stats import PaperOpenInterestMixin
 
-class PaperGateway:
+
+class PaperGateway(PaperOpenInterestMixin):
     """模拟撮合网关。paper 模式下替代真实网关，供 agent / 风控无差别调用。"""
 
     def __init__(
@@ -47,6 +50,7 @@ class PaperGateway:
         candle_provider: Callable[..., list[Candle]] | None = None,
         ticker_provider: Callable[[], list[Ticker]] | None = None,
         oi_provider: Callable[[str], Decimal | None] | None = None,
+        oi_history_provider: Callable[[str, str, int], list[OpenInterestPoint]] | None = None,
     ) -> None:
         self._cfg = config
         self._contracts = dict(contracts or {})
@@ -55,6 +59,7 @@ class PaperGateway:
         self._candle_provider = candle_provider
         self._ticker_provider = ticker_provider
         self._oi_provider = oi_provider  # 公共行情网关委托（paper 非 mock 行情时注入真实 OI 源）
+        self._oi_history_provider = oi_history_provider
         self.account = PaperAccount(Decimal(str(config.initial_equity)))
         self._snaps: dict[str, PriceSnap] = {}
         self._leverages: dict[str, Decimal] = {}
@@ -270,10 +275,6 @@ class PaperGateway:
         if self._ticker_provider is not None:
             return self._ticker_provider()
         return [synth_ticker(n, s, self._contracts.get(n)) for n, s in self._snaps.items()]
-
-    def fetch_open_interest(self, contract: str) -> Decimal | None:
-        """持仓量：已注入公共行情源（paper 非 mock 行情）则委托真实数据；纯离线 mock 返回 None。"""
-        return self._oi_provider(contract) if self._oi_provider is not None else None
 
     def _market_order(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
         snap = self._snap(req.contract)
