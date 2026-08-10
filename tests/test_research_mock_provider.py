@@ -11,6 +11,16 @@ from src.research.mock_provider import ResearchMockProvider
 
 @pytest.mark.asyncio
 async def test_mock_provider_queries_every_watchlist_contract_then_returns_v2_payload() -> None:
+    """校验研报 mock provider 先逐标的查询市场数据、再产出合法 v2 研报 JSON 的完整契约。
+
+    参数：无
+
+    返回：
+        None，断言首轮对白名单中的 BTC_USDT、ETH_USDT 各恰好发起一次
+        get_research_market_data 调用（limit=30 且顺序与白名单一致）；
+        回填工具结果后次轮返回 schema_version=2 的研报 JSON，
+        asset_views 按序覆盖两个合约，且各标的 basis_type 为「结构延续」、confidence 为「低」
+    """
     provider = ResearchMockProvider()
     messages = [
         {

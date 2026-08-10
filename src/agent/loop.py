@@ -57,7 +57,14 @@ class RoundResult:
 
 
 async def default_daily_stats(repo: Repo, mode: str) -> DailyStats:
-    """当日统计：已实现盈亏与开仓单数均按 mode 过滤（自然日，本地时区）。"""
+    """当日统计：已实现盈亏与开仓单数均按 mode 过滤（自然日，本地时区）。
+
+    参数：
+        repo: Repo，交易与审计数据仓库
+        mode: str，运行模式
+    返回：
+        DailyStats，当日统计：已实现盈亏与开仓单数均按 mode 过滤（自然日，本地时区）
+    """
     now = time.localtime()
     day_start = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
     return await repo.daily_stats(mode, day_start)
@@ -106,6 +113,35 @@ class DecisionLoop:
         indicator_shortlist: Callable[[], list[str]] | None = None,
         max_turns: int = 8,
     ) -> None:
+        """注入全部依赖，装配工具注册表与上下文构建器。
+
+        参数：
+            settings: Settings，全局配置（运行模式/风控/LLM/审计/研报等）
+            watchlist: list[str]，监控合约列表
+            provider: LLMProvider | None，LLM 提供者；None 表示未配置，run_once 跳过本轮
+            gateway: Gateway，交易所网关（真实或 paper 模拟）
+            risk_engine: RiskEngine，风控引擎
+            repo: Repo，SQLite 持久化仓库
+            candles: CandleCache，K线缓存
+            triggers: TriggerManager，价格触发器
+            prompt_loader: PromptLoader，系统提示词（策略书）加载器
+            set_next_wake: Callable[[int], int] | None，回写下次唤醒时间的回调；None 时不可调度
+            on_alert: AlertCallback | None，告警回调；None 时仅记日志不发外部告警
+            daily_stats_fn: DailyStatsFn | None，当日统计来源；None 时按 repo/mode 走默认实现
+            drain_fills: Callable[[], list] | None，paper 网关成交缓冲泄放钩子；真实网关为 None
+            persist_kill_switch: Callable[[bool], None] | None，风控锁写回 config.yaml 的回调；
+                None 时仅内存置位，重启后丢失
+            notify_event: Callable[[dict], None] | None，事件通知回调（成交落库等场景透传）
+            fill_persister: FillPersister | None，统一成交写入入口；None 时按 repo/mode 自建
+            audit: AuditTrail | None，共享审计器；None 时按 settings.audit 自建
+            indicator_service: IndicatorService | None，技术指标服务；None 时工具如实回报未接入
+            indicator_shortlist: Callable[[], list[str]] | None，上下文指标短名单来源回调；
+                None 时 ContextBuilder 回退内置基线
+            max_turns: int，单轮决策内 LLM 工具往返的最大轮次（下限 1），默认 8
+
+        返回：
+            None，就地完成依赖注入与 ToolDeps/ToolRegistry/ContextBuilder 装配
+        """
         self._settings = settings
         self._provider = provider
         self._repo = repo
@@ -147,23 +183,54 @@ class DecisionLoop:
 
     @property
     def consecutive_failures(self) -> int:
+        """读取 LLM 连续失败计数（供调度器/监控层透出）。
+
+        参数：无
+
+        返回：
+            int：连续失败次数，决策成功一轮后清零
+        """
         return self._consecutive_failures
 
     @property
     def risk_locked(self) -> bool:
+        """读取风控锁是否已置位（连续失败达上限后锁定开仓）。
+
+        参数：无
+
+        返回：
+            bool：True 表示风控锁（kill_switch）已生效
+        """
         return self._risk_locked
 
     @property
     def llm_configured(self) -> bool:
-        """provider 是否已配置（status_provider 透出 /api/status 用）。"""
+        """provider 是否已配置（status_provider 透出 /api/status 用）。
+
+        参数：无
+        返回：
+            bool，provider 是否已配置（status_provider 透出 /api/status 用）
+        """
         return self._provider is not None
 
     def set_provider(self, provider: LLMProvider) -> None:
-        """热替换 LLM provider（配置前端化：改 key/模型重建后下轮决策即生效）。"""
+        """热替换 LLM provider（配置前端化：改 key/模型重建后下轮决策即生效）。
+
+        参数：
+            provider: LLMProvider，新的 LLM 提供方；None 表示未配置
+        返回：
+            None，热替换 LLM provider（配置前端化：改 key/模型重建后下轮决策即生效）
+        """
         self._provider = provider
 
     async def run_once(self, wake_source: str) -> RoundResult:
-        """执行一轮决策。失败不向上抛；每轮结束（含失败轮）统一 drain 成交落库。"""
+        """执行一轮决策。失败不向上抛；每轮结束（含失败轮）统一 drain 成交落库。
+
+        参数：
+            wake_source: str，本轮唤醒来源
+        返回：
+            RoundResult，执行一轮决策。失败不向上抛；每轮结束（含失败轮）统一 drain 成交落库
+        """
         if self._provider is None:
             # LLM 未配置（缺 key）：跳过本轮，不落审计、不计连续失败；
             # 但先泄放成交缓冲——paper 强平/挂单成交与 LLM 无关，跳轮不得滞留丢失
@@ -209,7 +276,15 @@ class DecisionLoop:
     async def _chat_loop(
         self, prompt: str, ctx: AgentContext, round_id: str
     ) -> tuple[str, str, int]:
-        """多轮对话：LLM 返回工具调用就执行并回填结果，直到无调用或达轮次上限。"""
+        """多轮对话：LLM 返回工具调用就执行并回填结果，直到无调用或达轮次上限。
+
+        参数：
+            prompt: str，完整系统提示词
+            ctx: AgentContext，本轮上下文快照
+            round_id: str，决策轮标识
+        返回：
+            tuple[str, str, int]，多轮对话：LLM 返回工具调用就执行并回填结果，直到无调用或达轮次上限
+        """
         messages: list[dict] = [{"role": "user", "content": ctx.text}]
         schemas = self._registry.schemas()
         raw_parts: list[str] = []
@@ -230,7 +305,15 @@ class DecisionLoop:
         return text, "\n".join(raw_parts), total
 
     async def _execute_call(self, round_id: str, seq: int, call: ToolCall) -> ToolOutcome:
-        """执行一次工具调用并落审计（入参/风控判定/结果/耗时）。"""
+        """执行一次工具调用并落审计（入参/风控判定/结果/耗时）。
+
+        参数：
+            round_id: str，决策轮标识
+            seq: int，工具调用序号
+            call: ToolCall，模型返回的工具调用
+        返回：
+            ToolOutcome，执行一次工具调用并落审计（入参/风控判定/结果/耗时）
+        """
         started = time.monotonic()
         outcome = await self._registry.execute(call.name, call.args)
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -258,6 +341,16 @@ class DecisionLoop:
         """失败收尾：计数、落决策与审计（error 字段），达标则加锁告警。
 
         ctx 为 None 表示上下文构建阶段即失败（无上下文摘要可落）。
+
+        参数：
+            round_id: str，决策轮标识
+            prompt_md5: str，完整提示词摘要
+            strategy_md5: str，策略正文摘要
+            wake_source: str，本轮唤醒来源
+            ctx: AgentContext | None，本轮上下文快照
+            exc: Exception，本轮失败异常
+        返回：
+            RoundResult，失败收尾：计数、落决策与审计（error 字段），达标则加锁告警
         """
         self._consecutive_failures += 1
         error = f"{type(exc).__name__}: {exc}"
@@ -286,6 +379,10 @@ class DecisionLoop:
 
         经 FillPersister 与 manual_close、行情即时 drain 互斥：缓冲只被 drain 走
         一次，轮末兜底不会重复落库（归属继承与标注规则见 fill_persist.py）。
+
+        参数：无
+        返回：
+            None，paper 网关成交缓冲落 trades 表（真实网关无此钩子，由工具层直接落库）
         """
         if self._drain_fills is None:
             return
@@ -300,17 +397,36 @@ class DecisionLoop:
           内部持有，覆盖「下单→drain→落库」全程，行情即时 drain 抢不走其成交
         - 返回 {"contract", "status", "fill_price", "text"} 供 API 响应
           （fill_price 为 Decimal，序列化由 server 层处理）
+
+        参数：
+            contract: str，待手动平仓的合约标识
+        返回：
+            dict，用户手动平仓（监控界面）：与 LLM 平仓同一风控路径，成交标注 source=user_close
         """
         return await execute_manual_close(
             self._deps, contract, drain_fills=self._drain_fills, persister=self._persister
         )
 
     async def manual_cancel_order(self, contract: str, order_id: str) -> dict:
-        # 将监控 API 的手动撤单请求转交给统一撤单执行器。
+        """用户手动撤单（监控 API）：转交统一撤单执行器完成撤单与本地记录同步。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，待撤销的订单 ID
+
+        返回：
+            dict：撤单结果（id/contract/status/finish_as/warning，供 API 响应；
+            warning 非空表示网关已撤单但本地记录同步失败，提示勿重试撤单）
+        """
         return await execute_manual_cancel(self._deps, contract, order_id)
 
     async def _engage_lock(self) -> None:
-        """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。"""
+        """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。
+
+        参数：无
+        返回：
+            None，风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警
+        """
         if self._risk_locked:
             return
         self._risk_locked = True

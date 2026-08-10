@@ -18,6 +18,13 @@ from src.risk.models import DailyStats
 
 
 def _contract() -> Contract:
+    """构造 BTC_USDT 永续合约的测试用合约元数据。
+
+    参数：无
+
+    返回：
+        Contract：标记价 60000、最小下单 1 张的 BTC_USDT 合约定义
+    """
     return Contract(
         name="BTC_USDT",
         quanto_multiplier=Decimal("0.001"),
@@ -36,10 +43,27 @@ def _contract() -> Contract:
 
 
 async def _daily() -> DailyStats:
+    """提供当日统计的桩函数，固定返回零盈亏、零下单。
+
+    参数：无
+
+    返回：
+        DailyStats：已实现盈亏为 0、当日下单数为 0 的统计对象
+    """
     return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
 
 async def _registry(tmp_path, gateway: MockGateway) -> SimpleNamespace:
+    """组装一套带临时数据库与模拟网关的工具注册表测试环境。
+
+    参数：
+        tmp_path: pytest 临时目录夹具，SQLite 数据库文件落在其中
+        gateway: MockGateway，模拟交易所网关，作为工具依赖注入
+
+    返回：
+        SimpleNamespace：含 db(数据库)、gateway(网关)、registry(工具注册表)、
+        cache(K线缓存) 的测试环境命名空间
+    """
     db = Database()
     await db.open(tmp_path / "tpsl.db")
     repo = Repo(db)
@@ -60,6 +84,14 @@ async def _registry(tmp_path, gateway: MockGateway) -> SimpleNamespace:
 
 
 async def test_market_data_returns_beijing_ohlcv_table(tmp_path):
+    """验证市场数据工具以北京时间表格返回 OHLCV 与完整性提示。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = MockGateway(contracts={"BTC_USDT": _contract()})
     gateway.candles = [
         Candle(
@@ -80,7 +112,14 @@ async def test_market_data_returns_beijing_ohlcv_table(tmp_path):
 
 
 async def test_market_data_marks_unclosed_candle(tmp_path):
-    """未收盘标注：窗口未结束的最后一根尾部追加（未收盘），已收盘根不标。"""
+    """未收盘标注：窗口未结束的最后一根尾部追加（未收盘），已收盘根不标。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     now = int(time.time())
     current_open = now - (now % 3600)  # 当前 1h 窗口的开盘时刻
     prev_open = current_open - 3600
@@ -119,6 +158,14 @@ async def test_market_data_marks_unclosed_candle(tmp_path):
 
 
 async def test_open_requires_valid_stop_and_applies_leverage(tmp_path):
+    """验证开仓必须提供方向正确的止损并把请求杠杆应用到持仓。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = MockGateway(contracts={"BTC_USDT": _contract()})
     env = await _registry(tmp_path, gateway)
     try:
@@ -148,6 +195,14 @@ async def test_open_requires_valid_stop_and_applies_leverage(tmp_path):
 
 class _TraceGateway(MockGateway):
     def __init__(self) -> None:
+        """初始化带 BTC 合约、充足余额和止盈止损事件轨迹的网关。
+
+        参数：
+            无
+
+        返回：
+            None：初始化基础模拟网关并创建空事件列表
+        """
         super().__init__(
             contracts={"BTC_USDT": _contract()},
             account=Account(available=Decimal("10000"), unrealised_pnl=Decimal(0)),
@@ -155,15 +210,39 @@ class _TraceGateway(MockGateway):
         self.events: list[str] = []
 
     def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        """记录保护单创建顺序后交由基础网关创建订单。
+
+        参数：
+            order: TpslOrder，待创建的止盈或止损订单
+
+        返回：
+            TpslOrder：基础模拟网关创建并保存的保护单
+        """
         self.events.append(f"create:{order.kind}")
         return super().create_tpsl_order(order)
 
     def cancel_tpsl_order(self, order_id: str) -> None:
+        """记录保护单撤销顺序后交由基础网关撤销订单。
+
+        参数：
+            order_id: str，交易所订单编号
+
+        返回：
+            None：记录订单编号并撤销对应保护单
+        """
         self.events.append(f"cancel:{order_id}")
         super().cancel_tpsl_order(order_id)
 
 
 async def test_update_tpsl_creates_full_new_group_before_cancelling_old(tmp_path):
+    """验证更新止盈止损时先完整创建新组再撤销旧组。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = _TraceGateway()
     gateway.place_order(OrderRequest(contract="BTC_USDT", size=Decimal(1)))
     old_stop = gateway.create_tpsl_order(
@@ -200,12 +279,31 @@ async def test_update_tpsl_creates_full_new_group_before_cancelling_old(tmp_path
 
 class _CreateTakeProfitFailsGateway(_TraceGateway):
     def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        """模拟创建新止盈单失败，止损单仍交由基础网关创建。
+
+        参数：
+            order: TpslOrder，待创建的止盈或止损订单
+
+        返回：
+            TpslOrder：非止盈单由基础网关创建后返回
+
+        异常：
+            GatewayError：订单类型为 take_profit 时模拟创建失败
+        """
         if order.kind == "take_profit":
             raise GatewayError("创建止盈失败", label="CREATE_FAILED")
         return super().create_tpsl_order(order)
 
 
 async def test_update_tpsl_rolls_back_new_group_when_creation_fails(tmp_path):
+    """验证新止盈单创建失败时回滚已创建的新止损并保留旧保护单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = _CreateTakeProfitFailsGateway()
     gateway.place_order(OrderRequest(contract="BTC_USDT", size=Decimal(1)))
     old = gateway.create_tpsl_order(
@@ -229,12 +327,31 @@ class _CancelOldTakeProfitFailsGateway(_TraceGateway):
     fail_id: str = ""
 
     def cancel_tpsl_order(self, order_id: str) -> None:
+        """模拟撤销旧止盈单失败，其他订单仍交由基础网关撤销。
+
+        参数：
+            order_id: str，交易所订单编号
+
+        返回：
+            None：非目标止盈单被基础网关撤销
+
+        异常：
+            GatewayError：订单编号等于指定旧止盈单编号时模拟撤销失败
+        """
         if order_id == self.fail_id:
             raise GatewayError("撤销旧止盈失败", label="CANCEL_FAILED")
         super().cancel_tpsl_order(order_id)
 
 
 async def test_update_tpsl_reports_partial_old_cancel_failure(tmp_path):
+    """验证旧保护单部分撤销失败时保留新组并明确报告残留风险。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = _CancelOldTakeProfitFailsGateway()
     gateway.place_order(OrderRequest(contract="BTC_USDT", size=Decimal(1)))
     old_stop = gateway.create_tpsl_order(
@@ -267,6 +384,14 @@ async def test_update_tpsl_reports_partial_old_cancel_failure(tmp_path):
 
 
 def test_paper_stop_loss_closes_and_marks_tpsl_source():
+    """验证模拟止损触发后平仓并把成交来源标记为 tpsl_close。
+
+    参数：
+        无
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = PaperGateway(PaperConfig(initial_equity=10000), contracts={"BTC_USDT": _contract()})
     gateway.on_price("BTC_USDT", Decimal(60000))
     gateway.place_order(
@@ -279,6 +404,14 @@ def test_paper_stop_loss_closes_and_marks_tpsl_source():
 
 
 def test_paper_limit_fill_keeps_stop_loss():
+    """验证模拟限价开仓成交后请求中的止损仍绑定到新持仓。
+
+    参数：
+        无
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = PaperGateway(PaperConfig(initial_equity=10000), contracts={"BTC_USDT": _contract()})
     gateway.on_price("BTC_USDT", Decimal(60000), Decimal(59999), Decimal(60001))
     result = gateway.place_order(
@@ -295,6 +428,14 @@ def test_paper_limit_fill_keeps_stop_loss():
 
 
 def test_paper_amended_limit_fill_keeps_stop_loss():
+    """验证修改限价单后成交仍保留原始止损配置。
+
+    参数：
+        无
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     gateway = PaperGateway(PaperConfig(initial_equity=10000), contracts={"BTC_USDT": _contract()})
     gateway.on_price("BTC_USDT", Decimal(60000), Decimal(59999), Decimal(60001))
     result = gateway.place_order(

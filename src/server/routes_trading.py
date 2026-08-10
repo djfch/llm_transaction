@@ -30,7 +30,13 @@ class PaperResetBody(BaseModel):
 
 
 def _watchlist_contracts(deps: ServerDeps) -> list[str]:
-    """当前生效的合约名单：运行时共享名单优先，未接线时读 watchlist.yaml。"""
+    """当前生效的合约名单：运行时共享名单优先，未接线时读 watchlist.yaml。
+
+    参数：
+        deps: ServerDeps，服务器运行依赖
+    返回：
+        list[str]，当前生效的合约名单：运行时共享名单优先，未接线时读 watchlist.yaml
+    """
     if deps.runtime_watchlist is not None:
         return deps.runtime_watchlist
     try:
@@ -40,17 +46,40 @@ def _watchlist_contracts(deps: ServerDeps) -> list[str]:
 
 
 def _agent_running(deps: ServerDeps) -> bool:
-    """agent 真实运行态：经 status_provider 读取；未注入/缺字段时为 False（不硬编码）。"""
+    """agent 真实运行态：经 status_provider 读取；未注入/缺字段时为 False（不硬编码）。
+
+    参数：
+        deps: ServerDeps，服务器运行依赖
+    返回：
+        bool，agent 真实运行态：经 status_provider 读取；未注入/缺字段时为 False（不硬编码）
+    """
     return bool(deps.runtime_status().get("agent_running", False))
 
 
-# 创建交易监控路由，并通过依赖注入隔离实际网关写操作。
 def create_trading_router(deps: ServerDeps) -> APIRouter:
+    """创建交易监控路由，并通过依赖注入隔离实际网关写操作。
+
+    参数：
+        deps: ServerDeps，路由依赖集合（网关、手动撤单/平仓、模拟账户重置、
+            agent 启停等回调均经此注入）
+
+    返回：
+        APIRouter：挂载了交易写操作与 K 线查询端点（前缀 /api）的路由器
+    """
     router = APIRouter(prefix="/api")
 
     @router.get("/open_orders")
-    # 分页汇总当前 open 订单，避免单页上限遗漏挂单。
     async def list_open_orders() -> list[dict[str, Any]]:
+        """分页汇总当前 open 订单，避免单页上限遗漏挂单。
+
+        参数：无
+
+        返回：
+            list[dict[str, Any]]：全部未成交订单的字典序列化列表
+
+        异常：
+            HTTPException：网关未就绪时 503；交易所请求失败时 502
+        """
         if deps.gateway is None:
             raise HTTPException(status_code=503, detail="交易网关未就绪")
         try:
@@ -67,8 +96,20 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.delete("/orders/{contract}/{order_id}")
-    # 执行手动撤单；已终态订单返回 409 以触发前端刷新。
     async def cancel_order(contract: str, order_id: str) -> dict[str, Any]:
+        """执行手动撤单；已终态订单返回 409 以触发前端刷新。
+
+        参数：
+            contract: str，订单所属合约名（如 BTC_USDT）
+            order_id: str，待撤销的订单 ID
+
+        返回：
+            dict[str, Any]：撤单结果（由注入的手动撤单回调返回）
+
+        异常：
+            HTTPException：手动撤单未接线时 503；订单已终态/不存在时 409；
+                交易所请求失败时 502
+        """
         if deps.manual_cancel_order is None:
             raise HTTPException(status_code=503, detail="手动撤单未接线")
         try:
@@ -80,7 +121,15 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/positions/{contract}/close")
     async def close_position(contract: str) -> dict[str, Any]:
-        """手动平仓：与 LLM 平仓同一风控路径（由注入回调保证）。"""
+        """手动平仓：与 LLM 平仓同一风控路径（由注入回调保证）。
+
+        参数：
+            contract: str，合约标识
+        返回：
+            dict[str, Any]，手动平仓：与 LLM 平仓同一风控路径（由注入回调保证）
+        异常：
+            HTTPException，手动平仓未接线时返回 503，网关失败时返回 502，参数非法时返回 422
+        """
         if deps.manual_close is None:
             raise HTTPException(status_code=503, detail="手动平仓未接线（agent 未注入）")
         try:
@@ -93,7 +142,15 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/paper/reset")
     async def reset_paper(body: PaperResetBody) -> dict[str, Any]:
-        """重置模拟账户：清空模拟仓位/挂单并重设初始权益（写回 config.yaml）。"""
+        """重置模拟账户：清空模拟仓位/挂单并重设初始权益（写回 config.yaml）。
+
+        参数：
+            body: PaperResetBody，请求体数据
+        返回：
+            dict[str, Any]，重置模拟账户：清空模拟仓位/挂单并重设初始权益（写回 config.yaml）
+        异常：
+            HTTPException，非 paper 模式或账户未接线时返回 409，配置写入失败时返回 422
+        """
         settings = deps.runtime_settings
         if settings is None or settings.mode != "paper" or deps.paper_reset is None:
             raise HTTPException(status_code=409, detail="仅 paper 模式且已接线模拟账户时可重置")
@@ -109,6 +166,16 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/agent/start")
     async def start_agent() -> dict[str, bool]:
+        """启动 agent 调度循环，并返回启动后的真实运行态。
+
+        参数：无
+
+        返回：
+            dict[str, bool]：{"agent_running": 启动后 agent 是否真实在运行}
+
+        异常：
+            HTTPException：agent 调度未接线时 503
+        """
         if deps.agent_start is None:
             raise HTTPException(status_code=503, detail="agent 调度未接线")
         await deps.agent_start()
@@ -116,6 +183,16 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/agent/stop")
     async def stop_agent() -> dict[str, bool]:
+        """停止 agent 调度循环，并返回停止后的真实运行态。
+
+        参数：无
+
+        返回：
+            dict[str, bool]：{"agent_running": 停止后 agent 是否仍在运行}
+
+        异常：
+            HTTPException：agent 调度未接线时 503
+        """
         if deps.agent_stop is None:
             raise HTTPException(status_code=503, detail="agent 调度未接线")
         await deps.agent_stop()
@@ -127,7 +204,17 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
         interval: str = Query("1h"),
         limit: int = Query(200, ge=1, le=1000),
     ) -> dict[str, Any]:
-        """K 线查询：合约须在 watchlist 内；interval 白名单校验；返回图表消费的 number。"""
+        """K 线查询：合约须在 watchlist 内；interval 白名单校验；返回图表消费的 number。
+
+        参数：
+            contract: str，合约标识
+            interval: str，K 线周期
+            limit: int，返回的 K 线或指标点数量
+        返回：
+            dict[str, Any]，K 线查询：合约须在 watchlist 内；interval 白名单校验；返回图表消费的 number
+        异常：
+            HTTPException，合约或周期非法时返回 422，网关未就绪时返回 503，查询失败时返回 502
+        """
         if contract not in _watchlist_contracts(deps):
             raise HTTPException(status_code=422, detail=f"合约不在 watchlist: {contract}")
         if interval not in _CANDLE_INTERVALS:

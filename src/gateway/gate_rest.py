@@ -44,17 +44,43 @@ _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符
 
 
 def gen_client_order_id() -> str:
-    """生成 text 自定义订单 ID：t- 前缀 + 26 位，总长 28 字节。"""
+    """生成 text 自定义订单 ID：t- 前缀 + 26 位，总长 28 字节。
+
+    参数：
+        无
+
+    返回：
+        str：生成 text 自定义订单 ID：t- 前缀 + 26 位，总长 28 字节
+    """
     return f"t-{uuid.uuid4().hex[:26]}"
 
 
 def _fmt_decimal(value: Decimal) -> str:
-    """Decimal -> 普通十进制字符串（避免科学计数法）。"""
+    """Decimal -> 普通十进制字符串（避免科学计数法）。
+
+    参数：
+        value: Decimal，待转换或校验的值
+
+    返回：
+        str：Decimal -> 普通十进制字符串（避免科学计数法）
+    """
     return format(value, "f")
 
 
 def _validate_text(text: str) -> None:
-    """校验调用方自带 text（Gate 自定义订单 ID 规则）：t- 前缀、≤28 字节、字符集 0-9A-Za-z_-。"""
+    """校验调用方自带 text（Gate 自定义订单 ID 规则）：t- 前缀、≤28 字节、字符集 0-9A-Za-z_-。
+
+    参数：
+        text: str，待处理的文本
+
+    返回：
+        None：校验调用方自带 text（Gate 自定义订单 ID 规则）：t- 前缀、≤28 字节、字符集 0-9A-Za-z_-
+
+    异常：
+        ValueError：f"text 必须以 't-' 开头（Gate 自定义订单 ID 规则）: {text!r}" 所描述的条件发生时
+        ValueError：f'text 总长不能超过 {_TEXT_MAX_BYTES} 字节: {text!r}' 所描述的条件发生时
+        ValueError：f'text 只能包含字符 0-9A-Za-z_-: {text!r}' 所描述的条件发生时
+    """
     if not text.startswith("t-"):
         raise ValueError(f"text 必须以 't-' 开头（Gate 自定义订单 ID 规则）: {text!r}")
     if len(text.encode()) > _TEXT_MAX_BYTES:
@@ -68,6 +94,12 @@ def build_order_payload(req: OrderRequest) -> dict:
 
     已核实语义：市价单 price="0"+tif="ioc"；平仓 size="0"+close=true；
     text 为 None 时兜底生成，非 None 时按 Gate 规则校验（不合规抛 ValueError）。
+
+    参数：
+        req: OrderRequest，业务下单请求
+
+    返回：
+        dict：把业务下单意图组装成 Gate 下单参数（纯函数，不触网）
     """
     if req.text is None:
         text = gen_client_order_id()
@@ -105,19 +137,41 @@ def build_order_payload(req: OrderRequest) -> dict:
 
 
 def _dec(value: str | None) -> Decimal:
-    """SDK 字符串字段 -> Decimal；空串/None 归一为 0。"""
+    """SDK 字符串字段 -> Decimal；空串/None 归一为 0。
+
+    参数：
+        value: str | None，待转换或校验的值
+
+    返回：
+        Decimal：SDK 字符串字段 -> Decimal；空串/None 归一为 0
+    """
     if value in (None, ""):
         return Decimal(0)
     return Decimal(str(value))
 
 
 def _optional_price(value: str | None) -> Decimal | None:
-    """Gate 附带保护价的空串与零值都表示未配置。"""
+    """Gate 附带保护价的空串与零值都表示未配置。
+
+    参数：
+        value: str | None，待转换或校验的值
+
+    返回：
+        Decimal | None：Gate 附带保护价的空串与零值都表示未配置
+    """
     price = _dec(value)
     return None if price == 0 else price
 
 
 def _to_contract(c: gate_api.Contract) -> Contract:
+    """把 Gate SDK 合约对象转换为系统内共用的合约模型。
+
+    参数：
+        c: gate_api.Contract，SDK 返回的合约原始对象
+
+    返回：
+        Contract：共用合约模型（下单步长、标记价、资金费率等元数据与实时信息）
+    """
     return Contract(
         name=c.name,
         quanto_multiplier=_dec(c.quanto_multiplier),
@@ -136,6 +190,14 @@ def _to_contract(c: gate_api.Contract) -> Contract:
 
 
 def _to_position(p: gate_api.Position) -> Position:
+    """把 Gate SDK 持仓对象转换为系统内共用的持仓模型。
+
+    参数：
+        p: gate_api.Position，SDK 返回的持仓原始对象
+
+    返回：
+        Position：共用持仓模型（止盈止损价不在此填充，保持默认 None）
+    """
     return Position(
         contract=p.contract,
         size=_dec(p.size),
@@ -148,8 +210,15 @@ def _to_position(p: gate_api.Position) -> Position:
     )
 
 
-# 将 Gate futures order 转换为前后端共用的订单快照。
 def _to_order(o: gate_api.FuturesOrder) -> OrderResult:
+    """将 Gate futures order 转换为前后端共用的订单快照。
+
+    参数：
+        o: gate_api.FuturesOrder，SDK 返回的订单原始对象
+
+    返回：
+        OrderResult：共用订单模型（id 归一为字符串；附带保护价的空串/零值归一为 None）
+    """
     return OrderResult(
         id=str(o.id),
         contract=o.contract or "",
@@ -168,10 +237,26 @@ def _to_order(o: gate_api.FuturesOrder) -> OrderResult:
 
 
 def _to_candle(k: gate_api.FuturesCandlestick) -> Candle:
+    """把 Gate SDK K 线对象转换为系统内共用的 K 线模型。
+
+    参数：
+        k: gate_api.FuturesCandlestick，SDK 返回的 K 线原始对象
+
+    返回：
+        Candle：共用 K 线模型（t 为秒级时间戳，v 为成交量张数）
+    """
     return Candle(t=int(k.t), o=_dec(k.o), h=_dec(k.h), l=_dec(k.l), c=_dec(k.c), v=_dec(k.v))
 
 
 def _to_ticker(t: gate_api.FuturesTicker) -> Ticker:
+    """把 Gate SDK ticker 对象转换为系统内共用的 ticker 模型。
+
+    参数：
+        t: gate_api.FuturesTicker，SDK 返回的 ticker 原始对象
+
+    返回：
+        Ticker：共用 ticker 模型（最新价、标记价、资金费率与 24h 高低点）
+    """
     return Ticker(
         contract=t.contract,
         last=_dec(t.last),
@@ -184,7 +269,14 @@ def _to_ticker(t: gate_api.FuturesTicker) -> Ticker:
 
 
 def _to_tpsl(order: gate_api.FuturesPriceTriggeredOrder) -> TpslOrder | None:
-    """Gate 价格触发单转换为本系统整仓保护单；非整仓平仓单不参与接管。"""
+    """Gate 价格触发单转换为本系统整仓保护单；非整仓平仓单不参与接管。
+
+    参数：
+        order: gate_api.FuturesPriceTriggeredOrder，待处理的订单对象
+
+    返回：
+        TpslOrder | None：Gate 价格触发单转换为本系统整仓保护单；非整仓平仓单不参与接管
+    """
     direction = {"close-long-position": 1, "close-short-position": -1}.get(order.order_type)
     if direction is None or order.trigger is None:
         return None
@@ -200,7 +292,14 @@ def _to_tpsl(order: gate_api.FuturesPriceTriggeredOrder) -> TpslOrder | None:
 
 
 def _to_exchange_trade(t: gate_api.MyFuturesTrade) -> ExchangeTrade:
-    """SDK 个人成交 -> 内部结构；id/order_id 归一为字符串（推送侧同为字符串键）。"""
+    """SDK 个人成交 -> 内部结构；id/order_id 归一为字符串（推送侧同为字符串键）。
+
+    参数：
+        t: gate_api.MyFuturesTrade，Gate SDK 个人成交对象
+
+    返回：
+        ExchangeTrade：SDK 个人成交 -> 内部结构；id/order_id 归一为字符串（推送侧同为字符串键）
+    """
     return ExchangeTrade(
         id=str(t.id),
         order_id=str(t.order_id or ""),
@@ -215,7 +314,14 @@ def _to_exchange_trade(t: gate_api.MyFuturesTrade) -> ExchangeTrade:
 
 
 def _to_position_close_record(r: gate_api.PositionClose) -> PositionCloseRecord:
-    """SDK 平仓盈亏历史 -> 内部结构（pnl 回填来源）。"""
+    """SDK 平仓盈亏历史 -> 内部结构（pnl 回填来源）。
+
+    参数：
+        r: gate_api.PositionClose，Gate SDK 平仓记录对象
+
+    返回：
+        PositionCloseRecord：SDK 平仓盈亏历史 -> 内部结构（pnl 回填来源）
+    """
     return PositionCloseRecord(
         time=float(r.time),
         contract=r.contract,
@@ -231,6 +337,17 @@ class GateRestGateway(GateOpenInterestMixin):
     def __init__(
         self, gate_config: GateConfig, api_key: str = "", api_secret: str = "", testnet: bool = True
     ) -> None:
+        """按 Gate 配置初始化 SDK 客户端与结算币种。
+
+        参数：
+            gate_config: GateConfig，网关配置（结算币种、testnet/live 主机地址）
+            api_key: str，交易所 API Key；省略时为空串（仅能访问公开接口）
+            api_secret: str，交易所 API Secret；省略时为空串
+            testnet: bool，是否连接测试网；省略时默认 True（测试网）
+
+        返回：
+            None，就地初始化实例的 SDK 客户端（self._api）与结算币种（self._settle）
+        """
         host = gate_config.testnet_host if testnet else gate_config.live_host
         config = gate_api.Configuration(host=host, key=api_key, secret=api_secret)
         self._api = gate_api.FuturesApi(gate_api.ApiClient(config))
@@ -238,16 +355,44 @@ class GateRestGateway(GateOpenInterestMixin):
 
     @staticmethod
     def _exptime() -> int:
-        """X-Gate-Exptime 头（毫秒）：当前时间 + 30 秒，防延迟重放。"""
+        """X-Gate-Exptime 头（毫秒）：当前时间 + 30 秒，防延迟重放。
+
+        参数：
+            无
+
+        返回：
+            int：X-Gate-Exptime 头（毫秒）：当前时间 + 30 秒，防延迟重放
+        """
         return int(time.time() * 1000) + _EXPTIME_AHEAD_MS
 
     def get_contract(self, contract: str) -> Contract:
+        """读取单个合约的元数据与实时标记信息。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+
+        返回：
+            Contract：共用合约模型（下单步长、标记价、资金费率等）
+
+        异常：
+            GatewayError：交易所请求失败时抛出（合约不存在时为 ContractNotFound）
+        """
         try:
             return _to_contract(self._api.get_futures_contract(self._settle, contract))
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
     def get_account(self) -> Account:
+        """读取合约账户的可用余额与未实现盈亏。
+
+        参数：无
+
+        返回：
+            Account：共用账户模型（可用余额、未实现盈亏）
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         try:
             acc = self._api.list_futures_accounts(self._settle)
             return Account(available=_dec(acc.available), unrealised_pnl=_dec(acc.unrealised_pnl))
@@ -255,6 +400,16 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def list_positions(self) -> list[Position]:
+        """读取全部持仓，并回填各持仓同方向整仓保护单的止损/止盈触发价。
+
+        参数：无
+
+        返回：
+            list[Position]：共用持仓模型列表；无对应保护单时止损/止盈价为 None
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         try:
             positions = [_to_position(p) for p in self._api.list_positions(self._settle)]
             for pos in positions:
@@ -269,6 +424,19 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def place_order(self, req: OrderRequest) -> OrderResult:
+        """按业务下单意图向 Gate 下单；超时/网络异常时按 text 回查防重单。
+
+        参数：
+            req: OrderRequest，下单意图（合约、方向张数、价格、保护价、自定义订单 ID 等）
+
+        返回：
+            OrderResult：订单快照（正常创建或超时回查确认已创建）
+
+        异常：
+            GatewayError：交易所明确拒绝时抛出；超时回查确认订单未创建时抛出
+                （label=ORDER_TIMEOUT_NOT_CREATED，可安全重试）
+            OrderStateUnknown：下单超时且回查失败，订单状态未知（禁止盲目重试）
+        """
         payload = build_order_payload(req)
         try:
             order = self._api.create_futures_order(  # 成功返回 201
@@ -284,7 +452,20 @@ class GateRestGateway(GateOpenInterestMixin):
             return self._recheck_after_timeout(payload["text"], exc)
 
     def _recheck_after_timeout(self, text: str, original: Exception) -> OrderResult:
-        """下单超时后按 text 回查：已创建则返回结果；确认未创建可安全重试。"""
+        """下单超时后按 text 回查：已创建则返回结果；确认未创建可安全重试。
+
+        参数：
+            text: str，待处理的文本
+            original: Exception，下单超时时捕获的原始异常
+
+        返回：
+            OrderResult：下单超时后按 text 回查：已创建则返回结果；确认未创建可安全重试
+
+        异常：
+            GatewayError：'下单请求超时，回查确认订单未创建，可安全重试' 所描述的条件发生时
+            OrderStateUnknown：f'下单超时且回查失败（{wrapped}），订单状态未知，禁止盲目重试' 所描述的条件发生时
+            OrderStateUnknown：f'下单超时且回查请求失败（{exc}），订单状态未知，禁止盲目重试' 所描述的条件发生时
+        """
         try:
             order = self._api.get_futures_order(self._settle, text)  # order_id 支持 text
             return _to_order(order)
@@ -312,6 +493,20 @@ class GateRestGateway(GateOpenInterestMixin):
         price: Decimal | None = None,
         size: Decimal | None = None,
     ) -> OrderResult:
+        """修改挂单的价格或张数；不需要修改的字段传 None。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，交易所订单 id
+            price: Decimal | None，新委托价；省略时（None）不修改价格
+            size: Decimal | None，新委托张数；省略时（None）不修改张数
+
+        返回：
+            OrderResult：修改后的订单快照
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         amendment = gate_api.FuturesOrderAmendment(
             price=_fmt_decimal(price) if price is not None else None,
             size=_fmt_decimal(size) if size is not None else None,
@@ -325,6 +520,18 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def cancel_order(self, contract: str, order_id: str) -> OrderResult:
+        """撤销指定挂单。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，交易所订单 id
+
+        返回：
+            OrderResult：撤单后的订单快照
+
+        异常：
+            GatewayError：交易所请求失败时抛出（订单不存在时为 OrderNotFound）
+        """
         try:
             order = self._api.cancel_futures_order(
                 self._settle, order_id, x_gate_exptime=self._exptime()
@@ -333,7 +540,6 @@ class GateRestGateway(GateOpenInterestMixin):
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
-    # 支持省略 contract 的全合约查询，并透传分页参数给 Gate。
     def list_orders(
         self,
         contract: str | None = None,
@@ -341,6 +547,20 @@ class GateRestGateway(GateOpenInterestMixin):
         limit: int | None = None,
         offset: int = 0,
     ) -> list[OrderResult]:
+        """分页读取订单快照；支持省略 contract 的全合约查询，并透传分页参数给 Gate。
+
+        参数：
+            contract: str | None，合约名；省略时（None）查询全部合约
+            status: str，订单状态（open/finished）；省略时默认 "open"
+            limit: int | None，每页条数；省略时（None）由交易所默认
+            offset: int，分页偏移量；省略时默认 0
+
+        返回：
+            list[OrderResult]：订单快照列表
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         try:
             kwargs: dict[str, object] = {"offset": offset}
             if contract is not None:
@@ -353,6 +573,17 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        """读取指定合约当前生效（open）的整仓止盈止损保护单。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+
+        返回：
+            list[TpslOrder]：整仓保护单列表（非整仓平仓的触发单已被过滤）
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         try:
             orders = self._api.list_price_triggered_orders(self._settle, "open", contract=contract)
             return [mapped for raw in orders if (mapped := _to_tpsl(raw)) is not None]
@@ -360,7 +591,18 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def list_my_trades(self, contract: str | None = None, limit: int = 100) -> list[ExchangeTrade]:
-        """个人成交历史（补漏用）：按时间倒序拉最近 limit 条，调用方按水线自行过滤。"""
+        """个人成交历史（补漏用）：按时间倒序拉最近 limit 条，调用方按水线自行过滤。
+
+        参数：
+            contract: str | None，合约名称
+            limit: int，最多读取或返回的记录数量
+
+        返回：
+            list[ExchangeTrade]：个人成交历史（补漏用）：按时间倒序拉最近 limit 条，调用方按水线自行过滤
+
+        异常：
+        GatewayError：Gate SDK 成交历史请求失败并被统一包装时
+        """
         try:
             kwargs: dict[str, object] = {"limit": limit, "_request_timeout": _FILLS_TIMEOUT_S}
             if contract is not None:
@@ -372,7 +614,19 @@ class GateRestGateway(GateOpenInterestMixin):
     def list_position_close(
         self, contract: str, from_ts: float, to_ts: float
     ) -> list[PositionCloseRecord]:
-        """平仓盈亏历史（pnl 回填用）：[from_ts, to_ts] 时间窗内按合约过滤。"""
+        """平仓盈亏历史（pnl 回填用）：[from_ts, to_ts] 时间窗内按合约过滤。
+
+        参数：
+            contract: str，合约名称
+            from_ts: float，查询窗口起始时间戳
+            to_ts: float，查询窗口结束时间戳
+
+        返回：
+            list[PositionCloseRecord]：平仓盈亏历史（pnl 回填用）：[from_ts, to_ts] 时间窗内按合约过滤
+
+        异常：
+        GatewayError：Gate SDK 平仓历史请求失败并被统一包装时
+        """
         try:
             rows = self._api.list_position_close(
                 self._settle,
@@ -386,6 +640,18 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        """创建整仓止盈止损保护单（触发后市价全平持仓）。
+
+        参数：
+            order: TpslOrder，保护单意图（合约、方向、类型、触发价）；id 无需填写，创建后回填
+
+        返回：
+            TpslOrder：已创建的保护单（id 已回填为交易所侧 id）
+
+        异常：
+            GatewayError：交易所明确拒绝时抛出
+            OrderStateUnknown：请求超时或网络失败，保护单状态未知（禁止盲目重试）
+        """
         rule = 1 if (order.direction > 0) == (order.kind == "take_profit") else 2
         payload = gate_api.FuturesPriceTriggeredOrder(
             initial=gate_api.FuturesInitialOrder(
@@ -410,6 +676,18 @@ class GateRestGateway(GateOpenInterestMixin):
             ) from exc
 
     def cancel_tpsl_order(self, order_id: str) -> None:
+        """撤销指定的整仓止盈止损保护单。
+
+        参数：
+            order_id: str，交易所侧保护单 id
+
+        返回：
+            None，撤单请求已被交易所受理
+
+        异常：
+            GatewayError：交易所明确拒绝时抛出
+            OrderStateUnknown：请求超时或网络失败，保护单状态未知（需人工核对）
+        """
         try:
             self._api.cancel_price_triggered_order(
                 self._settle, order_id, _request_timeout=_TPSL_TIMEOUT_S
@@ -434,6 +712,21 @@ class GateRestGateway(GateOpenInterestMixin):
 
         公开参数 from_ts/to_ts 对应 SDK 的 _from/to；当前区间关键字尚未正确映射，
         传入历史区间会被 gate-api 拒绝，修复前不要依赖该路径。
+
+        参数：
+            contract: str，合约名称
+            interval: str，行情或统计周期
+            limit: int | None，最多读取或返回的记录数量
+            from_ts: int | None，查询窗口起始时间戳
+            to_ts: int | None，查询窗口结束时间戳
+
+        返回：
+            list[Candle]：K 线查询：limit 路径可用，单次最多 2000 点
+
+        异常：
+            ValueError：'limit 与 from/to 互斥，不能同时传' 所描述的条件发生时
+            ValueError：'limit 必须在 1~2000 之间' 所描述的条件发生时
+        GatewayError：Gate SDK K 线请求失败并被统一包装时
         """
         if limit is not None and (from_ts is not None or to_ts is not None):
             raise ValueError("limit 与 from/to 互斥，不能同时传")
@@ -453,13 +746,36 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def get_tickers(self) -> list[Ticker]:
+        """读取全部合约的 ticker 摘要。
+
+        参数：无
+
+        返回：
+            list[Ticker]：共用 ticker 模型列表（最新价、标记价、资金费率、24h 高低等）
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
         try:
             return [_to_ticker(t) for t in self._api.list_futures_tickers(self._settle)]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
-        """通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数。"""
+        """通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数。
+
+        参数：
+            contract: str，合约名称
+            leverage: int，目标杠杆倍数
+            margin_mode: str，逐仓或全仓保证金模式
+
+        返回：
+            Position：通过当前持仓杠杆接口设置 isolated/cross 模式与杠杆倍数
+
+        异常：
+            ValueError：f'非法 margin_mode: {margin_mode}（可选 isolated/cross）' 所描述的条件发生时
+        GatewayError：Gate SDK 杠杆设置请求失败并被统一包装时
+        """
         if margin_mode not in ("isolated", "cross"):
             raise ValueError(f"非法 margin_mode: {margin_mode}（可选 isolated/cross）")
         try:

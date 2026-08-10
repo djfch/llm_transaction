@@ -30,12 +30,34 @@ class FakeGateway:
     """注入用假网关：返回固定账户与持仓。"""
 
     def __init__(self) -> None:
+        """初始化假网关，归零持仓查询计数器。
+
+        参数：无
+
+        返回：
+            None，就地把 position_calls 置 0，供用例断言持仓查询次数
+        """
         self.position_calls = 0
 
     def get_account(self) -> Account:
+        """返回固定账户数据，模拟网关账户查询。
+
+        参数：无
+
+        返回：
+            Account：固定账户（available=9000、unrealised_pnl=100）
+        """
         return Account(available=Decimal("9000"), unrealised_pnl=Decimal("100"))
 
     def list_positions(self) -> list[Position]:
+        """返回固定的 BTC_USDT 多单，并累计查询次数。
+
+        参数：无
+
+        返回：
+            list[Position]：固定的一条 BTC_USDT 多头持仓；
+            副作用是 position_calls 加一，供单次快照断言
+        """
         self.position_calls += 1
         return [
             Position(
@@ -53,7 +75,14 @@ class FakeGateway:
 
 @pytest.fixture
 async def deps(tmp_path: Path):
-    """组装 fake 依赖：tmp 配置文件 + 内存种子数据（一轮决策/审计、两笔成交、一条笔记）。"""
+    """组装 fake 依赖：tmp 配置文件 + 内存种子数据（一轮决策/审计、两笔成交、一条笔记）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        AsyncIterator[ServerDeps]，通过夹具向测试提供上述临时依赖，并在结束后清理资源
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)  # 默认配置（Decimal 安全写回）
     watchlist_path = tmp_path / "watchlist.yaml"
@@ -115,6 +144,14 @@ async def deps(tmp_path: Path):
 
 @pytest.fixture
 async def client(deps: ServerDeps):
+    """基于 fake 依赖组装应用并给出 ASGI 测试客户端。
+
+    参数：
+        deps: ServerDeps，fake 依赖夹具，注入 create_app 组装被测应用
+
+    返回：
+        AsyncIterator[AsyncClient]，yield 可直连各 API 的客户端，退出时关闭客户端上下文
+    """
     app = create_app(deps)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -124,6 +161,15 @@ async def client(deps: ServerDeps):
 
 
 async def test_status(client: AsyncClient):
+    """校验 /api/status 返回运行状态快照及未接线字段的缺省值。
+
+    参数：
+        client: AsyncClient，ASGI 测试客户端夹具
+
+    返回：
+        None，断言 200 且 mode/uptime/kill_switch/llm 字段与种子配置一致，
+        status_provider 未提供的 agent_running 与 llm_configured 缺省为 False
+    """
     r = await client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
@@ -139,6 +185,15 @@ async def test_status(client: AsyncClient):
 
 
 async def test_account_and_positions(client: AsyncClient):
+    """校验账户与持仓端点：equity 必在（前端渲染契约），持仓透传假网关种子仓位。
+
+    参数：
+        client: AsyncClient，ASGI 测试客户端夹具
+
+    返回：
+        None，断言账户 available=9000、equity 存在且为正，
+        持仓首条合约为 BTC_USDT
+    """
     account = (await client.get("/api/account")).json()
     assert float(account["available"]) == 9000.0
     # 前端 AccountInfo 契约：equity 必在（缺了会让前端 fmtNum(undefined) 整页崩溃）
@@ -148,6 +203,15 @@ async def test_account_and_positions(client: AsyncClient):
 
 
 async def test_portfolio_returns_one_authoritative_snapshot(client: AsyncClient, deps: ServerDeps):
+    """验证组合快照只查询并返回一份权威账户与持仓数据。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = (await client.get("/api/portfolio")).json()
 
     assert isinstance(body["as_of"], float)
@@ -157,6 +221,15 @@ async def test_portfolio_returns_one_authoritative_snapshot(client: AsyncClient,
 
 
 async def test_account_503_when_gateway_missing(deps: ServerDeps, client: AsyncClient):
+    """验证网关未接线时账户接口明确返回 503。
+
+    参数：
+        deps: ServerDeps，测试应用或工具的依赖集合
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     deps.gateway = None
     for path in ("/api/account", "/api/positions", "/api/portfolio"):
         r = await client.get(path)
@@ -164,6 +237,14 @@ async def test_account_503_when_gateway_missing(deps: ServerDeps, client: AsyncC
 
 
 async def test_rounds_list_and_pagination(client: AsyncClient):
+    """验证决策轮次列表的排序与分页结果。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r = await client.get("/api/rounds", params={"offset": 0, "limit": 10})
     assert r.status_code == 200
     body = r.json()
@@ -180,6 +261,14 @@ async def test_rounds_list_and_pagination(client: AsyncClient):
 
 
 async def test_round_detail_and_404(client: AsyncClient):
+    """验证决策轮次详情及不存在轮次的 404 响应。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r = await client.get("/api/rounds/r1")
     assert r.status_code == 200
     body = r.json()
@@ -192,6 +281,14 @@ async def test_round_detail_and_404(client: AsyncClient):
 
 
 async def test_trades_filter(client: AsyncClient):
+    """验证成交列表能够按合约筛选。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = (await client.get("/api/trades")).json()
     assert len(body["items"]) == 2
     assert body["total"] == 2 and body["offset"] == 0 and body["limit"] == 50
@@ -202,6 +299,14 @@ async def test_trades_filter(client: AsyncClient):
 
 
 async def test_trades_pagination(client: AsyncClient):
+    """验证成交列表的分页边界与总数。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r = await client.get("/api/trades", params={"limit": 1, "offset": 1})
     body = r.json()
     assert [t["contract"] for t in body["items"]] == ["BTC_USDT"]  # 第 2 页只余较旧那笔
@@ -213,6 +318,14 @@ async def test_trades_pagination(client: AsyncClient):
 
 
 async def test_equity_series(client: AsyncClient):
+    """验证权益曲线接口返回按时间排列的数据点。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     body = (await client.get("/api/equity")).json()
     assert body["initial_equity"] == 10000.0
     equities = [p["equity"] for p in body["points"]]
@@ -220,6 +333,15 @@ async def test_equity_series(client: AsyncClient):
 
 
 async def test_notes(client: AsyncClient, deps: ServerDeps):
+    """验证笔记列表与新增笔记接口。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     for index in range(2, 6):
         await deps.repo.add_note("r1", f"第{index}条笔记")
     first = (await client.get("/api/notes", params={"offset": 0, "limit": 2})).json()
@@ -233,7 +355,15 @@ async def test_notes(client: AsyncClient, deps: ServerDeps):
 
 
 async def test_alerts_lists_pending_from_memory(client: AsyncClient, deps: ServerDeps):
-    """价格唤醒端点：返回内存索引中的未触发预警线，字段契约供前端面板渲染（内存唯一存储）。"""
+    """价格唤醒端点：返回内存索引中的未触发预警线，字段契约供前端面板渲染（内存唯一存储）。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     first = deps.triggers.add("BTC_USDT", ">=", Decimal("52000"))
     drop = deps.triggers.add("ETH_USDT", "<=", Decimal("2800"))
     second = deps.triggers.add("ETH_USDT", "<=", Decimal("3000"))
@@ -252,7 +382,15 @@ async def test_alerts_lists_pending_from_memory(client: AsyncClient, deps: Serve
 
 
 async def test_alerts_503_when_not_wired(client: AsyncClient, deps: ServerDeps):
-    """alerts_provider 未接线（agent 未就绪）时诚实 503，不返回空列表冒充无预警。"""
+    """alerts_provider 未接线（agent 未就绪）时诚实 503，不返回空列表冒充无预警。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     deps.alerts_provider = None
     r = await client.get("/api/alerts")
     assert r.status_code == 503
@@ -261,8 +399,12 @@ async def test_alerts_503_when_not_wired(client: AsyncClient, deps: ServerDeps):
 async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):
     """当日统计端点：与风控同一口径（服务器时区自然日、按 mode 过滤、仅开仓单计数）。
 
-    fixture 自带的两笔成交 created_at=1000/2000（1970 年，非当日）不应计入；
-    本用例追加当日成交与订单后断言三键取值。
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     now = time.time()
     # 当日 paper 成交两笔：realized = 10 + (-3) = 7；昨日一笔 99 不计入
@@ -313,6 +455,15 @@ async def test_daily_stats_endpoint(client: AsyncClient, deps: ServerDeps):
 
 
 async def test_config_get_and_put(client: AsyncClient, deps: ServerDeps):
+    """验证配置读取与更新能够往返保持字段值。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     raw = (await client.get("/api/config")).json()
     assert raw["risk"]["max_leverage"] == 5
     raw["llm"]["model"] = "claude-opus-4"
@@ -324,6 +475,14 @@ async def test_config_get_and_put(client: AsyncClient, deps: ServerDeps):
 
 
 async def test_config_put_needs_restart(client: AsyncClient):
+    """验证需重启配置变更会返回明确标记。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     raw = (await client.get("/api/config")).json()
     raw["mode"] = "testnet"
     r = await client.put("/api/config", json=raw)
@@ -331,6 +490,14 @@ async def test_config_put_needs_restart(client: AsyncClient):
 
 
 async def test_config_put_invalid_422(client: AsyncClient):
+    """验证非法配置更新返回 422 校验错误。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     raw = (await client.get("/api/config")).json()
     raw["risk"]["max_leverage"] = 0  # 违反 ge=1
     r = await client.put("/api/config", json=raw)
@@ -341,6 +508,14 @@ async def test_config_put_invalid_422(client: AsyncClient):
 
 
 async def test_strategy_get_and_put(client: AsyncClient):
+    """验证策略正文的读取与更新。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert (await client.get("/api/strategy")).text == "原始提示词"
     r = await client.put("/api/strategy", content="新提示词")
     assert r.status_code == 200
@@ -348,6 +523,14 @@ async def test_strategy_get_and_put(client: AsyncClient):
 
 
 async def test_watchlist_get_put_and_422(client: AsyncClient):
+    """验证关注列表读写及非法输入的 422 响应。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert (await client.get("/api/watchlist")).json()["contracts"] == ["BTC_USDT"]
     r = await client.put(
         "/api/watchlist", json={"settle": "usdt", "contracts": ["BTC_USDT", "ETH_USDT"]}
@@ -359,6 +542,15 @@ async def test_watchlist_get_put_and_422(client: AsyncClient):
 
 
 async def test_secrets_status_never_leaks_plaintext(client: AsyncClient, monkeypatch):
+    """验证密钥状态接口绝不回显明文凭证。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     for name in (
         "GATE_API_KEY",
         "GATE_API_SECRET",
@@ -397,6 +589,15 @@ async def test_secrets_status_never_leaks_plaintext(client: AsyncClient, monkeyp
 
 
 async def test_kill_switch_writes_config_and_callback(client: AsyncClient, deps: ServerDeps):
+    """验证熔断开关同时写回配置并触发回调。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r = await client.post("/api/kill_switch", json={"enabled": True})
     assert r.json() == {"kill_switch": True}
     assert deps.kill_calls == [True]  # 回调被调用
@@ -409,11 +610,28 @@ async def test_kill_switch_writes_config_and_callback(client: AsyncClient, deps:
 
 
 async def test_cors_allows_vite_dev_server(client: AsyncClient):
+    """验证 CORS 允许 Vite 开发服务器访问。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     r = await client.get("/api/status", headers={"Origin": "http://localhost:17576"})
     assert r.headers["access-control-allow-origin"] == "http://localhost:17576"
 
 
 async def test_static_mount_when_dist_exists(deps: ServerDeps, tmp_path: Path):
+    """验证前端构建产物存在时挂载静态页面。
+
+    参数：
+        deps: ServerDeps，测试应用或工具的依赖集合
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<html>ok</html>", encoding="utf-8")
@@ -425,6 +643,14 @@ async def test_static_mount_when_dist_exists(deps: ServerDeps, tmp_path: Path):
 
 
 def test_ws_hello_on_connect(deps: ServerDeps):
+    """验证 WebSocket 建连后立即收到握手消息。
+
+    参数：
+        deps: ServerDeps，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     app = create_app(deps)
     with TestClient(app) as tc, tc.websocket_connect("/ws") as ws:
         assert ws.receive_json() == {"type": "hello"}
@@ -434,16 +660,45 @@ class _FakeWS:
     """ConnectionManager 单元测试用假连接。"""
 
     def __init__(self) -> None:
+        """初始化测试替身并保存后续调用所需的预设数据。
+
+        参数：无
+
+        返回：
+            None，初始化当前测试替身，无返回值
+        """
         self.sent: list[dict] = []
 
     async def accept(self) -> None:
+        """记录模拟 WebSocket 已接受连接。
+
+        参数：无
+
+        返回：
+            None，执行上述模拟操作或副作用，无返回值
+        """
         pass
 
     async def send_json(self, payload: dict) -> None:
+        """保存发送给模拟 WebSocket 的 JSON 消息。
+
+        参数：
+            payload: dict，待发送的事件或 JSON 数据
+
+        返回：
+            None，执行上述模拟操作或副作用，无返回值
+        """
         self.sent.append(payload)
 
 
 async def test_connection_manager_broadcast():
+    """验证连接管理器向所有活跃连接广播消息。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     manager = ConnectionManager()
     a, b = _FakeWS(), _FakeWS()
     await manager.connect(a)
@@ -457,6 +712,13 @@ async def test_connection_manager_broadcast():
 
 
 async def test_pump_events_broadcasts_queue():
+    """验证事件泵把队列消息转发给连接管理器。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     queue: asyncio.Queue = asyncio.Queue()
     manager = ConnectionManager()
     ws = _FakeWS()

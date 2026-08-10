@@ -33,10 +33,26 @@ WATCHLIST = Watchlist(contracts=[BTC])
 
 @pytest.fixture
 async def build_ctx(tmp_path: Path) -> AsyncIterator[Callable[..., AppContext]]:
-    """build_app 工厂 + 统一清理（关闭数据库，避免 aiosqlite 线程跨用例泄漏）。"""
+    """提供统一构建应用上下文的异步工厂并在用例结束后关闭全部数据库。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离数据库等运行文件
+
+    返回：
+        AsyncIterator[Callable[..., AppContext]]，生成可按需覆盖配置的异步上下文工厂
+    """
     ctxs: list[AppContext] = []
 
     async def _factory(settings: Settings | None = None, **kwargs) -> AppContext:
+        """按统一 mock 配置组装应用上下文，并登记到清理列表由 fixture 收尾。
+
+        参数：
+            settings: Settings | None，应用配置；传 None 时使用默认 Settings()
+            **kwargs: 透传给 build_app 的额外参数（如 config_path）
+
+        返回：
+            AppContext：已组装的应用上下文，其数据库在 fixture 结束时统一关闭
+        """
         ctx = await build_app(
             settings or Settings(),
             WATCHLIST,
@@ -54,6 +70,14 @@ async def build_ctx(tmp_path: Path) -> AsyncIterator[Callable[..., AppContext]]:
 
 
 def _ticker(price: Decimal) -> Ticker:
+    """构造指定价格的 BTC 行情快照（资金费率 0.0001，24h 高低价同取该价）。
+
+    参数：
+        price: Decimal，最新价，同时作为标记价与 24h 高/低价
+
+    返回：
+        Ticker：BTC_USDT 的行情快照对象
+    """
     return Ticker(
         contract=BTC,
         last=price,
@@ -69,7 +93,14 @@ def _ticker(price: Decimal) -> Ticker:
 
 
 async def test_paper_mode_injects_drain_fills(build_ctx):
-    """paper 模式：drain_fills 接 PaperGateway.drain_fills；不建私有成交订阅。"""
+    """验证 paper 模式把模拟成交排空函数注入决策循环且不创建私有成交订阅。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证网关类型、排空接线和空成交订阅
+    """
     ctx = await build_ctx()
     assert isinstance(ctx.gateway, PaperGateway)
     assert ctx.loop._drain_fills == ctx.gateway.drain_fills  # bound method 同 func+self 即相等
@@ -77,14 +108,29 @@ async def test_paper_mode_injects_drain_fills(build_ctx):
 
 
 async def test_real_gateway_mode_has_no_drain_fills(build_ctx):
-    """真实网关（testnet）：无 drain_fills 钩子；mock_market 下不建私有成交订阅。"""
+    """验证 testnet 模式不注入 paper 成交排空函数且模拟行情下不建私有订阅。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证排空函数和成交订阅均为空
+    """
     ctx = await build_ctx(Settings(mode="testnet"))
     assert ctx.loop._drain_fills is None
     assert ctx.trade_feed is None  # mock_market=True 时不接私有 WS（真实装配见 build_app）
 
 
 async def test_persist_kill_switch_writes_config(tmp_path: Path, build_ctx):
-    """风控锁经注入回调写回 config.yaml（risk.kill_switch=true）。"""
+    """验证决策循环的风控锁持久化回调把真值写回配置文件。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证 risk.kill_switch(风控锁)已写为 true
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)  # 先落一份合法配置
     ctx = await build_ctx(config_path=config_path)
@@ -94,7 +140,14 @@ async def test_persist_kill_switch_writes_config(tmp_path: Path, build_ctx):
 
 
 async def test_audit_shared_between_loop_and_server(build_ctx):
-    """DecisionLoop 与 server 共用同一 AuditTrail 实例（审计单点落库）。"""
+    """验证决策循环与服务器共享同一审计轨迹实例以保持单点落库。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过对象身份断言验证审计实例共享
+    """
     ctx = await build_ctx()
     assert ctx.server_deps is not None
     assert ctx.loop._audit is ctx.server_deps.audit_trail
@@ -104,7 +157,14 @@ async def test_audit_shared_between_loop_and_server(build_ctx):
 
 
 async def test_server_runtime_shares_settings_and_watchlist(build_ctx):
-    """runtime_settings 是同一 Settings 实例；runtime_watchlist 是同一 list 对象。"""
+    """验证服务器、应用上下文与决策工具共享同一配置和白名单对象。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过对象身份断言验证运行时原地更新可跨层可见
+    """
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None
@@ -117,7 +177,13 @@ async def test_server_runtime_shares_settings_and_watchlist(build_ctx):
 
 
 def _paper_with_long_position() -> PaperGateway:
-    """持有多单的 paper 网关（合约 funding_interval=28800s，费率 0.0001）。"""
+    """构造持有一张 BTC 多单且资金费周期为八小时的 paper 网关。
+
+    参数：无
+
+    返回：
+        PaperGateway，已录入合约、价格并成交一张多单的模拟网关
+    """
     gateway = PaperGateway(Settings().paper)
     gateway.upsert_contract(_default_contract(BTC, Decimal("50000")))
     gateway.on_price(BTC, Decimal("50000"))
@@ -126,7 +192,13 @@ def _paper_with_long_position() -> PaperGateway:
 
 
 def test_funding_settles_only_when_interval_due():
-    """8h 结算周期：1 小时内不重复结算，到达周期才再次结算（修约 8 倍高估）。"""
+    """验证资金费首次结算后八小时内不重复扣费且到期才再次结算。
+
+    参数：无
+
+    返回：
+        None，通过断言验证一小时与八小时两个时间边界
+    """
     gateway = _paper_with_long_position()
     last_settled: dict[str, float] = {}
     assert settle_due_funding(gateway, last_settled, now=1000.0) == [BTC]  # 首次见到持仓即结算
@@ -142,7 +214,14 @@ def test_funding_settles_only_when_interval_due():
 
 
 async def test_trigger_fire_removes_from_memory_and_wakes(build_ctx):
-    """触发即一次性从内存索引移除，并以 price_trigger 原因抢醒调度器。"""
+    """验证价格预警触发后从内存移除并以精确原因抢醒调度器。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证预警单次语义和唤醒原因
+    """
     ctx = await build_ctx()
     ctx.triggers.add(BTC, ">=", Decimal("60000"))
     wakes: list[str] = []
@@ -156,7 +235,14 @@ async def test_trigger_fire_removes_from_memory_and_wakes(build_ctx):
 
 
 async def test_triggers_not_rebuilt_on_restart(build_ctx):
-    """内存唯一存储：重启（重新组装）后预警线不重建，索引为空，由 LLM 决定是否重设。"""
+    """验证应用重新组装后不会从持久层重建仅存于内存的价格预警。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证旧上下文有预警而新上下文为空
+    """
     ctx = await build_ctx()
     ctx.triggers.add(BTC, ">=", Decimal("60000"))
     assert len(ctx.triggers.list()) == 1
@@ -168,7 +254,14 @@ async def test_triggers_not_rebuilt_on_restart(build_ctx):
 
 
 async def test_server_deps_wires_trading_callbacks(build_ctx):
-    """manual_close / agent_start / agent_stop 已注入；paper 模式注入 paper_reset。"""
+    """验证 paper 模式服务器依赖完整接入手动平仓、启停和账户重置回调。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证四个交易控制回调均可用
+    """
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None
@@ -178,14 +271,28 @@ async def test_server_deps_wires_trading_callbacks(build_ctx):
 
 
 async def test_server_deps_no_paper_reset_in_testnet(build_ctx):
-    """testnet（真实网关）不注入 paper_reset，/api/paper/reset 将 409。"""
+    """验证 testnet 模式不会接入仅适用于 paper 的账户重置回调。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证 paper_reset(模拟账户重置)为空
+    """
     ctx = await build_ctx(Settings(mode="testnet"))
     assert ctx.server_deps is not None
     assert ctx.server_deps.paper_reset is None
 
 
 async def test_agent_start_stop_callbacks_drive_scheduler(build_ctx):
-    """agent_start/stop 回调真实启停调度器，status_provider 反映 agent_running。"""
+    """验证 agent 启停回调真实驱动调度器并同步更新运行状态。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证启动前、启动后与停止后的状态
+    """
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None and deps.status_provider is not None
@@ -199,7 +306,14 @@ async def test_agent_start_stop_callbacks_drive_scheduler(build_ctx):
 
 
 async def test_agent_start_fires_first_round_immediately(build_ctx):
-    """手动启动立即抢醒首轮（而非干等 default_wake_minutes 后的首个定时唤醒）。"""
+    """验证手动启动 agent 会立即触发首轮而无需等待默认定时器。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证首个事件类型和 manual_start(手动启动)来源
+    """
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None
@@ -213,7 +327,14 @@ async def test_agent_start_fires_first_round_immediately(build_ctx):
 
 
 async def test_status_provider_includes_in_round(build_ctx):
-    """status_provider 暴露 in_round 键（未运行时为 False），供 /api/agent/live 实时展示。"""
+    """验证状态提供器始终暴露当前是否处于决策轮的字段。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证 in_round(决策轮进行中)存在且初始为假
+    """
     ctx = await build_ctx()
     deps = ctx.server_deps
     assert deps is not None and deps.status_provider is not None
@@ -223,8 +344,14 @@ async def test_status_provider_includes_in_round(build_ctx):
 
 
 async def test_on_wake_pushes_round_start_then_round(build_ctx):
-    """决策轮事件序：round_start（轮开始）先于 round（轮结束）入队——
-    前端实时决策卡依靠 round_start 进入"决策中"轮询态。"""
+    """验证一次唤醒先发送决策轮开始事件再发送决策轮结束事件。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证事件顺序与唤醒来源
+    """
     ctx = await build_ctx()  # fixture 默认 mock_llm + mock_market
     await ctx.scheduler.start()
     try:
@@ -242,7 +369,14 @@ async def test_on_wake_pushes_round_start_then_round(build_ctx):
 
 
 async def test_research_subsystem_assembled(build_ctx):
-    """研报子系统装配进 AppContext：scheduler 就位，server 的 research_run 同源。"""
+    """验证研报 agent、调度器和服务器手动运行回调来自同一子系统装配。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证研报组件存在且运行回调同源
+    """
     ctx = await build_ctx()
     assert ctx.research.agent is not None
     assert ctx.research.scheduler is not None
@@ -252,10 +386,31 @@ async def test_research_subsystem_assembled(build_ctx):
 
 
 async def test_build_research_receives_notify_event(build_ctx, monkeypatch):
-    """build_research 收到 notify_event=event_queue.put_nowait（研报轮始/轮末事件经 WS 广播）。"""
+    """验证研报构建器接收应用事件队列的非阻塞通知回调。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+        monkeypatch: MonkeyPatch，用于包装并观察研报构建函数
+
+    返回：
+        None，通过断言验证回调与事件队列 put_nowait 方法同源
+    """
     captured: list = []
 
     def _wrap(settings, repo, audit, provider, notify_event=None, **kwargs):
+        """包装真实 build_research：截获 notify_event 入参后转调真实实现。
+
+        参数：
+            settings: 应用配置，透传
+            repo: 仓储对象，透传
+            audit: 审计对象，透传
+            provider: LLM provider，透传
+            notify_event: 事件回调，被记录到 captured 列表供断言
+            **kwargs: 其余透传参数
+
+        返回：
+            真实 build_research 的返回值（研报子系统组件）
+        """
         captured.append(notify_event)
         return _build_research_impl(
             settings, repo, audit, provider, notify_event=notify_event, **kwargs
@@ -267,19 +422,55 @@ async def test_build_research_receives_notify_event(build_ctx, monkeypatch):
 
 
 async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkeypatch):
-    """run_app 创建研报巡检 task（run_forever），shutdown 时被 cancel（与复盘同构）。"""
+    """验证应用运行时创建研报巡检任务并在关闭流程中取消该任务。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+        monkeypatch: MonkeyPatch，用于替换长期任务与关闭流程
+
+    返回：
+        None，通过断言验证捕获到唯一且已取消的研报任务
+    """
     ctx = await build_ctx()
     captured: list[asyncio.Task] = []
 
     async def _fake_forever() -> None:
+        """替代研报调度器 run_forever：永久挂起，直至任务被取消。
+
+        参数：无
+
+        返回：
+            None，永不自然返回；副作用是把协程挂起等待 cancel
+        """
         await asyncio.Event().wait()  # 挂起直至被 cancel
 
     async def _fake_serve() -> None:
+        """替代 server.serve：立即返回，避免占用真实 HTTP 端口。
+
+        参数：无
+
+        返回：
+            None，立即完成（不启动真实 HTTP 服务）
+        """
         await asyncio.sleep(0)
 
     async def _fake_shutdown(
         _ctx, server_task, pusher_task, funding_task, review_task, research_task, safety_task=None
     ) -> None:
+        """替代 run_app 的 shutdown：记录研报任务并取消各后台任务。
+
+        参数：
+            _ctx: 应用上下文（本桩未使用）
+            server_task: 服务端任务，被取消
+            pusher_task: 行情推送任务（本桩不处理）
+            funding_task: 资金费巡检任务，被取消
+            review_task: 复盘巡检任务，被取消
+            research_task: 研报巡检任务，记录到 captured 供断言其已被取消
+            safety_task: 安全巡检任务（本桩不处理）
+
+        返回：
+            None，副作用是取消 server/funding/review/research 四个任务并等待其收尾
+        """
         captured.append(research_task)
         for task in (server_task, funding_task, review_task, research_task):
             if task is not None:
@@ -301,7 +492,14 @@ async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkey
 
 
 async def test_review_subsystem_assembled(build_ctx):
-    """复盘子系统装配进 AppContext：版本库播种 v1，server 三个复盘写回调全部接线。"""
+    """验证复盘组件完成装配、播种初始版本并接入服务器写回调。
+
+    参数：
+        build_ctx: Callable，应用上下文异步构建夹具
+
+    返回：
+        None，通过断言验证组件、初始版本与三类服务器回调
+    """
     ctx = await build_ctx()
     assert ctx.review.agent is not None
     assert ctx.review.scheduler is not None
@@ -317,9 +515,16 @@ async def test_review_subsystem_assembled(build_ctx):
 
 
 async def test_strategy_save_rollback_callbacks(tmp_path: Path, build_ctx, monkeypatch):
-    """strategy_save 回调：经 StrategyStore 落版本（created_by='human'，reason 固定）；
-    纯"无差异"幂等成功（version=None）；其余校验失败上抛（路由映 422）；
-    strategy_rollback 回写历史内容并记新版本。ROOT 隔离到 tmp，不动真实策略书。"""
+    """验证策略保存与回滚回调的版本元数据、幂等、校验和文件回写语义。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离真实策略书
+        build_ctx: Callable，应用上下文异步构建夹具
+        monkeypatch: MonkeyPatch，用于把复盘根目录切换到临时目录
+
+    返回：
+        None，通过断言验证保存、重复保存、过短拒绝与历史回滚全链路
+    """
     monkeypatch.setattr("src.review.setup.ROOT", tmp_path)  # 策略书/复盘提示词路径隔离
     (tmp_path / "system_prompt.md").write_text("初始策略书。" * 30, encoding="utf-8")
     ctx = await build_ctx()
@@ -351,7 +556,15 @@ async def test_strategy_save_rollback_callbacks(tmp_path: Path, build_ctx, monke
 
 
 async def test_llm_reconfigure_rebuilds_each_agent_provider(tmp_path: Path, monkeypatch):
-    """LLM 热重建后，决策循环与复盘 agent 各自换到新 provider（按 agent 独立实例）。"""
+    """验证模型热重建为决策与复盘 agent 分别创建新的独立 provider。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离应用数据库
+        monkeypatch: MonkeyPatch，用于配置测试密钥并清除模拟模型开关
+
+    返回：
+        None，通过断言验证重建成功且两个 agent 的 provider 均已独立替换
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-reconfigure")
     monkeypatch.delenv("LLM_MOCK", raising=False)
     settings = Settings()

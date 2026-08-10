@@ -8,7 +8,14 @@ from decimal import Decimal, DivisionByZero, InvalidOperation, Overflow, localco
 
 
 async def maybe_await(result: Awaitable[None] | None) -> None:
-    """处理函数允许同步或协程，统一在此消化。"""
+    """统一等待可选协程结果，使回调可以同时支持同步与异步实现。
+
+    参数：
+        result: Awaitable[None] | None，回调返回的协程或同步空结果
+
+    返回：
+        None，存在可等待对象时等待其完成
+    """
     if inspect.isawaitable(result):
         await result
 
@@ -29,6 +36,13 @@ def _scan_number(expr: str, start: int) -> int:
     """从 start 扫描数字字面量，返回结束位置；支持科学计数法（如 1.07E+301）。
 
     E 记法支持是为了闭环：calc 大数结果以 E 记法输出，LLM 可把结果代回继续计算。
+
+    参数：
+        expr: str，待扫描的数学表达式
+        start: int，数字字面量的起始字符位置
+
+    返回：
+        int，数字字面量结束后的字符位置
     """
     j = start
     while j < len(expr) and expr[j] in "0123456789.":
@@ -45,7 +59,17 @@ def _scan_number(expr: str, start: int) -> int:
 
 
 def _tokenize(expr: str) -> list[str]:
-    """拆为 token 序列：数字字面量与单字符运算符（`**` 先归一为 `^`）。"""
+    """把表达式拆为数字和运算符词元，并把双星幂运算统一为脱字符。
+
+    参数：
+        expr: str，待拆分的数学表达式
+
+    返回：
+        list[str]，按原顺序排列的数字字面量与单字符运算符
+
+    异常：
+        _CalcError: 表达式包含不支持字符或无法识别的符号时抛出
+    """
     expr = expr.replace("**", "^")
     if bad := set(expr) - _CALC_ALLOWED:
         raise _CalcError(f"包含不支持的字符：{''.join(sorted(bad))}")
@@ -71,14 +95,39 @@ class _Parser:
     """递归下降解析并求值：expr → term → factor(一元负号) → power(右结合) → atom。"""
 
     def __init__(self, tokens: list[str]) -> None:
+        """初始化解析器：持有 token 序列，解析位置与括号嵌套深度归零。
+
+        参数：
+            tokens: list[str]，_tokenize 输出的 token 序列（数字字面量与单字符运算符）
+
+        返回：
+            None，就地初始化实例状态（_pos 与 _depth 归零）
+        """
         self._tokens = tokens
         self._pos = 0
         self._depth = 0  # 括号嵌套深度（显式限幅，不依赖 Python 栈余量）
 
     def _peek(self) -> str | None:
+        """查看当前待解析的 token，不推进解析位置。
+
+        参数：无
+
+        返回：
+            str | None：当前 token；已读到序列末尾时返回 None
+        """
         return self._tokens[self._pos] if self._pos < len(self._tokens) else None
 
     def _next(self) -> str:
+        """取出当前 token 并推进解析位置。
+
+        参数：无
+
+        返回：
+            str：当前 token
+
+        异常：
+            _CalcError：表达式已结束仍继续取词（表达式不完整）时抛出
+        """
         token = self._peek()
         if token is None:
             raise _CalcError("表达式不完整（意外结束）")
@@ -86,12 +135,29 @@ class _Parser:
         return token
 
     def parse(self) -> Decimal:
+        """解析完整表达式并求值，要求 token 序列恰好读完。
+
+        参数：无
+
+        返回：
+            Decimal：表达式的计算结果
+
+        异常：
+            _CalcError：表达式解析完后仍残留多余 token 时抛出
+        """
         value = self._expr()
         if self._peek() is not None:
             raise _CalcError(f"多余的内容：{self._peek()}")
         return value
 
     def _expr(self) -> Decimal:
+        """解析加减层：若干乘除项以 +、- 连接，左结合求值。
+
+        参数：无
+
+        返回：
+            Decimal：加减表达式的计算结果
+        """
         value = self._term()
         while self._peek() in ("+", "-"):
             if self._next() == "+":
@@ -101,6 +167,13 @@ class _Parser:
         return value
 
     def _term(self) -> Decimal:
+        """解析乘除层：若干一元因子以 *、/ 连接，左结合求值。
+
+        参数：无
+
+        返回：
+            Decimal：乘除表达式的计算结果
+        """
         value = self._factor()
         while self._peek() in ("*", "/"):
             if self._next() == "*":
@@ -110,14 +183,29 @@ class _Parser:
         return value
 
     def _factor(self) -> Decimal:
-        """一元负号层：`-x^2` 按惯例解释为 `-(x^2)`。"""
+        """解析一元负号层，使负号优先级低于幂运算并支持连续负号。
+
+        参数：无
+
+        返回：
+            Decimal，一元因子求值结果
+        """
         if self._peek() == "-":
             self._next()
             return -self._factor()
         return self._power()
 
     def _power(self) -> Decimal:
-        """幂运算，右结合：`2^3^2` = `2^(3^2)` = 512。"""
+        """按右结合规则解析幂运算，并限制指数绝对值防止资源滥用。
+
+        参数：无
+
+        返回：
+            Decimal，幂表达式求值结果
+
+        异常：
+            _CalcError: 指数绝对值超过允许上限时抛出
+        """
         base = self._atom()
         if self._peek() != "^":
             return base
@@ -128,6 +216,17 @@ class _Parser:
         return base**exponent
 
     def _atom(self) -> Decimal:
+        """解析最小单元：括号子表达式或数字字面量。
+
+        参数：无
+
+        返回：
+            Decimal：括号内子表达式的值，或数字字面量解析出的数值
+
+        异常：
+            _CalcError：括号嵌套超过 _CALC_MAX_DEPTH 层、缺少右括号，
+                或 token 不是合法数字时抛出
+        """
         token = self._next()
         if token == "(":
             self._depth += 1
@@ -145,7 +244,14 @@ class _Parser:
 
 
 def _format_result(value: Decimal) -> str:
-    """结果去尾零：整数值显示为整数形式（8 而非 8.000），超精度回退科学计数法。"""
+    """把 Decimal 结果格式化为去尾零文本，整数优先使用普通整数形式。
+
+    参数：
+        value: Decimal，待展示的计算结果
+
+    返回：
+        str，适合返回给 LLM 的紧凑数值文本
+    """
     if value == value.to_integral_value() and value.adjusted() < 28:
         return str(value.quantize(Decimal(1)))
     return str(value.normalize())
@@ -155,7 +261,14 @@ def _format_result(value: Decimal) -> str:
 
 
 def fmt_indicator_value(value: str | None) -> str:
-    """指标数值文本：数值保留 2 位小数（整数原样输出），None 显示 无数据。"""
+    """把指标原始值格式化为整数或两位小数，缺失与非数值分别降级展示。
+
+    参数：
+        value: str | None，指标原始文本或缺失值
+
+    返回：
+        str，格式化数值、原始非数值文本或“无数据”提示
+    """
     if value is None:
         return "无数据"
     try:
@@ -172,6 +285,12 @@ def calc_expression(expr: str) -> str:
 
     支持 + - * / ^（`**` 等价）、括号、一元负号与小数；全程 Decimal（prec=28），
     限幅 Emax 防大数溢出。供执行/复盘两侧 calc 工具 handler 直接返回给 LLM。
+
+    参数：
+        expr: str，待求值的数学表达式
+
+    返回：
+        str，计算结果文本；表达式非法、除零或溢出时返回中文错误说明
     """
     expr = expr.strip()
     if not expr:

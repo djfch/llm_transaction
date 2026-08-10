@@ -37,9 +37,30 @@ class SeqProvider:
     """预置响应序列的 mock provider；元素为异常则抛出。"""
 
     def __init__(self, responses: list) -> None:
+        """初始化预置响应队列。
+
+        参数：
+            responses: list，预置响应序列，元素为 LLMResponse 或异常实例
+
+        返回：
+            None，副作用为将响应存入内部队列，供 chat 依次消费
+        """
         self._responses = deque(responses)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按预置顺序弹出响应；队列耗尽时返回占位响应。
+
+        参数：
+            system: str，系统提示词（本 mock 忽略）
+            messages: list[dict]，对话消息列表（本 mock 忽略）
+            tools: list[dict]，工具定义列表（本 mock 忽略）
+
+        返回：
+            LLMResponse：队首预置响应；无更多预置时返回占位文本
+
+        异常：
+            Exception：预置元素为异常实例时原样抛出（模拟 provider 调用失败）
+        """
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
         item = self._responses.popleft()
@@ -48,10 +69,29 @@ class SeqProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """构造工具结果消息，与真实 provider 的消息格式对齐。
+
+        参数：
+            call: ToolCall，被应答的工具调用，取其 call_id 做关联
+            result: str，工具执行结果文本
+
+        返回：
+            dict：role=tool 的消息字典，携带 tool_call_id 与结果内容
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造测试用合约对象：关键字段按参数设置，其余字段取固定常用值。
+
+    参数：
+        name: str，合约名（如 BTC_USDT）
+        quanto: str，合约乘数字符串（每张合约对应的币数量）
+        mark: str，标记价格字符串
+
+    返回：
+        Contract：最小下单量 1、状态为交易中的测试合约
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -70,7 +110,16 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 async def _make_loop(tmp_path, *, gateway: MockGateway, watchlist: list[str]) -> SimpleNamespace:
-    """MockGateway 决策循环（无 drain 钩子 → 工具层不写 trades，真实网关路径）。"""
+    """MockGateway 决策循环（无 drain 钩子 → 工具层不写 trades，真实网关路径）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        gateway: MockGateway，测试使用的模拟交易网关
+        watchlist: list[str]，当前关注合约列表
+
+    返回：
+        SimpleNamespace，集中持有数据库、仓储、网关、决策循环与设置的测试环境
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -92,13 +141,27 @@ async def _make_loop(tmp_path, *, gateway: MockGateway, watchlist: list[str]) ->
 
 
 async def _close_order_flags(repo: Repo) -> list[int]:
-    """orders 表全部行的 is_close 标记（list_orders 模型不含该列，直查 SQL）。"""
+    """orders 表全部行的 is_close 标记（list_orders 模型不含该列，直查 SQL）。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        list[int]，按创建时间和主键排序的全部订单平仓标记
+    """
     cur = await repo._conn.execute("SELECT is_close FROM orders ORDER BY created_at, id")
     return [row[0] for row in await cur.fetchall()]
 
 
 async def _trade_source_flags(repo: Repo) -> list[str]:
-    """orders 表全部行的 trade_source 标记（直查 SQL，模型不含该列）。"""
+    """orders 表全部行的 trade_source 标记（直查 SQL，模型不含该列）。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        list[str]，按创建时间和主键排序的全部订单交易来源
+    """
     cur = await repo._conn.execute("SELECT trade_source FROM orders ORDER BY created_at, id")
     return [row[0] for row in await cur.fetchall()]
 
@@ -107,6 +170,15 @@ async def _trade_source_flags(repo: Repo) -> list[str]:
 
 
 async def test_manual_close_paper_full_chain(tmp_path):
+    """校验 paper 全链路手动平仓：持仓被平、平仓成交标注 user_close、轮末 drain 不重复落库。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库与审计目录落在其中
+
+    返回：
+        None，断言持仓清空、trades 依次为 llm_open 与 user_close 各一行、平仓单 is_close=1；
+        再跑一轮后成交行数不变（缓冲已被消费、无双计）且日统计可计算
+    """
     ctx = await build_app(
         Settings(audit=AuditConfig(dir=str(tmp_path / "audit"))),
         Watchlist(contracts=[BTC]),
@@ -148,7 +220,13 @@ async def test_manual_close_paper_full_chain(tmp_path):
 
 async def test_manual_close_marks_order_trade_source_user_close(tmp_path):
     """真实网关路径：工具层不写 trades（成交由 fill_sync 按交易所回报落库）；
-    本单 orders 行标 trade_source=user_close，供成交回报分类归属。"""
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     gateway.place_order(OrderRequest(contract=BTC, size=Decimal(1)))  # 制造持仓
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
@@ -168,6 +246,15 @@ async def test_manual_close_marks_order_trade_source_user_close(tmp_path):
 
 
 async def test_manual_close_risk_denied_raises(tmp_path):
+    """校验账户权益非正时手动平仓被风控拒绝：抛 ManualCloseRiskDenied 且未下单。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库与审计目录落在其中
+
+    返回：
+        None，断言抛出 ManualCloseRiskDenied（提示"账户权益非正"）、网关无下单记录、
+        trades 表无成交行
+    """
     gateway = MockGateway(
         contracts={BTC: _contract(BTC, "0.001", "60000")},
         account=Account(available=Decimal("-1"), unrealised_pnl=Decimal(0)),  # 权益非正
@@ -183,6 +270,14 @@ async def test_manual_close_risk_denied_raises(tmp_path):
 
 
 async def test_manual_cancel_syncs_open_order_to_local_record(tmp_path):
+    """验证人工撤单后同步更新本地订单业务记录。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     order = gateway.place_order(
         OrderRequest(contract=BTC, size=Decimal(2), price=Decimal("59000"), tif="gtc")
@@ -210,6 +305,15 @@ async def test_manual_cancel_syncs_open_order_to_local_record(tmp_path):
 
 
 async def test_manual_cancel_finds_target_on_second_open_orders_page(tmp_path, monkeypatch):
+    """验证人工撤单能在第二页未完成订单中找到目标。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     orders = [
         gateway.place_order(
@@ -227,6 +331,17 @@ async def test_manual_cancel_finds_target_on_second_open_orders_page(tmp_path, m
         limit: int | None = None,
         offset: int = 0,
     ):
+        """记录分页查询参数并返回对应页的模拟订单。
+
+        参数：
+            contract: str | None，目标合约标识
+            status: str，订单状态筛选条件
+            limit: int | None，查询数量上限
+            offset: int，分页偏移量
+
+        返回：
+            list[Order]，与当前分页偏移量对应的未完成订单
+        """
         calls.append({"contract": contract, "status": status, "limit": limit, "offset": offset})
         return original_list_orders(contract, status, limit, offset)
 
@@ -245,6 +360,15 @@ async def test_manual_cancel_finds_target_on_second_open_orders_page(tmp_path, m
 
 
 async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, monkeypatch):
+    """验证撤单成功但本地同步失败时返回明确警告。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     order = gateway.place_order(
         OrderRequest(contract=BTC, size=Decimal(-2), price=Decimal("61000"), tif="gtc")
@@ -252,6 +376,18 @@ async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, mon
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
 
     async def fail_sync(*_args, **_kwargs):
+        """模拟本地订单同步失败。
+
+        参数：
+            *_args: tuple[object, ...]，测试中忽略的位置参数
+            **_kwargs: dict[str, object]，测试中忽略的关键字参数
+
+        返回：
+            None，实际不会返回（函数总是抛出异常）
+
+        异常：
+            RuntimeError，模拟本地数据库读写失败时抛出
+        """
         raise RuntimeError("local database offline")
 
     monkeypatch.setattr(env.repo, "update_order_status", fail_sync)
@@ -269,6 +405,14 @@ async def test_manual_cancel_returns_warning_when_local_sync_fails(tmp_path, mon
 
 
 async def test_manual_cancel_rejects_order_from_another_contract(tmp_path):
+    """验证人工撤单拒绝错误合约下的订单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     eth = "ETH_USDT"
     gateway = MockGateway(
         contracts={
@@ -290,6 +434,14 @@ async def test_manual_cancel_rejects_order_from_another_contract(tmp_path):
 
 
 async def test_manual_close_non_watchlist_contract_allowed(tmp_path):
+    """验证人工平仓允许处理已不在关注列表的持仓。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={"DOGE_USDT": _contract("DOGE_USDT", "0.001", "60000")})
     gateway.place_order(OrderRequest(contract="DOGE_USDT", size=Decimal(1)))
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])  # DOGE 不在白名单
@@ -302,6 +454,14 @@ async def test_manual_close_non_watchlist_contract_allowed(tmp_path):
 
 
 async def test_manual_close_exempt_kill_switch(tmp_path):
+    """验证人工减仓不被熔断开关阻断。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     gateway.place_order(OrderRequest(contract=BTC, size=Decimal(1)))
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
@@ -318,6 +478,14 @@ async def test_manual_close_exempt_kill_switch(tmp_path):
 
 
 async def test_manual_close_unknown_contract_raises_gateway_error(tmp_path):
+    """验证人工平仓未知合约时透出网关错误。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
     try:
@@ -331,6 +499,14 @@ async def test_manual_close_unknown_contract_raises_gateway_error(tmp_path):
 
 
 async def test_manual_close_no_position_no_ghost_row(tmp_path):
+    """验证无持仓时人工平仓不会产生幽灵订单记录。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     gateway = MockGateway(contracts={BTC: _contract(BTC, "0.001", "60000")})  # 无持仓
     env = await _make_loop(tmp_path, gateway=gateway, watchlist=[BTC])
     try:

@@ -19,6 +19,14 @@ _INIT = "初始策略书：" + "稳健交易，控制回撤。" * 10
 
 @pytest.fixture
 async def repo(tmp_path):
+    """提供指向临时数据库文件的 Repo 仓储夹具。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库文件落在其中
+
+    返回：
+        AsyncIterator[Repo]，yield 已打开临时数据库的仓储对象，测试结束后关闭连接
+    """
     db = Database()
     await db.open(tmp_path / "test.db")
     yield Repo(db)
@@ -27,6 +35,15 @@ async def repo(tmp_path):
 
 @pytest.fixture
 async def deps(tmp_path, repo):
+    """组装测试所需的工具或服务依赖。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        ReviewToolDeps，绑定临时仓储与 paper 模式的复盘工具依赖
+    """
     prompt = tmp_path / "system_prompt.md"
     prompt.write_text(_INIT, encoding="utf-8")
     store = StrategyStore(prompt, repo)
@@ -36,12 +53,27 @@ async def deps(tmp_path, repo):
 
 @pytest.fixture
 async def registry(deps):
+    """组装已注册测试工具的注册表夹具。
+
+    参数：
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        ToolRegistry，绑定复盘工具依赖的注册表
+    """
     await _seed_rounds(deps.repo)
     return ReviewToolRegistry(deps)
 
 
 async def _seed_rounds(repo: Repo) -> None:
-    """两轮决策 + 审计轮（含 error 与上下文快照）+ 工具调用链 + 三笔成交。"""
+    """两轮决策 + 审计轮（含 error 与上下文快照）+ 工具调用链 + 三笔成交。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     await repo.save_decision(
         round_id="round-aaa",
         mode="paper",
@@ -112,6 +144,14 @@ async def _seed_rounds(repo: Repo) -> None:
 
 
 async def test_get_review_stats(registry):
+    """验证复盘统计工具返回完整汇总。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_review_stats", {"start_ts": 0, "end_ts": 2000})
     assert "平仓笔数：2" in text  # llm_open 不计入样本
     assert "总盈亏：6" in text
@@ -120,6 +160,14 @@ async def test_get_review_stats(registry):
 
 
 async def test_get_review_stats_missing_ts(registry):
+    """验证缺少时间戳的统计参数返回错误。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_review_stats", {"end_ts": 2000})
     assert "参数错误" in text and "start_ts" in text
 
@@ -128,6 +176,14 @@ async def test_get_review_stats_missing_ts(registry):
 
 
 async def test_list_decision_rounds(registry):
+    """验证决策轮次工具按预期列出记录。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute(
         "list_decision_rounds", {"start_ts": 0, "end_ts": time.time() + 10}
     )
@@ -139,6 +195,14 @@ async def test_list_decision_rounds(registry):
 
 
 async def test_list_decision_rounds_limit_and_clamp(registry):
+    """验证决策轮次数量限制会被安全收敛。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     one = await registry.execute(
         "list_decision_rounds", {"start_ts": 0, "end_ts": time.time() + 10, "limit": 1}
     )
@@ -157,6 +221,14 @@ async def test_list_decision_rounds_limit_and_clamp(registry):
 
 
 async def test_get_decision_detail(registry):
+    """验证决策详情工具返回指定轮次。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_decision_detail", {"round_id": "round-aaa"})
     assert "原始输出" in text and "看多 BTC" in text
     truncated = await registry.execute(
@@ -170,6 +242,14 @@ async def test_get_decision_detail(registry):
 
 
 async def test_get_decision_detail_missing(registry):
+    """验证决策详情工具处理不存在轮次。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_decision_detail", {"round_id": "nope"})
     assert "未找到" in text
 
@@ -178,6 +258,14 @@ async def test_get_decision_detail_missing(registry):
 
 
 async def test_get_tool_call_chain(registry):
+    """验证工具调用链按执行顺序返回。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_tool_call_chain", {"round_id": "round-aaa"})
     assert text.index("#1 get_market_data") < text.index("#2 place_order")  # 按 seq 排序
     assert "耗时=12ms" in text
@@ -186,6 +274,14 @@ async def test_get_tool_call_chain(registry):
 
 
 async def test_get_tool_call_chain_empty(registry):
+    """验证没有工具调用时返回空调用链。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_tool_call_chain", {"round_id": "round-bbb"})
     assert "无工具调用记录" in text
 
@@ -194,7 +290,14 @@ async def test_get_tool_call_chain_empty(registry):
 
 
 async def test_calc_tool(registry):
-    """calc 已注册且可算；参数缺失转错误文本；工具总数 12。"""
+    """calc 已注册且可算；参数缺失转错误文本；工具总数 12。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     assert await registry.execute("calc", {"expression": "2*(3-1)^2"}) == "8"
     assert "参数错误" in await registry.execute("calc", {})
     assert len(registry.specs) == 12
@@ -204,6 +307,14 @@ async def test_calc_tool(registry):
 
 
 async def test_list_trades(registry):
+    """验证复盘工具列出成交记录。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("list_trades", {"start_ts": 0, "end_ts": 2000})
     assert "BTC_USDT" in text and "ETH_USDT" in text
     assert "来源=llm_close" in text and "来源=user_close" in text
@@ -211,6 +322,14 @@ async def test_list_trades(registry):
 
 
 async def test_list_trades_filter_and_limit(registry):
+    """验证成交工具支持筛选与数量限制。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     by_source = await registry.execute(
         "list_trades", {"start_ts": 0, "end_ts": 2000, "source": "llm_close"}
     )
@@ -220,7 +339,15 @@ async def test_list_trades_filter_and_limit(registry):
 
 
 async def test_list_decision_rounds_and_trades_mode_isolation(registry, deps):
-    """取数口径对齐 deps.mode（paper）：混合 mode 数据下工具只返回当前模式的轮次/成交。"""
+    """取数口径对齐 deps.mode（paper）：混合 mode 数据下工具只返回当前模式的轮次/成交。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     await deps.repo.save_decision(round_id="round-testnet", mode="testnet", strategy_md5="md5-a")
     await deps.repo.save_trade(
         "round-testnet",
@@ -247,6 +374,14 @@ async def test_list_decision_rounds_and_trades_mode_isolation(registry, deps):
 
 
 async def test_get_round_context(registry):
+    """验证轮次上下文工具返回输入快照。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_round_context", {"round_id": "round-aaa"})
     assert "上下文快照" in text
     truncated = await registry.execute(
@@ -256,6 +391,14 @@ async def test_get_round_context(registry):
 
 
 async def test_get_round_context_missing(registry):
+    """验证轮次上下文工具处理不存在轮次。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_round_context", {"round_id": "nope"})
     assert "未找到" in text
 
@@ -264,12 +407,29 @@ async def test_get_round_context_missing(registry):
 
 
 async def test_get_strategy_versions_list_and_current(registry):
+    """验证策略版本列表标记当前版本。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_strategy_versions", {})
     assert "v1" in text and "human" in text and "初始版本" in text
     assert "当前策略全文" in text and "稳健交易" in text
 
 
 async def test_get_strategy_versions_single(registry, deps):
+    """验证策略版本工具返回指定单个版本。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     v1 = (await deps.store.list_versions())[0]
     text = await registry.execute("get_strategy_versions", {"version_id": v1.id})
     assert "全文" in text and "稳健交易" in text
@@ -283,6 +443,15 @@ async def test_get_strategy_versions_single(registry, deps):
 
 
 async def test_submit_strategy_revision_success(registry, deps):
+    """验证合法策略修订成功生成新版本。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     new = "新策略书：" + "顺势加仓，严格止损。" * 10
     text = await registry.execute(
         "submit_strategy_revision", {"new_prompt_md": new, "reason": "收紧止损"}
@@ -293,6 +462,15 @@ async def test_submit_strategy_revision_success(registry, deps):
 
 
 async def test_submit_strategy_revision_rejected(registry, deps):
+    """验证不满足约束的策略修订被拒绝。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute(
         "submit_strategy_revision", {"new_prompt_md": "太短", "reason": "r"}
     )
@@ -304,10 +482,26 @@ async def test_submit_strategy_revision_rejected(registry, deps):
 
 
 async def test_unknown_tool(registry):
+    """验证注册表拒绝未知工具名。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("nope", {})
     assert "未知工具" in text and "get_review_stats" in text
 
 
 async def test_args_not_dict(registry):
+    """验证注册表拒绝非字典工具参数。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = await registry.execute("get_review_stats", "not-a-dict")
     assert text == "参数错误：工具参数必须是对象"

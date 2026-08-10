@@ -14,6 +14,12 @@ from src.config import load_settings  # noqa: E402
 
 
 def main() -> None:
+    """调用 Gate 真实公共接口列出 USDT 永续合约，打印前 5 个用于手动验证连通性。
+
+    参数：无
+
+    返回：None，合约信息直接打印到控制台
+    """
     gate = load_settings().gate
     client = gate_api.ApiClient(gate_api.Configuration(host=gate.live_host))
     api = gate_api.FuturesApi(client)

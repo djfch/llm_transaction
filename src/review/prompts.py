@@ -33,12 +33,28 @@ class ReviewPromptLoader:
     """
 
     def __init__(self, path: str | Path) -> None:
+        """初始化加载器：记录提示词文件路径，缓存与告警状态置空（此处不读文件）。
+
+        参数：
+            path: str | Path，复盘提示词文件路径
+
+        返回：
+            None，就地初始化实例状态
+        """
         self._path = Path(path)
         self._mtime: float | None = None
         self._body: str = ""
         self._warned_missing = False
 
     def _load_body(self) -> str:
+        """读取提示词正文：文件 mtime 变化才重读，缺失时返回缓存且仅告警一次。
+
+        参数：无
+
+        返回：
+            str：提示词正文；文件缺失时返回缓存内容（首次加载时为空串），
+            运行中被删除则沿用缓存
+        """
         try:
             mtime = self._path.stat().st_mtime
         except FileNotFoundError:
@@ -55,14 +71,28 @@ class ReviewPromptLoader:
         return self._body
 
     def system_prompt(self, tool_docs: str) -> tuple[str, str]:
-        """返回（完整 system prompt, md5）。完整文本 = 复盘提示词正文 + 工具说明段。"""
+        """返回（完整 system prompt, md5）。完整文本 = 复盘提示词正文 + 工具说明段。
+
+        参数：
+            tool_docs: str，渲染后的工具说明
+
+        返回：
+            tuple[str, str]，拼接工具说明后的完整系统提示词及其 MD5
+        """
         body = self._load_body()
         full = body.rstrip() + "\n\n" + tool_docs
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
 
 def render_tool_docs(specs: list[_ToolSpecLike]) -> str:
-    """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。"""
+    """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。
+
+    参数：
+        specs: list[_ToolSpecLike]，工具规格列表
+
+    返回：
+        str，工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）
+    """
     lines = ["## 可用工具", ""]
     for t in specs:
         required = "、".join(t.parameters.get("required", [])) or "无"

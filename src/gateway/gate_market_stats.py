@@ -16,7 +16,17 @@ class GateOpenInterestMixin:
     _settle: str
 
     def fetch_open_interest(self, contract: str) -> Decimal | None:
-        """读取最新合约持仓量；空统计返回 None。"""
+        """读取最新合约持仓量；空统计返回 None。
+
+            参数：
+                contract: str，合约名称
+
+            返回：
+                Decimal | None：读取最新合约持仓量；空统计返回 None
+
+            异常：
+        GatewayError：Gate SDK 最新持仓量请求失败并被统一包装时
+        """
         try:
             stats = self._api.list_contract_stats(self._settle, contract, limit=1)
         except GateApiException as exc:
@@ -29,7 +39,19 @@ class GateOpenInterestMixin:
     def fetch_open_interest_history(
         self, contract: str, interval: str, limit: int = 3
     ) -> list[OpenInterestPoint]:
-        """按统计周期读取持仓量历史；过滤不完整点并按时间升序返回。"""
+        """按统计周期读取持仓量历史；过滤不完整点并按时间升序返回。
+
+            参数：
+                contract: str，合约名称
+                interval: str，行情或统计周期
+                limit: int，最多读取或返回的记录数量
+
+            返回：
+                list[OpenInterestPoint]：按统计周期读取持仓量历史；过滤不完整点并按时间升序返回
+
+            异常：
+        GatewayError：Gate SDK 持仓量历史请求失败并被统一包装时
+        """
         try:
             stats = self._api.list_contract_stats(
                 self._settle, contract, interval=interval, limit=limit

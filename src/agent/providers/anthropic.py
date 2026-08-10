@@ -22,6 +22,19 @@ class AnthropicProvider:
     """Anthropic Messages API 适配。"""
 
     def __init__(self, config: LLMConfig | CredentialConfig, api_key: str | None = None) -> None:
+        """初始化 Anthropic 异步客户端并保存模型配置。
+
+        参数：
+            config: LLMConfig | CredentialConfig，LLM 配置（读取模型名、最大输出 token 数、
+                思考强度）
+            api_key: str | None，Anthropic API 密钥；省略时从环境变量 ANTHROPIC_API_KEY 读取
+
+        返回：
+            None，创建 AsyncAnthropic 客户端并保存为实例属性
+
+        异常：
+            LLMError：参数与环境变量均未提供 API 密钥时抛出
+        """
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise LLMError("缺少 ANTHROPIC_API_KEY 环境变量，无法初始化 Anthropic provider")
@@ -33,6 +46,20 @@ class AnthropicProvider:
         self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """调用 Anthropic Messages API 发起一轮对话，返回统一格式的回复。
+
+        参数：
+            system: str，系统提示词
+            messages: list[dict]，多轮对话消息列表（Anthropic 原生格式）
+            tools: list[dict]，中性格式工具定义 {name, description, parameters(JSON Schema)}，
+                内部转换为 Anthropic 的 input_schema 格式；空列表表示不带工具
+
+        返回：
+            LLMResponse：统一回复（文本 + 工具调用列表 + 原始输出 + 原生 assistant 消息）
+
+        异常：
+            LLMError：Anthropic API 调用失败（网络/鉴权/限流/服务端错误等）时抛出
+        """
         req: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens,
@@ -58,6 +85,15 @@ class AnthropicProvider:
         return self._parse(resp)
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把一次工具执行结果包装成 Anthropic 原生 tool_result 消息，供回填继续对话。
+
+        参数：
+            call: ToolCall，对应的工具调用（取 call_id 作为 tool_use_id 关联原调用）
+            result: str，工具执行结果文本
+
+        返回：
+            dict：role 为 user、content 为 tool_result block 的消息
+        """
         return {
             "role": "user",
             "content": [{"type": "tool_result", "tool_use_id": call.call_id, "content": result}],
@@ -65,7 +101,14 @@ class AnthropicProvider:
 
     @staticmethod
     def _parse(resp: anthropic.types.Message) -> LLMResponse:
-        """content block 列表 → 统一 LLMResponse；SDK 已把 tool_use.input 解析为 dict。"""
+        """content block 列表 → 统一 LLMResponse；SDK 已把 tool_use.input 解析为 dict。
+
+        参数：
+            resp: anthropic.types.Message，提供商原始响应
+
+        返回：
+            LLMResponse，由文本块和工具调用块组成的统一 LLM 响应
+        """
         text_parts: list[str] = []
         calls: list[ToolCall] = []
         for block in resp.content:

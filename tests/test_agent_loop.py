@@ -39,10 +39,31 @@ class MockProvider:
     """预置响应序列的 mock provider：每次 chat 弹出下一个；元素为异常则抛出。"""
 
     def __init__(self, responses: list) -> None:
+        """初始化 mock provider：预置响应存入队列，准备记录调用快照。
+
+        参数：
+            responses: list，预置响应序列；元素为 LLMResponse，或用于模拟失败的异常实例
+
+        返回：
+            None，副作用为初始化内部响应队列与调用快照列表 calls
+        """
         self._responses = deque(responses)
         self.calls: list[dict] = []  # 每次 chat 的 (system, messages, tools) 快照
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """记录本次调用快照并弹出下一个预置响应；队列空则返回占位响应。
+
+        参数：
+            system: str，系统提示词原文
+            messages: list[dict]，本轮对话消息列表
+            tools: list[dict]，可用工具的 schema 列表
+
+        返回：
+            LLMResponse：队列中下一个预置响应；无预置响应时返回占位文本响应
+
+        异常：
+            Exception：预置元素为异常实例时原样抛出（模拟 LLM 调用失败）
+        """
         self.calls.append({"system": system, "messages": list(messages), "tools": tools})
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
@@ -52,10 +73,29 @@ class MockProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """构造工具结果回填消息，与真实 provider 的回填格式一致。
+
+        参数：
+            call: ToolCall，已执行的工具调用（取其 call_id 关联结果）
+            result: str，工具执行结果文本
+
+        返回：
+            dict：role 为 tool、按 tool_call_id 关联调用的消息字典
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造测试用合约对象，仅关键字段参数化，其余取固定常用值。
+
+    参数：
+        name: str，合约名（如 BTC_USDT）
+        quanto: str，合约乘数字符串（内部转为 Decimal）
+        mark: str，标记价格字符串（内部转为 Decimal）
+
+    返回：
+        Contract：交易状态、未下架、含固定费率与下单上下限的测试合约
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -74,6 +114,16 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 def _resp(text: str, calls: list[ToolCall], raw: str) -> LLMResponse:
+    """构造预置的 LLM 响应，附带 assistant 回填消息。
+
+    参数：
+        text: str，助手可见文本（空串表示本轮纯工具调用）
+        calls: list[ToolCall]，本轮要求执行的工具调用列表
+        raw: str，原始响应文本（落审计 llm_raw 用）
+
+    返回：
+        LLMResponse：含工具调用与 assistant_message 的完整响应
+    """
     return LLMResponse(
         text=text,
         tool_calls=calls,
@@ -83,6 +133,16 @@ def _resp(text: str, calls: list[ToolCall], raw: str) -> LLMResponse:
 
 
 async def _make_env(tmp_path, *, max_failures: int = 3) -> SimpleNamespace:
+    """搭建决策循环测试环境：临时 SQLite + MockGateway + 行情/触发器/策略书。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库、策略书与审计快照目录落其中
+        max_failures: int，连续失败熔断阈值（写入 LLMConfig，默认 3）
+
+    返回：
+        SimpleNamespace：装配好的测试环境，含 db/repo/gateway/candles/triggers、
+        watchlist、settings、prompt_loader，以及 wake_calls/alerts 收集列表
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -135,11 +195,27 @@ async def _make_env(tmp_path, *, max_failures: int = 3) -> SimpleNamespace:
     )
 
     def set_next_wake(minutes: int) -> int:
+        """按调度范围裁剪唤醒分钟数并记录原值与生效值。
+
+        参数：
+            minutes: int，工具请求的下一次唤醒间隔分钟数
+
+        返回：
+            int：限制在 5 至 720 分钟内的实际唤醒间隔
+        """
         effective = max(5, min(720, minutes))
         env.wake_calls.append((minutes, effective))
         return effective
 
     async def fake_daily_stats() -> DailyStats:
+        """返回无盈亏、无订单的固定当日统计。
+
+        参数：
+            无
+
+        返回：
+            DailyStats：已实现盈亏和今日订单数均为零的统计对象
+        """
         return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
     env.set_next_wake = set_next_wake
@@ -148,6 +224,16 @@ async def _make_env(tmp_path, *, max_failures: int = 3) -> SimpleNamespace:
 
 
 def _make_loop(env: SimpleNamespace, provider: MockProvider, **kwargs) -> DecisionLoop:
+    """组装可控的决策循环测试实例。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+        provider: MockProvider，LLM 提供者测试替身
+    **kwargs: object，覆盖 DecisionLoop 可选依赖的关键字参数
+
+    返回：
+    DecisionLoop：复用隔离环境依赖并注入指定提供者的决策循环
+    """
     return DecisionLoop(
         settings=env.settings,
         watchlist=env.watchlist,
@@ -167,6 +253,14 @@ def _make_loop(env: SimpleNamespace, provider: MockProvider, **kwargs) -> Decisi
 
 @pytest.fixture
 async def env(tmp_path):
+    """组装决策循环的隔离测试环境。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        AsyncIterator[SimpleNamespace]：yield 完整决策测试环境，并在用例收尾关闭数据库
+    """
     env = await _make_env(tmp_path)
     yield env
     await env.db.close()
@@ -176,6 +270,14 @@ async def env(tmp_path):
 
 
 async def test_full_round_audited(env: SimpleNamespace):
+    """验证三轮 LLM 对话、五次工具调用及完整快照均写入审计。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider(
         [
             _resp(
@@ -263,7 +365,14 @@ async def test_full_round_audited(env: SimpleNamespace):
 
 
 async def test_price_alert_dedup_and_cancel(env: SimpleNamespace):
-    """相同 (contract, direction, price) 重复设置不创建第二个；取消按同三元组精确删除。"""
+    """相同 (contract, direction, price) 重复设置不创建第二个；取消按同三元组精确删除。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider(
         [
             _resp(
@@ -317,7 +426,14 @@ async def test_price_alert_dedup_and_cancel(env: SimpleNamespace):
 
 
 async def test_price_alert_rejects_over_max(env: SimpleNamespace):
-    """预警线全局上限：已达 MAX_ALERTS 时工具拒绝创建并返回错误文本，总数不变。"""
+    """预警线全局上限：已达 MAX_ALERTS 时工具拒绝创建并返回错误文本，总数不变。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     for i in range(MAX_ALERTS):
         env.triggers.add("BTC_USDT", ">=", Decimal(70000 + i))
     provider = MockProvider(
@@ -350,6 +466,14 @@ async def test_price_alert_rejects_over_max(env: SimpleNamespace):
 
 
 async def test_risk_deny_recorded_no_order(env: SimpleNamespace):
+    """验证超出单仓上限时风控拒单、记录原因且不产生订单。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider(
         [
             _resp(
@@ -386,6 +510,14 @@ async def test_risk_deny_recorded_no_order(env: SimpleNamespace):
 
 
 async def test_parse_failure_no_trade(env: SimpleNamespace):
+    """验证 LLM 参数解析失败时不交易并完整记录失败决策轮。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider([LLMParseError("工具参数不是合法 JSON")])
     loop = _make_loop(env, provider)
     result = await loop.run_once("price_alert")
@@ -409,6 +541,14 @@ async def test_parse_failure_no_trade(env: SimpleNamespace):
 
 
 async def test_consecutive_failures_lock_and_alert(tmp_path):
+    """验证连续失败达到阈值后锁定风控且只发送一次告警。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     env = await _make_env(tmp_path, max_failures=2)
     try:
         provider = MockProvider([LLMError("boom")] * 5)
@@ -433,6 +573,14 @@ async def test_consecutive_failures_lock_and_alert(tmp_path):
 
 
 async def test_invalid_args_return_error_text(env: SimpleNamespace):
+    """验证缺参、非法枚举和未知工具返回错误文本但不判整轮失败。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider(
         [
             _resp(
@@ -465,6 +613,14 @@ async def test_invalid_args_return_error_text(env: SimpleNamespace):
 
 
 async def test_removed_tools_are_not_registered(env: SimpleNamespace):
+    """验证已移除的账户与杠杆工具既不可调用也不在注册表中。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     provider = MockProvider(
         [
             _resp(
@@ -488,7 +644,14 @@ async def test_removed_tools_are_not_registered(env: SimpleNamespace):
 
 def test_schemas_and_handlers_stay_in_sync():
     """schema 与 handler 同名成对：schema 有 handler 无 → 工具对 LLM 静默缺失；
-    handler 有 schema 无 → ToolRegistry 构造即 KeyError（反向由构造路径隐式覆盖）。"""
+    handler 有 schema 无 → ToolRegistry 构造即 KeyError（反向由构造路径隐式覆盖）。
+
+    参数：
+        无
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     assert set(SCHEMAS) == set(_HANDLERS)
 
 
@@ -496,6 +659,14 @@ def test_schemas_and_handlers_stay_in_sync():
 
 
 async def test_prompt_hot_reload(tmp_path):
+    """验证策略文件修改后 PromptLoader 热加载新正文并更新摘要。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
     path = tmp_path / "system_prompt.md"
     path.write_text("版本A", encoding="utf-8")
     loader = PromptLoader(path)
@@ -518,12 +689,29 @@ async def test_prompt_hot_reload(tmp_path):
 
 
 async def test_indicator_shortlist_forwarded_to_context(env: SimpleNamespace):
-    """indicator_shortlist 回调经 DecisionLoop 转发给 ContextBuilder：指标行随回调重读变化。"""
+    """indicator_shortlist 回调经 DecisionLoop 转发给 ContextBuilder：指标行随回调重读变化。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
 
     class _Svc:
         """指标服务 stub：只实现上下文行接口，回显收到的键列表（直观察觉短名单来源）。"""
 
         def shortlist_line(self, contract: str, interval: str, keys: list[str]) -> str:
+            """把收到的合约、周期和指标键回显为上下文指标行。
+
+            参数：
+                contract: str，合约名称
+                interval: str，时间周期
+                keys: list[str]，指标键列表
+
+            返回：
+                str：包含合约、周期及逗号分隔指标键的文本
+            """
             return f"{contract} 指标({interval}): 键={','.join(keys)}"
 
     keys = ["rsi14"]

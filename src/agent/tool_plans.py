@@ -14,7 +14,16 @@ from src.memory.plans_repo import MAX_PLAN_CHARS
 
 
 async def update_trade_plan(deps: ToolDeps, args: dict) -> ToolOutcome:
-    """全文覆盖更新交易计划（全局唯一一份，多合约想法写在同一份里）。"""
+    """全文覆盖更新交易计划（全局唯一一份，多合约想法写在同一份里）。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        args: dict，工具调用参数
+    返回：
+        ToolOutcome，全文覆盖更新交易计划（全局唯一一份，多合约想法写在同一份里）
+    异常：
+        ToolArgError，计划正文超过最大字符数时抛出
+    """
     content = _need_str(args, "content")
     if len(content) > MAX_PLAN_CHARS:
         raise ToolArgError(f"计划全文过长（{len(content)} 字符，上限 {MAX_PLAN_CHARS}）")
@@ -27,7 +36,14 @@ async def update_trade_plan(deps: ToolDeps, args: dict) -> ToolOutcome:
 
 
 async def clear_trade_plan(deps: ToolDeps, args: dict) -> ToolOutcome:
-    """清空交易计划（计划已完成或作废时）；原因随审计留痕。"""
+    """清空交易计划（计划已完成或作废时）；原因随审计留痕。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        args: dict，工具调用参数
+    返回：
+        ToolOutcome，清空交易计划（计划已完成或作废时）；原因随审计留痕
+    """
     _need_str(args, "reason")  # 强制写明原因（进审计），内容本身无需落库
     if await deps.repo.plans.get_plan() is None:
         return ToolOutcome("当前本就没有交易计划，无需清空")
@@ -37,6 +53,12 @@ async def clear_trade_plan(deps: ToolDeps, args: dict) -> ToolOutcome:
 
 
 def _notify_plan_updated(deps: ToolDeps) -> None:
-    """计划变更即广播 WS 事件（前端据此立即重拉面板，不等轮末）；未接线时静默跳过。"""
+    """计划变更即广播 WS 事件（前端据此立即重拉面板，不等轮末）；未接线时静默跳过。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+    返回：
+        None，计划变更即广播 WS 事件（前端据此立即重拉面板，不等轮末）；未接线时静默跳过
+    """
     if deps.notify_event is not None:
         deps.notify_event({"type": "plan_updated"})

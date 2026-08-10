@@ -27,8 +27,10 @@ from src.research.providers.mcp_client import McpSession
 def test_parse_ts_formats() -> None:
     """支持 ISO 与 'YYYY-MM-DD HH:MM:SS'；空串/坏值用当前时间兜底。
 
-    回归（M-TZ）：无时区串必须按北京时间（UTC+8）解释，与服务器本地时区
-    无关——UTC 部署机上本测试在修复前必挂（旧实现按本地时区解释）。
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     assert (
         parse_ts("2026-08-05 20:30") == datetime(2026, 8, 5, 20, 30, tzinfo=BEIJING_TZ).timestamp()
@@ -42,7 +44,13 @@ def test_parse_ts_formats() -> None:
 
 
 def test_parse_ts_aware_iso_respects_own_tz() -> None:
-    """复审 #9②：带 %z 的 ISO 串尊重自带时区（不套北京时间）。"""
+    """复审 #9②：带 %z 的 ISO 串尊重自带时区（不套北京时间）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from datetime import timezone
 
     expected = datetime(2026, 8, 5, 20, 30, tzinfo=timezone.utc).timestamp()
@@ -53,12 +61,39 @@ def test_parse_ts_aware_iso_respects_own_tz() -> None:
 
 
 def _fake_mcp(monkeypatch, responses: dict[str, str]):
-    """同时 mock __aenter__（跳过真实连接）与 call_tool（按工具名返回预设）。"""
+    """同时 mock __aenter__（跳过真实连接）与 call_tool（按工具名返回预设）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+        responses: dict[str, str]，工具名到预设响应文本的映射
+
+    返回：
+        None，完成 MCP 会话方法替换，无返回值
+    """
 
     async def fake_enter(self) -> McpSession:
+        """模拟 MCP 会话异步进入并返回当前会话。
+
+        参数：无
+
+        返回：
+            McpSession，跳过真实连接并交给 async with 使用的当前测试会话
+        """
         return self
 
     async def fake_call(self, name: str, args: dict | None = None) -> str:
+        """按工具名返回预设的 MCP 调用结果。
+
+        参数：
+            name: str，工具、合约或对象名称
+            args: dict | None，工具调用参数
+
+        返回：
+            str，预设映射中该 MCP 工具对应的序列化响应文本
+
+        异常：
+            ResearchSourceError，工具名未在预设响应中登记时抛出
+        """
         if name not in responses:
             raise ResearchSourceError(f"未预设工具 {name}")
         return responses[name]
@@ -68,7 +103,14 @@ def _fake_mcp(monkeypatch, responses: dict[str, str]):
 
 
 async def test_jin10_calendar_parsing(monkeypatch) -> None:
-    """日历解析：字段映射 + 星级 int 兜底。"""
+    """日历解析：字段映射 + 星级 int 兜底。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = json.dumps(
         {
             "data": [
@@ -96,7 +138,14 @@ async def test_jin10_calendar_parsing(monkeypatch) -> None:
 
 
 async def test_jin10_flash_pagination(monkeypatch) -> None:
-    """快讯分页：收集全部页后统一按时间窗口过滤（不依赖服务端排序假设）。"""
+    """快讯分页：收集全部页后统一按时间窗口过滤（不依赖服务端排序假设）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     import time as _time
     from datetime import datetime as _dt
 
@@ -112,9 +161,25 @@ async def test_jin10_flash_pagination(monkeypatch) -> None:
     calls: list[str] = []
 
     async def fake_enter(self) -> McpSession:
+        """模拟 MCP 会话异步进入并返回当前会话。
+
+        参数：无
+
+        返回：
+            McpSession，跳过真实连接并交给 async with 使用的当前测试会话
+        """
         return self
 
     async def fake_call(self, name: str, args: dict | None = None) -> str:
+        """按工具名返回预设的 MCP 调用结果。
+
+        参数：
+            name: str，工具、合约或对象名称
+            args: dict | None，工具调用参数
+
+        返回：
+            str，首次调用返回近期快讯页，后续调用返回旧快讯页的 JSON 文本
+        """
         calls.append(name)
         return recent if len(calls) == 1 else old
 
@@ -131,7 +196,11 @@ async def test_jin10_flash_pagination(monkeypatch) -> None:
 async def test_jin10_flash_int_title_coerced(monkeypatch) -> None:
     """回归（M3）：快讯缺 title、id 为 JSON 数字时，title 兜底必须为 str。
 
-    修复前 title 是 int，聚合层 title[:40] 抛 TypeError，一行畸形数据废掉整轮研报。
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     recent_str = datetime.fromtimestamp(time.time() - 100).strftime("%Y-%m-%d %H:%M:%S")
     text = json.dumps({"data": [{"id": 360139, "content": "无标题快讯", "time": recent_str}]})
@@ -145,12 +214,38 @@ async def test_jin10_flash_int_title_coerced(monkeypatch) -> None:
 
 
 async def test_jin10_search_both_channels_down_raises(monkeypatch) -> None:
-    """回归（M2）：搜索双通道全挂抛 ResearchSourceError，不伪装'未找到'。"""
+    """回归（M2）：搜索双通道全挂抛 ResearchSourceError，不伪装'未找到'。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     async def fake_enter(self) -> McpSession:
+        """模拟 MCP 会话异步进入并返回当前会话。
+
+        参数：无
+
+        返回：
+            McpSession，跳过真实连接并交给 async with 使用的当前测试会话
+        """
         return self
 
     async def fake_call(self, name: str, args: dict | None = None) -> str:
+        """按工具名返回预设的 MCP 调用结果。
+
+        参数：
+            name: str，工具、合约或对象名称
+            args: dict | None，工具调用参数
+
+        返回：
+            str，不会正常返回；所有工具调用均模拟连接失败
+
+        异常：
+            ResearchSourceError，模拟数据源或网络连接失败时抛出
+        """
         raise ResearchSourceError(f"{name} 连接失败")
 
     monkeypatch.setattr(McpSession, "__aenter__", fake_enter)
@@ -161,14 +256,40 @@ async def test_jin10_search_both_channels_down_raises(monkeypatch) -> None:
 
 
 async def test_jin10_search_one_channel_down_degrades(monkeypatch) -> None:
-    """M2 配套：单通道失败降级——返回成功通道的结果，不抛错。"""
+    """M2 配套：单通道失败降级——返回成功通道的结果，不抛错。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     recent_str = datetime.fromtimestamp(time.time() - 50).strftime("%Y-%m-%d %H:%M:%S")
     ok = json.dumps({"data": [{"id": "1", "title": "搜到", "content": "c", "time": recent_str}]})
 
     async def fake_enter(self) -> McpSession:
+        """模拟 MCP 会话异步进入并返回当前会话。
+
+        参数：无
+
+        返回：
+            McpSession，跳过真实连接并交给 async with 使用的当前测试会话
+        """
         return self
 
     async def fake_call(self, name: str, args: dict | None = None) -> str:
+        """按工具名返回预设的 MCP 调用结果。
+
+        参数：
+            name: str，工具、合约或对象名称
+            args: dict | None，工具调用参数
+
+        返回：
+            str，成功通道返回包含单条近期新闻的 JSON 文本
+
+        异常：
+            ResearchSourceError，模拟数据源或网络连接失败时抛出
+        """
         if name == "search_flash":
             raise ResearchSourceError("search_flash 挂了")
         return ok
@@ -184,7 +305,14 @@ async def test_jin10_search_one_channel_down_degrades(monkeypatch) -> None:
 
 
 async def test_blockbeats_flash_parsing(monkeypatch) -> None:
-    """24h 快讯解析：HTML 剥离 + 全文保留。"""
+    """24h 快讯解析：HTML 剥离 + 全文保留。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     text = json.dumps(
         {
             "page": 1,
@@ -210,7 +338,14 @@ async def test_blockbeats_flash_parsing(monkeypatch) -> None:
 
 
 async def test_blockbeats_flash_int_title_coerced(monkeypatch) -> None:
-    """复审 #9①：律动数字 title 强制 str（与金十 M3 同族防御）。"""
+    """复审 #9①：律动数字 title 强制 str（与金十 M3 同族防御）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     recent_str = datetime.fromtimestamp(time.time() - 100).strftime("%Y-%m-%d %H:%M:%S")
     text = json.dumps(
         {"page": 1, "data": [{"id": 1, "title": 12345, "content": "c", "create_time": recent_str}]}
@@ -223,14 +358,40 @@ async def test_blockbeats_flash_int_title_coerced(monkeypatch) -> None:
 
 
 async def test_blockbeats_indicators_partial_failure(monkeypatch) -> None:
-    """指标组：单工具失败标注不可用，不拖垮整组。"""
+    """指标组：单工具失败标注不可用，不拖垮整组。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     ok = json.dumps({"value": 2.1})
     calls: list[str] = []
 
     async def fake_enter(self) -> McpSession:
+        """模拟 MCP 会话异步进入并返回当前会话。
+
+        参数：无
+
+        返回：
+            McpSession，跳过真实连接并交给 async with 使用的当前测试会话
+        """
         return self
 
     async def fake_call(self, name: str, args: dict | None = None) -> str:
+        """按工具名返回预设的 MCP 调用结果。
+
+        参数：
+            name: str，工具、合约或对象名称
+            args: dict | None，工具调用参数
+
+        返回：
+            str，BTC ETF 工具返回指标 JSON 文本，其余工具模拟失败
+
+        异常：
+            ResearchSourceError，触发测试预设的失败路径时抛出
+        """
         calls.append(name)
         if name == "get_btc_etf_flow":
             return ok
@@ -249,7 +410,14 @@ async def test_blockbeats_indicators_partial_failure(monkeypatch) -> None:
 
 
 async def test_fred_unknown_indicator(repo=None) -> None:
-    """T11：FRED 未知指标/坏别名返回提示而非抛错（无需 key）。"""
+    """T11：FRED 未知指标/坏别名返回提示而非抛错（无需 key）。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     src = fred.FredSource()
     text = await src.get_macro_series("not a real indicator name at all")
@@ -257,16 +425,47 @@ async def test_fred_unknown_indicator(repo=None) -> None:
 
 
 async def test_polymarket_empty_result(monkeypatch) -> None:
-    """T11：Polymarket 无匹配市场返回提示而非崩溃。"""
+    """T11：Polymarket 无匹配市场返回提示而非崩溃。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     class _EmptyResp:
         def raise_for_status(self) -> None:
+            """模拟成功 HTTP 响应的状态检查。
+
+            参数：无
+
+            返回：
+                None，执行上述模拟操作或副作用，无返回值
+            """
             pass
 
         def json(self) -> dict:
+            """返回模拟 HTTP 响应中预设的 JSON 数据。
+
+            参数：无
+
+            返回：
+                dict，包含空 events 列表的 Polymarket HTTP 响应数据
+            """
             return {"events": []}
 
     async def fake_get(self, url, params=None, **kwargs):
+        """模拟 HTTP GET 请求并返回预设响应。
+
+        参数：
+            url: str，模拟请求地址
+            params: dict | None，模拟请求查询参数
+            **kwargs: dict[str, object]，按名称传入的可选参数
+
+        返回：
+            _EmptyResp，空市场列表的模拟 HTTP 响应
+        """
         return _EmptyResp()
 
     monkeypatch.setattr(polymarket.httpx.AsyncClient, "get", fake_get)
@@ -279,7 +478,14 @@ async def test_polymarket_empty_result(monkeypatch) -> None:
 
 
 async def test_article_detail_cache_hit(monkeypatch) -> None:
-    """T12：缓存命中直接返回全文（不调金十）。"""
+    """T12：缓存命中直接返回全文（不调金十）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from src.research.providers.base import FlashItem
 
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
@@ -299,17 +505,39 @@ async def test_article_detail_cache_hit(monkeypatch) -> None:
 
 
 async def test_article_detail_fallback_jin10(monkeypatch) -> None:
-    """T12：缓存未命中走金十详情。"""
+    """T12：缓存未命中走金十详情。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = ResearchDataProvider(jin10=_FakeJin10())
     detail = await provider.fetch_article_detail("j9")
     assert detail == "金十详情"
 
 
 async def test_article_detail_blockbeats_refetch(monkeypatch) -> None:
-    """T12：金十拒绝后走律动重拉兜底找到全文。"""
+    """T12：金十拒绝后走律动重拉兜底找到全文。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     class _BbDetail(_FakeBb):
         async def fetch_flash(self, hours=24):
+            """返回预设的快讯列表。
+
+            参数：
+                hours: int，快讯回看时长
+
+            返回：
+                list[FlashItem]，包含律动全文的模拟快讯列表
+            """
             from src.research.providers.base import FlashItem
 
             return [
@@ -326,6 +554,17 @@ async def test_article_detail_blockbeats_refetch(monkeypatch) -> None:
 
     class _Jin10NoDetail(_FakeJin10):
         async def fetch_article_detail(self, item_id):
+            """返回预设的文章详情或模拟未找到错误。
+
+            参数：
+                item_id: str，目标文章标识
+
+            返回：
+                str，实际不会返回（函数总是抛出异常）
+
+            异常：
+                ResearchSourceError，触发测试预设的失败路径时抛出
+            """
             raise ResearchSourceError("金十无此 id")
 
     provider = ResearchDataProvider(jin10=_Jin10NoDetail(), blockbeats=_BbDetail())
@@ -334,10 +573,28 @@ async def test_article_detail_blockbeats_refetch(monkeypatch) -> None:
 
 
 async def test_article_detail_not_found(monkeypatch) -> None:
-    """T12：全部兜底失败返回"未找到"哨兵。"""
+    """T12：全部兜底失败返回"未找到"哨兵。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     class _NoDetailJin10(_FakeJin10):
         async def fetch_article_detail(self, item_id):
+            """返回预设的文章详情或模拟未找到错误。
+
+            参数：
+                item_id: str，目标文章标识
+
+            返回：
+                str，实际不会返回（函数总是抛出异常）
+
+            异常：
+                ResearchSourceError，触发测试预设的失败路径时抛出
+            """
             raise ResearchSourceError("金十无此 id")
 
     provider = ResearchDataProvider(jin10=_NoDetailJin10(), blockbeats=_FakeBb())
@@ -351,7 +608,14 @@ async def test_article_detail_not_found(monkeypatch) -> None:
 
 
 async def test_fred_no_key_returns_guidance(monkeypatch) -> None:
-    """key 未配置：返回中文提示而非抛错。"""
+    """key 未配置：返回中文提示而非抛错。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     src = fred.FredSource()
     text = await src.get_macro_series("cpi")
@@ -359,14 +623,40 @@ async def test_fred_no_key_returns_guidance(monkeypatch) -> None:
 
 
 async def test_fred_render(monkeypatch) -> None:
-    """有 key：渲染最新值 + 窗口变化 + 表格（mock 内部请求）。"""
+    """有 key：渲染最新值 + 窗口变化 + 表格（mock 内部请求）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     monkeypatch.setenv("FRED_API_KEY", "fake")
     src = fred.FredSource()
 
     async def fake_meta(self, client, series_id):
+        """返回预设的 FRED 指标元数据。
+
+        参数：
+            client: httpx.AsyncClient，用于发起测试请求的客户端
+            series_id: str，FRED 指标序列标识
+
+        返回：
+            dict[str, str]，包含指标标题的元数据
+        """
         return {"title": "Consumer Price Index"}
 
     async def fake_obs(self, client, series_id, look_back):
+        """返回预设的 FRED 观测序列。
+
+        参数：
+            client: httpx.AsyncClient，用于发起测试请求的客户端
+            series_id: str，FRED 指标序列标识
+            look_back: int，观测回看窗口天数
+
+        返回：
+            list[tuple[str, str]]，按日期排列的模拟观测点
+        """
         return [("2026-01-01", "310"), ("2026-07-01", "320")]
 
     monkeypatch.setattr(fred.FredSource, "_series_meta", fake_meta)
@@ -381,13 +671,34 @@ async def test_fred_render(monkeypatch) -> None:
 
 
 async def test_polymarket_rendering(monkeypatch) -> None:
-    """预测市场渲染：过滤已关闭市场、按成交额排序、含概率与结算日。"""
+    """预测市场渲染：过滤已关闭市场、按成交额排序、含概率与结算日。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     class _Resp:
         def raise_for_status(self) -> None:
+            """模拟成功 HTTP 响应的状态检查。
+
+            参数：无
+
+            返回：
+                None，执行上述模拟操作或副作用，无返回值
+            """
             pass
 
         def json(self) -> dict:
+            """返回模拟 HTTP 响应中预设的 JSON 数据。
+
+            参数：无
+
+            返回：
+                dict，包含开放与关闭预测市场样本的 Polymarket HTTP 响应数据
+            """
             return {
                 "events": [
                     {
@@ -415,6 +726,16 @@ async def test_polymarket_rendering(monkeypatch) -> None:
             }
 
     async def fake_get(self, url, params=None, **kwargs):
+        """模拟 HTTP GET 请求并返回预设响应。
+
+        参数：
+            url: str，模拟请求地址
+            params: dict | None，模拟请求查询参数
+            **kwargs: dict[str, object]，按名称传入的可选参数
+
+        返回：
+            _Resp，包含预测市场数据的模拟 HTTP 响应
+        """
         return _Resp()
 
     monkeypatch.setattr(polymarket.httpx.AsyncClient, "get", fake_get)
@@ -430,9 +751,24 @@ async def test_polymarket_rendering(monkeypatch) -> None:
 
 class _FakeJin10:
     async def fetch_calendar(self):
+        """返回预设的财经日历数据。
+
+        参数：无
+
+        返回：
+            list[CalendarEvent]，空的模拟财经日历列表
+        """
         return []
 
     async def fetch_flash(self, hours=24):
+        """返回预设的快讯列表。
+
+        参数：
+            hours: int，快讯回看时长
+
+        返回：
+            list[FlashItem]，金十模拟快讯列表
+        """
         from src.research.providers.base import FlashItem
 
         return [
@@ -448,14 +784,39 @@ class _FakeJin10:
         ]
 
     async def fetch_article_detail(self, item_id):
+        """返回预设的文章详情或模拟未找到错误。
+
+        参数：
+            item_id: str，目标文章标识
+
+        返回：
+            str，金十模拟文章全文
+        """
         return "金十详情"
 
     async def search_news(self, keyword, limit=20):
+        """返回预设的新闻搜索结果。
+
+        参数：
+            keyword: str，新闻搜索关键词
+            limit: int，查询数量上限
+
+        返回：
+            list[FlashItem]，模拟新闻搜索结果
+        """
         return []
 
 
 class _FakeBb:
     async def fetch_flash(self, hours=24):
+        """返回预设的快讯列表。
+
+        参数：
+            hours: int，快讯回看时长
+
+        返回：
+            list[FlashItem]，律动模拟快讯列表
+        """
         from src.research.providers.base import FlashItem
 
         return [
@@ -471,14 +832,36 @@ class _FakeBb:
         ]  # 同秒同标题 → 去重
 
     async def fetch_indicators(self):
+        """返回预设的宏观指标数据。
+
+        参数：无
+
+        返回：
+            str，模拟宏观指标快照文本
+        """
         return "指标快照"
 
     async def search_news(self, keyword, limit=20):
+        """返回预设的新闻搜索结果。
+
+        参数：
+            keyword: str，新闻搜索关键词
+            limit: int，查询数量上限
+
+        返回：
+            list[FlashItem]，模拟新闻搜索结果
+        """
         return []
 
 
 async def test_aggregator_merge_dedup() -> None:
-    """聚合器：双源快讯按 时间+标题 去重合并。"""
+    """聚合器：双源快讯按 时间+标题 去重合并。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
     items = await provider.fetch_flash()
     assert len(items) == 1  # 重复被去重
@@ -487,7 +870,13 @@ async def test_aggregator_merge_dedup() -> None:
 
 
 async def test_aggregator_missing_source_raises() -> None:
-    """聚合器：未装配源调用时报错（工具层转哨兵）。"""
+    """聚合器：未装配源调用时报错（工具层转哨兵）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = ResearchDataProvider()
     with pytest.raises(ResearchSourceError):
         await provider.fetch_calendar()
@@ -495,14 +884,43 @@ async def test_aggregator_missing_source_raises() -> None:
 
 class _BrokenSource:
     async def fetch_flash(self, hours=24):
+        """返回预设的快讯列表。
+
+        参数：
+            hours: int，快讯回看时长
+
+        返回：
+            list[FlashItem]，实际不会返回（函数总是抛出异常）
+
+        异常：
+            ResearchSourceError，模拟数据源或网络连接失败时抛出
+        """
         raise ResearchSourceError("连接失败")
 
     async def search_news(self, keyword, limit=20):
+        """返回预设的新闻搜索结果。
+
+        参数：
+            keyword: str，新闻搜索关键词
+            limit: int，查询数量上限
+
+        返回：
+            list[FlashItem]，实际不会返回（函数总是抛出异常）
+
+        异常：
+            ResearchSourceError，模拟数据源或网络连接失败时抛出
+        """
         raise ResearchSourceError("连接失败")
 
 
 async def test_aggregator_all_sources_down_raises() -> None:
-    """双源全挂：抛 ResearchSourceError（回归 H2：不得伪装'无快讯'）。"""
+    """双源全挂：抛 ResearchSourceError（回归 H2：不得伪装'无快讯'）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = ResearchDataProvider(jin10=_BrokenSource(), blockbeats=_BrokenSource())
     with pytest.raises(ResearchSourceError, match="全部不可用"):
         await provider.fetch_flash()
@@ -511,11 +929,25 @@ async def test_aggregator_all_sources_down_raises() -> None:
 
 
 async def test_aggregator_one_source_down_degrades() -> None:
-    """单源失败：另一源数据仍可用（降级不中断）。"""
+    """单源失败：另一源数据仍可用（降级不中断）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from src.research.providers.base import FlashItem
 
     class _OkSource:
         async def fetch_flash(self, hours=24):
+            """返回预设的快讯列表。
+
+            参数：
+                hours: int，快讯回看时长
+
+            返回：
+                list[FlashItem]，可用数据源返回的模拟快讯列表
+            """
             return [
                 FlashItem(
                     id="ok1",
@@ -539,7 +971,11 @@ async def test_aggregator_one_source_down_degrades() -> None:
 def test_stdio_command_platform_split(monkeypatch) -> None:
     """回归（M1）：stdio 命令按平台拆分——Windows 走 cmd /c，POSIX 直接 exec。
 
-    修复前硬编码 cmd /c，Linux 部署机（systemd）上律动源必然连接失败。
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     from src.research.providers.mcp_client import _stdio_command
 
@@ -557,7 +993,13 @@ def test_stdio_command_platform_split(monkeypatch) -> None:
 
 
 def test_stdio_command_empty_raises() -> None:
-    """复审 #9③：空/纯空白命令抛 ResearchSourceError（__init__ 的 not cmd 拦不住 ' '）。"""
+    """复审 #9③：空/纯空白命令抛 ResearchSourceError（__init__ 的 not cmd 拦不住 ' '）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from src.research.providers.mcp_client import _stdio_command
 
     with pytest.raises(ResearchSourceError):

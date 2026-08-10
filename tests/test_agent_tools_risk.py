@@ -22,6 +22,16 @@ from src.risk.models import DailyStats
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造一个测试用合约对象（限额、费率等固定，标记价可调）。
+
+    参数：
+        name: str，合约名（如 "BTC_USDT"）
+        quanto: str，合约乘数（quanto_multiplier），字符串形式转 Decimal
+        mark: str，标记价格，字符串形式转 Decimal
+
+    返回：
+        Contract：填充了固定交易参数与费率的合约对象
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -40,13 +50,29 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 async def _zero_daily() -> DailyStats:
+    """提供恒为零的当日统计，作为风控 daily_stats_fn 的默认实现。
+
+    参数：无
+
+    返回：
+        DailyStats：已实现盈亏为 0、当日下单数为 0 的统计对象
+    """
     return DailyStats(realized_pnl=Decimal(0), orders_today=0)
 
 
 async def _make_tools(
     tmp_path, *, extra_contracts: tuple = (), research_config: ResearchConfig | None = None
 ) -> SimpleNamespace:
-    """组装工具注册表（MockGateway + tmp_path SQLite）。"""
+    """组装工具注册表（MockGateway + tmp_path SQLite）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        extra_contracts: tuple，除 BTC 外需注册的附加测试合约
+        research_config: ResearchConfig | None，可选的研报方向闸门配置
+
+    返回：
+        SimpleNamespace，包含数据库、仓储、模拟网关、工具依赖和注册表的测试环境
+    """
     db = Database()
     await db.open(tmp_path / "tools.db")
     repo = Repo(db)
@@ -74,7 +100,16 @@ async def _make_tools(
 
 
 async def _open_limit_order(env: SimpleNamespace, size: int = 1, price: int = 59000) -> str:
-    """下一笔限价挂单（保持 open），返回该挂单号。"""
+    """下一笔限价挂单（保持 open），返回该挂单号。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        size: int，订单张数
+        price: int，订单价格
+
+    返回：
+        str，模拟网关中新建且保持 open 状态的限价单编号
+    """
     pos = env.gateway.positions.get("BTC_USDT")
     opens = (
         pos is None or pos.size == 0 or (pos.size > 0) == (size > 0) or abs(size) > abs(pos.size)
@@ -91,6 +126,14 @@ async def _open_limit_order(env: SimpleNamespace, size: int = 1, price: int = 59
 
 
 async def test_amend_order_over_position_limit_denied(tmp_path):
+    """校验改单后名义价值超过单仓上限时被风控拒绝，且原挂单不变。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言 risk_verdict 为 deny、提示含"单仓"且挂单剩余数量仍为 1
+    """
     env = await _make_tools(tmp_path)
     try:
         order_id = await _open_limit_order(env)
@@ -104,6 +147,14 @@ async def test_amend_order_over_position_limit_denied(tmp_path):
 
 
 async def test_amend_order_price_deviation_denied(tmp_path):
+    """校验改单价格偏离标记价超过阈值时被风控拒绝，且原挂单不变。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言 risk_verdict 为 deny、提示含"偏离"且挂单剩余数量仍为 1
+    """
     env = await _make_tools(tmp_path)
     try:
         order_id = await _open_limit_order(env)
@@ -117,6 +168,14 @@ async def test_amend_order_price_deviation_denied(tmp_path):
 
 
 async def test_amend_order_non_watchlist_denied(tmp_path):
+    """校验对白名单外合约改单直接被风控拒绝。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言 risk_verdict 为 deny 且提示含"白名单"
+    """
     env = await _make_tools(tmp_path, extra_contracts=("DOGE_USDT",))
     try:
         out = await env.registry.execute(
@@ -128,6 +187,14 @@ async def test_amend_order_non_watchlist_denied(tmp_path):
 
 
 async def test_amend_order_allowed_and_persisted(tmp_path):
+    """校验合规改单放行、网关生效，且落库为更新原行而非新增记录。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言改单后挂单剩余数量变为 2、库中仅一条订单记录且价格/数量已更新
+    """
     env = await _make_tools(tmp_path)
     try:
         order_id = await _open_limit_order(env)
@@ -145,6 +212,14 @@ async def test_amend_order_allowed_and_persisted(tmp_path):
 
 
 async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
+    """校验 kill_switch 开启时减仓方向改单豁免，加仓方向改单照拒。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言减仓改单 allow、反向加仓改单 deny 且提示含 "kill_switch"
+    """
     env = await _make_tools(tmp_path)
     try:
         await env.registry.execute(
@@ -167,7 +242,14 @@ async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
 
 
 async def test_amend_flip_exceeds_position_not_exempt(tmp_path):
-    """反向改单数量超过持仓 = 翻仓（新敞口），不得豁免 kill_switch（回归 #翻仓豁免洞）。"""
+    """反向改单数量超过持仓 = 翻仓（新敞口），不得豁免 kill_switch（回归 #翻仓豁免洞）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path)
     try:
         await env.registry.execute(
@@ -189,6 +271,14 @@ async def test_amend_flip_exceeds_position_not_exempt(tmp_path):
 
 
 async def test_place_order_declared_leverage_over_limit_denied(tmp_path):
+    """校验声明杠杆超过上限时下单被拒，且订单未提交到网关。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言 risk_verdict 为 deny、提示含"超过上限"且网关无任何下单记录
+    """
     env = await _make_tools(tmp_path)
     try:
         out = await env.registry.execute(
@@ -202,12 +292,30 @@ async def test_place_order_declared_leverage_over_limit_denied(tmp_path):
 
 
 async def test_place_order_declared_leverage_applied(tmp_path):
+    """校验无持仓时声明杠杆在下单前真实设置到网关并反映到持仓上。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
+
+    返回：
+        None，断言 set_leverage 以声明杠杆被调用一次且持仓杠杆变为声明值
+    """
     env = await _make_tools(tmp_path)
     try:
         spy = []
         orig = env.gateway.set_leverage
 
         def _spy(contract, leverage, margin_mode="isolated"):
+            """记录 set_leverage 调用参数后转发给原实现。
+
+            参数：
+                contract: str，合约名
+                leverage: int，杠杆倍数
+                margin_mode: str，保证金模式，默认 "isolated"
+
+            返回：
+                原 set_leverage 的返回值
+            """
             spy.append((contract, leverage, margin_mode))
             return orig(contract, leverage, margin_mode)
 
@@ -227,10 +335,30 @@ async def test_place_order_declared_leverage_applied(tmp_path):
 
 
 async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatch):
+    """验证交易所下单成功但本地保存失败时禁止盲目重试。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path)
     try:
 
         async def _boom(**kwargs):
+            """模拟依赖调用失败并抛出预设异常。
+
+            参数：
+                **kwargs: dict[str, object]，按名称传入的可选参数
+
+            返回：
+                None，实际不会返回（函数总是抛出异常）
+
+            异常：
+                RuntimeError，模拟本地数据库读写失败时抛出
+            """
             raise RuntimeError("db down")
 
         monkeypatch.setattr(env.repo, "save_order", _boom)
@@ -248,6 +376,14 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
 
 
 async def test_reduce_only_order_not_counted_in_orders_today(tmp_path):
+    """验证只减仓订单不计入当日开仓订单数。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path)
     try:
         out = await env.registry.execute(
@@ -265,6 +401,14 @@ async def test_reduce_only_order_not_counted_in_orders_today(tmp_path):
 
 
 async def test_orders_is_close_column_migration(tmp_path):
+    """验证旧订单表可迁移并补齐平仓标记列。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -301,6 +445,14 @@ async def test_orders_is_close_column_migration(tmp_path):
 
 
 async def test_close_order_skips_price_deviation(tmp_path):
+    """验证纯平仓订单不受开仓价格偏离限制。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path)
     try:
         await env.registry.execute(
@@ -334,7 +486,20 @@ async def _save_report(
     technical_confirmation: str = "确认",
     data_status: str = "完整",
 ) -> None:
-    """落一份最新 v2 逐标的研报（created_at 为当前时刻）。"""
+    """落一份最新 v2 逐标的研报（created_at 为当前时刻）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        direction: str，逐标的研报方向
+        confidence: str，研报置信度
+        contract: str，目标合约标识
+        basis_type: str，研判依据类型
+        technical_confirmation: str，技术面确认状态
+        data_status: str，研报数据可用状态
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     await env.repo.research.save_report_bundle(
         report_type="manual",
         summary="逐标的研报",
@@ -362,6 +527,14 @@ async def _save_report(
 
 
 async def test_research_gate_high_confidence_blocks_counter_order(tmp_path):
+    """验证高置信度研报会拦截反向开仓。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await _save_report(env, "偏空", "高")
@@ -373,6 +546,14 @@ async def test_research_gate_high_confidence_blocks_counter_order(tmp_path):
 
 
 async def test_research_gate_mid_confidence_allows(tmp_path):
+    """验证中等置信度研报仅提示而不拦截下单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await _save_report(env, "偏空", "中")
@@ -383,6 +564,14 @@ async def test_research_gate_mid_confidence_allows(tmp_path):
 
 
 async def test_research_gate_low_confidence_allows(tmp_path):
+    """验证低置信度研报不拦截下单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await _save_report(env, "偏空", "低")
@@ -393,6 +582,14 @@ async def test_research_gate_low_confidence_allows(tmp_path):
 
 
 async def test_research_gate_expired_report_allows(tmp_path):
+    """验证过期研报不参与方向拦截。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await _save_report(env, "偏空", "高")
@@ -411,6 +608,14 @@ async def test_research_gate_expired_report_allows(tmp_path):
 
 
 async def test_research_gate_disabled_allows(tmp_path):
+    """验证关闭研报闸门后允许下单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=ResearchConfig(gate_enabled=False))
     try:
         await _save_report(env, "偏空", "高")
@@ -422,6 +627,14 @@ async def test_research_gate_disabled_allows(tmp_path):
 
 async def test_research_gate_no_config_allows(tmp_path):
     # research_config=None（旧构造方式）：闸门关闭，高置信反向也放行
+    """验证缺少研报闸门配置时保持兼容放行。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path)
     try:
         await _save_report(env, "偏空", "高")
@@ -432,6 +645,14 @@ async def test_research_gate_no_config_allows(tmp_path):
 
 
 async def test_research_gate_no_report_allows(tmp_path):
+    """验证没有研报时交易工具正常放行。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         out = await env.registry.execute("place_order", _OPEN_LONG)
@@ -441,10 +662,30 @@ async def test_research_gate_no_report_allows(tmp_path):
 
 
 async def test_research_gate_latest_report_error_degrades(tmp_path, monkeypatch):
+    """验证读取最新研报异常时闸门降级放行。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
 
         async def _boom(contract: str):
+            """模拟依赖调用失败并抛出预设异常。
+
+            参数：
+                contract: str，目标合约标识
+
+            返回：
+                None，实际不会返回（函数总是抛出异常）
+
+            异常：
+                RuntimeError，模拟本地数据库读写失败时抛出
+            """
             raise RuntimeError("db down")
 
         monkeypatch.setattr(env.repo.research, "latest_asset_view", _boom)
@@ -455,6 +696,14 @@ async def test_research_gate_latest_report_error_degrades(tmp_path, monkeypatch)
 
 
 async def test_research_gate_failed_report_is_ignored(tmp_path):
+    """验证生成失败的研报不会触发交易拦截。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await env.repo.research.save_failed_report(
@@ -468,6 +717,14 @@ async def test_research_gate_failed_report_is_ignored(tmp_path):
 
 
 async def test_research_gate_btc_view_does_not_block_eth(tmp_path):
+    """验证 BTC 研报观点不会串扰 ETH 下单。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, extra_contracts=("ETH_USDT",), research_config=_GATE_ON)
     try:
         env.deps.watchlist.append("ETH_USDT")
@@ -482,6 +739,14 @@ async def test_research_gate_btc_view_does_not_block_eth(tmp_path):
 
 
 async def test_research_gate_structure_continuation_is_soft_reference(tmp_path):
+    """验证结构延续型研报仅作为软参考。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_tools(tmp_path, research_config=_GATE_ON)
     try:
         await _save_report(env, "偏空", "高", basis_type="结构延续")
@@ -492,6 +757,14 @@ async def test_research_gate_structure_continuation_is_soft_reference(tmp_path):
 
 
 async def test_research_gate_conflict_or_unavailable_data_allows(tmp_path):
+    """验证证据冲突或数据不可用时闸门不做硬拦截。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     for technical, status in (("冲突", "完整"), ("确认", "不可用")):
         env = await _make_tools(tmp_path / f"{technical}-{status}", research_config=_GATE_ON)
         try:

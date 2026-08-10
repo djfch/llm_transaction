@@ -31,7 +31,14 @@ _INDICATOR_TOOLS: list[tuple[str, dict, str]] = [
 
 
 def _flash_from_row(row: dict) -> FlashItem:
-    """一条律动快讯行 → FlashItem（24h 快讯自带全文 content）。"""
+    """把律动接口的一条快讯记录转换为统一事实项并清理摘要中的 HTML。
+
+    参数：
+        row: dict，律动 MCP 返回的单条快讯字段
+
+    返回：
+        FlashItem，保留原始正文与来源字段的统一快讯对象
+    """
     title = str(row.get("title") or "")  # 强制 str：防数字标题炸聚合层切片（同 M3）
     content = row.get("content") or ""
     return FlashItem(
@@ -47,7 +54,14 @@ def _flash_from_row(row: dict) -> FlashItem:
 
 
 def _strip_html(text: str) -> str:
-    """剥离 HTML 标签与实体（快讯正文为 HTML 片段）。"""
+    """移除快讯正文中的 HTML 标签并还原常见实体。
+
+    参数：
+        text: str，可能包含 HTML 片段的快讯正文
+
+    返回：
+        str，去除标签、替换常见实体并清理首尾空白的纯文本
+    """
     import re
 
     text = re.sub(r"<[^>]+>", "", text)
@@ -58,10 +72,27 @@ class BlockbeatsSource:
     """律动数据源：stdio MCP 会话，方法级容错。"""
 
     def __init__(self, *, cmd: str, timeout: float = 60.0) -> None:
+        """初始化律动数据源，记录 stdio MCP 启动命令与超时时间。
+
+        参数：
+            cmd: str，启动律动 MCP 子进程的命令串（如 npx -y blockbeats-mcp）
+            timeout: float，单次 MCP 连接/调用的超时秒数，省略时默认 60 秒
+
+        返回：
+            None，仅初始化实例字段
+        """
         self._cmd = cmd
         self._timeout = timeout
 
     def _session(self) -> McpSession:
+        """新建一个律动 stdio MCP 会话（仅配置尚未连接，须以 async with 打开）。
+
+        参数：无
+
+        返回：
+            McpSession：按本实例的命令与超时配置、并从环境变量
+            BLOCKBEATS_API_KEY 取 API key 的 stdio 会话对象
+        """
         return McpSession(
             kind="stdio",
             cmd=self._cmd,
@@ -70,14 +101,29 @@ class BlockbeatsSource:
         )
 
     async def fetch_flash(self, hours: int = 24) -> list[FlashItem]:
-        """24h 全量快讯（该接口固定 50 条，hours 参数仅语义化保留）。"""
+        """读取律动近 24 小时固定批次快讯并转换为统一事实项。
+
+        参数：
+            hours: int，调用方期望的小时窗口；当前上游接口固定返回 24 小时数据
+
+        返回：
+            list[FlashItem]，上游当前批次的全部有效快讯
+        """
         async with self._session() as s:
             text = await s.call_tool("get_newsflash_24h", {})
         rows = _safe_rows(text)
         return [_flash_from_row(r) for r in rows]
 
     async def search_news(self, keyword: str, limit: int = 20) -> list[FlashItem]:
-        """关键词搜索（快讯/文章混合通道）。"""
+        """按关键词搜索律动快讯与文章，并按发布时间倒序截取结果。
+
+        参数：
+            keyword: str，新闻检索关键词
+            limit: int，最多返回的结果条数
+
+        返回：
+            list[FlashItem]，按发布时间从新到旧排列的统一新闻项
+        """
         async with self._session() as s:
             text = await s.call_tool(
                 "search_news", {"keyword": keyword, "size": limit, "lang": "cn"}
@@ -88,7 +134,13 @@ class BlockbeatsSource:
         return items[:limit]
 
     async def fetch_indicators(self) -> str:
-        """指标组快照文本：逐工具调用，单失败标注不可用。"""
+        """逐项调用律动宏观与加密指标工具并拼装中文快照，单项失败时就地标注。
+
+        参数：无
+
+        返回：
+            str，按指标标题分段的市场快照文本
+        """
         lines: list[str] = []
         async with self._session() as s:
             for tool, args, label in _INDICATOR_TOOLS:
@@ -101,7 +153,14 @@ class BlockbeatsSource:
 
 
 def _safe_rows(text: str) -> list[dict]:
-    """提取 data 列表；解析失败返回空（调用方降级）。"""
+    """从 MCP JSON 响应中安全提取字典类型的数据行。
+
+    参数：
+        text: str，MCP 工具返回的 JSON 文本
+
+    返回：
+        list[dict]，data 数组中的字典项；解析或结构失败时返回空列表
+    """
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError):
@@ -113,7 +172,14 @@ def _safe_rows(text: str) -> list[dict]:
 
 
 def _compact(text: str) -> str:
-    """压缩 JSON 文本为可读快照（去掉换行缩进，截断超长）。"""
+    """把 JSON 响应压缩为无缩进快照，并限制输出长度。
+
+    参数：
+        text: str，待压缩的 JSON 或普通响应文本
+
+    返回：
+        str，最长 800 字符的紧凑 JSON；无法解析时返回截断原文
+    """
     try:
         payload = json.loads(text)
         return json.dumps(payload, ensure_ascii=False)[:800]

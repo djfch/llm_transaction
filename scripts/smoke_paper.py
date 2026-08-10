@@ -24,6 +24,14 @@ DB_PATH = "data/smoke.db"
 
 
 def _ticker(price: Decimal) -> Ticker:
+    """按给定价格构造一笔 BTC_USDT 的模拟行情快照，用于推送给模拟行情源。
+
+    参数：
+        price: Decimal，最新成交价；标记价与 24h 高/低价同步取该值
+
+    返回：
+        Ticker：完整行情对象，资金费率固定 0.0001、24h 涨跌幅固定 0.5%
+    """
     return Ticker(
         contract="BTC_USDT",
         last=price,
@@ -36,7 +44,14 @@ def _ticker(price: Decimal) -> Ticker:
 
 
 async def pusher(ctx: AppContext, duration: float) -> None:
-    """按 duration 等比压缩原 60 秒节奏：开局与中期各手动唤醒一轮（短时长也 ≥2 轮决策）。"""
+    """按 duration 等比压缩原 60 秒节奏：开局与中期各手动唤醒一轮（短时长也 ≥2 轮决策）。
+
+    参数：
+        ctx: AppContext，风控规则上下文
+        duration: float，冒烟运行总时长秒数
+    返回：
+        None，按 duration 等比压缩原 60 秒节奏：开局与中期各手动唤醒一轮（短时长也 ≥2 轮决策）
+    """
     source = ctx.source
     assert isinstance(source, ManualPriceSource)
     scale = duration / 60.0
@@ -52,6 +67,14 @@ async def pusher(ctx: AppContext, duration: float) -> None:
 
 
 async def main() -> None:
+    """冒烟入口：以 Mock LLM 与模拟行情跑完整主程序，结束后校验审计落库。
+
+    参数：无
+
+    返回：
+        None，重建 data/smoke.db 并打印落库统计与 SMOKE PASS；运行时长取命令行
+        第 1 个参数（秒），缺省 60 秒；断言失败时非零退出
+    """
     Path(DB_PATH).unlink(missing_ok=True)
     settings = load_settings()
     settings.server.port = 0  # 随机空闲端口，避免占用

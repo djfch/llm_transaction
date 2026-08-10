@@ -24,7 +24,18 @@ logger = get_logger(__name__)
 
 
 def resolve_agent_credential(settings: Settings, credential_name: str) -> CredentialConfig:
-    """按名取生效凭证；Settings 校验已保证 agent 引用存在，找不到属内部不一致。"""
+    """按名取生效凭证；Settings 校验已保证 agent 引用存在，找不到属内部不一致。
+
+    参数：
+        settings: Settings，当前完整运行配置
+        credential_name: str，要解析的凭证名称
+
+    返回：
+        CredentialConfig：按名取生效凭证；Settings 校验已保证 agent 引用存在，找不到属内部不一致
+
+    异常：
+        LLMError：f'agent 引用的凭证不存在: {credential_name}' 所描述的条件发生时
+    """
     for cred in settings.llm.resolve_credentials():
         if cred.name == credential_name:
             return cred
@@ -32,7 +43,17 @@ def resolve_agent_credential(settings: Settings, credential_name: str) -> Creden
 
 
 def create_provider(cred: CredentialConfig) -> LLMProvider:
-    """按凭证构造真实 provider（外裹同参重试装饰器）；缺 key 抛 LLMError（点名环境变量名）。"""
+    """按凭证构造真实 provider（外裹同参重试装饰器）；缺 key 抛 LLMError（点名环境变量名）。
+
+    参数：
+        cred: CredentialConfig，已解析的 LLM 凭证配置
+
+    返回：
+        LLMProvider：按凭证构造真实 provider（外裹同参重试装饰器）；缺 key 抛 LLMError（点名环境变量名）
+
+    异常：
+        LLMError：f'缺少 {cred.api_key_env} 环境变量，无法初始化 {cred.provider} provider' 所描述的条件发生时
+    """
     key = os.environ.get(cred.api_key_env, "")
     if not key:
         raise LLMError(f"缺少 {cred.api_key_env} 环境变量，无法初始化 {cred.provider} provider")
@@ -47,6 +68,14 @@ def build_provider(settings: Settings, mock_llm: bool, credential_name: str) -> 
     """按 agent 绑定凭证构造 provider：mock 走 MockProvider；缺 key 等 LLMError 降级为 None。
 
     None 时对应 agent 暂停（决策循环跳轮 / 复盘报未配置，见各自 run 入口）。
+
+    参数：
+        settings: Settings，当前完整运行配置
+        mock_llm: bool，是否使用内置模拟 LLM
+        credential_name: str，要解析的凭证名称
+
+    返回：
+        LLMProvider | None：按 agent 绑定凭证构造 provider：mock 走 MockProvider；缺 key 等 LLMError 降级为 None
     """
     if mock_llm or os.environ.get("LLM_MOCK") == "1":
         return MockProvider()

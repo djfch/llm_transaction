@@ -55,6 +55,13 @@ GOOD_JSON = json.dumps(
 class _FakeJin10:
     async def fetch_calendar(self):
         # 事件日期按北京时区动态生成（复审 #6 配套）：写死日期跨天后即过期
+        """返回测试用经济日历事件。
+
+        参数：
+            self: _FakeJin10，当前测试替身实例
+        返回：
+            list[CalendarEvent]，返回该测试辅助函数构造或记录的结果
+        """
         today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         return [
             CalendarEvent(
@@ -69,6 +76,14 @@ class _FakeJin10:
         ]
 
     async def fetch_flash(self, hours=24):
+        """返回测试用快讯列表。
+
+        参数：
+            self: _FakeJin10，当前测试替身实例
+            hours: int，回溯小时数
+        返回：
+            list[FlashItem]，返回该测试辅助函数构造或记录的结果
+        """
         return [
             FlashItem(
                 id="j1",
@@ -82,25 +97,75 @@ class _FakeJin10:
         ]
 
     async def fetch_article_detail(self, item_id):
+        """返回指定文章的测试详情。
+
+        参数：
+            self: _FakeJin10，当前测试替身实例
+            item_id: str，文章标识
+        返回：
+            str，返回该测试辅助函数构造或记录的结果
+        """
         return "详情"
 
     async def search_news(self, keyword, limit=20):
+        """返回符合条件的新闻搜索结果。
+
+        参数：
+            self: _FakeJin10，当前测试替身实例
+            keyword: str，搜索关键词
+            limit: int，返回数量上限
+        返回：
+            list[object]，返回该测试辅助函数构造或记录的结果
+        """
         return []
 
 
 class _FakeBb:
     async def fetch_flash(self, hours=24):
+        """返回测试用快讯列表。
+
+        参数：
+            self: _FakeBb，当前测试替身实例
+            hours: int，回溯小时数
+        返回：
+            list[FlashItem]，返回该测试辅助函数构造或记录的结果
+        """
         return []
 
     async def fetch_indicators(self):
+        """返回测试用市场指标摘要。
+
+        参数：
+            self: _FakeBb，当前测试替身实例
+        返回：
+            str，返回该测试辅助函数构造或记录的结果
+        """
         return "## BTC ETF 净流入\n+2.1 亿"
 
     async def search_news(self, keyword, limit=20):
+        """返回符合条件的新闻搜索结果。
+
+        参数：
+            self: _FakeBb，当前测试替身实例
+            keyword: str，搜索关键词
+            limit: int，返回数量上限
+        返回：
+            list[object]，返回该测试辅助函数构造或记录的结果
+        """
         return []
 
 
 class _ResearchMarketData:
     async def snapshot(self, contract: str, limit: int = 30) -> dict:
+        """返回指定合约的测试市场快照。
+
+        参数：
+            self: _ResearchMarketData，当前测试替身实例
+            contract: str，合约标识
+            limit: int，返回数量上限
+        返回：
+            dict，返回该测试辅助函数构造或记录的结果
+        """
         return {
             "contract": contract,
             "requested_limit": limit,
@@ -114,9 +179,26 @@ class _SequentialProvider:
     """确定性 Mock：第一轮取公共信息和白名单行情，第二轮输出 JSON。"""
 
     def __init__(self) -> None:
+        """初始化测试替身及其可观测状态。
+
+        参数：
+            self: _SequentialProvider，当前测试替身实例
+        返回：
+            None，初始化并保存测试替身状态
+        """
         self._calls = 0
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        """返回该轮测试预设的模型响应。
+
+        参数：
+            self: _SequentialProvider，当前测试替身实例
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+        返回：
+            LLMResponse，返回该测试辅助函数构造或记录的结果
+        """
         from src.agent.providers.base import LLMResponse, ToolCall
 
         self._calls += 1
@@ -138,6 +220,15 @@ class _SequentialProvider:
         )
 
     def tool_result_message(self, call, result: str) -> dict:
+        """构造模型可消费的工具结果消息。
+
+        参数：
+            self: _SequentialProvider，当前测试替身实例
+            call: object，工具调用对象
+            result: str，工具执行结果文本
+        返回：
+            dict，返回该测试辅助函数构造或记录的结果
+        """
         return {"role": "user", "content": f"工具 {call.name} 结果：{result}"}
 
 
@@ -145,10 +236,27 @@ class _BadJsonProvider(_SequentialProvider):
     """持续输出非法 JSON（同上下文重发 3 次后仍失败，落 error 报告）。"""
 
     def __init__(self) -> None:
+        """初始化测试替身及其可观测状态。
+
+        参数：
+            self: _BadJsonProvider，当前测试替身实例
+        返回：
+            None，初始化并保存测试替身状态
+        """
         super().__init__()
         self._bad = True
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        """返回该轮测试预设的模型响应。
+
+        参数：
+            self: _BadJsonProvider，当前测试替身实例
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+        返回：
+            LLMResponse，返回该测试辅助函数构造或记录的结果
+        """
         from src.agent.providers.base import LLMResponse
 
         self._calls += 1
@@ -167,6 +275,13 @@ class _BadJsonProvider(_SequentialProvider):
 
 @pytest.fixture
 async def repo(tmp_path) -> AsyncIterator[Repo]:
+    """创建测试数据库仓库并在用例结束后关闭连接。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        AsyncIterator[Repo]，返回该测试辅助函数构造或记录的结果
+    """
     db = Database()
     await db.open(tmp_path / "research.db")
     try:
@@ -177,12 +292,29 @@ async def repo(tmp_path) -> AsyncIterator[Repo]:
 
 @pytest.fixture
 def settings() -> Settings:
+    """创建模拟交易模式的测试配置。
+
+    参数：无
+    返回：
+        Settings，返回该测试辅助函数构造或记录的结果
+    """
     return Settings(mode="paper")
 
 
 async def _build_agent(
     repo: Repo, settings: Settings, provider, tmp_path, notify_event=None
 ) -> ResearchAgent:
+    """组装使用测试替身的研报 Agent。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        provider: object，模型提供方测试替身
+        tmp_path: Path，pytest 提供的临时目录
+        notify_event: object，可选事件通知回调
+    返回：
+        ResearchAgent，返回该测试辅助函数构造或记录的结果
+    """
     audit = AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit")))
     data = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
     return ResearchAgent(
@@ -201,7 +333,15 @@ async def _build_agent(
 
 
 async def test_full_round_success(repo: Repo, settings: Settings, tmp_path) -> None:
-    """完整一轮：工具循环→JSON 落库→审计轮完整。"""
+    """完整一轮：工具循环→JSON 落库→审计轮完整。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
     result = await agent.run(report_type="us")
     assert result["ok"] is True
@@ -225,7 +365,15 @@ async def test_full_round_success(repo: Repo, settings: Settings, tmp_path) -> N
 
 
 async def test_bad_json_falls_to_error_report(repo: Repo, settings: Settings, tmp_path) -> None:
-    """输出非法 JSON、同上下文重发 3 次仍失败：落 error 报告 + 审计轮 error，返回 ok=False。"""
+    """输出非法 JSON、同上下文重发 3 次仍失败：落 error 报告 + 审计轮 error，返回 ok=False。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     provider = _BadJsonProvider()
     agent = await _build_agent(repo, settings, provider, tmp_path)
     result = await agent.run(report_type="asia")
@@ -239,7 +387,15 @@ async def test_bad_json_falls_to_error_report(repo: Repo, settings: Settings, tm
 
 
 async def test_no_provider_returns_failure(repo: Repo, settings: Settings, tmp_path) -> None:
-    """LLM 未配置：直接失败，不落审计、不落研报。"""
+    """LLM 未配置：直接失败，不落审计、不落研报。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     agent = await _build_agent(repo, settings, None, tmp_path)
     result = await agent.run()
     assert result["ok"] is False and result["error_code"] == "llm_not_configured"
@@ -247,7 +403,12 @@ async def test_no_provider_returns_failure(repo: Repo, settings: Settings, tmp_p
 
 
 def test_parse_payload_edge_cases() -> None:
-    """JSON 解析容错：代码块包裹、缺字段、非法文本、合法。"""
+    """JSON 解析容错：代码块包裹、缺字段、非法文本、合法。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     kwargs = {
         "expected_contracts": ("BTC_USDT",),
         "queried_contracts": {"BTC_USDT"},
@@ -260,10 +421,28 @@ def test_parse_payload_edge_cases() -> None:
 
 
 async def test_tool_call_failure_does_not_abort(repo: Repo, settings: Settings, tmp_path) -> None:
-    """工具执行失败（未知工具）不中断循环，最终仍产出研报。"""
+    """工具执行失败（未知工具）不中断循环，最终仍产出研报。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _ToolErrorProvider(_SequentialProvider):
         async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _ToolErrorProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -294,13 +473,42 @@ async def test_tool_call_failure_does_not_abort(repo: Repo, settings: Settings, 
 async def test_provider_chat_raises_falls_to_error(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """T2：provider.chat 抛异常 → 落 error 报告 + 审计轮 error，返回 ok=False。"""
+    """T2：provider.chat 抛异常 → 落 error 报告 + 审计轮 error，返回 ok=False。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _RaisingProvider:
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _RaisingProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            异常：
+                RuntimeError: 测试场景主动触发该失败条件时抛出
+            """
             raise RuntimeError("LLM 服务不可用")
 
         def tool_result_message(self, call, result):
+            """构造模型可消费的工具结果消息。
+
+            参数：
+                self: _RaisingProvider，当前测试替身实例
+                call: object，工具调用对象
+                result: str，工具执行结果文本
+            返回：
+                dict，返回该测试辅助函数构造或记录的结果
+            """
             return {"role": "user", "content": "x"}
 
     agent = await _build_agent(repo, settings, _RaisingProvider(), tmp_path)
@@ -313,15 +521,40 @@ async def test_provider_chat_raises_falls_to_error(
 
 
 async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path) -> None:
-    """T3：首次输出坏 JSON、同上下文重发后合法 → ok=True（重试成功路径）。"""
+    """T3：首次输出坏 JSON、同上下文重发后合法 → ok=True（重试成功路径）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _RetryProvider(_SequentialProvider):
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _RetryProvider，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             super().__init__()
             self._retry_called = False
             self.seen: list[list[dict]] = []  # 每次调用收到的 messages 快照
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _RetryProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -357,14 +590,39 @@ async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path)
 
 
 async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, tmp_path) -> None:
-    """坏 JSON 连续 2 次、第 3 次输出合法 → ok=True；三次请求上下文完全一致。"""
+    """坏 JSON 连续 2 次、第 3 次输出合法 → ok=True；三次请求上下文完全一致。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _ThirdTimeProvider(_SequentialProvider):
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _ThirdTimeProvider，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             super().__init__()
             self.seen: list[list[dict]] = []
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _ThirdTimeProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -399,14 +657,39 @@ async def test_json_retry_third_attempt_success(repo: Repo, settings: Settings, 
 async def test_reask_uses_full_context_after_tool_round(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """工具轮后产出坏 JSON：重发上下文为 [user, assistant, 工具结果] 全序列，坏输出不回灌。"""
+    """工具轮后产出坏 JSON：重发上下文为 [user, assistant, 工具结果] 全序列，坏输出不回灌。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _ToolThenBadJson(_SequentialProvider):
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _ToolThenBadJson，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             super().__init__()
             self.seen: list[list[dict]] = []
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _ToolThenBadJson，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -450,13 +733,38 @@ async def test_reask_uses_full_context_after_tool_round(
 async def test_parse_retry_phase_under_timeout_fuse(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """JSON 重试阶段同受超时保险丝约束：重发卡死 → TimeoutError 落 error 报告。"""
+    """JSON 重试阶段同受超时保险丝约束：重发卡死 → TimeoutError 落 error 报告。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _BadThenHang:
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _BadThenHang，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             self.calls = 0
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _BadThenHang，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse
 
             self.calls += 1
@@ -471,6 +779,15 @@ async def test_parse_retry_phase_under_timeout_fuse(
             await asyncio.sleep(60)  # 重发请求卡死，远超 2s 保险丝
 
         def tool_result_message(self, call, result):
+            """构造模型可消费的工具结果消息。
+
+            参数：
+                self: _BadThenHang，当前测试替身实例
+                call: object，工具调用对象
+                result: str，工具执行结果文本
+            返回：
+                dict，返回该测试辅助函数构造或记录的结果
+            """
             return {"role": "user", "content": "x"}
 
     provider = _BadThenHang()
@@ -483,19 +800,53 @@ async def test_parse_retry_phase_under_timeout_fuse(
 
 
 async def test_timeout_terminates_round(repo: Repo, settings: Settings, tmp_path) -> None:
-    """T4：超时强制终止 → 落 error 报告，审计轮收尾。"""
+    """T4：超时强制终止 → 落 error 报告，审计轮收尾。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _SlowProvider:
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _SlowProvider，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             self.calls = 0
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _SlowProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             self.calls += 1
             import asyncio
 
             await asyncio.sleep(60)  # 远超 2s 超时
 
         def tool_result_message(self, call, result):
+            """构造模型可消费的工具结果消息。
+
+            参数：
+                self: _SlowProvider，当前测试替身实例
+                call: object，工具调用对象
+                result: str，工具执行结果文本
+            返回：
+                dict，返回该测试辅助函数构造或记录的结果
+            """
             return {"role": "user", "content": "x"}
 
     provider = _SlowProvider()
@@ -508,13 +859,38 @@ async def test_timeout_terminates_round(repo: Repo, settings: Settings, tmp_path
 
 
 async def test_max_turns_exhausted_warns(repo: Repo, settings: Settings, tmp_path) -> None:
-    """T5：无限工具调用直到轮次上限 → 强制结束，耗尽且无有效输出时落 error 报告。"""
+    """T5：无限工具调用直到轮次上限 → 强制结束，耗尽且无有效输出时落 error 报告。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _LoopProvider:
         def __init__(self) -> None:
+            """初始化测试替身及其可观测状态。
+
+            参数：
+                self: _LoopProvider，当前测试替身实例
+            返回：
+                None，初始化并保存测试替身状态
+            """
             self.calls = 0
 
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _LoopProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self.calls += 1
@@ -526,6 +902,15 @@ async def test_max_turns_exhausted_warns(repo: Repo, settings: Settings, tmp_pat
             )
 
         def tool_result_message(self, call, result):
+            """构造模型可消费的工具结果消息。
+
+            参数：
+                self: _LoopProvider，当前测试替身实例
+                call: object，工具调用对象
+                result: str，工具执行结果文本
+            返回：
+                dict，返回该测试辅助函数构造或记录的结果
+            """
             return {"role": "user", "content": f"工具 {call.name} 结果：{result}"}
 
     agent = await _build_agent(repo, settings, _LoopProvider(), tmp_path)
@@ -543,6 +928,16 @@ class _CausalLinkProvider(_SequentialProvider):
     """第一轮提交一条因果链（不传 report_id——LLM 无法预知本轮 id），第二轮输出 JSON。"""
 
     async def chat(self, system, messages, tools):
+        """返回该轮测试预设的模型响应。
+
+        参数：
+            self: _CausalLinkProvider，当前测试替身实例
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+        返回：
+            LLMResponse，返回该测试辅助函数构造或记录的结果
+        """
         from src.agent.providers.base import LLMResponse, ToolCall
 
         self._calls += 1
@@ -578,8 +973,12 @@ class _CausalLinkProvider(_SequentialProvider):
 async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, tmp_path) -> None:
     """回归（H1）：完整一轮中提交因果链 → 落研报后由代码回填本轮 report_id。
 
-    修复前 LLM 被要求传尚不存在的研报 id，因果链按设计永远走不通；
-    本测试走此前零覆盖的"run 完整一轮中提交"路径。版本化字段透传落库。
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
     """
     agent = await _build_agent(repo, settings, _CausalLinkProvider(), tmp_path)
     result = await agent.run(report_type="us")
@@ -596,10 +995,28 @@ async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, t
 
 
 async def test_failed_round_discards_causal_links(repo: Repo, settings: Settings, tmp_path) -> None:
-    """H1 配套：本轮研报失败时暂存的因果链被丢弃（不留孤儿、不错挂历史研报）。"""
+    """H1 配套：本轮研报失败时暂存的因果链被丢弃（不留孤儿、不错挂历史研报）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _SubmitThenBadJson(_SequentialProvider):
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _SubmitThenBadJson，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -634,10 +1051,29 @@ async def test_failed_round_discards_causal_links(repo: Repo, settings: Settings
 async def test_flush_causal_links_partial_failure(
     repo: Repo, settings: Settings, tmp_path, monkeypatch
 ) -> None:
-    """复审 #7：多条暂存、单条落库失败 → 跳过该条不影响研报主产物，其余照常落库。"""
+    """复审 #7：多条暂存、单条落库失败 → 跳过该条不影响研报主产物，其余照常落库。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _TwoChainsProvider(_SequentialProvider):
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _TwoChainsProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -676,6 +1112,15 @@ async def test_flush_causal_links_partial_failure(
     calls = {"n": 0}
 
     async def flaky_save(**kwargs):
+        """模拟单条因果链保存失败并转发其余保存请求。
+
+        参数：
+            **kwargs: dict[str, object]，透传的关键字参数
+        返回：
+            CausalLink，未触发模拟故障时保存并返回的因果链
+        异常：
+            RuntimeError: 处理第二条因果链时模拟数据库抖动
+        """
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("DB 抖动")
@@ -693,10 +1138,28 @@ async def test_flush_causal_links_partial_failure(
 async def test_retry_round_tool_calls_executed_and_flushed(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """复审 #9④：JSON 重试轮携带的工具调用（L7 块）被执行，因果链随成功研报回填。"""
+    """复审 #9④：JSON 重试轮携带的工具调用（L7 块）被执行，因果链随成功研报回填。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     class _RetryToolProvider(_SequentialProvider):
         async def chat(self, system, messages, tools):
+            """返回该轮测试预设的模型响应。
+
+            参数：
+                self: _RetryToolProvider，当前测试替身实例
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+            返回：
+                LLMResponse，返回该测试辅助函数构造或记录的结果
+            """
             from src.agent.providers.base import LLMResponse, ToolCall
 
             self._calls += 1
@@ -749,7 +1212,15 @@ async def test_retry_round_tool_calls_executed_and_flushed(
 
 
 async def test_event_success_sequence(repo: Repo, settings: Settings, tmp_path) -> None:
-    """WS 事件：成功一轮恰好推 start + ok=True，round_id 一致。"""
+    """WS 事件：成功一轮恰好推 start + ok=True，round_id 一致。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     events: list[dict] = []
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
     result = await agent.run(report_type="us")
@@ -760,7 +1231,15 @@ async def test_event_success_sequence(repo: Repo, settings: Settings, tmp_path) 
 
 
 async def test_event_failure_sequence(repo: Repo, settings: Settings, tmp_path) -> None:
-    """WS 事件：失败一轮恰好推 start + ok=False。"""
+    """WS 事件：失败一轮恰好推 start + ok=False。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     events: list[dict] = []
     agent = await _build_agent(repo, settings, _BadJsonProvider(), tmp_path, events.append)
     result = await agent.run(report_type="asia")
@@ -771,7 +1250,15 @@ async def test_event_failure_sequence(repo: Repo, settings: Settings, tmp_path) 
 
 
 async def test_event_no_provider_zero_events(repo: Repo, settings: Settings, tmp_path) -> None:
-    """WS 事件：LLM 未配置早退，零事件。"""
+    """WS 事件：LLM 未配置早退，零事件。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     events: list[dict] = []
     agent = await _build_agent(repo, settings, None, tmp_path, events.append)
     result = await agent.run()
@@ -780,7 +1267,15 @@ async def test_event_no_provider_zero_events(repo: Repo, settings: Settings, tmp
 
 
 async def test_event_notifier_default_no_break(repo: Repo, settings: Settings, tmp_path) -> None:
-    """WS 事件：未注入 notify_event（默认 None）时 run 正常完成不炸。"""
+    """WS 事件：未注入 notify_event（默认 None）时 run 正常完成不炸。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
     result = await agent.run(report_type="us")
     assert result["ok"] is True
@@ -789,9 +1284,26 @@ async def test_event_notifier_default_no_break(repo: Repo, settings: Settings, t
 async def test_event_notifier_raise_does_not_break(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """WS 事件：广播回调抛异常只记日志，不拖垮 run。"""
+    """WS 事件：广播回调抛异常只记日志，不拖垮 run。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
 
     def _boom(_event: dict) -> None:
+        """模拟依赖调用失败。
+
+        参数：
+            _event: dict，待广播的测试事件
+        返回：
+            None，不会正常返回，用于模拟失败路径
+        异常：
+            RuntimeError: 测试场景主动触发该失败条件时抛出
+        """
         raise RuntimeError("WS 连接断开")
 
     agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, _boom)
@@ -826,6 +1338,16 @@ V2_JSON = json.dumps(
 
 class _V2Provider(_SequentialProvider):
     async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        """返回该轮测试预设的模型响应。
+
+        参数：
+            self: _V2Provider，当前测试替身实例
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+        返回：
+            LLMResponse，返回该测试辅助函数构造或记录的结果
+        """
         from src.agent.providers.base import LLMResponse, ToolCall
 
         self._calls += 1
@@ -849,6 +1371,15 @@ class _V2Provider(_SequentialProvider):
 async def test_v2_round_saves_every_whitelist_asset(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
+    """验证第二版研报会为白名单中的每个合约保存资产结论。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     audit = AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit-v2")))
     agent = ResearchAgent(
         settings=settings,

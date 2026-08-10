@@ -31,10 +31,31 @@ class StubProvider:
     """按脚本回放响应的 stub（实现 LLMProvider 协议）：LLMResponse 返回、异常抛出。"""
 
     def __init__(self, script: list) -> None:
+        """初始化测试替身并保存后续调用所需的预设数据。
+
+        参数：
+            script: list，按调用顺序消费的模拟响应脚本
+
+        返回：
+            None，初始化当前测试替身，无返回值
+        """
         self._script = deque(script)
         self.chat_count = 0
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按测试脚本顺序返回模拟的 LLM 响应或异常。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            LLMResponse，脚本队首的预置模型响应；脚本耗尽时返回占位响应
+
+        异常：
+            Exception，脚本中的当前响应项是异常对象时原样抛出
+        """
         self.chat_count += 1
         if not self._script:
             return LLMResponse(text="（脚本外响应）", raw="{}")
@@ -44,11 +65,28 @@ class StubProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息。
+
+        参数：
+            call: ToolCall，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool、call_id 与结果内容的工具消息
+        """
         return {"role": "tool", "call_id": call.call_id, "content": result}
 
 
 @pytest.fixture
 async def env(tmp_path):
+    """提供复盘 Agent 测试环境夹具。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        AsyncIterator[SimpleNamespace]，提供完整复盘测试环境并在结束后关闭数据库
+    """
     db = Database()
     await db.open(tmp_path / "review.db")
     repo = Repo(db)
@@ -74,6 +112,16 @@ async def env(tmp_path):
 
 def _make_agent(env, provider, **kwargs) -> ReviewAgent:
     # 默认同步收集 WS 事件；用例可经 kwargs 覆盖注入（如抛错容错测试）
+    """组装使用指定提供商的复盘 Agent。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        provider: LLMProvider | None，本轮使用的模拟 LLM 提供商
+        **kwargs: dict[str, object]，按名称传入的可选参数
+
+    返回：
+        ReviewAgent，绑定测试仓储、审计、策略存储、提示词与通知回调的复盘 Agent
+    """
     kwargs.setdefault("notify_event", lambda payload: env.events.append(payload))
     return ReviewAgent(
         settings=env.settings,
@@ -88,7 +136,14 @@ def _make_agent(env, provider, **kwargs) -> ReviewAgent:
 
 
 async def _seed_trades(repo: Repo) -> None:
-    """区间内一笔平仓成交（join decisions），供预统计产生非空样本。"""
+    """区间内一笔平仓成交（join decisions），供预统计产生非空样本。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+    """
     await repo.save_decision(round_id="r1", mode="paper", strategy_md5="m1")
     await repo.save_trade(
         "r1",
@@ -104,7 +159,14 @@ async def _seed_trades(repo: Repo) -> None:
 
 
 async def test_run_success_without_revision(env):
-    """(a) 直接返文本：报告落库 action=none、审计轮 wake_source='review'、通知被调。"""
+    """(a) 直接返文本：报告落库 action=none、审计轮 wake_source='review'、通知被调。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     await _seed_trades(env.repo)
     provider = StubProvider([LLMResponse(text="# 复盘结论\n整体表现平稳。", raw="raw-1")])
     result = await _make_agent(env, provider).run(*_PERIOD)
@@ -130,7 +192,14 @@ async def test_run_success_without_revision(env):
 
 
 async def test_run_empty_text_fallback(env):
-    """LLM 最终文本为空 → 兜底「（复盘未产出报告）」，仍落库成功。"""
+    """LLM 最终文本为空 → 兜底「（复盘未产出报告）」，仍落库成功。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = StubProvider([LLMResponse(text="", raw="{}")])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is True
@@ -139,7 +208,14 @@ async def test_run_empty_text_fallback(env):
 
 
 async def test_run_with_strategy_revision(env):
-    """(b) 先查统计再 submit 再返文本：版本创建 + action=rewrite + attach + 工具审计行。"""
+    """(b) 先查统计再 submit 再返文本：版本创建 + action=rewrite + attach + 工具审计行。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     await _seed_trades(env.repo)
     new_prompt = "新策略书：" + "顺势加仓，严格止损。" * 10
     provider = StubProvider(
@@ -185,7 +261,14 @@ async def test_run_with_strategy_revision(env):
 
 
 async def test_run_llm_failure_lands_error_report(env):
-    """(c) LLM 抛错：error 报告 + 审计轮 error + 失败告警，不向上抛。"""
+    """(c) LLM 抛错：error 报告 + 审计轮 error + 失败告警，不向上抛。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     provider = StubProvider([LLMError("boom")])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is False and "LLMError: boom" in result["error"]
@@ -202,9 +285,27 @@ async def test_run_llm_failure_lands_error_report(env):
 
 
 async def test_run_survives_notify_event_failure(env):
-    """notify_event 每次调用都抛错：_emit_event 容错生效，run 仍成功、报告正常落库。"""
+    """notify_event 每次调用都抛错：_emit_event 容错生效，run 仍成功、报告正常落库。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
 
     def _boom(payload: dict) -> None:
+        """模拟依赖调用失败并抛出预设异常。
+
+        参数：
+            payload: dict，待发送的事件或 JSON 数据
+
+        返回：
+            None，执行上述模拟操作或副作用，无返回值
+
+        异常：
+            RuntimeError，模拟数据源或网络连接失败时抛出
+        """
         raise RuntimeError("广播队列挂了")
 
     provider = StubProvider([LLMResponse(text="# 复盘结论\n事件失败无妨。", raw="raw-1")])
@@ -217,7 +318,14 @@ async def test_run_survives_notify_event_failure(env):
 
 
 async def test_run_without_provider_no_audit_no_report(env):
-    """(d) provider None：返回失败但不落审计、不落报告、不告警；error_code 结构化。"""
+    """(d) provider None：返回失败但不落审计、不落报告、不告警；error_code 结构化。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     result = await _make_agent(env, None).run(*_PERIOD)
     assert result["ok"] is False
     assert result["error_code"] == "llm_not_configured"  # 结构化错误码（路由据此映 503）
@@ -229,7 +337,14 @@ async def test_run_without_provider_no_audit_no_report(env):
 
 
 async def test_set_provider_hot_swap(env):
-    """set_provider 热替换：先 None 后注入，注入后即可正常复盘。"""
+    """set_provider 热替换：先 None 后注入，注入后即可正常复盘。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     agent = _make_agent(env, None)
     agent.set_provider(StubProvider([LLMResponse(text="热替换后报告", raw="{}")]))
     result = await agent.run(*_PERIOD)
@@ -237,7 +352,15 @@ async def test_set_provider_hot_swap(env):
 
 
 async def test_run_with_indicator_config_revision(env, tmp_path):
-    """指标短名单修订：轮末把报告 id 回填到指标配置版本（同策略版本关联模式，判空跳过）。"""
+    """指标短名单修订：轮末把报告 id 回填到指标配置版本（同策略版本关联模式，判空跳过）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     indicator_store = IndicatorConfigStore(
         tmp_path / "indicator_config.yaml", env.repo, valid_keys=frozenset({"ema20", "rsi14"})
     )
@@ -267,12 +390,30 @@ async def test_run_with_indicator_config_revision(env, tmp_path):
 
 
 async def test_watchlist_hot_update_visible_to_review_agent(env, tmp_path):
-    """复盘 agent 持有活名单引用：构造之后热加入的合约，轮内指标工具不再拦截（Codex P2 回归）。"""
+    """复盘 agent 持有活名单引用：构造之后热加入的合约，轮内指标工具不再拦截（Codex P2 回归）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     from src.gateway.base import Candle
     from src.market.indicator_service import IndicatorService
 
     class _CandleCache:
         def get_recent(self, contract, interval, n):
+            """返回测试替身中预设的最近 K 线。
+
+            参数：
+                contract: str，目标合约标识
+                interval: str，K 线周期
+                n: int，需要读取的 K 线数量
+
+            返回：
+                list[Candle]，固定生成的 60 根模拟 K 线
+            """
             return [
                 Candle(
                     t=1_700_000_000 + i * 3600,
@@ -287,6 +428,14 @@ async def test_watchlist_hot_update_visible_to_review_agent(env, tmp_path):
 
     class _OiCache:
         def get(self, contract):
+            """返回测试替身中指定合约的预设值。
+
+            参数：
+                contract: str，目标合约标识
+
+            返回：
+                Decimal，固定的模拟持仓量
+            """
             return Decimal("12345")
 
     live_watchlist = ["BTC_USDT"]

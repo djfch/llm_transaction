@@ -28,9 +28,29 @@ class SeqProvider:
     """预置响应序列的 mock provider；元素为异常则抛出。"""
 
     def __init__(self, responses: list) -> None:
+        """初始化 mock provider，把预置响应装入内部队列。
+
+        参数：
+            self: SeqProvider，当前测试替身实例
+            responses: list，预设模型响应列表
+        返回：
+            None，初始化并保存测试替身状态
+        """
         self._responses = deque(responses)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按顺序弹出一条预置响应；队列耗尽时返回占位文本响应。
+
+        参数：
+            self: SeqProvider，当前测试替身实例
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+        返回：
+            LLMResponse，返回该测试辅助函数构造或记录的结果
+        异常：
+            Exception: 预设响应元素是异常实例时原样抛出
+        """
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
         item = self._responses.popleft()
@@ -39,6 +59,15 @@ class SeqProvider:
         return item
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """构造模型可消费的工具结果消息。
+
+        参数：
+            self: SeqProvider，当前测试替身实例
+            call: ToolCall，工具调用对象
+            result: str，工具执行结果文本
+        返回：
+            dict，返回该测试辅助函数构造或记录的结果
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
@@ -49,6 +78,13 @@ _CONTRACTS = {
 
 
 def _contract(name: str) -> Contract:
+    """构造指定名称的永续合约测试规格。
+
+    参数：
+        name: str，合约名称
+    返回：
+        Contract，返回该测试辅助函数构造或记录的结果
+    """
     quanto, mark = _CONTRACTS[name]
     return Contract(
         name=name,
@@ -68,7 +104,14 @@ def _contract(name: str) -> Contract:
 
 
 async def _make_paper_loop(tmp_path, *contracts: str) -> SimpleNamespace:
-    """paper 决策循环（PaperGateway + drain_fills），审计快照隔离到 tmp_path。"""
+    """paper 决策循环（PaperGateway + drain_fills），审计快照隔离到 tmp_path。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        *contracts: str，待注册的合约标识
+    返回：
+        SimpleNamespace，返回该测试辅助函数构造或记录的结果
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -97,6 +140,13 @@ async def _make_paper_loop(tmp_path, *contracts: str) -> SimpleNamespace:
 
 
 async def test_manual_close_paper_no_position(tmp_path):
+    """验证模拟账户没有持仓时人工平仓会返回明确结果。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     env = await _make_paper_loop(tmp_path, "BTC_USDT")
     try:
         result = await env.loop.manual_close("BTC_USDT")
@@ -110,11 +160,28 @@ async def test_manual_close_paper_no_position(tmp_path):
 
 
 async def test_manual_close_trade_persist_failure_warns(tmp_path, monkeypatch):
+    """验证人工平仓成交持久化失败时会记录告警。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，执行断言验证目标行为
+    """
     env = await _make_paper_loop(tmp_path, "BTC_USDT")
     try:
         env.gateway.place_order(OrderRequest(contract="BTC_USDT", size=Decimal(1)))
 
         async def _boom(**kwargs):
+            """模拟依赖调用失败。
+
+            参数：
+                **kwargs: dict[str, object]，透传的关键字参数
+            返回：
+                None，不会正常返回，用于模拟失败路径
+            异常：
+                RuntimeError: 测试场景主动触发该失败条件时抛出
+            """
             raise RuntimeError("db down")
 
         monkeypatch.setattr(env.repo, "save_trade", _boom)
@@ -131,6 +198,13 @@ async def test_manual_close_trade_persist_failure_warns(tmp_path, monkeypatch):
 
 
 async def test_manual_close_flushes_buffer_with_source_labels(tmp_path):
+    """验证人工平仓会清空成交缓冲并保留来源标签。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     env = await _make_paper_loop(tmp_path, "BTC_USDT", "ETH_USDT")
     try:
         gateway = env.gateway

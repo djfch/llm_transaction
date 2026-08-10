@@ -8,7 +8,19 @@ logger = get_logger(__name__)
 
 
 def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
-    # 分页核对订单仍是未成交状态，避免重复撤销已成交或已取消订单。
+    """分页核对指定订单仍处于未成交（open）状态，避免重复撤销已成交或已取消的订单。
+
+    参数：
+        deps: ToolDeps，工具依赖集合，使用其中的 gateway 分页查询未成交订单
+        contract: str，合约名（如 BTC_USDT）
+        order_id: str，待核对的订单 ID
+
+    返回：
+        None，订单仍处于 open 状态时正常返回；无其他副作用
+
+    异常：
+        OrderNotFound：订单不在未成交列表中（不存在、已成交或已取消）时抛出
+    """
     offset = 0
     while True:
         page = deps.gateway.list_orders(contract, "open", limit=100, offset=offset)
@@ -24,7 +36,18 @@ def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
 
 
 async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) -> dict:
-    # 撤销网关订单并同步本地记录；同步失败时返回不可重试警告。
+    """执行人工撤单：撤销交易所网关订单并同步本地订单记录；同步失败时返回不可重试警告。
+
+    参数：
+        deps: ToolDeps，工具依赖集合，使用其中的 gateway 撤单、repo 更新本地订单状态
+        contract: str，合约名（如 BTC_USDT）
+        order_id: str，待撤销的订单 ID
+
+    返回：
+        dict：撤单结果，包含 id（订单 ID）、contract（合约名）、status（订单状态）、
+        finish_as（结束方式，缺省为 cancelled）、warning（本地同步失败时的警告文案，
+        成功时为空字符串）
+    """
     _require_open_order(deps, contract, order_id)
     result = deps.gateway.cancel_order(contract, order_id)
     warning = ""

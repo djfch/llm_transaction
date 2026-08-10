@@ -27,15 +27,36 @@ class FakeGateway:
     """注入用假网关：账户权益 9100（available 9000 + unrealised 100），无持仓。"""
 
     def get_account(self) -> Account:
+        """返回固定的假账户快照（可用 9000 + 未实现盈亏 100）。
+
+        参数：无
+
+        返回：
+            Account：权益合计 9100 的假账户对象
+        """
         return Account(available=Decimal("9000"), unrealised_pnl=Decimal("100"))
 
     def list_positions(self) -> list[Position]:
+        """返回空持仓列表，模拟当前无任何持仓。
+
+        参数：无
+
+        返回：
+            list[Position]：空列表，表示无持仓
+        """
         return []
 
 
 @pytest.fixture
 async def deps(tmp_path: Path):
-    """fake 依赖：tmp 配置（默认 paper）+ 一笔 paper 成交；watchlist 文件同步就绪。"""
+    """构造含默认 paper 配置、白名单与一笔成交的临时服务器依赖。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        AsyncIterator[ServerDeps]，生成测试依赖并在用例结束后关闭数据库
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)
     watchlist_path = tmp_path / "watchlist.yaml"
@@ -69,6 +90,14 @@ async def deps(tmp_path: Path):
 
 @pytest.fixture
 async def client(deps: ServerDeps):
+    """构造直连假依赖所装配应用的 httpx 异步测试客户端。
+
+    参数：
+        deps: ServerDeps，fake 依赖夹具，create_app 以其装配 FastAPI 应用
+
+    返回：
+        AsyncIterator[AsyncClient]，yield 走 ASGI 内存传输的客户端，退出时关闭客户端上下文
+    """
     app = create_app(deps)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -78,13 +107,29 @@ async def client(deps: ServerDeps):
 
 
 async def test_status_kill_switch_prefers_runtime(deps: ServerDeps, client: AsyncClient):
-    """agent 连续失败触发的内存态风控锁必须对监控可见（文件里仍是 false）。"""
+    """验证状态接口优先展示运行时内存中的风控锁而非旧文件值。
+
+    参数：
+        deps: ServerDeps，可修改运行时状态提供器的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证 kill_switch(风控锁)为运行时真值
+    """
     deps.status_provider = lambda: {"uptime_seconds": 1, "kill_switch": True}
     assert (await client.get("/api/status")).json()["kill_switch"] is True
 
 
 async def test_status_kill_switch_falls_back_to_file(deps: ServerDeps, client: AsyncClient):
-    """运行时状态未提供 kill_switch 时回退到配置文件值。"""
+    """验证运行时未提供风控锁字段时状态接口回退到配置文件值。
+
+    参数：
+        deps: ServerDeps，可修改运行时状态提供器的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证回退后的风控锁为文件中的假值
+    """
     deps.status_provider = lambda: {"uptime_seconds": 1}
     assert (await client.get("/api/status")).json()["kill_switch"] is False
 
@@ -93,7 +138,15 @@ async def test_status_kill_switch_falls_back_to_file(deps: ServerDeps, client: A
 
 
 async def test_put_config_updates_shared_runtime_risk(deps: ServerDeps, client: AsyncClient):
-    """改风控参数后与 agent 循环共享的 Settings 实例原地更新（下轮决策即生效）。"""
+    """验证保存风控参数会原地更新决策循环共享的运行时配置。
+
+    参数：
+        deps: ServerDeps，可接入共享 Settings 的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证无需重启且共享风控参数即时更新
+    """
     runtime = Settings()  # 模拟 build_app 持有的共享实例
     deps.runtime_settings = runtime
     raw = (await client.get("/api/config")).json()
@@ -104,7 +157,15 @@ async def test_put_config_updates_shared_runtime_risk(deps: ServerDeps, client: 
 
 
 async def test_put_config_updates_shared_runtime_scheduler(deps: ServerDeps, client: AsyncClient):
-    """调度参数同样原地写回（WakeupScheduler 每次唤醒时读配置字段）。"""
+    """验证保存调度参数会原地更新共享配置并在后续唤醒时生效。
+
+    参数：
+        deps: ServerDeps，可接入共享 Settings 的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证无需重启且默认唤醒分钟数已更新
+    """
     runtime = Settings()
     deps.runtime_settings = runtime
     raw = (await client.get("/api/config")).json()
@@ -115,7 +176,15 @@ async def test_put_config_updates_shared_runtime_scheduler(deps: ServerDeps, cli
 
 
 async def test_put_config_restart_fields_not_written_back(deps: ServerDeps, client: AsyncClient):
-    """mode 等构造期绑定字段写不回运行时，须标 needs_restart（llm 热键已移出，见 secrets 测试）。"""
+    """验证运行模式等构造期字段只标记需重启而不会改写当前运行时对象。
+
+    参数：
+        deps: ServerDeps，可接入共享 Settings 的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证 needs_restart(需重启字段)与当前模式值
+    """
     runtime = Settings()
     deps.runtime_settings = runtime
     raw = (await client.get("/api/config")).json()
@@ -126,7 +195,15 @@ async def test_put_config_restart_fields_not_written_back(deps: ServerDeps, clie
 
 
 async def test_put_config_without_runtime_marks_restart(deps: ServerDeps, client: AsyncClient):
-    """未接线运行时配置时诚实标注 needs_restart，不假称下轮生效。"""
+    """验证未接入运行时配置时把已保存字段诚实标记为需要重启。
+
+    参数：
+        deps: ServerDeps，未接入 runtime_settings 的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证风控字段出现在需重启列表
+    """
     raw = (await client.get("/api/config")).json()
     raw["risk"]["max_position_pct"] = 0.5
     r = await client.put("/api/config", json=raw)
@@ -134,7 +211,14 @@ async def test_put_config_without_runtime_marks_restart(deps: ServerDeps, client
 
 
 async def test_put_config_invalid_scheduler_422(client: AsyncClient):
-    """min > max 的调度配置被模型校验拒绝（ConfigError → 422）。"""
+    """验证最小唤醒时间大于最大值的调度配置被映射为 422。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证非法调度边界的响应状态码
+    """
     raw = (await client.get("/api/config")).json()
     raw["scheduler"]["min_wake_minutes"] = 600
     raw["scheduler"]["max_wake_minutes"] = 60
@@ -145,7 +229,15 @@ async def test_put_config_invalid_scheduler_422(client: AsyncClient):
 
 
 async def test_put_watchlist_updates_shared_runtime_list(deps: ServerDeps, client: AsyncClient):
-    """watchlist 写回后共享名单同一 list 对象原地更新（ToolDeps.watchlist 下轮可见）。"""
+    """验证保存白名单会原地更新工具依赖持有的共享列表对象。
+
+    参数：
+        deps: ServerDeps，可接入共享白名单列表的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证保存成功且原列表已包含新增合约
+    """
     runtime_list = ["BTC_USDT"]
     deps.runtime_watchlist = runtime_list
     r = await client.put(
@@ -159,7 +251,14 @@ async def test_put_watchlist_updates_shared_runtime_list(deps: ServerDeps, clien
 
 
 async def test_equity_baseline_paper_uses_config(client: AsyncClient):
-    """paper 模式基准取 paper.initial_equity（响应为 number，前端图表可直接用）。"""
+    """验证 paper 模式权益曲线以模拟账户初始权益配置作为基准。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证基准来源、初始权益与数值类型
+    """
     body = (await client.get("/api/equity")).json()
     assert body["baseline_source"] == "paper_config"
     assert body["initial_equity"] == 10000.0
@@ -167,14 +266,29 @@ async def test_equity_baseline_paper_uses_config(client: AsyncClient):
 
 
 async def test_equity_points_rounded_to_cents(client: AsyncClient):
-    """曲线点保留 number 但四舍五入到分位，避免浮点长尾（如 10099.000000000002）。"""
+    """验证权益曲线点保持数值类型并统一四舍五入到分位。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证每个权益点均无分位后的浮点长尾
+    """
     body = (await client.get("/api/equity")).json()
     for p in body["points"]:
         assert p["equity"] == round(p["equity"], 2)
 
 
 async def test_equity_baseline_testnet_uses_account(deps: ServerDeps, client: AsyncClient):
-    """非 paper 模式基准由账户当前权益倒推（曲线末端回到当前权益），不读 paper 配置。"""
+    """验证 testnet 模式从当前账户权益倒推曲线基准而不读取 paper 配置。
+
+    参数：
+        deps: ServerDeps，提供配置、仓储与假网关的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证基准来源、倒推起点与曲线终点
+    """
     raw = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
     raw["mode"] = "testnet"
     raw["paper"]["initial_equity"] = 555.0  # 若误读配置基准会暴露
@@ -197,7 +311,15 @@ async def test_equity_baseline_testnet_uses_account(deps: ServerDeps, client: As
 
 
 async def test_equity_baseline_fallback_when_gateway_missing(deps: ServerDeps, client: AsyncClient):
-    """账户查询不可用时基准降级为 0 并在响应标注，不 5xx。"""
+    """验证非 paper 模式缺少网关时权益基准降级为零而不返回服务端错误。
+
+    参数：
+        deps: ServerDeps，可移除网关的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证成功状态、降级来源与零初始权益
+    """
     raw = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
     raw["mode"] = "testnet"
     write_settings(raw, deps.config_path)
@@ -216,21 +338,60 @@ class _FakeWS:
     """receive 行为可配的假连接。"""
 
     def __init__(self, exc: Exception) -> None:
+        """初始化假连接，记录 receive_text 被调用时应抛出的异常。
+
+        参数：
+            exc: Exception，receive_text 被调用时要抛出的异常
+
+        返回：
+            None，就地初始化实例状态（已发送消息列表与待抛异常）
+        """
         self.sent: list[dict] = []
         self._exc = exc
 
     async def accept(self) -> None:
+        """接受连接（空实现，仅为满足 ws_connection 的调用）。
+
+        参数：无
+
+        返回：
+            None，无任何副作用
+        """
         pass
 
     async def send_json(self, payload: dict) -> None:
+        """记录服务端下发的 JSON 消息，供测试断言检查。
+
+        参数：
+            payload: dict，服务端要发送的 JSON 消息体
+
+        返回：
+            None，消息追加到 sent 列表
+        """
         self.sent.append(payload)
 
     async def receive_text(self) -> str:
+        """模拟接收侧失败，调用即抛出初始化时注入的异常。
+
+        参数：无
+
+        返回：
+            str：类型标注为 str，实际调用即抛异常、不会返回
+
+        异常：
+            Exception：构造时注入的异常（如 WebSocketDisconnect 或 RuntimeError）
+        """
         raise self._exc
 
 
 async def test_ws_connection_cleans_up_on_unexpected_error():
-    """接收侧抛非 WebSocketDisconnect 异常时，连接也必须从 manager 移除（不残留）。"""
+    """验证 WebSocket 接收侧意外异常传播后连接仍从管理器中清理。
+
+    参数：无
+
+    返回：
+        None，通过断言验证 RuntimeError 传播且连接计数归零
+    """
     manager = ConnectionManager()
     ws = _FakeWS(RuntimeError("连接异常"))
     with pytest.raises(RuntimeError):
@@ -239,7 +400,13 @@ async def test_ws_connection_cleans_up_on_unexpected_error():
 
 
 async def test_ws_connection_cleans_up_on_disconnect():
-    """正常断开同样从连接集合清理。"""
+    """验证正常 WebSocket 断开同样会从连接管理器中清理。
+
+    参数：无
+
+    返回：
+        None，通过断言验证断开后连接计数归零
+    """
     manager = ConnectionManager()
     ws = _FakeWS(WebSocketDisconnect())
     await ws_connection(ws, manager)
@@ -249,7 +416,15 @@ async def test_ws_connection_cleans_up_on_disconnect():
 async def test_put_config_merges_preserves_untouched_sections(
     deps: ServerDeps, client: AsyncClient
 ):
-    """PUT 只提交字段子集时，未提及的段/键必须原样保留。"""
+    """验证配置局部更新只覆盖提交字段并保留其他段与同段其他键。
+
+    参数：
+        deps: ServerDeps，提供配置文件路径的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过断言验证目标键更新且三个未提交值原样保留
+    """
     raw = yaml.safe_load(deps.config_path.read_text(encoding="utf-8"))
     raw["paper"]["initial_equity"] = 23456
     raw["gate"]["testnet_host"] = "https://custom.example.com"

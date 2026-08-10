@@ -37,10 +37,26 @@ CONTRACT = "BTC_USDT"
 
 
 def _ts() -> str:
+    """生成当前时刻的时间戳字符串，用于日志打印前缀。
+
+    参数：无
+
+    返回：
+        str：当前时间，格式 HH:MM:SS
+    """
     return time.strftime("%H:%M:%S")
 
 
 def _print_payload(channel: str, response: WebSocketResponse) -> None:
+    """打印私有 WS 频道推送的原始响应：错误、非 update 事件、update 事件逐条打印字段全集。
+
+    参数：
+        channel: str，频道名（如 usertrades / autoorders / liquidates），仅用于打印前缀
+        response: WebSocketResponse，WS SDK 解析后的响应对象
+
+    返回：
+        None，结果打印到标准输出
+    """
     if response.error:
         print(f"[{_ts()}] {channel} ACK/ERROR: {response.error}")
         return
@@ -53,7 +69,12 @@ def _print_payload(channel: str, response: WebSocketResponse) -> None:
 
 
 def _build() -> tuple[Settings, GateRestGateway, Connection]:
-    """加载配置与密钥，构建 testnet 网关与私有 WS 连接；host 必须含 testnet。"""
+    """加载配置与密钥，构建 testnet 网关与私有 WS 连接；host 必须含 testnet。
+
+    参数：无
+    返回：
+        tuple[Settings, GateRestGateway, Connection]，加载配置与密钥，构建 testnet 网关与私有 WS 连接；host 必须含 testnet
+    """
     load_dotenv()
     settings = load_settings()
     if "testnet" not in settings.gate.testnet_host:
@@ -77,7 +98,13 @@ def _build() -> tuple[Settings, GateRestGateway, Connection]:
 
 
 def _subscribe_private(conn: Connection) -> None:
-    """订阅三条私有频道（payload ["!all"]），原始 payload 全量打印。"""
+    """订阅三条私有频道（payload ["!all"]），原始 payload 全量打印。
+
+    参数：
+        conn: Connection，数据库连接
+    返回：
+        None，订阅三条私有频道（payload ["!all"]），原始 payload 全量打印
+    """
     FuturesUserTradesChannel(conn, lambda c, r: _print_payload("usertrades", r)).subscribe(["!all"])
     FuturesAutoOrdersChannel(conn, lambda c, r: _print_payload("autoorders", r)).subscribe(["!all"])
     FuturesLiquidatesChannel(conn, lambda c, r: _print_payload("liquidates", r)).subscribe(["!all"])
@@ -85,8 +112,15 @@ def _subscribe_private(conn: Connection) -> None:
 
 async def _open_then_trigger_tpsl(gw: GateRestGateway) -> float | None:
     """市价开最小多仓 → 挂略高于标记价的止盈等触发；超时未触发则市价平仓兜底
+
     （autoorders 触发字段可能观测不到，但 usertrades/position_close 仍可实测）。
-    Gate 校验：多仓止盈触发价必须 > 最新价（禁止"立即触发"挂法），返回平仓时刻。"""
+    Gate 校验：多仓止盈触发价必须 > 最新价（禁止"立即触发"挂法），返回平仓时刻。
+
+    参数：
+        gw: GateRestGateway，Gate 网关实例
+    返回：
+        float | None，市价开最小多仓 → 挂略高于标记价的止盈等触发；超时未触发则市价平仓兜底
+    """
     contract = gw.get_contract(CONTRACT)
     size = int(contract.order_size_min)
     mark = contract.mark_price
@@ -112,14 +146,27 @@ async def _open_then_trigger_tpsl(gw: GateRestGateway) -> float | None:
 
 
 def _print_my_trades(gw: GateRestGateway) -> None:
-    """打印个人成交历史原始字段（gate_api 直查，字段全集）。"""
+    """打印个人成交历史原始字段（gate_api 直查，字段全集）。
+
+    参数：
+        gw: GateRestGateway，Gate 网关实例
+    返回：
+        None，打印个人成交历史原始字段（gate_api 直查，字段全集）
+    """
     print(f"[{_ts()}] —— my_trades 原始字段 ——")
     for t in gw._api.get_my_trades(gw._settle, contract=CONTRACT, limit=5):
         print(f"  {t.to_dict()}")
 
 
 async def _poll_position_close(gw: GateRestGateway, close_ts: float | None) -> None:
-    """平仓后每 1 秒轮询 position_close：实测记录出现延迟与粒度；并验证 _from/to 窗口过滤。"""
+    """平仓后每 1 秒轮询 position_close：实测记录出现延迟与粒度；并验证 _from/to 窗口过滤。
+
+    参数：
+        gw: GateRestGateway，Gate 网关实例
+        close_ts: float | None，平仓时间戳
+    返回：
+        None，平仓后每 1 秒轮询 position_close：实测记录出现延迟与粒度；并验证 _from/to 窗口过滤
+    """
     print(f"[{_ts()}] —— position_close 延迟与粒度实测 ——")
     for i in range(15):
         rows = gw._api.list_position_close(gw._settle, contract=CONTRACT, limit=5)
@@ -142,6 +189,14 @@ async def _poll_position_close(gw: GateRestGateway, close_ts: float | None) -> N
 
 
 async def main() -> None:
+    """串起实测全流程：建连订阅 → 开仓触发止盈 → 打印成交与 position_close 实测字段。
+
+    参数：无
+
+    返回：
+        None，订阅私有频道并下单触发推送，实测结果打印到标准输出；
+        finally 兜底平掉残留持仓并关闭 WS 连接
+    """
     _, gw, conn = _build()
     _subscribe_private(conn)
     ws_task = asyncio.create_task(conn.run())

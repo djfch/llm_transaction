@@ -33,10 +33,25 @@ class Verdict(BaseModel):
 
     @classmethod
     def allow(cls) -> Verdict:
+        """构造放行判定：允许该交易意图执行，不带任何拒绝理由。
+
+        参数：无
+
+        返回：
+            Verdict：allowed=True、reasons 为空的判定结果
+        """
         return cls(allowed=True)
 
     @classmethod
     def deny(cls, reasons: list[str]) -> Verdict:
+        """构造拒绝判定：禁止该交易意图执行，并附全部命中的风控理由。
+
+        参数：
+            reasons: list[str]，各风控规则命中的拒绝理由列表
+
+        返回：
+            Verdict：allowed=False、附带全部拒绝理由的判定结果
+        """
         return cls(allowed=False, reasons=reasons)
 
 

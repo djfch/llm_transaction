@@ -39,17 +39,42 @@ _SAFETY_NET_INTERVAL_S = 300  # 低频安全网间隔（秒）：幂等补漏，
 class ExchangeRestSource(Protocol):
     """同步器依赖的 REST 能力（结构化接口，GateRestGateway 天然满足）。"""
 
-    def list_my_trades(
-        self, contract: str | None = None, limit: int = 100
-    ) -> list[ExchangeTrade]: ...
+    def list_my_trades(self, contract: str | None = None, limit: int = 100) -> list[ExchangeTrade]:
+        """拉取我的成交记录（REST，补漏与安全网的数据来源）。
+
+        参数：
+            contract: str | None，合约名；None 表示全部合约
+            limit: int，最多返回的成交条数
+
+        返回：
+            list[ExchangeTrade]：成交列表，Gate 按时间倒序返回（最新在前）
+        """
+        ...
 
     def list_position_close(
         self, contract: str, from_ts: float, to_ts: float
-    ) -> list[PositionCloseRecord]: ...
+    ) -> list[PositionCloseRecord]:
+        """查询合约平仓盈亏历史（position_close，平仓 pnl 回填的数据来源）。
+
+        参数：
+            contract: str，合约名
+            from_ts: float，查询窗口起点（秒级时间戳，Gate 服务器时钟）
+            to_ts: float，查询窗口终点（秒级时间戳，Gate 服务器时钟）
+
+        返回：
+            list[PositionCloseRecord]：时间窗口内的平仓记录列表
+        """
+        ...
 
 
 def parse_user_trade(raw: dict) -> ExchangeTrade:
-    """usertrades 推送条目解析（字段名与 REST MyFuturesTrade 一致，实测校准）。"""
+    """usertrades 推送条目解析（字段名与 REST MyFuturesTrade 一致，实测校准）。
+
+    参数：
+        raw: dict，交易所推送的原始字段映射
+    返回：
+        ExchangeTrade，usertrades 推送条目解析（字段名与 REST MyFuturesTrade 一致，实测校准）
+    """
     create_time_ms = raw.get("create_time_ms")
     create_time = float(create_time_ms) / 1000 if create_time_ms else float(raw["create_time"])
     return ExchangeTrade(
@@ -71,6 +96,11 @@ def extract_triggered_order_id(raw: dict) -> str:
     实测确认（testnet 2026-08）：open/finished(auto_cancelled, trade_id=0) 事件正确
     返回空，不会把被自动撤销的止盈止损误判为已触发；真正触发的事件本轮未观测到，
     trade_id 为触发后生成的订单 id 依据 Gate 官方文档。
+
+    参数：
+        raw: dict，交易所推送的原始字段映射
+    返回：
+        str，autoorders 推送提取已触发产生的成交订单 id；未触发或无 id 返回 ''
     """
     status = str(raw.get("status") or "")
     if status and status not in ("finished", "triggered", "succeeded"):
@@ -87,6 +117,11 @@ def extract_liquidation_order_id(raw: dict) -> str:
 
     本轮 testnet 实测未触发强平，字段名按 Gate 官方文档假设（order_id 优先、id 兜底）；
     待真实强平事件观测后校准。
+
+    参数：
+        raw: dict，交易所推送的原始字段映射
+    返回：
+        str，liquidates 推送提取强平订单 id（与 usertrades 的 order_id 对应）
     """
     for key in ("order_id", "id"):
         value = raw.get(key)
@@ -105,6 +140,18 @@ class ExchangeFillSync:
         mode: str,
         notify_event: Callable[[dict], None] | None = None,
     ) -> None:
+        """注入依赖并初始化内存状态（触发订单集合、pnl 消费键、回填任务强引用）。
+
+        参数：
+            fills: ExchangeFillsRepo，trades 表仓储：落库、归因查询/补正、水线读写
+            rest: ExchangeRestSource，交易所 REST 只读能力（补漏拉成交、查平仓记录）
+            mode: str，运行模式（testnet/live），成交归属与补漏均按它过滤
+            notify_event: Callable[[dict], None] | None，事件广播回调（发
+                trades_updated 通知前端刷新成交列表）；省略或为 None 时静默不发
+
+        返回：
+            None，副作用为初始化实例属性
+        """
         self._fills = fills
         self._rest = rest
         self._mode = mode
@@ -117,12 +164,24 @@ class ExchangeFillSync:
     # ---------- 推送入口 ----------
 
     async def handle_user_trade(self, raw: dict) -> None:
-        """成交推送：幂等落库 + 分类 + 平仓类调度 pnl 回填。"""
+        """成交推送：幂等落库 + 分类 + 平仓类调度 pnl 回填。
+
+        参数：
+            raw: dict，交易所推送的原始字段映射
+        返回：
+            None，成交推送：幂等落库 + 分类 + 平仓类调度 pnl 回填
+        """
         trade = parse_user_trade(raw)
         await self._persist(trade)
 
     async def handle_auto_order(self, raw: dict) -> None:
-        """自动订单推送：触发订单 id 入集合，乱序成交补正为 tpsl_close。"""
+        """自动订单推送：触发订单 id 入集合，乱序成交补正为 tpsl_close。
+
+        参数：
+            raw: dict，交易所推送的原始字段映射
+        返回：
+            None，自动订单推送：触发订单 id 入集合，乱序成交补正为 tpsl_close
+        """
         order_id = extract_triggered_order_id(raw)
         if not order_id:
             return
@@ -130,7 +189,13 @@ class ExchangeFillSync:
         await self._reattribute(order_id, "tpsl_close")
 
     async def handle_liquidation(self, raw: dict) -> None:
-        """强平推送：强平订单 id 入集合，乱序成交补正为 liquidation。"""
+        """强平推送：强平订单 id 入集合，乱序成交补正为 liquidation。
+
+        参数：
+            raw: dict，交易所推送的原始字段映射
+        返回：
+            None，强平推送：强平订单 id 入集合，乱序成交补正为 liquidation
+        """
         order_id = extract_liquidation_order_id(raw)
         if not order_id:
             return
@@ -140,7 +205,14 @@ class ExchangeFillSync:
     # ---------- 补漏 ----------
 
     async def catch_up(self, *, first_lookback_s: float = 600.0, overlap_s: float = 60.0) -> None:
-        """事件驱动补漏（启动/断线重连）：水线重叠窗内逐条走同一落库路径。"""
+        """事件驱动补漏（启动/断线重连）：水线重叠窗内逐条走同一落库路径。
+
+        参数：
+            first_lookback_s: float，首次补漏回溯秒数
+            overlap_s: float，水线补漏重叠秒数
+        返回：
+            None，事件驱动补漏（启动/断线重连）：水线重叠窗内逐条走同一落库路径
+        """
         try:
             trades = await asyncio.to_thread(self._rest.list_my_trades, None, 100)
         except Exception:
@@ -167,6 +239,10 @@ class ExchangeFillSync:
         为什么不靠 on_reconnected：gatews 对会话中断连（网络抖动/NAT 超时/keepalive
         收尸）做内部静默重连且不重放私有推送，run() 不返回，重连钩子不可见——
         秒级断线窗口内的成交（尤其强平/止盈止损这类无主成交）只能靠定时兜底找回。
+
+        参数：无
+        返回：
+            None，低频安全网主循环：每 5 分钟幂等补漏一次（shutdown 时随任务取消终止）
         """
         while True:
             await asyncio.sleep(_SAFETY_NET_INTERVAL_S)
@@ -175,7 +251,13 @@ class ExchangeFillSync:
     # ---------- 内部 ----------
 
     async def _persist(self, trade: ExchangeTrade) -> None:
-        """分类 + 幂等落库 + 事件 + 平仓类 pnl 回填调度（WS 与补漏共用）。"""
+        """分类 + 幂等落库 + 事件 + 平仓类 pnl 回填调度（WS 与补漏共用）。
+
+        参数：
+            trade: ExchangeTrade，交易所成交记录
+        返回：
+            None，分类 + 幂等落库 + 事件 + 平仓类 pnl 回填调度（WS 与补漏共用）
+        """
         source, round_id = await self._classify(trade)
         row_id = await self._fills.save_exchange_trade(
             exchange_trade_id=trade.id,
@@ -197,7 +279,13 @@ class ExchangeFillSync:
             self._schedule_pnl_backfill(row_id, trade.contract, trade.create_time, trade.id)
 
     async def _classify(self, trade: ExchangeTrade) -> tuple[str, str]:
-        """返回 (source, round_id)：本地订单 > 强平集合 > 自动订单集合 > 未知。"""
+        """返回 (source, round_id)：本地订单 > 强平集合 > 自动订单集合 > 未知。
+
+        参数：
+            trade: ExchangeTrade，交易所成交记录
+        返回：
+            tuple[str, str]，(source, round_id)：本地订单 > 强平集合 > 自动订单集合 > 未知
+        """
         attr = await self._fills.order_attribution(trade.order_id, self._mode)
         if attr is not None:
             round_id, trade_source, is_close = attr
@@ -211,7 +299,14 @@ class ExchangeFillSync:
         return "", ""
 
     async def _reattribute(self, order_id: str, source: str) -> None:
-        """乱序补正：订单 id 命中的无来源成交行 UPDATE + 再发事件 + 补做 pnl 回填。"""
+        """乱序补正：订单 id 命中的无来源成交行 UPDATE + 再发事件 + 补做 pnl 回填。
+
+        参数：
+            order_id: str，交易所订单标识
+            source: str，成交来源分类
+        返回：
+            None，乱序补正：订单 id 命中的无来源成交行 UPDATE + 再发事件 + 补做 pnl 回填
+        """
         rows = await self._fills.find_by_exchange_order_id(order_id, self._mode)
         for row_id, old_source, contract, created_at in rows:
             if old_source:
@@ -223,6 +318,17 @@ class ExchangeFillSync:
     def _schedule_pnl_backfill(
         self, row_id: int, contract: str, fill_ts: float, label: str
     ) -> None:
+        """创建 pnl 回填后台任务并持有强引用（防 GC 提前回收），完成后自动移除。
+
+        参数：
+            row_id: int，trades 表行 id（回填 update_pnl 的目标行）
+            contract: str，合约名
+            fill_ts: float，成交时间（秒，Gate 服务器时钟），用于圈定查询窗口
+            label: str，日志标识（成交 id 或订单 id），回填失败时便于定位
+
+        返回：
+            None，副作用为在事件循环上创建回填任务并登记进 _tasks
+        """
         task = asyncio.get_running_loop().create_task(
             self._backfill_pnl(row_id, contract, fill_ts, label)
         )
@@ -230,14 +336,28 @@ class ExchangeFillSync:
         task.add_done_callback(self._tasks.discard)
 
     async def aclose(self) -> None:
-        """取消未完成的 pnl 回填任务（shutdown 用）：db 关闭后任务醒来落库会报错噪音。"""
+        """取消未完成的 pnl 回填任务（shutdown 用）：db 关闭后任务醒来落库会报错噪音。
+
+        参数：无
+        返回：
+            None，取消未完成的 pnl 回填任务（shutdown 用）：db 关闭后任务醒来落库会报错噪音
+        """
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _backfill_pnl(self, row_id: int, contract: str, fill_ts: float, label: str) -> None:
-        """两次机会查 position_close 回填 pnl；再不中记 0（日志），不阻塞落库。"""
+        """两次机会查 position_close 回填 pnl；再不中记 0（日志），不阻塞落库。
+
+        参数：
+            row_id: int，本地成交记录标识
+            contract: str，合约标识
+            fill_ts: float，成交时间戳
+            label: str，来源显示标签
+        返回：
+            None，两次机会查 position_close 回填 pnl；再不中记 0（日志），不阻塞落库
+        """
         for delay in (_FIRST_PNL_DELAY_S, _RETRY_PNL_DELAY_S):
             await asyncio.sleep(delay)
             try:
@@ -262,6 +382,13 @@ class ExchangeFillSync:
         两侧时间均为 Gate 服务器时钟，无本地偏移问题。下界 -5s 挡掉旧未消费记录
         错配（如网页端手动平仓留下的记录）；最近邻替代"最新一条"，防 2s 内同合约
         两笔平仓时 pnl 互换（粒度/下界以实测定，慢速强平可再放宽）。
+
+        参数：
+            rows: list[PositionCloseRecord]，候选平仓记录
+            contract: str，合约标识
+            fill_ts: float，成交时间戳
+        返回：
+            PositionCloseRecord | None，取与成交时间最接近（fill_ts-5s ~ +2s 窗内）且未被其他成交消费的记录
         """
         candidates = [
             r
@@ -276,11 +403,28 @@ class ExchangeFillSync:
         return record
 
     def _remember(self, order_set: set[str], order_id: str) -> None:
+        """把触发订单 id 记入集合；超上限时整体清空，防内存无界增长。
+
+        参数：
+            order_set: set[str]，目标集合（自动订单集合或强平订单集合）
+            order_id: str，待记入的触发订单 id
+
+        返回：
+            None，副作用为就地修改 order_set（超限先清空再写入）
+        """
         if len(order_set) >= _ORDER_SET_CAP:
             order_set.clear()  # 超限清空：老单补正机会让给新单（补正窗口本就短暂）
         order_set.add(order_id)
 
     def _emit(self, contract: str) -> None:
+        """广播 trades_updated 事件通知前端刷新；未注入回调时静默跳过。
+
+        参数：
+            contract: str，合约名，随事件带给前端用于定向刷新成交列表
+
+        返回：
+            None，副作用为调用 notify_event 回调发出事件
+        """
         if self._notify_event is not None:
             self._notify_event(
                 {"type": "trades_updated", "data": {"contracts": [contract], "count": 1}}

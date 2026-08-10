@@ -99,14 +99,33 @@ class SecretsBody(BaseModel):
     @field_validator("anthropic_api_key", "openai_api_key", "api_key")
     @classmethod
     def _no_control_chars(cls, value: str) -> str:
-        """拒绝换行/回车/NUL 等控制字符（防 .env 换行注入，见 set_env_keys 同名防护）。"""
+        """拒绝换行/回车/NUL 等控制字符（防 .env 换行注入，见 set_env_keys 同名防护）。
+
+        参数：
+            value: str，待转换或校验的值
+
+        返回：
+            str：拒绝换行/回车/NUL 等控制字符（防 .env 换行注入，见 set_env_keys 同名防护）
+
+        异常：
+            ValueError：'密钥值不允许包含换行/回车/NUL 字符' 所描述的条件发生时
+        """
         if any(c in value for c in ("\r", "\n", "\0")):
             raise ValueError("密钥值不允许包含换行/回车/NUL 字符")
         return value
 
 
 def _changed_keys(old: BaseModel, new: BaseModel, prefix: str = "") -> list[str]:
-    """递归比较两个同型模型，返回有差异的叶子字段点分路径（按模型字段声明序）。"""
+    """递归比较两个同型模型，返回有差异的叶子字段点分路径（按模型字段声明序）。
+
+    参数：
+        old: BaseModel，修改前的配置模型
+        new: BaseModel，修改后的配置模型
+        prefix: str，递归字段路径前缀
+
+    返回：
+        list[str]：递归比较两个同型模型，返回有差异的叶子字段点分路径（按模型字段声明序）
+    """
     keys: list[str] = []
     for name in type(new).model_fields:
         vo, vn = getattr(old, name), getattr(new, name)
@@ -119,7 +138,16 @@ def _changed_keys(old: BaseModel, new: BaseModel, prefix: str = "") -> list[str]
 
 
 def _write_back(runtime: Settings, source: Settings, keys: list[str]) -> None:
-    """把指定点分叶子字段从 source 原地写入 runtime（保持同一实例，共享引用不失效）。"""
+    """把指定点分叶子字段从 source 原地写入 runtime（保持同一实例，共享引用不失效）。
+
+    参数：
+        runtime: Settings，需要原地更新的运行时配置
+        source: Settings，可选的成交来源过滤条件
+        keys: list[str]，需要复制或报告的字段路径列表
+
+    返回：
+        None：把指定点分叶子字段从 source 原地写入 runtime（保持同一实例，共享引用不失效）
+    """
     for key in keys:
         parts = key.split(".")
         target: Any = runtime
@@ -131,7 +159,14 @@ def _write_back(runtime: Settings, source: Settings, keys: list[str]) -> None:
 
 
 def _config_422(exc: ValueError) -> HTTPException:
-    """ConfigError 与 validate_mode 抛出的 ValueError 都转成 422。"""
+    """ConfigError 与 validate_mode 抛出的 ValueError 都转成 422。
+
+    参数：
+        exc: ValueError，捕获到的原始异常
+
+    返回：
+        HTTPException：ConfigError 与 validate_mode 抛出的 ValueError 都转成 422
+    """
     return HTTPException(status_code=422, detail=str(exc))
 
 
@@ -140,6 +175,13 @@ def _merge_body(raw: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
 
     前端只提交它管理的字段子集（mode/llm/risk/scheduler/notify），直接整体写回会把
     未提交的段（gate/paper/server/audit/log）重置为默认值——合并保证未提及的键原样保留。
+
+    参数：
+        raw: dict[str, Any]，待解析或保留的原始数据
+        body: dict[str, Any]，接口请求体字段
+
+    返回：
+        dict[str, Any]：把 PUT 体合并到现有配置原文上（按段浅合并）
     """
     merged = dict(raw)
     for key, value in body.items():
@@ -156,6 +198,12 @@ def _strip_llm_credentials(body: dict[str, Any]) -> dict[str, Any]:
     段级浅合并下，表单提交 {...initial} 全量快照会让 credentials 旧快照整体替换生效列表，
     静默回滚专用端点刚写入的新凭证（窗口期竞态）；服务端强制剥离，前端无法绕过。
     剥后 llm 段为空 dict 也安全：浅合并不产生任何变化，磁盘与 runtime 凭证列表不动。
+
+    参数：
+        body: dict[str, Any]，接口请求体字段
+
+    返回：
+        dict[str, Any]：剥掉 PUT 体 llm 段的 credentials 键：凭证列表只能经 /api/credentials 专用端点变更
     """
     llm = body.get("llm")
     if isinstance(llm, dict) and "credentials" in llm:
@@ -164,14 +212,28 @@ def _strip_llm_credentials(body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _run_llm_reconfigure(deps: ServerDeps) -> dict[str, Any]:
-    """调用主程序注入的 LLM 热重建回调；未接线时诚实标注 agent 未接线。"""
+    """调用主程序注入的 LLM 热重建回调；未接线时诚实标注 agent 未接线。
+
+    参数：
+        deps: ServerDeps，当前模块所需的运行依赖集合
+
+    返回：
+        dict[str, Any]：调用主程序注入的 LLM 热重建回调；未接线时诚实标注 agent 未接线
+    """
     if deps.llm_reconfigure is None:
         return {"llm_configured": False, "error": "agent 未接线"}
     return await deps.llm_reconfigure()
 
 
 def _secrets_settings(deps: ServerDeps) -> Settings:
-    """密钥端点读取配置：优先运行时共享实例，未接线时按文件加载（非法文件回退默认值）。"""
+    """密钥端点读取配置：优先运行时共享实例，未接线时按文件加载（非法文件回退默认值）。
+
+    参数：
+        deps: ServerDeps，当前模块所需的运行依赖集合
+
+    返回：
+        Settings：密钥端点读取配置：优先运行时共享实例，未接线时按文件加载（非法文件回退默认值）
+    """
     if deps.runtime_settings is not None:
         return deps.runtime_settings
     try:
@@ -181,10 +243,25 @@ def _secrets_settings(deps: ServerDeps) -> Settings:
 
 
 def create_config_router(deps: ServerDeps) -> APIRouter:
+    """创建配置相关 API 路由（config / strategy / watchlist / secrets / kill_switch 端点）。
+
+    参数：
+        deps: ServerDeps，服务端依赖（配置路径、运行时共享实例、热重建与通知回调等）
+
+    返回：
+        APIRouter：挂载全部配置端点的路由器，前缀 /api
+    """
     router = APIRouter(prefix="/api")
 
     @router.get("/config")
     async def get_config() -> dict[str, Any]:
+        """读取当前配置文件原文并返回。
+
+        参数：无
+
+        返回：
+            dict[str, Any]：config.yaml 的原始内容（未经模型校验）
+        """
         return read_settings_raw(deps.config_path)
 
     @router.put("/config")
@@ -194,6 +271,15 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
         body 里 llm 段的 credentials 键被强制忽略（见 _strip_llm_credentials）：
         凭证列表只能经 /api/credentials 专用端点变更，防表单旧快照整体替换静默回滚；
         agents.*.credential 分配与 llm.model 等热键仍归本端点管辖。
+
+        参数：
+            body: dict[str, Any]，接口请求体字段
+
+        返回：
+            dict[str, Any]：整体保存配置（段级浅合并，未提交的段/键原样保留）
+
+        异常：
+        HTTPException：配置模型校验失败时转换为 422 响应
         """
         body = _strip_llm_credentials(body)
         try:
@@ -225,7 +311,14 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/strategy", response_class=PlainTextResponse)
     async def get_strategy() -> str:
-        """策略书按纯文本（text/plain）返回，与前端约定一致。"""
+        """策略书按纯文本（text/plain）返回，与前端约定一致。
+
+        参数：
+            无
+
+        返回：
+            str：策略书按纯文本（text/plain）返回，与前端约定一致
+        """
         if not deps.prompt_path.exists():
             return ""
         return deps.prompt_path.read_text(encoding="utf-8")
@@ -234,7 +327,17 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
     async def put_strategy(request: Request) -> str:
         """保存策略书：接线后经 deps.strategy_save 走 StrategyStore（校验 + 版本落库），
         校验失败映 422（detail 为全部未过原因）；响应契约保持 PlainText 原文不变。
-        未接线（测试 fake deps）时直接写入策略文件。"""
+        未接线（测试 fake deps）时直接写入策略文件。
+
+        参数：
+            request: Request，FastAPI 原始请求对象
+
+        返回：
+            str：保存策略书：接线后经 deps.strategy_save 走 StrategyStore（校验 + 版本落库），
+
+        异常：
+            HTTPException：满足显式失败条件 所描述的条件发生时
+        """
         body = (await request.body()).decode("utf-8")
         if deps.strategy_save is not None:
             try:
@@ -247,10 +350,28 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/watchlist")
     async def get_watchlist() -> dict[str, Any]:
+        """读取当前自选合约清单原文并返回。
+
+        参数：无
+
+        返回：
+            dict[str, Any]：watchlist 文件的原始内容（未经模型校验）
+        """
         return read_watchlist_raw(deps.watchlist_path)
 
     @router.put("/watchlist")
     async def put_watchlist(body: dict[str, Any]) -> dict[str, bool]:
+        """保存自选合约清单，并原地更新运行时共享列表（下轮决策即生效）。
+
+        参数：
+            body: dict[str, Any]，PUT 请求体（watchlist 内容）
+
+        返回：
+            dict[str, bool]：{"saved": True} 表示保存成功
+
+        异常：
+            HTTPException：清单校验失败时抛出（422，detail 为校验错误信息）
+        """
         try:
             watchlist = write_watchlist(body, deps.watchlist_path)
         except ValueError as exc:
@@ -261,7 +382,14 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/secrets/status")
     async def secrets_status() -> dict[str, Any]:
-        # 只查环境变量是否存在，永不返回明文
+        """查询各密钥是否已配置（只查环境变量是否存在，永不返回明文）。
+
+        参数：无
+
+        返回：
+            dict[str, Any]：gate_key / llm_key / telegram 三个布尔值，
+            以及逐凭证的配置状态列表（名称、provider、model、是否已配置、被哪些 agent 使用）
+        """
         env = os.environ
         settings = _secrets_settings(deps)
         credentials = settings.llm.resolve_credentials()
@@ -297,6 +425,16 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
         契约逐字：{"saved": true, "llm_configured": bool, "error": str}。
         空串字段不修改（set_env_keys 空值跳过）；交易所 key 无写入端点（密钥铁规）。
         credential 非空时按其 api_key_env 写键，凭证名不存在映 422。
+
+        参数：
+            body: SecretsBody，接口请求体字段
+
+        返回：
+            dict[str, Any]：写入 LLM key 到 .env 并热重建 provider；响应永不回显明文
+
+        异常：
+            HTTPException：满足显式失败条件 所描述的条件发生时
+        HTTPException：密钥绑定配置校验失败时转换为 422 响应
         """
         mapping = {
             "ANTHROPIC_API_KEY": body.anthropic_api_key,
@@ -317,6 +455,17 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/kill_switch")
     async def post_kill_switch(body: KillSwitchBody) -> dict[str, bool]:
+        """开关风控熔断（kill_switch）：写入配置文件并发送熔断状态通知。
+
+        参数：
+            body: KillSwitchBody，请求体；enabled 为 True 表示开启熔断（禁止新开仓）
+
+        返回：
+            dict[str, bool]：{"kill_switch": 当前熔断状态}
+
+        异常：
+            HTTPException：配置写入校验失败时抛出（422，detail 为校验错误信息）
+        """
         raw = read_settings_raw(deps.config_path)
         raw.setdefault("risk", {})["kill_switch"] = body.enabled
         try:

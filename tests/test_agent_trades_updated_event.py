@@ -29,18 +29,54 @@ class SeqProvider:
     """预置响应序列的 mock provider。"""
 
     def __init__(self, responses: list) -> None:
+        """保存预置响应序列，供 chat 按调用顺序依次弹出。
+
+        参数：
+            responses: list，预置的 LLM 响应列表，按顺序消费
+
+        返回：
+            None，就地初始化内部响应队列
+        """
         self._responses = deque(responses)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """按序弹出预置响应；序列弹尽时返回无工具调用的占位响应。
+
+        参数：
+            system: str，系统提示词（mock 忽略）
+            messages: list[dict]，对话消息列表（mock 忽略）
+            tools: list[dict]，可用工具定义（mock 忽略）
+
+        返回：
+            LLMResponse：预置序列中的下一条响应；序列为空时返回固定文本的占位响应
+        """
         if not self._responses:
             return LLMResponse(text="（无更多预置响应）", raw="{}")
         return self._responses.popleft()
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具执行结果包装成 provider 约定的 tool 角色消息。
+
+        参数：
+            call: ToolCall，已执行的工具调用，取其 call_id 关联结果
+            result: str，工具执行结果文本
+
+        返回：
+            dict：{"role": "tool", "tool_call_id": ..., "content": ...} 形式的消息
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
 def _resp(text: str, calls: list[ToolCall]) -> LLMResponse:
+    """构造带指定文本和工具调用的模拟模型响应。
+
+    参数：
+        text: str，助手回复正文
+        calls: list[ToolCall]，本轮提出的工具调用列表
+
+    返回：
+        LLMResponse，可直接放入 SeqProvider 响应序列的模型响应
+    """
     return LLMResponse(
         text=text,
         tool_calls=calls,
@@ -50,6 +86,16 @@ def _resp(text: str, calls: list[ToolCall]) -> LLMResponse:
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造指定名称、合约乘数与标记价的测试合约元数据。
+
+    参数：
+        name: str，永续合约名称
+        quanto: str，合约乘数的十进制字符串
+        mark: str，标记价的十进制字符串
+
+    返回：
+        Contract，带固定手续费和下单边界的测试合约
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -68,6 +114,17 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 def _fill(order_id: str, contract: str, size: int, is_close: bool = False) -> FillRecord:
+    """构造用于成交持久化测试的固定价格成交记录。
+
+    参数：
+        order_id: str，成交关联的订单编号
+        contract: str，成交所属合约
+        size: int，带方向的成交张数
+        is_close: bool，是否属于平仓成交，默认否
+
+    返回：
+        FillRecord，价格 60000、手续费 0.1 的模拟成交
+    """
     return FillRecord(
         order_id=order_id,
         contract=contract,
@@ -81,6 +138,14 @@ def _fill(order_id: str, contract: str, size: int, is_close: bool = False) -> Fi
 
 
 async def _make_repo(tmp_path) -> SimpleNamespace:
+    """打开临时数据库并返回数据库与仓储测试环境。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        SimpleNamespace，包含 db(数据库)与 repo(仓储)
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     return SimpleNamespace(db=db, repo=Repo(db))
@@ -90,7 +155,14 @@ async def _make_repo(tmp_path) -> SimpleNamespace:
 
 
 async def test_persister_emits_once_with_payload(tmp_path):
-    """一批 3 笔（2 合约）全部落库成功 → 发一次事件，contracts 去重排序、count=3。"""
+    """验证三笔两合约成交全部落库后只发一次去重排序的更新事件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证失败数、事件载荷和落库笔数
+    """
     env = await _make_repo(tmp_path)
     events: list[dict] = []
     try:
@@ -115,11 +187,30 @@ async def test_persister_emits_once_with_payload(tmp_path):
 
 
 async def test_persister_all_fail_no_event(tmp_path, monkeypatch):
-    """全部落库失败 → 不发事件（失败仅记日志，不重试）。"""
+    """验证整批成交全部落库失败时记录失败但不发更新事件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，用于把成交保存替换为失败桩
+
+    返回：
+        None，通过断言验证失败计数和空事件列表
+    """
     env = await _make_repo(tmp_path)
     events: list[dict] = []
 
     async def _fail_save(**kwargs):
+        """模拟任何成交保存请求都发生数据库故障。
+
+        参数：
+            kwargs: dict，成交保存关键字参数，本桩不读取其内容
+
+        返回：
+            None，本函数始终在返回前抛出异常
+
+        异常：
+            RuntimeError: 每次调用都抛出，用于模拟数据库不可用
+        """
         raise RuntimeError("db down")
 
     monkeypatch.setattr(env.repo, "save_trade", _fail_save)
@@ -134,12 +225,31 @@ async def test_persister_all_fail_no_event(tmp_path, monkeypatch):
 
 
 async def test_persister_partial_failure_payload(tmp_path, monkeypatch):
-    """部分失败：count=成功笔数、contracts 仅含成功合约（失败笔不进事件）。"""
+    """验证部分成交落库失败时事件只统计成功笔数与成功合约。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: MonkeyPatch，用于注入按合约失败的保存桩
+
+    返回：
+        None，通过断言验证失败数、事件载荷和实际落库笔数
+    """
     env = await _make_repo(tmp_path)
     events: list[dict] = []
     original = env.repo.save_trade
 
     async def _fail_eth(**kwargs):
+        """仅让 ETH_USDT 成交保存失败，其余请求委托原保存方法。
+
+        参数：
+            kwargs: dict，包含 contract(合约)等成交保存字段
+
+        返回：
+            TradeRecord，非 ETH_USDT 成交的持久化记录
+
+        异常：
+            RuntimeError: contract(合约)为 ETH_USDT 时模拟数据库故障
+        """
         if kwargs["contract"] == "ETH_USDT":
             raise RuntimeError("db down")
         return await original(**kwargs)
@@ -164,7 +274,14 @@ async def test_persister_partial_failure_payload(tmp_path, monkeypatch):
 
 
 async def test_persister_without_notify_event_compatible(tmp_path):
-    """不传 notify_event → 正常落库不报错。"""
+    """验证未接入事件通知回调时成交持久化仍保持兼容并正常落库。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证零失败与一笔落库记录
+    """
     env = await _make_repo(tmp_path)
     try:
         failures = await FillPersister(env.repo, "paper").drain_persist(
@@ -177,7 +294,14 @@ async def test_persister_without_notify_event_compatible(tmp_path):
 
 
 async def test_persister_empty_batch_no_event(tmp_path):
-    """空批次（drain 无成交）→ 不发事件。"""
+    """验证成交排空返回空批次时不报失败也不发更新事件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证失败数为零且事件列表为空
+    """
     env = await _make_repo(tmp_path)
     events: list[dict] = []
     try:
@@ -192,7 +316,16 @@ async def test_persister_empty_batch_no_event(tmp_path):
 
 
 async def _make_paper_loop(tmp_path, provider: SeqProvider, events: list[dict]) -> SimpleNamespace:
-    """paper 全链路决策循环（PaperGateway + drain_fills + notify_event 捕获）。"""
+    """组装包含模拟撮合、成交排空与事件捕获的 paper 决策循环。
+
+    参数：
+        tmp_path: Path，pytest 临时目录，用于隔离数据库、审计与提示词文件
+        provider: SeqProvider，按序提供决策响应的模拟模型
+        events: list[dict]，收集更新事件的外部列表
+
+    返回：
+        SimpleNamespace，包含 db(数据库)、repo(仓储)、gateway(网关)和 loop(决策循环)
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     repo = Repo(db)
@@ -218,7 +351,14 @@ async def _make_paper_loop(tmp_path, provider: SeqProvider, events: list[dict]) 
 
 
 async def test_drain_round_emits_event_only_when_fills(tmp_path):
-    """有成交的轮次轮末发事件；无成交的轮次不发。"""
+    """验证决策轮仅在轮末排空到成交时发送更新事件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证有成交轮次发一次、无成交轮次不新增事件
+    """
     provider = SeqProvider(
         [
             _resp(
@@ -249,7 +389,14 @@ async def test_drain_round_emits_event_only_when_fills(tmp_path):
 
 
 async def test_manual_close_emits_event(tmp_path):
-    """手动平仓：本单成交落库后发事件（夹带批为空不发，本单批发一次）。"""
+    """验证手动平仓成交落库后发送一次对应合约的更新事件。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证平仓结果文本及事件载荷
+    """
     provider = SeqProvider(
         [
             _resp(

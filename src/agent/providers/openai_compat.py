@@ -21,6 +21,20 @@ class OpenAICompatProvider:
     """OpenAI chat.completions 兼容协议适配。"""
 
     def __init__(self, config: LLMConfig | CredentialConfig, api_key: str | None = None) -> None:
+        """初始化 OpenAI 兼容客户端：取 key、建 AsyncOpenAI 并记下模型参数。
+
+        参数：
+            config: LLMConfig | CredentialConfig，LLM 配置（模型名、max_tokens、
+                thinking_effort、可选的 openai_base_url）
+            api_key: str | None，显式传入的 API key；为 None 时从环境变量
+                OPENAI_API_KEY 读取
+
+        返回：
+            None，就地初始化实例属性（创建 self._client 异步客户端）
+
+        异常：
+            LLMError：未提供 api_key 且环境变量 OPENAI_API_KEY 也为空时抛出
+        """
         key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not key:
             raise LLMError("缺少 OPENAI_API_KEY 环境变量，无法初始化 OpenAI 兼容 provider")
@@ -35,6 +49,20 @@ class OpenAICompatProvider:
         self._thinking_effort = config.thinking_effort
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """发起一轮对话：把中性工具定义转成 OpenAI 格式并调用 chat.completions。
+
+        参数：
+            system: str，系统提示词（作为首条 system 消息发送）
+            messages: list[dict]，多轮对话消息（厂商原生格式的历史消息）
+            tools: list[dict]，中性格式工具定义 {name, description, parameters(JSON Schema)}；
+                空列表时按 None 传给 API（不启用工具）
+
+        返回：
+            LLMResponse：统一回复（文本 + 工具调用列表 + 原文 + 原生 assistant 消息）
+
+        异常：
+            LLMError：OpenAI 兼容 API 返回错误（网络/鉴权/限流/服务端等）时抛出
+        """
         oai_tools = [
             {
                 "type": "function",
@@ -60,10 +88,33 @@ class OpenAICompatProvider:
         return self._parse(resp)
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把一次工具执行结果包装成 OpenAI 原生 tool 消息，供回填 messages 继续对话。
+
+        参数：
+            call: ToolCall，对应的工具调用（取其 call_id 关联回请求）
+            result: str，工具执行结果的文本内容
+
+        返回：
+            dict：OpenAI 格式的 tool 角色消息
+                {"role": "tool", "tool_call_id": ..., "content": ...}
+        """
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
     @staticmethod
     def _parse(resp: openai.types.chat.ChatCompletion) -> LLMResponse:
+        """把 OpenAI ChatCompletion 原始响应解析成统一 LLMResponse。
+
+        参数：
+            resp: openai.types.chat.ChatCompletion，OpenAI SDK 返回的原始响应对象
+
+        返回：
+            LLMResponse：统一回复（文本 + 解析后的工具调用列表 + 原文 JSON +
+                原生 assistant 消息）
+
+        异常：
+            LLMParseError：响应不含任何 choice、工具参数不是合法 JSON、
+                或工具参数解析结果不是 JSON 对象时抛出
+        """
         if not resp.choices:
             raise LLMParseError("LLM 响应不含任何 choice")
         msg = resp.choices[0].message

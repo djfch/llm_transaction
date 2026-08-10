@@ -34,7 +34,14 @@ class ResearchComponents:
 
 
 def _build_data_provider(cfg: ResearchConfig) -> ResearchDataProvider:
-    """按 .env 密钥装配四类数据源；key 缺失的源不装配（None），不阻塞其余源。"""
+    """按环境变量中的密钥装配可用研报数据源，缺少密钥的来源保持未配置。
+
+    参数：
+        cfg: ResearchConfig，研报外部数据源的地址与启动命令配置
+
+    返回：
+        ResearchDataProvider，包含当前可用来源的数据聚合器
+    """
     jin10 = None
     token = os.environ.get("JIN10_MCP_TOKEN", "")
     if token:
@@ -66,9 +73,20 @@ def build_research(
     gateway: object | None = None,
     watchlist: list[str] | None = None,
 ) -> ResearchComponents:
-    """装配研报子系统。provider 为 LLM provider（可为 None：LLM 未配置时研报直接失败）。
+    """装配研报代理、数据聚合器和调度器，并建立可选市场数据与事件通道。
 
-    notify_event 为 WS 事件广播回调（轮始/轮末），None 则不广播（测试/未接线场景）。
+    参数：
+        settings: Settings，研报运行参数与外部来源配置
+        repo: Repo，共享持久化仓库
+        audit: AuditTrail，研报轮次与工具调用审计入口
+        provider: object | None，LLM 提供器；未配置时研报运行会返回失败
+        notify_event: Callable[[dict], None] | None，轮次事件广播回调
+        candle_cache: object | None，逐标的 K 线缓存
+        gateway: object | None，逐标的行情与合约查询网关
+        watchlist: list[str] | None，本轮允许研究的合约白名单
+
+    返回：
+        ResearchComponents，已接线的研报代理、数据聚合器与调度器
     """
     cfg = settings.research
     data_provider = _build_data_provider(cfg)

@@ -29,6 +29,17 @@ class _ResearchRunBody(BaseModel):
 
 
 def _asset_summary(view: ResearchAssetView) -> dict[str, Any]:
+    """把单标的结论视图压成摘要字典，只保留前端契约约定的 8 个字段。
+
+    参数：
+        view: ResearchAssetView，研报中单合约的结论视图（含当时市场输入快照）
+
+    返回：
+        dict[str, Any]：逐标的摘要，含 contract（合约名）、direction（方向）、
+        confidence（置信度）、horizon（预测窗口）、market_regime（市场状态）、
+        technical_confirmation（技术确认）、basis_type（基差类型）、
+        data_status（数据状态）共 8 个前端契约键
+    """
     keys = (
         "contract",
         "direction",
@@ -44,6 +55,16 @@ def _asset_summary(view: ResearchAssetView) -> dict[str, Any]:
 
 
 def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
+    """在摘要基础上补齐证据、风险与研判叙述，得到单标的完整详情字典。
+
+    参数：
+        view: ResearchAssetView，研报中单合约的结论视图（含当时市场输入快照）
+
+    返回：
+        dict[str, Any]：逐标的详情；在摘要 8 键之上追加 evidence（证据列表）、
+        risks（风险列表）、narrative（研判叙述）、verify_result（复盘验证结果）、
+        created_at（创建时间戳）；evidence/risks 由 *_json 字段解析为对象
+    """
     item = _asset_summary(view)
     item.update(
         {
@@ -58,7 +79,15 @@ def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
 
 
 def _report_item(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
-    """报告头只暴露当前协议字段；逐标的列表使用摘要形状。"""
+    """报告头只暴露当前协议字段；逐标的列表使用摘要形状。
+
+    参数：
+        report: ResearchReport，研报或复盘报告记录
+        views: list[ResearchAssetView]，报告对应的逐标的研判列表
+
+    返回：
+        dict[str, Any]，包含报告头与逐标的摘要的响应字典
+    """
     return {
         "id": report.id,
         "report_type": report.report_type,
@@ -74,13 +103,29 @@ def _report_item(report: ResearchReport, views: list[ResearchAssetView]) -> dict
 
 
 def _report_detail(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
+    """组装研报详情响应体：报告头字段不变，逐标的由摘要换成完整详情。
+
+    参数：
+        report: ResearchReport，研报报告头（summary/cross_market_view 等）
+        views: list[ResearchAssetView]，该研报的逐标的结论视图列表
+
+    返回：
+        dict[str, Any]：研报详情；结构同 _report_item，但 asset_views 为完整详情形状
+    """
     item = _report_item(report, views)
     item["asset_views"] = [_asset_detail(view) for view in views]
     return item
 
 
 def _causal_link_item(link: CausalLink) -> dict[str, Any]:
-    """因果链响应项：chain/evidence 解析为对象（键集为前端契约，不含 *_json 原名）。"""
+    """因果链响应项：chain/evidence 解析为对象（键集为前端契约，不含 *_json 原名）。
+
+    参数：
+        link: CausalLink，因果链记录
+
+    返回：
+        dict[str, Any]，chain 与 evidence 已解析为对象的因果链响应项
+    """
     return {
         "id": link.id,
         "report_id": link.report_id,
@@ -97,13 +142,31 @@ def _causal_link_item(link: CausalLink) -> dict[str, Any]:
 
 
 def create_research_router(deps: ServerDeps) -> APIRouter:
+    """装配研报路由（/api 前缀）：分页列表、详情、实时状态与手动触发四个端点。
+
+    参数：
+        deps: ServerDeps，服务端依赖集合；取数经 deps.repo.research，
+        手动触发经 deps.research_run 回调（None 时该端点诚实 503）
+
+    返回：
+        APIRouter：挂载 /research/reports、/research/reports/{report_id}、
+        /research/live、/research/run 四个端点的路由器
+    """
     router = APIRouter(prefix="/api")
 
     @router.get("/research/reports")
     async def list_research_reports(
         offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200)
     ) -> dict[str, Any]:
-        """研报分页列表（最新在前，含失败记录与逐标的摘要）。"""
+        """研报分页列表（最新在前，含失败记录与逐标的摘要）。
+
+        参数：
+            offset: int，分页偏移量
+            limit: int，返回记录数量上限
+
+        返回：
+            dict[str, Any]，研报分页列表（最新在前，含失败记录与逐标的摘要）
+        """
         reports, total = await deps.repo.research.list_reports_page(limit=limit, offset=offset)
         items = []
         for report in reports:
@@ -113,7 +176,17 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
 
     @router.get("/research/reports/{report_id}")
     async def get_research_report(report_id: int) -> dict[str, Any]:
-        """研报详情：逐标的证据/风险/研判 + 该研报因果链（空为 []）。"""
+        """研报详情：逐标的证据/风险/研判 + 该研报因果链（空为 []）。
+
+        参数：
+            report_id: int，报告编号
+
+        返回：
+            dict[str, Any]，研报详情：逐标的证据/风险/研判 + 该研报因果链（空为 []）
+
+        异常：
+            HTTPException，指定研报不存在时以 404 响应
+        """
         report = await deps.repo.research.get_report(report_id)
         if report is None:
             raise HTTPException(status_code=404, detail=f"研报不存在: {report_id}")
@@ -131,6 +204,12 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
         进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item，
         args/result 为已解析对象）；mode 口径同 get_review_live（runtime_settings 优先，
         未接线回退配置文件）；无研报轮时 round 为 null、tool_calls 为空。
+
+        参数：无
+
+        返回：
+            dict[str, Any]，实时研报展示：当前模式最新一轮研报审计（wake_source='research'）+ 已落库工具调用。  响应键与前端契约冻结：round 键集同 /api/review/live（model_dump 不含 mode， 进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item， args/result 为已解析对象）；mode 口径同 get_review_live（runtime_settings 优先， 未接线回退配置文件）；无研报轮时 round 为 null、tool_calls 为空
+
         """
         settings = deps.runtime_settings or load_settings(deps.config_path)
         round_row = await deps.repo.research.latest_research_audit_round(settings.mode)
@@ -148,6 +227,16 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
 
         回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。
         状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）。
+
+        参数：
+            body: _ResearchRunBody | None，可选的手动触发请求体
+
+        返回：
+            dict[str, Any]，手动触发研报：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。  回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。 状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）
+
+        异常：
+            HTTPException，研报未接线或 LLM 未配置时以 503 响应，调度锁占用时以 409 响应
+
         """
         if deps.research_run is None:
             raise HTTPException(status_code=503, detail="研报未接线（agent 未装配研报调度）")

@@ -17,6 +17,13 @@ from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersio
 
 
 def _now() -> float:
+    """取当前 Unix 时间戳（秒），作为记录的 created_at 落库时间。
+
+    参数：无
+
+    返回：
+        float：当前 Unix 时间戳（秒）
+    """
     return time.time()
 
 
@@ -33,7 +40,17 @@ ORDER BY page.id DESC
 async def query_page_rows(
     conn: aiosqlite.Connection, sql: str, limit: int, offset: int
 ) -> tuple[list[aiosqlite.Row], int]:
-    """执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)。"""
+    """执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)。
+
+    参数：
+        conn: aiosqlite.Connection，SQLite 异步连接
+        sql: str，固定参数化分页 SQL
+        limit: int，最多读取或返回的记录数量
+        offset: int，分页起始偏移量
+
+    返回：
+        tuple[list[aiosqlite.Row], int]：执行固定分页 CTE；空页的 LEFT JOIN 占位行仅用于携带 total(总数)
+    """
     cur = await conn.execute(sql, (limit, offset))
     raw_rows = await cur.fetchall()
     total = int(raw_rows[0]["total"]) if raw_rows else 0
@@ -41,7 +58,14 @@ async def query_page_rows(
 
 
 def row_without_total(row: aiosqlite.Row) -> dict[str, object]:
-    """移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段。"""
+    """移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段。
+
+    参数：
+        row: aiosqlite.Row，SQLite 查询结果行
+
+    返回：
+        dict[str, object]：移除分页 CTE 附带的 total(总数) 列，保留领域模型的原始字段
+    """
     data = dict(row)
     data.pop("total", None)
     return data
@@ -51,10 +75,25 @@ class ReviewRepo:
     """策略版本/复盘报告/复盘取数的存取方法集合。所有写操作立即 commit。"""
 
     def __init__(self, db: Database) -> None:
+        """绑定共享数据库句柄（与 Repo 共用同一连接与事务语义）。
+
+        参数：
+            db: Database，已打开的数据库句柄，由 Repo 挂载时传入
+
+        返回：
+            None，仅保存数据库引用，不触发任何 IO
+        """
         self._db = db
 
     @property
     def _conn(self) -> aiosqlite.Connection:
+        """取共享的 aiosqlite 连接，供本类各存取方法执行 SQL。
+
+        参数：无
+
+        返回：
+            aiosqlite.Connection：与 Repo 共享的同一数据库连接
+        """
         return self._db.conn
 
     # ---------- strategy_versions（策略书版本） ----------
@@ -67,7 +106,18 @@ class ReviewRepo:
         reason: str,
         report_id: int | None = None,
     ) -> StrategyVersion:
-        """落库一个策略书版本（content 为完整原文，md5 为关联键）。"""
+        """落库一个策略书版本（content 为完整原文，md5 为关联键）。
+
+        参数：
+            content: str，策略书完整正文
+            md5: str，策略书正文摘要
+            created_by: str，版本创建来源
+            reason: str，操作原因或失败说明
+            report_id: int | None，研报记录编号
+
+        返回：
+            StrategyVersion：落库一个策略书版本（content 为完整原文，md5 为关联键）
+        """
         ts = _now()
         cur = await self._conn.execute(
             "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at)"
@@ -86,17 +136,40 @@ class ReviewRepo:
         )
 
     async def list_strategy_versions(self) -> list[StrategyVersion]:
-        """全部版本，按 id 倒序（最新在前）。"""
+        """全部版本，按 id 倒序（最新在前）。
+
+        参数：
+            无
+
+        返回：
+            list[StrategyVersion]：全部版本，按 id 倒序（最新在前）
+        """
         cur = await self._conn.execute("SELECT * FROM strategy_versions ORDER BY id DESC")
         return [StrategyVersion(**dict(r)) for r in await cur.fetchall()]
 
     async def get_strategy_version(self, version_id: int) -> StrategyVersion | None:
+        """按 id 读取单个策略书版本。
+
+        参数：
+            version_id: int，策略版本 id
+
+        返回：
+            StrategyVersion | None：命中的策略版本；id 不存在时返回 None
+        """
         cur = await self._conn.execute("SELECT * FROM strategy_versions WHERE id=?", (version_id,))
         row = await cur.fetchone()
         return StrategyVersion(**dict(row)) if row else None
 
     async def attach_report_to_version(self, version_id: int, report_id: int) -> None:
-        """回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）。"""
+        """回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）。
+
+        参数：
+            version_id: int，策略版本编号
+            report_id: int，研报记录编号
+
+        返回：
+            None：回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）
+        """
         await self._conn.execute(
             "UPDATE strategy_versions SET report_id=? WHERE id=?", (report_id, version_id)
         )
@@ -118,6 +191,19 @@ class ReviewRepo:
         """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。
 
         round_id 为产生本报告的审计轮 id；省略默认 ''（无关联）。
+
+        参数：
+            period_start: float，复盘区间起点时间戳
+            period_end: float，复盘区间终点时间戳
+            stats_json: str，复盘统计 JSON 文本
+            report_md: str，复盘报告 Markdown 正文
+            strategy_action: str，策略书处理动作
+            new_version_id: int | None，复盘生成的新策略版本编号
+            error: str，需要记录的错误文本
+            round_id: str，关联的审计轮次编号
+
+        返回：
+            ReviewReport：落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）
         """
         ts = _now()
         cur = await self._conn.execute(
@@ -153,17 +239,40 @@ class ReviewRepo:
     async def list_review_reports_page(
         self, limit: int, offset: int
     ) -> tuple[list[ReviewReport], int]:
-        """以单条 SQL 快照返回报告页及总数，越界页仍保留准确总数。"""
+        """以单条 SQL 快照返回报告页及总数，越界页仍保留准确总数。
+
+        参数：
+            limit: int，最多读取或返回的记录数量
+            offset: int，分页起始偏移量
+
+        返回：
+            tuple[list[ReviewReport], int]：以单条 SQL 快照返回报告页及总数，越界页仍保留准确总数
+        """
         rows, total = await query_page_rows(self._conn, _REVIEW_REPORTS_PAGE_SQL, limit, offset)
         return [ReviewReport(**row_without_total(row)) for row in rows], total
 
     async def get_review_report(self, report_id: int) -> ReviewReport | None:
+        """按 id 读取单份复盘报告。
+
+        参数：
+            report_id: int，复盘报告 id
+
+        返回：
+            ReviewReport | None：命中的复盘报告；id 不存在时返回 None
+        """
         cur = await self._conn.execute("SELECT * FROM review_reports WHERE id=?", (report_id,))
         row = await cur.fetchone()
         return ReviewReport(**dict(row)) if row else None
 
     async def latest_review_period_end(self) -> float | None:
-        """最近一次复盘的 period_end；无记录返回 None（调度幂等：不重复复盘同一区间）。"""
+        """最近一次复盘的 period_end；无记录返回 None（调度幂等：不重复复盘同一区间）。
+
+        参数：
+            无
+
+        返回：
+            float | None：最近一次复盘的 period_end；无记录返回 None（调度幂等：不重复复盘同一区间）
+        """
         cur = await self._conn.execute("SELECT MAX(period_end) AS value FROM review_reports")
         row = await cur.fetchone()
         value = row["value"] if row else None
@@ -186,6 +295,16 @@ class ReviewRepo:
         （round_id=''，decisions 无匹配，如 LLM 未配置期间 drain 的强平/止盈止损）也计入；
         仅按策略统计时无 join 匹配的成交不参与（decisions.strategy_md5=? 自然排除 NULL 行，
         与 INNER JOIN 语义一致）。
+
+        参数：
+            start_ts: float，查询区间起始时间戳
+            end_ts: float，查询区间结束时间戳
+            mode: str，交易运行模式
+            contract: str | None，合约名称
+            strategy_md5: str | None，策略书内容摘要；为空时不按版本过滤
+
+        返回：
+            list[Trade]：区间内成交（[start, end)，按 id 正序），LEFT JOIN decisions 支持按策略版本过滤
         """
         sql = (
             "SELECT trades.* FROM trades"
@@ -210,7 +329,18 @@ class ReviewRepo:
         limit: int = 100,
         mode: str | None = None,
     ) -> list[Decision]:
-        """区间内决策（[start, end)，按 id 倒序）；limit 钳制到 1..100；mode 非空时按模式过滤。"""
+        """区间内决策（[start, end)，按 id 倒序）；limit 钳制到 1..100；mode 非空时按模式过滤。
+
+        参数：
+            start_ts: float，查询区间起始时间戳
+            end_ts: float，查询区间结束时间戳
+            strategy_md5: str | None，策略书内容摘要；为空时不按版本过滤
+            limit: int，最多读取或返回的记录数量
+            mode: str | None，交易运行模式
+
+        返回：
+            list[Decision]：区间内决策（[start, end)，按 id 倒序）；limit 钳制到 1..100；mode 非空时按模式过滤
+        """
         limit = max(1, min(100, limit))
         sql = "SELECT * FROM decisions WHERE created_at >= ? AND created_at < ?"
         params: list = [start_ts, end_ts]
@@ -233,7 +363,19 @@ class ReviewRepo:
         limit: int = 200,
         mode: str | None = None,
     ) -> list[Trade]:
-        """区间内成交（[start, end)，按 id 正序）；contract/source/mode 可选过滤，limit 钳 1..200。"""
+        """区间内成交（[start, end)，按 id 正序）；contract/source/mode 可选过滤，limit 钳 1..200。
+
+        参数：
+            start_ts: float，查询区间起始时间戳
+            end_ts: float，查询区间结束时间戳
+            contract: str | None，合约名称
+            source: str | None，可选的成交来源过滤条件
+            limit: int，最多读取或返回的记录数量
+            mode: str | None，交易运行模式
+
+        返回：
+            list[Trade]：区间内成交（[start, end)，按 id 正序）；contract/source/mode 可选过滤，limit 钳 1..200
+        """
         limit = max(1, min(200, limit))
         sql = "SELECT * FROM trades WHERE created_at >= ? AND created_at < ?"
         params: list = [start_ts, end_ts]
@@ -256,6 +398,12 @@ class ReviewRepo:
         """按模式取最近一轮复盘审计（wake_source='review' 过滤，排序口径同 latest_audit_round）。
 
         供 /api/review/live 使用：交易轮（timer 等）再多也不参与；无复盘轮返回 None。
+
+        参数：
+            mode: str，交易运行模式
+
+        返回：
+            AuditRound | None：按模式取最近一轮复盘审计（wake_source='review' 过滤，排序口径同 latest_audit_round）
         """
         cur = await self._conn.execute(
             "SELECT * FROM audit_rounds WHERE mode=? AND wake_source='review'"

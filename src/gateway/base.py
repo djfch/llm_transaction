@@ -19,6 +19,16 @@ class GatewayError(Exception):
     """网关统一异常基类。label 为 Gate 私有错误标签（如有），status 为 HTTP 状态码。"""
 
     def __init__(self, message: str, label: str = "", status: int | None = None) -> None:
+        """初始化网关异常，记录错误消息与交易所侧的错误标签、HTTP 状态码。
+
+        参数：
+            message: str，错误描述消息
+            label: str，Gate 私有错误标签（如 ORDER_NOT_FOUND），无则省略
+            status: int | None，HTTP 状态码，无则省略
+
+        返回：
+            None，初始化异常实例（就地写入 label/status 属性）
+        """
         super().__init__(message)
         self.label = label
         self.status = status
@@ -181,13 +191,61 @@ class Ticker(BaseModel):
 class Gateway(Protocol):
     """交易所网关统一接口：真实实现、mock、paper 撮合引擎都实现它。"""
 
-    def get_contract(self, contract: str) -> Contract: ...
+    def get_contract(self, contract: str) -> Contract:
+        """读取单个合约的元数据与实时标记信息（标记价、资金费率、手续费率等）。
 
-    def get_account(self) -> Account: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
 
-    def list_positions(self) -> list[Position]: ...
+        返回：
+            Contract：合约元数据与实时标记信息
 
-    def place_order(self, req: OrderRequest) -> OrderResult: ...
+        异常：
+            ContractNotFound：合约不存在时抛出
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def get_account(self) -> Account:
+        """读取合约账户的可用余额与未实现盈亏。
+
+        参数：无
+
+        返回：
+            Account：合约账户快照（可用余额、未实现盈亏）
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def list_positions(self) -> list[Position]:
+        """读取当前全部持仓，并带上各持仓的止盈止损触发价（如有）。
+
+        参数：无
+
+        返回：
+            list[Position]：持仓列表；无持仓时返回空列表
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def place_order(self, req: OrderRequest) -> OrderResult:
+        """按下单意图向交易所提交订单（开仓/平仓、限价/市价）。
+
+        参数：
+            req: OrderRequest，下单意图；price 为 None 表示市价单，close=True 表示整仓平仓
+
+        返回：
+            OrderResult：交易所确认后的订单结果
+
+        异常：
+            GatewayError：交易所明确拒绝或请求失败时抛出
+            OrderStateUnknown：下单超时且回查失败、订单状态未知时抛出（禁止盲目重试）
+        """
+        ...
 
     def amend_order(
         self,
@@ -195,24 +253,106 @@ class Gateway(Protocol):
         order_id: str,
         price: Decimal | None = None,
         size: Decimal | None = None,
-    ) -> OrderResult: ...
+    ) -> OrderResult:
+        """修改未成交挂单的价格和/或张数，未传的字段保持原值。
 
-    def cancel_order(self, contract: str, order_id: str) -> OrderResult: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，交易所订单 id
+            price: Decimal | None，新的委托价格；省略时不修改价格
+            size: Decimal | None，新的委托张数（正多负空）；省略时不修改张数
 
-    # 分页读取订单快照；contract 为空时返回全部合约。
+        返回：
+            OrderResult：修改后的订单快照
+
+        异常：
+            OrderNotFound：订单不存在时抛出
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def cancel_order(self, contract: str, order_id: str) -> OrderResult:
+        """撤销指定未成交挂单。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            order_id: str，交易所订单 id
+
+        返回：
+            OrderResult：撤单后的订单快照
+
+        异常：
+            OrderNotFound：订单不存在时抛出
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
     def list_orders(
         self,
         contract: str | None = None,
         status: str = "open",
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[OrderResult]: ...
+    ) -> list[OrderResult]:
+        """分页读取订单快照；contract 为空时返回全部合约的订单。
 
-    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]: ...
+        参数：
+            contract: str | None，合约名（如 BTC_USDT）；省略时查询全部合约
+            status: str，订单状态过滤（open 未成交 / finished 已完结），省略时默认 open
+            limit: int | None，单页最大条数；省略时由交易所决定
+            offset: int，分页偏移量，省略时默认 0
 
-    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder: ...
+        返回：
+            list[OrderResult]：订单快照列表；无匹配订单时返回空列表
 
-    def cancel_tpsl_order(self, order_id: str) -> None: ...
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        """读取指定合约当前生效的整仓止盈止损保护单。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+
+        返回：
+            list[TpslOrder]：止盈止损保护单列表；无保护单时返回空列表
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
+        """创建整仓止盈止损保护单，触发后平掉对应方向的全部持仓。
+
+        参数：
+            order: TpslOrder，保护单参数（方向、类型、触发价）；id 由交易所生成
+
+        返回：
+            TpslOrder：创建成功的保护单（id 已回填为交易所生成的 id）
+
+        异常：
+            GatewayError：交易所明确拒绝或请求失败时抛出
+            OrderStateUnknown：请求超时或网络失败、保护单状态未知时抛出（禁止盲目重试）
+        """
+        ...
+
+    def cancel_tpsl_order(self, order_id: str) -> None:
+        """撤销指定止盈止损保护单。
+
+        参数：
+            order_id: str，交易所保护单 id
+
+        返回：
+            None，撤销请求已被交易所受理
+
+        异常：
+            GatewayError：交易所明确拒绝或请求失败时抛出
+            OrderStateUnknown：请求超时或网络失败、保护单状态未知时抛出（需人工核对）
+        """
+        ...
 
     def get_candlesticks(
         self,
@@ -221,17 +361,83 @@ class Gateway(Protocol):
         limit: int | None = None,
         from_ts: int | None = None,
         to_ts: int | None = None,
-    ) -> list[Candle]: ...
+    ) -> list[Candle]:
+        """读取合约 K 线；limit 与 from/to 两种查询方式互斥。
 
-    def get_tickers(self) -> list[Ticker]: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            interval: str，K 线周期（如 1m、5m、1h），省略时默认 1m
+            limit: int | None，最近 N 根（1~2000）；与 from_ts/to_ts 不能同时传
+            from_ts: int | None，起始秒级时间戳；省略表示不限制起点
+            to_ts: int | None，结束秒级时间戳；省略表示不限制终点
 
-    # 持仓量（张数）：无该数据的实现（如 paper）返回 None；查询失败抛 GatewayError。
-    def fetch_open_interest(self, contract: str) -> Decimal | None: ...
+        返回：
+            list[Candle]：K 线列表；无数据时返回空列表
+
+        异常：
+            ValueError：limit 与 from/to 同时传入，或 limit 超出 1~2000 时抛出
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def get_tickers(self) -> list[Ticker]:
+        """读取全部合约的 ticker 摘要（最新价、标记价、资金费率、24h 高低等）。
+
+        参数：无
+
+        返回：
+            list[Ticker]：全部合约的 ticker 摘要列表
+
+        异常：
+            GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def fetch_open_interest(self, contract: str) -> Decimal | None:
+        """读取合约最新持仓量（张数）。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+
+        返回：
+            Decimal | None：持仓量张数；无该数据的实现（如 paper）返回 None
+
+        异常：
+            GatewayError：交易所查询失败时抛出
+        """
+        ...
 
     def fetch_open_interest_history(
         self, contract: str, interval: str, limit: int = 3
-    ) -> list[OpenInterestPoint]: ...
+    ) -> list[OpenInterestPoint]:
+        """按统计周期读取合约持仓量历史，按时间升序返回。
 
-    def set_leverage(
-        self, contract: str, leverage: int, margin_mode: str = "isolated"
-    ) -> Position: ...
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            interval: str，统计周期（与 K 线周期同格式，如 4h、1d）
+            limit: int，返回的最大数据点数，省略时默认 3
+
+        返回：
+            list[OpenInterestPoint]：持仓量历史点列表（按时间升序）；无数据时返回空列表
+
+        异常：
+            GatewayError：交易所查询失败时抛出
+        """
+        ...
+
+    def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
+        """设置合约的杠杆倍数与保证金模式（逐仓/全仓）。
+
+        参数：
+            contract: str，合约名（如 BTC_USDT）
+            leverage: int，杠杆倍数
+            margin_mode: str，保证金模式（isolated 逐仓 / cross 全仓），省略时默认 isolated
+
+        返回：
+            Position：设置后的持仓快照
+
+        异常：
+            ValueError：margin_mode 不是 isolated/cross 时抛出
+            GatewayError：交易所请求失败时抛出
+        """
+        ...

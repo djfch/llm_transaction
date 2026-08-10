@@ -39,7 +39,14 @@ logger = get_logger(__name__)
 
 
 async def _research_gate_direction(deps: ToolDeps, contract: str) -> str | None:
-    """按订单合约读取 v2 研报；仅可靠的高置信催化结论进入硬闸门。"""
+    """按订单合约读取 v2 研报；仅可靠的高置信催化结论进入硬闸门。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        contract: str，合约标识
+    返回：
+        str | None，按订单合约读取 v2 研报；仅可靠的高置信催化结论进入硬闸门
+    """
     cfg = deps.research_config
     if cfg is None or not cfg.gate_enabled:
         return None
@@ -72,7 +79,20 @@ async def _risk_check(
     is_close: bool,
     leverage: int,
 ) -> ToolOutcome | None:
-    """构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None。"""
+    """构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        contract: str，合约标识
+        size: Decimal，订单张数
+        price: Decimal | None，委托价格；None 表示市价
+        is_close: bool，是否为纯平仓或减仓
+        leverage: int，请求杠杆倍数
+    返回：
+        ToolOutcome | None，构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None
+    异常：
+        ToolArgError，交易意图字段未通过模型校验时抛出
+    """
     meta = deps.gateway.get_contract(contract)
     account = deps.gateway.get_account()
     positions = deps.gateway.list_positions()
@@ -112,7 +132,15 @@ async def _risk_check(
 def _resolve_leverage(
     contract: str, declared: int | None, positions: list[Position]
 ) -> tuple[int, int | None]:
-    """返回风控杠杆与下单前需实际设置的杠杆；声明值总会由 place_order 生效。"""
+    """返回风控杠杆与下单前需实际设置的杠杆；声明值总会由 place_order 生效。
+
+    参数：
+        contract: str，合约标识
+        declared: int | None，调用方显式声明的杠杆
+        positions: list[Position]，当前持仓列表
+    返回：
+        tuple[int, int | None]，风控杠杆与下单前需实际设置的杠杆；声明值总会由 place_order 生效
+    """
     pos = next((p for p in positions if p.contract == contract), None)
     if declared is not None:
         return declared, declared
@@ -122,6 +150,16 @@ def _resolve_leverage(
 
 
 def _position_after(positions: list[Position], contract: str, size: Decimal) -> Decimal:
+    """预估本单成交后的持仓张数，供 place_order 判定持仓方向以校验止盈止损。
+
+    参数：
+        positions: list[Position]，当前全部持仓列表
+        contract: str，合约名（如 BTC_USDT）
+        size: Decimal，本次下单张数（正多负空）
+
+    返回：
+        Decimal：预估下单后的持仓张数（含方向，正多负空）；该合约无持仓时按 0 起算
+    """
     pos = next((p for p in positions if p.contract == contract), None)
     return (pos.size if pos is not None else Decimal(0)) + size
 
@@ -129,7 +167,17 @@ def _position_after(positions: list[Position], contract: str, size: Decimal) -> 
 def _opens_exposure(
     positions: list[Position], contract: str, size: Decimal, close: bool, reduce_only: bool
 ) -> bool:
-    """只把纯平仓/纯减仓视为免止损；反手残余仓属于新敞口。"""
+    """只把纯平仓/纯减仓视为免止损；反手残余仓属于新敞口。
+
+    参数：
+        positions: list[Position]，当前持仓列表
+        contract: str，合约标识
+        size: Decimal，订单张数
+        close: bool，是否全平当前持仓
+        reduce_only: bool，是否只允许减少持仓
+    返回：
+        bool，只把纯平仓/纯减仓视为免止损；反手残余仓属于新敞口
+    """
     if close:
         return False
     pos = next((p for p in positions if p.contract == contract), None)
@@ -143,6 +191,20 @@ def _opens_exposure(
 def _validate_tpsl(
     *, direction: int, mark_price: Decimal, stop_loss: Decimal, take_profit: Decimal | None
 ) -> None:
+    """校验止损/止盈价：必须为正数，且相对标记价的方向与持仓方向匹配。
+
+    参数：
+        direction: int，持仓方向（1=多仓，-1=空仓）
+        mark_price: Decimal，合约当前标记价
+        stop_loss: Decimal，止损价（多仓须低于标记价，空仓须高于标记价）
+        take_profit: Decimal | None，止盈价（与止损反向）；None 表示不设置、跳过校验
+
+    返回：
+        None，纯校验无副作用；校验不通过时抛异常
+
+    异常：
+        ToolArgError：价格非正，或止损/止盈价相对标记价的方向与持仓方向矛盾时抛出
+    """
     if stop_loss <= 0 or (take_profit is not None and take_profit <= 0):
         raise ToolArgError("止损价与止盈价必须为正数")
     if direction > 0:
@@ -173,6 +235,14 @@ async def _record_order(
     重试即重单），返回文本明确"禁止重试"。
     trade_source 透传给 orders.trade_source（manual_close 传 user_close），
     供成交回报分类归属；trades 表由 fill_persist/fill_sync 两条路径写入，此处不落。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        result: OrderResult，网关返回的订单结果
+        req: OrderRequest，原始订单请求
+        trade_source: str，订单成交来源
+    返回：
+        str，落 orders 表；本地落库失败返回告警文本，成功返回空串
     """
     try:
         # 不变量：网关同步返回与本入队之间不得插入 await——aiosqlite 单连接 FIFO
@@ -204,7 +274,16 @@ async def _record_order(
 
 
 async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
-    """下单：先构造 TradeIntent 过风控，放行才调网关并落订单记录。"""
+    """下单：先构造 TradeIntent 过风控，放行才调网关并落订单记录。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        args: dict，工具调用参数
+    返回：
+        ToolOutcome，下单：先构造 TradeIntent 过风控，放行才调网关并落订单记录
+    异常：
+        ToolArgError，张数为零、开敞口缺止损、纯平减仓携带止盈止损或杠杆非法时抛出
+    """
     contract = _need_str(args, "contract")
     close = bool(args.get("close", False))
     reduce_only = bool(args.get("reduce_only", False))
@@ -271,7 +350,16 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
 
 
 async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
-    """整仓保护替换：完整新组落地后才撤销同方向旧组，避免裸露窗口。"""
+    """整仓保护替换：完整新组落地后才撤销同方向旧组，避免裸露窗口。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        args: dict，工具调用参数
+    返回：
+        ToolOutcome，整仓保护替换：完整新组落地后才撤销同方向旧组，避免裸露窗口
+    异常：
+        ToolArgError，当前合约没有持仓时抛出
+    """
     contract = _need_str(args, "contract")
     stop_loss = _need_decimal(args, "stop_loss_price")
     take_profit = _opt_decimal(args, "take_profit_price")
@@ -357,7 +445,16 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
 
 
 async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
-    """改单：按改后参数过风控（与下单同一引擎），放行才调网关并同步落库。"""
+    """改单：按改后参数过风控（与下单同一引擎），放行才调网关并同步落库。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        args: dict，工具调用参数
+    返回：
+        ToolOutcome，改单：按改后参数过风控（与下单同一引擎），放行才调网关并同步落库
+    异常：
+        ToolArgError，价格和张数均未提供时抛出
+    """
     contract = _need_str(args, "contract")
     order_id = _need_str(args, "order_id")
     price = _opt_decimal(args, "price")
@@ -401,6 +498,14 @@ def _amend_direction(
     反手翻仓，都属新敞口，不豁免（必须过全套风控）；仅反向且数量不超过持仓
     才是纯减仓/平仓（豁免，与 place_order 的 _opens_exposure 同一约定）。
     未给 size 时方向不可知，保守按开仓处理（不豁免），张数取挂单剩余量评估占比。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        contract: str，合约标识
+        order_id: str，交易所订单标识
+        size: Decimal | None，订单张数
+    返回：
+        tuple[bool, Decimal]，推断改后（是否平仓方向, 参与风控的有效张数）
     """
     pos = next((p for p in deps.gateway.list_positions() if p.contract == contract), None)
     if size is not None:
@@ -417,6 +522,15 @@ def _amend_direction(
 
 
 async def cancel_order(deps: ToolDeps, args: dict) -> ToolOutcome:
+    """撤单：调网关撤销指定订单，并把最新订单状态同步落库到 orders 表。
+
+    参数：
+        deps: ToolDeps，工具依赖集合，使用其中的 gateway 撤单、repo 更新本地订单状态
+        args: dict，工具入参，须含 contract（合约名）与 order_id（待撤销的订单 ID）
+
+    返回：
+        ToolOutcome：执行结果，text 为撤单结果文本（含订单号与最新状态）
+    """
     contract = _need_str(args, "contract")
     order_id = _need_str(args, "order_id")
     result = deps.gateway.cancel_order(contract, order_id)

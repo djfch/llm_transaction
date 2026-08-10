@@ -33,6 +33,16 @@ from src.risk.engine import RiskEngine
 
 
 def _contract(name: str, quanto: str, mark: str) -> Contract:
+    """构造测试用合约元数据（固定费率/档位，仅名称、乘数、标记价可变）。
+
+    参数：
+        name: str，合约名（如 "BTC_USDT"）
+        quanto: str，合约乘数（每张对应的基础货币数量）
+        mark: str，标记价格（影响撮合与强平判断）
+
+    返回：
+        Contract：可直接喂给 PaperGateway.upsert_contract 的合约对象
+    """
     return Contract(
         name=name,
         quanto_multiplier=Decimal(quanto),
@@ -51,6 +61,15 @@ def _contract(name: str, quanto: str, mark: str) -> Contract:
 
 
 def _ticker(contract: str, price: str) -> Ticker:
+    """构造测试用行情快照（最新价/标记价/24h 高低均取同一价格）。
+
+    参数：
+        contract: str，合约名（如 "BTC_USDT"）
+        price: str，统一填充到各价格字段的行情价
+
+    返回：
+        Ticker：可直接喂给 on_ticker 回调的行情对象
+    """
     return Ticker(
         contract=contract,
         last=Decimal(price),
@@ -63,6 +82,17 @@ def _ticker(contract: str, price: str) -> Ticker:
 
 
 def _fill(order_id: str, contract: str, size: int, is_close: bool = False) -> FillRecord:
+    """构造测试用成交流水（固定价 60000、固定手续费、无盈亏、taker）。
+
+    参数：
+        order_id: str，订单标识（如 "tpsl-BTC_USDT-1"、"liquidation"），落库时据此推 source
+        contract: str，合约名
+        size: int，成交张数（负数表示减仓方向）
+        is_close: bool，是否平仓成交，默认 False（开仓）
+
+    返回：
+        FillRecord：可直接塞进 paper 账户成交缓冲的成交记录
+    """
     return FillRecord(
         order_id=order_id,
         contract=contract,
@@ -76,12 +106,28 @@ def _fill(order_id: str, contract: str, size: int, is_close: bool = False) -> Fi
 
 
 async def _make_repo(tmp_path) -> SimpleNamespace:
+    """在临时目录打开独立数据库并配套 Repo。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，agent.db 落在其中（用例间隔离）
+
+    返回：
+        SimpleNamespace：带 db（已打开的数据库，需调用方 finally 关闭）与
+        repo（基于该库的仓储对象）两个属性
+    """
     db = Database()
     await db.open(tmp_path / "agent.db")
     return SimpleNamespace(db=db, repo=Repo(db))
 
 
 def _make_gateway() -> PaperGateway:
+    """构造已注册 BTC_USDT 合约、初始价 60000 的模拟撮合网关。
+
+    参数：无
+
+    返回：
+        PaperGateway：初始权益 10000、已完成一次价格注入的 paper 网关
+    """
     gateway = PaperGateway(PaperConfig(initial_equity=Decimal("10000")))
     gateway.upsert_contract(_contract("BTC_USDT", "0.001", "60000"))
     gateway.on_price("BTC_USDT", Decimal("60000"))
@@ -89,7 +135,19 @@ def _make_gateway() -> PaperGateway:
 
 
 async def _wait_trades(repo: Repo, n: int, timeout: float = 2.0) -> list[Trade]:
-    """轮询成交表直至 ≥n 条或超时（替代固定 sleep 等 fire-and-forget 落库任务，防 CI flake）。"""
+    """轮询成交表直至 ≥n 条或超时（替代固定 sleep 等 fire-and-forget 落库任务，防 CI flake）。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        n: int，需要读取或生成的记录数量
+        timeout: float，最长等待秒数
+
+    返回：
+        list[Trade]，达到期望数量后从成交表读取的记录列表
+
+    异常：
+        AssertionError，等待成交记录达到期望数量超时时抛出
+    """
     deadline = time.monotonic() + timeout
     while True:
         trades = await repo.trades_between(0.0, time.time() + 1)
@@ -101,7 +159,17 @@ async def _wait_trades(repo: Repo, n: int, timeout: float = 2.0) -> list[Trade]:
 
 
 async def _wait_pending_drains(timeout: float = 2.0) -> None:
-    """等全部即时 drain 任务收尾（强引用集清空），替代固定 sleep。"""
+    """等全部即时 drain 任务收尾（强引用集清空），替代固定 sleep。
+
+    参数：
+        timeout: float，最长等待秒数
+
+    返回：
+        None，执行上述模拟操作或副作用，无返回值
+
+    异常：
+        AssertionError，即时成交落库任务在期限内未收尾时抛出
+    """
     deadline = time.monotonic() + timeout
     while _pending_drains:
         if time.monotonic() > deadline:
@@ -110,7 +178,14 @@ async def _wait_pending_drains(timeout: float = 2.0) -> None:
 
 
 async def test_instant_drain_persists_resting_order_fill(tmp_path):
-    """挂单被行情触发：不跑决策轮即落库，继承原订单 round_id，事件契约与轮末一致。"""
+    """挂单被行情触发：不跑决策轮即落库，继承原订单 round_id，事件契约与轮末一致。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_repo(tmp_path)
     gateway = _make_gateway()
     events: list[dict] = []
@@ -146,7 +221,14 @@ async def test_instant_drain_persists_resting_order_fill(tmp_path):
 
 
 async def test_instant_drain_tpsl_liquidation_empty_attribution(tmp_path):
-    """tpsl-*/liquidation 无订单行：round_id=""（前端可见不可点），source 标注准确。"""
+    """tpsl-*/liquidation 无订单行：round_id=""（前端可见不可点），source 标注准确。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
     env = await _make_repo(tmp_path)
     gateway = _make_gateway()
     events: list[dict] = []
@@ -173,7 +255,12 @@ async def test_instant_drain_tpsl_liquidation_empty_attribution(tmp_path):
 async def test_manual_close_holds_lock_against_instant_drain(tmp_path, monkeypatch):
     """manual_close 持锁全程：save_order 让出窗口时调度的即时 drain 抢不走本单成交。
 
-    本单仍标 user_close 且只落一条；被阻塞的即时 drain 事后 drain 到空缓冲，无新记录。
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     env = await _make_repo(tmp_path)
     gateway = _make_gateway()
@@ -204,6 +291,16 @@ async def test_manual_close_holds_lock_against_instant_drain(tmp_path, monkeypat
         original_save_order = env.repo.save_order
 
         async def _slow_save_order(*args, **kwargs):
+            """慢速版 save_order：落订单行前让出事件循环，制造即时 drain 的抢锁窗口。
+
+            参数：
+                args: tuple，透传给原始 save_order 的位置参数
+                kwargs: dict，透传给原始 save_order 的关键字参数
+
+            返回：
+                原始 save_order 的返回值（订单行落库结果）；副作用为置位 reached
+                事件并 sleep 0.05 秒让出调度
+            """
             reached.set()  # 平仓单已下单（成交已入缓冲），落订单行时让出事件循环
             await asyncio.sleep(0.05)
             return await original_save_order(*args, **kwargs)
@@ -229,13 +326,29 @@ async def test_manual_close_holds_lock_against_instant_drain(tmp_path, monkeypat
 async def test_attribution_query_failure_degrades_not_loses(tmp_path, monkeypatch):
     """归属查询异常：成交不丢——降级 round_id="" 落库保记录，事件照发。
 
-    回归：order_round_id 曾在 try 之外，查询异常中止整批且缓冲已空 → 成交永久丢失。
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     env = await _make_repo(tmp_path)
     events: list[dict] = []
     persister = FillPersister(env.repo, "paper", events.append)
 
     async def _boom(order_id: str) -> str | None:
+        """模拟 order_round_id 查询数据库时异常（monkeypatch 替换件）。
+
+        参数：
+            order_id: str，订单标识（本替身不使用）
+
+        返回：
+            str | None：永不返回，调用即抛异常
+
+        异常：
+            RuntimeError：总是抛出，模拟数据库抖动
+        """
         raise RuntimeError("db hiccup")
 
     monkeypatch.setattr(env.repo, "order_round_id", _boom)
@@ -256,8 +369,11 @@ async def test_attribution_query_failure_degrades_not_loses(tmp_path, monkeypatc
 async def test_build_app_shares_one_persister_between_ticker_and_loop(tmp_path):
     """build_app 接线守护：on_ticker 与 DecisionLoop 必须共享同一 FillPersister（同一把锁）。
 
-    防抢 user_close / 无双计成立的前提是同一实例；DecisionLoop 缺省静默自建新实例，
-    接错线（两把锁）不会有任何测试变红——此处显式断言实例同一性并做行为验证。
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证上述行为，无返回值
     """
     ctx = await build_app(
         Settings(),

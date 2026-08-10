@@ -12,7 +12,14 @@ _LABEL_EXCEPTIONS: dict[str, type[GatewayError]] = {
 
 
 def wrap_gate_exception(exc: GateApiException) -> GatewayError:
-    """按 GateApiException.label 分类包装成自定义异常。"""
+    """按 GateApiException.label 分类包装成自定义异常。
+
+    参数：
+        exc: GateApiException，捕获到的原始异常
+
+    返回：
+        GatewayError：按 GateApiException.label 分类包装成自定义异常
+    """
     label = getattr(exc, "label", "") or ""
     message = getattr(exc, "message", "") or str(exc)
     status = getattr(exc, "status", None)

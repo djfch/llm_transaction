@@ -24,6 +24,17 @@ class RiskEngine:
 
         research_direction：高置信研报方向（偏多/偏空），供方向闸门规则判定；
         缺省 None 表示闸门不约束（兼容既有调用方）。
+
+        参数：
+            intent: TradeIntent，待校验的交易意图
+            account: AccountSnapshot，账户快照
+            positions: list[PositionSnapshot]，当前持仓列表
+            daily_stats: DailyStats，当日交易统计
+            watchlist: list[str]，允许交易的合约白名单
+            config: RiskConfig，风险配置
+            research_direction: str | None，高置信研报方向；None 表示不约束
+        返回：
+            Verdict，逐条跑规则；任一拒绝即 Deny，reasons 汇总全部命中理由（不只返回第一条）
         """
         ctx = RuleInput(
             intent, account, positions, daily_stats, watchlist, config, research_direction

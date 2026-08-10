@@ -32,6 +32,14 @@ _LONG_MD = "# 复盘报告\n\n" + "区间成交 3 笔，胜率 66.7%。" * 30
 
 @pytest.fixture
 async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
+    """构造指向临时数据库的 Repo 实例，测试结束后关闭连接。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，数据库文件落在其中
+
+    返回：
+        AsyncIterator[Repo]：yield 已打开临时数据库的仓储对象
+    """
     db = Database()
     await db.open(tmp_path / "t.db")
     yield Repo(db)
@@ -39,7 +47,16 @@ async def repo(tmp_path: Path) -> AsyncIterator[Repo]:
 
 
 def _deps(repo: Repo, tmp_path: Path, **overrides: Any) -> ServerDeps:
-    """组装 fake 依赖：tmp 配置/策略书 + 指定回调覆盖。"""
+    """组装使用临时配置和策略书且支持回调覆盖的服务器依赖。
+
+    参数：
+        repo: Repo，端点读写复盘数据使用的仓储
+        tmp_path: Path，pytest 临时目录
+        overrides: Any，按名称覆盖默认 ServerDeps 字段
+
+    返回：
+        ServerDeps，可注入测试应用的依赖集合
+    """
     config_path = tmp_path / "config.yaml"
     write_settings({}, config_path)  # 默认配置（mode=paper，review.enabled=true）
     prompt_path = tmp_path / "system_prompt.md"
@@ -54,6 +71,14 @@ def _deps(repo: Repo, tmp_path: Path, **overrides: Any) -> ServerDeps:
 
 
 def _client_of(deps: ServerDeps) -> AsyncClient:
+    """为指定依赖创建直接调用 ASGI 应用的异步客户端。
+
+    参数：
+        deps: ServerDeps，待注入应用的服务器依赖
+
+    返回：
+        AsyncClient，以 http://test 为基址的进程内测试客户端
+    """
     return AsyncClient(transport=ASGITransport(app=create_app(deps)), base_url="http://test")
 
 
@@ -61,6 +86,15 @@ def _client_of(deps: ServerDeps) -> AsyncClient:
 
 
 async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
+    """验证复盘报告列表截断正文、保持倒序并由详情端点返回全文。
+
+    参数：
+        repo: Repo，用于预置复盘报告的仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证列表字段、详情全文及不存在报告的 404
+    """
     await repo.review.save_review_report(1000.0, 2000.0, '{"a":1}', "短报告", "none")
     r2 = await repo.review.save_review_report(
         3000.0, 4000.0, '{"b":2}', _LONG_MD, "rewrite", new_version_id=7, round_id="rv-round-1"
@@ -84,14 +118,30 @@ async def test_review_reports_list_and_detail(repo: Repo, tmp_path: Path):
 
 
 async def test_review_live_empty(repo: Repo, tmp_path: Path):
-    """空库：无复盘轮时 round 为 null、tool_calls 为空。"""
+    """验证空数据库的复盘实时端点返回空轮次和空工具调用。
+
+    参数：
+        repo: Repo，空临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证固定空态响应契约
+    """
     async with _client_of(_deps(repo, tmp_path)) as c:
         body = (await c.get("/api/review/live")).json()
         assert body == {"round": None, "tool_calls": []}
 
 
 async def test_review_live_returns_latest_review_round(repo: Repo, tmp_path: Path):
-    """种复盘轮 + 工具调用：round 键集不含 mode、args/result 已解析；更新的交易轮不串台。"""
+    """验证复盘实时端点返回最新复盘轮、解析工具字段且不串入交易轮。
+
+    参数：
+        repo: Repo，用于预置审计轮与工具调用的仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证轮次键集、工具解析、进行中状态和角色隔离
+    """
     await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=1000.0)
     await repo.save_audit_tool_call(
         "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
@@ -140,15 +190,37 @@ async def test_review_live_returns_latest_review_round(repo: Repo, tmp_path: Pat
 
 
 async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
-    """状态码映射走结构化 error_code（busy→409、llm_not_configured→503），不依赖错误文案。"""
+    """验证手动复盘按结构化错误码映射未接线、忙碌、缺模型和成功状态。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证 503、409 与 200 三类响应
+    """
     async with _client_of(_deps(repo, tmp_path)) as c:  # 未接线
         r = await c.post("/api/review/run")
         assert r.status_code == 503
 
     async def _busy() -> dict:
+        """模拟复盘调度器正忙的结构化结果。
+
+        参数：无
+
+        返回：
+            dict，包含 busy 错误码的未启动结果
+        """
         return {"started": False, "error": "busy right now", "error_code": "busy"}
 
     async def _no_llm() -> dict:
+        """模拟复盘缺少模型配置的结构化结果。
+
+        参数：无
+
+        返回：
+            dict，包含 llm_not_configured 错误码的失败结果
+        """
         return {
             "started": False,
             "ok": False,
@@ -157,6 +229,13 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
         }
 
     async def _ok() -> dict:
+        """模拟复盘成功启动并生成报告。
+
+        参数：无
+
+        返回：
+            dict，包含固定报告编号的成功结果
+        """
         return {"started": True, "ok": True, "report_id": 1}
 
     async with _client_of(_deps(repo, tmp_path, review_run=_busy)) as c:
@@ -170,14 +249,38 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
 
 
 async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
-    """POST /api/review/run 接受可选 JSON body 透传补跑区间；非法输入 422。"""
+    """验证手动复盘端点透传可选补跑区间并拒绝非法请求。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证有参、无参及两类非法区间请求
+    """
     calls: list[dict] = []
 
     async def _run(**kwargs) -> dict:
+        """记录复盘区间参数并返回递增报告编号。
+
+        参数：
+            kwargs: dict，路由透传的 period_start(开始时间)与 period_end(结束时间)
+
+        返回：
+            dict，表示复盘成功且报告编号等于调用次数
+        """
         calls.append(kwargs)
         return {"started": True, "ok": True, "report_id": len(calls)}
 
     async def _invalid(**kwargs) -> dict:
+        """模拟复盘调度器拒绝非法时间区间。
+
+        参数：
+            kwargs: dict，路由透传的复盘区间，本桩不读取其内容
+
+        返回：
+            dict，包含 invalid_period 错误码的未启动结果
+        """
         return {"started": False, "error": "区间非法", "error_code": "invalid_period"}
 
     async with _client_of(_deps(repo, tmp_path, review_run=_run)) as c:
@@ -200,6 +303,15 @@ async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
 
 
 async def test_strategy_versions_list_detail_and_diff(repo: Repo, tmp_path: Path):
+    """验证策略版本列表、详情和差异端点的字段、文本与错误响应。
+
+    参数：
+        repo: Repo，用于预置两条策略版本的仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证倒序列表、详情正文、差异文本及 404、422
+    """
     v1 = await repo.review.save_strategy_version(
         "策略书 v1：保守止损。", "md5-v1", "human", "初始版本"
     )
@@ -226,10 +338,39 @@ async def test_strategy_versions_list_detail_and_diff(repo: Repo, tmp_path: Path
 
 
 async def test_strategy_rollback_status_mapping(repo: Repo, tmp_path: Path):
+    """验证策略回滚端点的成功、版本不存在和未接线状态映射。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证 200、404 与 503 三类响应
+    """
+
     async def _ok(version_id: int) -> dict:
+        """模拟成功回滚到指定策略版本。
+
+        参数：
+            version_id: int，请求回滚到的历史版本编号
+
+        返回：
+            dict，包含目标版本与固定新版本编号 3
+        """
         return {"rolled_back_to": version_id, "version": 3}
 
     async def _missing(version_id: int) -> dict:
+        """模拟目标策略版本不存在。
+
+        参数：
+            version_id: int，请求回滚到的版本编号
+
+        返回：
+            dict，本函数始终在返回前抛出异常
+
+        异常：
+            StrategyValidationError: 每次调用均携带版本不存在原因抛出
+        """
         raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
 
     async with _client_of(_deps(repo, tmp_path, strategy_rollback=_ok)) as c:
@@ -246,10 +387,26 @@ async def test_strategy_rollback_status_mapping(repo: Repo, tmp_path: Path):
 
 
 async def test_put_strategy_via_strategy_save(repo: Repo, tmp_path: Path):
-    """接线后经 strategy_save 保存：响应契约保持 PlainText 原文不变。"""
+    """验证策略保存回调接线后端点透传全文并保持纯文本响应契约。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证回调收到原文且响应原样回显
+    """
     saved: list[str] = []
 
     async def _save(content: str) -> dict:
+        """记录待保存策略全文并返回固定版本编号。
+
+        参数：
+            content: str，端点收到的策略书全文
+
+        返回：
+            dict，表示保存成功且版本编号为 5
+        """
         saved.append(content)
         return {"saved": True, "version": 5}
 
@@ -262,9 +419,28 @@ async def test_put_strategy_via_strategy_save(repo: Repo, tmp_path: Path):
 
 
 async def test_put_strategy_validation_error_maps_422(repo: Repo, tmp_path: Path):
-    """校验失败映 422，detail 为全部原因拼接；成功路径不受影响。"""
+    """验证策略校验错误被映射为含完整原因的 422 响应。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证状态码与过短原因
+    """
 
     async def _reject(content: str) -> dict:
+        """模拟策略正文过短的校验失败。
+
+        参数：
+            content: str，待保存策略正文，本桩不读取其内容
+
+        返回：
+            dict，本函数始终在返回前抛出异常
+
+        异常：
+            StrategyValidationError: 每次调用均携带策略过短原因抛出
+        """
         raise StrategyValidationError(["策略书过短：strip 后 4 字符，最少 100 字符"])
 
     async with _client_of(_deps(repo, tmp_path, strategy_save=_reject)) as c:
@@ -274,9 +450,25 @@ async def test_put_strategy_validation_error_maps_422(repo: Repo, tmp_path: Path
 
 
 async def test_put_strategy_no_diff_idempotent(repo: Repo, tmp_path: Path):
-    """无差异幂等路径：回调返回 version=None 视为保存成功（不产新版本）。"""
+    """验证策略内容无差异时版本为空仍被视为幂等保存成功。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证成功状态和纯文本响应
+    """
 
     async def _no_diff(content: str) -> dict:
+        """模拟策略内容与当前版本无差异的幂等结果。
+
+        参数：
+            content: str，待保存策略正文，本桩不读取其内容
+
+        返回：
+            dict，表示保存成功但没有生成新版本
+        """
         return {"saved": True, "version": None}
 
     async with _client_of(_deps(repo, tmp_path, strategy_save=_no_diff)) as c:
@@ -289,7 +481,15 @@ async def test_put_strategy_no_diff_idempotent(repo: Repo, tmp_path: Path):
 
 
 async def test_put_config_review_keys_hot_applied(repo: Repo, tmp_path: Path):
-    """review.enabled/daily_time/interval_days 属 _RUNTIME_KEYS：写回运行时实例，不进 needs_restart。"""
+    """验证复盘开关、时间和间隔配置热写回运行时且非法值被拒绝。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证无需重启、运行时同步及两个 422 边界
+    """
     runtime = Settings()
     assert runtime.review.enabled is True
     deps = _deps(repo, tmp_path, runtime_settings=runtime)

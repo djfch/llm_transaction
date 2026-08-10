@@ -24,20 +24,40 @@ _SECONDS_PER_DAY = 86400
 
 
 def local_day_start(ts: float) -> float:
-    """ts 所在自然日的本地 00:00 时间戳。"""
+    """ts 所在自然日的本地 00:00 时间戳。
+
+    参数：
+        ts: float，时间戳
+    返回：
+        float，ts 所在自然日的本地 00:00 时间戳
+    """
     lt = time.localtime(ts)
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
 def daily_fire_ts(daily_time: str, ts: float) -> float:
-    """ts 当日的触发时刻（本地时间 HH:MM）时间戳。"""
+    """ts 当日的触发时刻（本地时间 HH:MM）时间戳。
+
+    参数：
+        daily_time: str，每日触发时刻
+        ts: float，时间戳
+    返回：
+        float，ts 当日的触发时刻（本地时间 HH:MM）时间戳
+    """
     hour, minute = daily_time.split(":")
     lt = time.localtime(ts)
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(hour), int(minute), 0, 0, 0, -1))
 
 
 def _valid_period(start: float | None, end: float | None) -> bool:
-    """人工补跑区间校验：两端齐全、为数字（拒绝 bool）且 start < end。"""
+    """人工补跑区间校验：两端齐全、为数字（拒绝 bool）且 start < end。
+
+    参数：
+        start: float | None，人工补跑区间起点
+        end: float | None，人工补跑区间终点
+    返回：
+        bool，人工补跑区间校验：两端齐全、为数字（拒绝 bool）且 start < end
+    """
     if start is None or end is None:
         return False
     if isinstance(start, bool) or isinstance(end, bool):
@@ -51,13 +71,28 @@ class ReviewScheduler:
     """复盘调度器：触发逻辑集中在可注入时间的 _tick，巡检循环只是 sleep + 调用。"""
 
     def __init__(self, settings: Settings, agent: ReviewAgent, repo: Repo) -> None:
+        """创建复盘调度器，注入配置、复盘 agent 与持久化仓库，并初始化防重入锁。
+
+        参数：
+            settings: Settings，全局配置（读取其中 review 段的开关、触发时刻与间隔天数）
+            agent: ReviewAgent，复盘 agent（单次触发时调用其 run 执行复盘）
+            repo: Repo，持久化仓库（经 review 子仓库读取上次复盘区间，用于落库幂等判定）
+
+        返回：
+            None，就地初始化调度器依赖与 asyncio 防重入锁
+        """
         self._settings = settings
         self._agent = agent
         self._repo = repo
         self._lock = asyncio.Lock()
 
     async def run_forever(self) -> None:
-        """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。"""
+        """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。
+
+        参数：无
+        返回：
+            None，巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环
+        """
         while True:
             await asyncio.sleep(60)
             try:
@@ -66,7 +101,13 @@ class ReviewScheduler:
                 logger.exception("复盘调度巡检异常")
 
     async def _tick(self, now: float | None = None) -> None:
-        """单次巡检：到点且距上次复盘已满间隔天数则触发（now 可注入，供测试）。"""
+        """单次巡检：到点且距上次复盘已满间隔天数则触发（now 可注入，供测试）。
+
+        参数：
+            now: float | None，可注入的当前时间戳
+        返回：
+            None，单次巡检：到点且距上次复盘已满间隔天数则触发（now 可注入，供测试）
+        """
         if not self._settings.review.enabled:
             return
         now = time.time() if now is None else now
@@ -93,6 +134,12 @@ class ReviewScheduler:
         无参维持最近 interval_days 天区间；有参（人工补跑历史区间）先校验
         （数字且 start < end），非法返回 error_code='invalid_period'（server 层映 422），
         不触发 agent。
+
+        参数：
+            period_start: float | None，复盘区间起点
+            period_end: float | None，复盘区间终点
+        返回：
+            dict，手动触发复盘；进行中返回忙（error_code='busy'，server 层映 409）
         """
         if period_start is None and period_end is None:
             day_start = local_day_start(time.time())

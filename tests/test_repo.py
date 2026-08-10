@@ -11,6 +11,13 @@ from src.risk.models import DailyStats
 
 @pytest.fixture
 async def db(tmp_path):
+    """构造指向临时数据库文件的 Database 实例，测试结束后关闭。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        AsyncIterator[Database]，提供已打开的临时数据库，并在夹具结束后关闭连接
+    """
     database = Database()
     await database.open(tmp_path / "test.db")
     yield database
@@ -19,6 +26,13 @@ async def db(tmp_path):
 
 @pytest.fixture
 async def repo(db: Database) -> Repo:
+    """创建基于临时数据库连接的统一仓库。
+
+    参数：
+        db: Database，已打开的临时数据库
+    返回：
+        Repo，基于临时数据库连接创建的统一仓库
+    """
     return Repo(db)
 
 
@@ -26,12 +40,26 @@ async def repo(db: Database) -> Repo:
 
 
 async def test_wal_mode_enabled(db: Database):
+    """验证数据库连接启用了 WAL 日志模式。
+
+    参数：
+        db: Database，已打开的临时数据库
+    返回：
+        None，执行断言验证目标行为
+    """
     cur = await db.conn.execute("PRAGMA journal_mode")
     row = await cur.fetchone()
     assert row[0] == "wal"
 
 
 async def test_reopen_is_idempotent(tmp_path):
+    """验证同一数据库文件可被重复打开和关闭。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     path = tmp_path / "reopen.db"
     db1 = Database()
     await db1.open(path)
@@ -42,6 +70,12 @@ async def test_reopen_is_idempotent(tmp_path):
 
 
 async def test_conn_before_open_raises():
+    """验证数据库未打开时访问连接会抛出运行时异常。
+
+    参数：无
+    返回：
+        None，执行断言验证目标行为
+    """
     with pytest.raises(RuntimeError, match="未打开"):
         _ = Database().conn
 
@@ -50,6 +84,13 @@ async def test_conn_before_open_raises():
 
 
 async def test_save_and_list_decisions(repo: Repo):
+    """验证决策记录可以保存并按字段完整读回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     saved = await repo.save_decision(
         round_id="r1",
         mode="paper",
@@ -66,6 +107,13 @@ async def test_save_and_list_decisions(repo: Repo):
 
 
 async def test_decisions_pagination(repo: Repo):
+    """验证决策列表按最新优先顺序分页且总数正确。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(5):
         await repo.save_decision(round_id=f"r{i}", mode="paper")
     page1 = await repo.list_decisions(limit=2, offset=0)
@@ -78,7 +126,13 @@ async def test_decisions_pagination(repo: Repo):
 
 
 async def test_decisions_page_returns_items_and_total_from_one_query(repo: Repo):
-    """越界页仍要带回总数，供前端将页码回退到最后有效页。"""
+    """越界页仍要带回总数，供前端将页码回退到最后有效页。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(3):
         await repo.save_decision(round_id=f"page-r{i}", mode="paper")
     items, total = await repo.list_decisions_page(limit=2, offset=4)
@@ -90,6 +144,13 @@ async def test_decisions_page_returns_items_and_total_from_one_query(repo: Repo)
 
 
 async def test_order_write_update_query(repo: Repo):
+    """验证订单写入、更新及查询链路保持字段一致。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_order(
         order_id="12345",
         round_id="r1",
@@ -133,6 +194,13 @@ async def test_order_write_update_query(repo: Repo):
 
 
 async def test_trades_between_range(repo: Repo):
+    """验证成交记录按半开时间区间正确筛选。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_trade(
         "r1",
         "paper",
@@ -170,6 +238,13 @@ async def test_trades_between_range(repo: Repo):
 
 
 async def test_trade_decimal_precision(repo: Repo):
+    """验证成交金额字段读写时保持 Decimal 精度。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     tiny = Decimal("0.00000001")  # TEXT 存储不丢精度
     await repo.save_trade("r1", "paper", "BTC_USDT", tiny, tiny, tiny, tiny, created_at=1.0)
     got = (await repo.trades_between(0.0, 2.0))[0]
@@ -178,7 +253,13 @@ async def test_trade_decimal_precision(repo: Repo):
 
 
 async def test_trades_between_mode_filter(repo: Repo):
-    """trades_between 传 mode 时只返回该模式成交；不传时行为不变（全模式）。"""
+    """trades_between 传 mode 时只返回该模式成交；不传时行为不变（全模式）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_trade(
         "r1",
         "paper",
@@ -208,7 +289,13 @@ async def test_trades_between_mode_filter(repo: Repo):
 
 
 async def test_daily_stats_filters_mode_and_close_orders(repo: Repo):
-    """日统计按 mode 过滤；orders_today 只计开仓单（平仓单落库 side_size='0'）。"""
+    """日统计按 mode 过滤；orders_today 只计开仓单（平仓单落库 side_size='0'）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     now = time.localtime()
     day_start = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
     await repo.save_order("o1", "r1", "paper", "BTC_USDT", Decimal(2))  # 开多
@@ -241,7 +328,13 @@ async def test_daily_stats_filters_mode_and_close_orders(repo: Repo):
 
 
 async def test_daily_stats_empty_day(repo: Repo):
-    """当日无成交无订单时返回零值统计。"""
+    """当日无成交无订单时返回零值统计。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     stats = await repo.daily_stats("paper", day_start_ts=time.time() + 3600)
     assert stats.orders_today == 0
     assert stats.realized_pnl == Decimal(0)
@@ -251,7 +344,13 @@ async def test_daily_stats_empty_day(repo: Repo):
 
 
 async def test_save_trade_source_roundtrip(repo: Repo):
-    """save_trade 透传 source 并落库读回；不传时默认 ''（历史/未知）。"""
+    """save_trade 透传 source 并落库读回；不传时默认 ''（历史/未知）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     t1 = await repo.save_trade(
         "r1",
         "paper",
@@ -272,7 +371,13 @@ async def test_save_trade_source_roundtrip(repo: Repo):
 
 
 async def test_trades_source_migration_adds_column(tmp_path):
-    """旧库迁移：已存在的 trades 表（无 source 列）幂等补列，历史行保持 '' 不回填。"""
+    """旧库迁移：已存在的 trades 表（无 source 列）幂等补列，历史行保持 '' 不回填。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     import aiosqlite
 
     path = tmp_path / "old.db"
@@ -305,7 +410,13 @@ async def test_trades_source_migration_adds_column(tmp_path):
 
 
 async def test_list_trades_limit_and_contract(repo: Repo):
-    """list_trades：SQL 层 LIMIT、最新在前、合约可选过滤。"""
+    """list_trades：SQL 层 LIMIT、最新在前、合约可选过滤。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(5):
         await repo.save_trade(
             "r1",
@@ -324,7 +435,13 @@ async def test_list_trades_limit_and_contract(repo: Repo):
 
 
 async def test_list_trades_offset_pagination(repo: Repo):
-    """list_trades：offset 分页遍历全量，页间不重复不遗漏。"""
+    """list_trades：offset 分页遍历全量，页间不重复不遗漏。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(5):
         await repo.save_trade(
             "r1",
@@ -345,7 +462,13 @@ async def test_list_trades_offset_pagination(repo: Repo):
 
 
 async def test_count_trades(repo: Repo):
-    """count_trades：总数与 list_trades 分页口径一致，支持 contract 过滤。"""
+    """count_trades：总数与 list_trades 分页口径一致，支持 contract 过滤。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(5):
         await repo.save_trade(
             "r1",
@@ -366,6 +489,13 @@ async def test_count_trades(repo: Repo):
 
 
 async def test_recent_notes(repo: Repo):
+    """验证最近笔记按最新优先顺序和数量限制返回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(5):
         await repo.add_note("r1", f"笔记{i}")
     notes = await repo.recent_notes(3)
@@ -380,7 +510,13 @@ async def test_recent_notes(repo: Repo):
 
 
 async def test_notes_page_returns_latest_items_and_total(repo: Repo):
-    """笔记分页查询使用同一结果快照，越界页也保留总数。"""
+    """笔记分页查询使用同一结果快照，越界页也保留总数。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(3):
         await repo.add_note("r1", f"分页笔记{i}")
     first_items, first_total = await repo.list_notes_page(limit=2, offset=0)
@@ -391,7 +527,13 @@ async def test_notes_page_returns_latest_items_and_total(repo: Repo):
 
 
 async def test_list_notes_by_rounds(repo: Repo):
-    """按轮批量取笔记：每轮只留最新一条，无归属轮次缺席，空输入返回空映射。"""
+    """按轮批量取笔记：每轮只留最新一条，无归属轮次缺席，空输入返回空映射。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.add_note("r1", "旧笔记")
     await repo.add_note("r1", "新笔记")
     await repo.add_note("r2", "另一轮笔记")
@@ -407,6 +549,14 @@ async def test_list_notes_by_rounds(repo: Repo):
 
 
 async def test_record_wakeup(repo: Repo, db: Database):
+    """验证唤醒记录写入数据库并可直接查询。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        db: Database，已打开的临时数据库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.record_wakeup(scheduled_at=12345.0, source="timer")
     cur = await db.conn.execute("SELECT scheduled_at, source FROM wakeup")
     row = await cur.fetchone()
@@ -418,6 +568,13 @@ async def test_record_wakeup(repo: Repo, db: Database):
 
 
 async def test_audit_round_lifecycle(repo: Repo):
+    """验证审计轮从开始到结束的状态与字段更新。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.start_audit_round(
         round_id="r1",
         mode="paper",
@@ -441,6 +598,13 @@ async def test_audit_round_lifecycle(repo: Repo):
 
 
 async def test_audit_tool_calls_by_round(repo: Repo):
+    """验证工具调用审计记录按所属轮次查询。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.start_audit_round(round_id="r1", mode="paper")
     await repo.save_audit_tool_call(
         round_id="r1",
@@ -467,7 +631,13 @@ async def test_audit_tool_calls_by_round(repo: Repo):
 
 
 async def test_list_audit_rounds_batch(repo: Repo):
-    """list_audit_rounds：一次 IN 查询批量取（避免列表端点 N+1），缺失的 id 不出现。"""
+    """list_audit_rounds：一次 IN 查询批量取（避免列表端点 N+1），缺失的 id 不出现。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.start_audit_round("r1", "paper", prompt_md5="m1")
     await repo.start_audit_round("r2", "testnet", prompt_md5="m2")
     got = await repo.list_audit_rounds(["r2", "r1", "不存在"])
@@ -478,7 +648,13 @@ async def test_list_audit_rounds_batch(repo: Repo):
 
 
 async def test_latest_audit_round(repo: Repo):
-    """latest_audit_round：按 mode 取 started_at 最新一轮；空表 None；模式间隔离。"""
+    """latest_audit_round：按 mode 取 started_at 最新一轮；空表 None；模式间隔离。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     assert await repo.latest_audit_round("paper") is None  # 空表
     await repo.start_audit_round("r1", "paper", started_at=1000.0)
     await repo.start_audit_round("r2", "paper", started_at=2000.0)
@@ -492,7 +668,13 @@ async def test_latest_audit_round(repo: Repo):
 
 
 async def test_latest_audit_round_tie_breaks_by_insert_order(repo: Repo):
-    """started_at 并列时取后插入者（rowid 大者），保证「最新」语义确定。"""
+    """started_at 并列时取后插入者（rowid 大者），保证「最新」语义确定。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.start_audit_round("r-first", "paper", started_at=1000.0)
     await repo.start_audit_round("r-second", "paper", started_at=1000.0)
     latest = await repo.latest_audit_round("paper")
@@ -500,7 +682,13 @@ async def test_latest_audit_round_tie_breaks_by_insert_order(repo: Repo):
 
 
 async def test_latest_audit_round_exclude_wake_sources(repo: Repo):
-    """exclude_wake_sources：排除复盘/研报轮（trader live 视图口径）；默认空元组行为不变。"""
+    """exclude_wake_sources：排除复盘/研报轮（trader live 视图口径）；默认空元组行为不变。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.start_audit_round("r-trader", "paper", wake_source="timer", started_at=1000.0)
     await repo.start_audit_round("r-research", "paper", wake_source="research", started_at=2000.0)
     await repo.start_audit_round("r-review", "paper", wake_source="review", started_at=3000.0)
@@ -514,7 +702,13 @@ async def test_latest_audit_round_exclude_wake_sources(repo: Repo):
 
 
 async def test_strategy_md5_write_roundtrip(repo: Repo):
-    """save_decision/start_audit_round 透传 strategy_md5 并读回；不传默认 ''。"""
+    """save_decision/start_audit_round 透传 strategy_md5 并读回；不传默认 ''。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_decision(round_id="r1", mode="paper", strategy_md5="md5-a")
     await repo.start_audit_round("r1", "paper", strategy_md5="md5-a")
     decision = await repo.get_decision_by_round("r1")
@@ -527,7 +721,13 @@ async def test_strategy_md5_write_roundtrip(repo: Repo):
 
 
 async def test_strategy_md5_migration_adds_columns(tmp_path):
-    """旧库（decisions/audit_rounds 无 strategy_md5 列）迁移补列；历史行保持 ''，重复 open 幂等。"""
+    """旧库（decisions/audit_rounds 无 strategy_md5 列）迁移补列；历史行保持 ''，重复 open 幂等。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
     import aiosqlite
 
     path = tmp_path / "old.db"
@@ -570,6 +770,13 @@ async def test_strategy_md5_migration_adds_columns(tmp_path):
 
 
 async def test_strategy_version_roundtrip(repo: Repo):
+    """验证策略版本保存后可完整读回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     v1 = await repo.review.save_strategy_version("内容一", "md5-1", "human", "初版")
     v2 = await repo.review.save_strategy_version(
         "内容二", "md5-2", "review_agent", "复盘改写", report_id=7
@@ -585,7 +792,13 @@ async def test_strategy_version_roundtrip(repo: Repo):
 
 
 async def test_attach_report_to_version(repo: Repo):
-    """版本先落库、报告后落库：attach_report_to_version 回填 report_id。"""
+    """版本先落库、报告后落库：attach_report_to_version 回填 report_id。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     v = await repo.review.save_strategy_version("内容", "md5", "review_agent", "复盘改写")
     await repo.review.attach_report_to_version(v.id, 42)
     got = await repo.review.get_strategy_version(v.id)
@@ -596,6 +809,13 @@ async def test_attach_report_to_version(repo: Repo):
 
 
 async def test_review_report_roundtrip_and_page(repo: Repo):
+    """验证复盘报告保存、读取和分页总数保持一致。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.review.save_review_report(1000.0, 2000.0, '{"win_rate":0.5}', "# 报告一", "none")
     r2 = await repo.review.save_review_report(
         2000.0, 3000.0, "{}", "# 报告二", "rewrite", new_version_id=3, round_id="rv-round-2"
@@ -617,7 +837,13 @@ async def test_review_report_roundtrip_and_page(repo: Repo):
 
 
 async def test_latest_review_period_end(repo: Repo):
-    """latest_review_period_end：空库 None；有记录取最大 period_end（调度幂等用）。"""
+    """latest_review_period_end：空库 None；有记录取最大 period_end（调度幂等用）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     assert await repo.review.latest_review_period_end() is None
     await repo.review.save_review_report(1000.0, 2000.0, "{}", "", "none")
     await repo.review.save_review_report(500.0, 1500.0, "{}", "", "none")
@@ -628,7 +854,13 @@ async def test_latest_review_period_end(repo: Repo):
 
 
 async def test_latest_review_audit_round(repo: Repo):
-    """latest_review_audit_round：只取 wake_source='review' 的最新一轮，交易轮不参与。"""
+    """latest_review_audit_round：只取 wake_source='review' 的最新一轮，交易轮不参与。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     assert await repo.review.latest_review_audit_round("paper") is None  # 空表
     await repo.start_audit_round("r-t1", "paper", wake_source="timer", started_at=1000.0)
     await repo.start_audit_round("r-v1", "paper", wake_source="review", started_at=2000.0)
@@ -647,7 +879,13 @@ async def test_latest_review_audit_round(repo: Repo):
 
 
 async def _seed_review_trades(repo: Repo) -> None:
-    """两策略版本各一轮决策 + 五笔成交（含一笔无决策关联的孤立成交）。"""
+    """两策略版本各一轮决策 + 五笔成交（含一笔无决策关联的孤立成交）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，向测试仓库写入复盘统计所需的决策和成交数据
+    """
     await repo.save_decision(round_id="r-a", mode="paper", strategy_md5="md5-a")
     await repo.save_decision(round_id="r-b", mode="paper", strategy_md5="md5-b")
     await repo.save_decision(round_id="r-c", mode="testnet", strategy_md5="md5-a")
@@ -706,8 +944,10 @@ async def _seed_review_trades(repo: Repo) -> None:
 async def test_trades_for_review_filters(repo: Repo):
     """trades_for_review：LEFT JOIN decisions；mode 必填；[start, end)；按 id 正序。
 
-    当前口径：无 strategy_md5 过滤时孤儿成交（无 decisions 行）仍计入基础样本；
-    按策略过滤时无 join 匹配的成交不参与（与 INNER JOIN 语义一致）。
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
     """
     await _seed_review_trades(repo)
     all_paper = await repo.review.trades_for_review(0.0, 3000.0, "paper")
@@ -730,7 +970,13 @@ async def test_trades_for_review_filters(repo: Repo):
 
 
 async def test_trades_for_review_keeps_orphan_closes_without_strategy_filter(repo: Repo):
-    """round_id='' 的孤儿平仓成交在无过滤时计入基础统计，按策略过滤时排除。"""
+    """round_id='' 的孤儿平仓成交在无过滤时计入基础统计，按策略过滤时排除。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_trade(
         "",
         "paper",
@@ -761,7 +1007,13 @@ async def test_trades_for_review_keeps_orphan_closes_without_strategy_filter(rep
 
 
 async def test_decisions_for_review(repo: Repo):
-    """decisions_for_review：区间 + strategy_md5 过滤；按 id 倒序；limit 钳 1..100。"""
+    """decisions_for_review：区间 + strategy_md5 过滤；按 id 倒序；limit 钳 1..100。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     now = time.time()
     for i in range(3):
         await repo.save_decision(
@@ -779,7 +1031,13 @@ async def test_decisions_for_review(repo: Repo):
 
 
 async def test_decisions_for_review_mode_filter(repo: Repo):
-    """decisions_for_review 传 mode 时只返回该模式决策；不传时行为不变（全模式）。"""
+    """decisions_for_review 传 mode 时只返回该模式决策；不传时行为不变（全模式）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     now = time.time()
     await repo.save_decision(round_id="dm-p", mode="paper")
     await repo.save_decision(round_id="dm-t", mode="testnet")
@@ -789,7 +1047,13 @@ async def test_decisions_for_review_mode_filter(repo: Repo):
 
 
 async def test_list_trades_filtered(repo: Repo):
-    """list_trades_filtered：[start, end)；contract/source 可选过滤；按 id 正序；limit 钳 1..200。"""
+    """list_trades_filtered：[start, end)；contract/source 可选过滤；按 id 正序；limit 钳 1..200。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     for i in range(4):
         await repo.save_trade(
             "r1",
@@ -816,7 +1080,13 @@ async def test_list_trades_filtered(repo: Repo):
 
 
 async def test_list_trades_filtered_mode_filter(repo: Repo):
-    """list_trades_filtered 传 mode 时只返回该模式成交；不传时行为不变（全模式）。"""
+    """list_trades_filtered 传 mode 时只返回该模式成交；不传时行为不变（全模式）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
     await repo.save_trade(
         "r1",
         "paper",

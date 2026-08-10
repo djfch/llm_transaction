@@ -42,9 +42,26 @@ class LLMProvider(Protocol):
     """LLM 供应商统一接口。"""
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        """发起一轮对话。tools 为中性格式 {name, description, parameters(JSON Schema)}。"""
+        """发起一轮对话。tools 为中性格式 {name, description, parameters(JSON Schema)}。
+
+        参数：
+            system: str，系统提示词
+            messages: list[dict]，本轮对话消息列表
+            tools: list[dict]，中性格式的工具定义列表
+
+        返回：
+            LLMResponse：发起一轮对话。tools 为中性格式 {name, description, parameters(JSON Schema)}
+        """
         ...
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
-        """把一次工具执行结果包装成厂商原生消息，追加进 messages 继续对话。"""
+        """把一次工具执行结果包装成厂商原生消息，追加进 messages 继续对话。
+
+        参数：
+            call: ToolCall，已执行的工具调用
+            result: str，待序列化或返回的执行结果
+
+        返回：
+            dict：把一次工具执行结果包装成厂商原生消息，追加进 messages 继续对话
+        """
         ...

@@ -49,6 +49,14 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     返回 outcome.risk_verdict="deny"，由调用方决定（LLM 工具层转文本；
     manual_close 转 ManualCloseRiskDenied）。trade_source 非空时透传给 orders.trade_source
     （manual_close 传 user_close，供交易所真实成交回报分类归属）。
+
+    参数：
+        deps: ToolDeps，网关、风控、订单仓库等共享交易依赖
+        contract: str，待全部平仓的合约名称
+        trade_source: str，写入订单记录的交易来源标识
+
+    返回：
+        CloseResult，包含风控判定、订单状态与成交价格的平仓结果
     """
     positions = deps.gateway.list_positions()
     had_position = any(p.contract == contract for p in positions)  # 下单前快照（防文本谎称）
@@ -93,6 +101,18 @@ async def execute_manual_close(
     强平等）按标准标注一并落库。缓冲已清空，轮末 drain 无货可落，天然无双计。
     真实网关无缓冲：trades 由 ExchangeFillSync 按交易所真实成交回报落库，订单行
     已带 trade_source=user_close 供归属判定。
+
+    参数：
+        deps: ToolDeps，网关、风控与订单仓库等共享交易依赖
+        contract: str，用户要求平仓的合约名称
+        drain_fills: Callable[[], list[FillRecord]] | None，提取模拟网关待落库成交的回调
+        persister: FillPersister，串行化并持久化成交记录的服务
+
+    返回：
+        dict，包含合约、订单状态、成交价格和用户可读说明的 API 响应
+
+    异常：
+        ManualCloseRiskDenied: 风控拒绝本次手动平仓时抛出
     """
     async with persister.lock:
         cr = await close_position(deps, contract, trade_source="user_close")
