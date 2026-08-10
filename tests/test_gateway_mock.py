@@ -15,6 +15,7 @@ from src.gateway import (
     OrderRequest,
 )
 from src.gateway.base import Candle
+from src.gateway.market_stats import OpenInterestPoint
 from src.gateway.gate_rest import build_order_payload, gen_client_order_id, wrap_gate_exception
 
 BTC = "BTC_USDT"
@@ -304,3 +305,14 @@ def test_fetch_open_interest_default_and_injected():
     """mock 持仓量：默认 123456，构造可注入固定值。"""
     assert MockGateway().fetch_open_interest(BTC) == Decimal("123456")
     assert MockGateway(open_interest=Decimal("42")).fetch_open_interest(BTC) == Decimal("42")
+
+
+def test_fetch_open_interest_history_default_and_injected():
+    points = [OpenInterestPoint(time=100, value=Decimal("42"))]
+    assert MockGateway().fetch_open_interest_history(BTC, "4h") == []
+    assert (
+        MockGateway(open_interest_history={BTC: points}).fetch_open_interest_history(
+            BTC, "1d", limit=1
+        )
+        == points
+    )

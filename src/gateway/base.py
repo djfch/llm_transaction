@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from pydantic import BaseModel
+from .market_stats import OpenInterestPoint
 
 
 class GatewayError(Exception):
@@ -226,6 +227,10 @@ class Gateway(Protocol):
 
     # 持仓量（张数）：无该数据的实现（如 paper）返回 None；查询失败抛 GatewayError。
     def fetch_open_interest(self, contract: str) -> Decimal | None: ...
+
+    def fetch_open_interest_history(
+        self, contract: str, interval: str, limit: int = 3
+    ) -> list[OpenInterestPoint]: ...
 
     def set_leverage(
         self, contract: str, leverage: int, margin_mode: str = "isolated"

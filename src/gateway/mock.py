@@ -20,6 +20,7 @@ from .base import (
     OrderNotFound,
     OrderRequest,
     OrderResult,
+    OpenInterestPoint,
     Position,
     Ticker,
     TpslOrder,
@@ -48,11 +49,13 @@ class MockGateway:
         account: Account | None = None,
         positions: dict[str, Position] | None = None,
         open_interest: Decimal = Decimal("123456"),
+        open_interest_history: dict[str, list[OpenInterestPoint]] | None = None,
     ) -> None:
         self.contracts = contracts or {}
         self.account = account or Account(available=Decimal("10000"), unrealised_pnl=Decimal(0))
         self.positions = positions or {}
         self.open_interest = open_interest
+        self.open_interest_history = open_interest_history or {}
         self.tickers: list[Ticker] = []
         self.candles: list[Candle] = []
         self.orders: dict[str, OrderResult] = {}
@@ -308,6 +311,12 @@ class MockGateway:
     def fetch_open_interest(self, contract: str) -> Decimal | None:
         """mock 固定持仓量：构造时可注入，默认 123456。"""
         return self.open_interest
+
+    def fetch_open_interest_history(
+        self, contract: str, interval: str, limit: int = 3
+    ) -> list[OpenInterestPoint]:
+        """返回构造时注入的历史持仓量，默认无历史数据。"""
+        return self.open_interest_history.get(contract, [])[-limit:]
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
         if margin_mode not in ("isolated", "cross"):
