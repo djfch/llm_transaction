@@ -47,6 +47,8 @@ jobs:
 
   deploy:
     needs: build-dist
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     env:
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
@@ -56,6 +58,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.build-dist.outputs.commit_sha }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
@@ -78,3 +81,5 @@ jobs:
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
             "DEPLOY_ROOT='${DEPLOY_PATH}' DEPLOY_COMMIT=${DEPLOY_COMMIT} bash -s" \
             < scripts/deploy.sh
+      - name: 更新生产基线指针
+        run: bash scripts/update_deploy_ref.sh

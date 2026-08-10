@@ -4,7 +4,7 @@
 
 ## 自动化流程
 
-在 GitHub 仓库中打开 Actions → CD → Run workflow，输入 `deploy` 确认。工作流始终从 `main` 构建，并以同一提交检出 `deploy.sh`、构建前端，再把完整 SHA 传给服务器；成功时前后端来自同一提交，失败时自动尝试恢复上一提交的代码、依赖和前端产物。
+在 GitHub 仓库中打开 Actions → CD → Run workflow，输入 `deploy` 确认。工作流始终从 `main` 构建，并以同一提交检出 `deploy.sh`、构建前端，再把完整 SHA 传给服务器；成功时前后端来自同一提交，失败时自动尝试恢复上一提交的代码、依赖和前端产物。只有服务器脚本完成且健康检查通过后，工作流才会把 `deploy(生产基线分支)`快进到同一个 `DEPLOY_COMMIT(部署提交)`。
 
 ```mermaid
 flowchart LR
@@ -20,11 +20,27 @@ flowchart LR
     Switch --> Start["启动新版本"]
     Start --> Health["GET /api/status 健康检查"]
     Health -->|"失败"| Rollback["恢复上一提交、依赖和 dist 并重启"]
+    Health -->|"成功"| DeployRef["快进 deploy 并读取远端 SHA 复核"]
+    DeployRef -->|"更新失败"| PointerFail["CD 标红并提示核对服务器实际 SHA"]
 ```
 
-工作流定义见 `.github/workflows/cd.yml`，服务器端执行逻辑见 `scripts/deploy.sh`。
+工作流定义见 `.github/workflows/cd.yml`，服务器端执行逻辑见 `scripts/deploy.sh`，生产指针更新逻辑见 `scripts/update_deploy_ref.sh`。
 
 工作流把与前端产物同一提交的 `scripts/deploy.sh` 通过 SSH 标准输入发送到服务器，首次升级也不会误用服务器旧脚本。脚本在切换前保留上一版 `web/dist(前端构建产物)`；从切换提交开始，依赖同步、解包、重启或健康检查任一步失败，都会尝试恢复上一提交、Python 依赖和前端产物，并在服务已被触及时重启服务。
+
+## 生产基线分支
+
+`main(主分支)`仍是唯一部署来源和 PR 目标，`deploy(生产基线分支)`只是生产状态指针，不能从它创建功能分支。首次建立时，`deploy`指向 `c7ee59b2b80ff78098db77ac5afbad65fdb5d284(当前生产提交)`。
+
+服务器部署失败或自动回滚时，工作流不会执行生产指针步骤。部署成功后，`update_deploy_ref.sh`最多重试三次，只允许普通快进推送，随后通过 `git ls-remote`再次读取远端 SHA 并要求与 `DEPLOY_COMMIT`完全相等；脚本不使用 force push。仓库规则必须禁止删除和非快进更新 `deploy`，但允许 CD 直接快进，不要求通过 PR。
+
+若服务器部署已经成功、但 `deploy`更新或复核失败，CD 会标记失败。此时服务器可能已经运行新提交，在人工核对服务器实际 `HEAD`并修复指针前，不得依赖 `deploy`进行兼容决策。
+
+因此生产状态关系固定为：
+
+```text
+main 的完整 SHA → 服务器部署与健康检查通过 → deploy 快进并复核远端 SHA
+```
 
 ## 一次性服务器准备
 
@@ -76,6 +92,7 @@ curl http://127.0.0.1:17577/api/status
 ## 部署前检查
 
 - `main` 分支 CI 已全部通过，并由人确认可以部署；工作流会忽略界面选择的其他 ref，始终构建 `main`。
+- `deploy`仓库规则已禁止删除和强推；若上一次 CD 的指针更新失败，先核对服务器实际 SHA。
 - 服务器工作目录的 `config.yaml`、`watchlist.yaml`、`system_prompt.md`、`review_prompt.md` 和 `.env` 已正确配置。
 - `llm-transaction.service` 中的工作目录、启动命令和环境符合服务器实际路径。
 - 监控 API 默认无鉴权；在加入鉴权与 TLS 前，只监听回环地址或放在受控反向代理后。
