@@ -30,6 +30,9 @@ import type {
   PortfolioSnapshot,
   PutConfigResult,
   ResearchLive,
+  ResearchAssetDetail,
+  ResearchAssetSummary,
+  ResearchTechnicalConfirmation,
   ResearchReportDetail,
   ResearchReportsPage,
   ResearchReportSummary,
@@ -387,46 +390,67 @@ function adaptRunReview(raw: RawRunReview): RunReviewResult {
   }
 }
 
-/** 后端研报原始项（列表/详情同 13 键，仅 narrative 长度不同；时间为 created_at(Unix秒)） */
-interface RawResearchReport {
-  id: number
-  report_type: string
+interface RawResearchAssetSummary {
+  contract: string
   direction: string
   confidence: string
   horizon: string
-  evidence_json: string
-  risks_json: string
+  market_regime: string
+  technical_confirmation: ResearchTechnicalConfirmation
+  basis_type: string
+  data_status: string
+}
+
+interface RawResearchAssetDetail extends RawResearchAssetSummary {
+  evidence?: unknown
+  risks?: unknown
   narrative: string
-  raw_json: string
   verify_result: string
+  created_at: number
+}
+
+/** 后端当前研报响应：报告头不再包含全局方向和逐标的详情字段。 */
+interface RawResearchReport {
+  id: number
+  schema_version: number
+  summary: string
+  cross_market_view: string
+  global_risks?: unknown
+  asset_views: RawResearchAssetSummary[]
+  report_type: string
   error: string
   round_id: string
   created_at: number
 }
 
-/**
- * 后端研报 → 前端 ResearchReportSummary：snake_case 转 camelCase、created_at(Unix秒) 转 ISO；
- * evidence_json/risks_json/raw_json 保留原始字符串不解析（与复盘 statsJson 同约定：
- * 列表不需要结构化内容，详情端点会给已解析对象，适配层不为其建双份口径）。
- */
-function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
+function adaptResearchAssetSummary(raw: RawResearchAssetSummary): ResearchAssetSummary {
   return {
-    id: raw.id,
-    reportType: raw.report_type ?? '',
-    direction: raw.direction ?? '',
-    confidence: raw.confidence ?? '',
-    horizon: raw.horizon ?? '',
-    evidenceJson: raw.evidence_json ?? '[]',
-    risksJson: raw.risks_json ?? '[]',
-    narrative: raw.narrative ?? '',
-    rawJson: raw.raw_json ?? '{}',
-    verifyResult: raw.verify_result ?? '',
-    error: raw.error ?? '',
-    roundId: raw.round_id ?? '',
-    time: new Date(raw.created_at * 1000).toISOString(),
+    contract: raw.contract,
+    direction: raw.direction,
+    confidence: raw.confidence,
+    horizon: raw.horizon,
+    marketRegime: raw.market_regime,
+    technicalConfirmation: raw.technical_confirmation,
+    basisType: raw.basis_type,
+    dataStatus: raw.data_status,
   }
 }
 
+/** 后端研报 → 前端当前结构摘要。 */
+function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
+  return {
+    id: raw.id,
+    schemaVersion: raw.schema_version,
+    summary: raw.summary,
+    crossMarketView: raw.cross_market_view,
+    globalRisks: adaptStringList(raw.global_risks),
+    assetViews: raw.asset_views.map(adaptResearchAssetSummary),
+    reportType: raw.report_type,
+    error: raw.error,
+    roundId: raw.round_id,
+    time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
 /** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御）；broken_at 为断点节点下标 */
 interface RawCausalLink {
   id: number
@@ -442,14 +466,11 @@ interface RawCausalLink {
   created_at: number
 }
 
-/** 后端研报详情原始响应：同摘要键 + evidence/risks/raw 已解析 + causal_links */
-type RawResearchReportDetail = RawResearchReport & {
-  evidence?: unknown
-  risks?: unknown
-  raw?: unknown
+/** 后端研报详情：报告头同列表，逐标的项展开，市场快照不返回。 */
+type RawResearchReportDetail = Omit<RawResearchReport, 'asset_views'> & {
+  asset_views: RawResearchAssetDetail[]
   causal_links?: RawCausalLink[]
 }
-
 /** 容错解析：契约上为已解析数组，防御性兼容 JSON 字符串形态；解析失败返回 null */
 function tryParseJson(value: unknown): unknown {
   if (typeof value !== 'string') return value
@@ -526,28 +547,32 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
   }
 }
 
-/** 后端研报详情 → 前端 ResearchReportDetail：摘要适配 + 已解析字段/因果链适配 */
-function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReportDetail {
-  const parsedRaw = tryParseJson(raw.raw)
+function adaptResearchAssetDetail(raw: RawResearchAssetDetail): ResearchAssetDetail {
   return {
-    ...adaptResearchReport(raw),
+    ...adaptResearchAssetSummary(raw),
     evidence: adaptEvidenceList(raw.evidence),
     risks: adaptStringList(raw.risks),
-    raw: parsedRaw !== null && typeof parsedRaw === 'object' && !Array.isArray(parsedRaw)
-      ? (parsedRaw as Record<string, unknown>)
-      : {},
-    causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
+    narrative: raw.narrative ?? '',
+    verifyResult: raw.verify_result ?? '',
+    time: new Date((raw.created_at ?? 0) * 1000).toISOString(),
   }
 }
 
+/** 后端研报详情 → 前端当前结构详情。 */
+function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReportDetail {
+  return {
+    ...adaptResearchReport(raw),
+    assetViews: raw.asset_views.map(adaptResearchAssetDetail),
+    causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
+  }
+}
 /** 后端 POST /api/research/run 原始响应（成功/失败的键集合不同，全部可选防御） */
 interface RawRunResearch {
   started: boolean
   ok?: boolean
   report_id?: number
   round_id?: string
-  direction?: string
-  confidence?: string
+  asset_count?: number
   error?: string
   error_code?: string
 }
@@ -559,8 +584,7 @@ function adaptRunResearch(raw: RawRunResearch): RunResearchResult {
     ok: raw.ok,
     reportId: raw.report_id,
     roundId: raw.round_id,
-    direction: raw.direction,
-    confidence: raw.confidence,
+    assetCount: raw.asset_count,
     error: raw.error ?? '',
     errorCode: raw.error_code,
   }
