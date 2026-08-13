@@ -20,9 +20,10 @@ export interface ConversationMessage {
 
 /** 单回合解析产物：若干文本块 + 若干工具调用（参数已序列化为摘要文本） */
 interface AssistantTurn {
-  reasonings: string[]
-  texts: string[]
-  calls: Array<{ name: string; argsText: string }>
+  blocks: Array<
+    | { kind: 'reasoning' | 'text'; text: string }
+    | { kind: 'tool_call'; name: string; argsText: string }
+  >
 }
 
 /** 单个 LLM 回合：保留该回合的思考、回复、工具调用与对应工具返回。 */
@@ -57,17 +58,21 @@ function openAiArgsText(args: unknown): string {
 
 /** Anthropic 格式：提取 thinking 明文；redacted_thinking/signature 不展示。 */
 function parseAnthropic(content: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
+  const turn: AssistantTurn = { blocks: [] }
   for (const block of content) {
     if (!isRecord(block)) continue
     if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
-      turn.reasonings.push(block.thinking)
+      turn.blocks.push({ kind: 'reasoning', text: block.thinking })
     }
     if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-      turn.texts.push(block.text)
+      turn.blocks.push({ kind: 'text', text: block.text })
     }
     if (block.type === 'tool_use') {
-      turn.calls.push({ name: String(block.name ?? ''), argsText: argsText(block.input) })
+      turn.blocks.push({
+        kind: 'tool_call',
+        name: String(block.name ?? ''),
+        argsText: argsText(block.input),
+      })
     }
   }
   return turn
@@ -78,15 +83,18 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   const first = choices[0]
   if (!isRecord(first) || !isRecord(first.message)) return null
   const msg = first.message
-  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
+  const turn: AssistantTurn = { blocks: [] }
   if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
-    turn.reasonings.push(msg.reasoning_content)
+    turn.blocks.push({ kind: 'reasoning', text: msg.reasoning_content })
   }
-  if (typeof msg.content === 'string' && msg.content.trim()) turn.texts.push(msg.content)
+  if (typeof msg.content === 'string' && msg.content.trim()) {
+    turn.blocks.push({ kind: 'text', text: msg.content })
+  }
   if (!Array.isArray(msg.tool_calls)) return turn
   for (const tc of msg.tool_calls) {
     if (!isRecord(tc) || !isRecord(tc.function)) continue
-    turn.calls.push({
+    turn.blocks.push({
+      kind: 'tool_call',
       name: String(tc.function.name ?? ''),
       argsText: openAiArgsText(tc.function.arguments),
     })
@@ -96,7 +104,7 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
 
 /** OpenAI Responses 格式：reasoning 只提取 summary_text，encrypted_content 不展示。 */
 function parseResponses(output: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
+  const turn: AssistantTurn = { blocks: [] }
   for (const item of output) {
     if (!isRecord(item)) continue
     if (item.type === 'reasoning' && Array.isArray(item.summary)) {
@@ -107,19 +115,20 @@ function parseResponses(output: unknown[]): AssistantTurn {
           typeof summary.text === 'string' &&
           summary.text.trim()
         ) {
-          turn.reasonings.push(summary.text)
+          turn.blocks.push({ kind: 'reasoning', text: summary.text })
         }
       }
     }
     if (item.type === 'message' && Array.isArray(item.content)) {
       for (const c of item.content) {
         if (isRecord(c) && c.type === 'output_text' && typeof c.text === 'string' && c.text.trim()) {
-          turn.texts.push(c.text)
+          turn.blocks.push({ kind: 'text', text: c.text })
         }
       }
     }
     if (item.type === 'function_call') {
-      turn.calls.push({
+      turn.blocks.push({
+        kind: 'tool_call',
         name: String(item.name ?? ''),
         argsText: openAiArgsText(item.arguments),
       })
@@ -168,7 +177,7 @@ function toResultMessage(call: ToolCall): ConversationMessage {
 /** 降级渲染：保留 llm_raw 原文（非空时），并保证工具调用链可见 */
 function fallbackMessages(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
   const msgs: ConversationMessage[] = []
-  if (llmRaw.trim()) msgs.push({ role: 'assistant', kind: 'text', text: llmRaw })
+  if (llmRaw.trim()) msgs.push({ role: 'assistant', kind: 'text', text: safeFallbackText(llmRaw) })
   for (const call of toolCalls) msgs.push(toCallMessage(call), toResultMessage(call))
   return msgs
 }
@@ -180,6 +189,38 @@ function fallbackMessages(llmRaw: string, toolCalls: ToolCall[]): ConversationMe
  */
 export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
   return buildConversationTurns(llmRaw, toolCalls).flatMap((turn) => turn.messages)
+}
+
+/** 未识别原始格式的安全降级：保留普通内容，递归移除签名、密文与脱敏思考块。 */
+function safeFallbackText(raw: string): string {
+  return raw
+    .split('\n')
+    .map((line) => {
+      try {
+        return JSON.stringify(stripSensitive(JSON.parse(line)))
+      } catch {
+        return /signature|encrypted_content|redacted_thinking/i.test(line)
+          ? '（原始响应含不可展示的签名或加密思考）'
+          : line
+      }
+    })
+    .join('\n')
+}
+
+/** 递归清理未知 JSON 中不可展示的供应商私有推理字段。 */
+function stripSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => !(isRecord(item) && item.type === 'redacted_thinking'))
+      .map(stripSensitive)
+  }
+  if (!isRecord(value)) return value
+  if (value.type === 'redacted_thinking') return null
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'signature' && key !== 'encrypted_content')
+      .map(([key, child]) => [key, stripSensitive(child)]),
+  )
 }
 
 /** 构建按 LLM 响应回合分组的完整对话，供界面逐回合折叠。 */
@@ -197,19 +238,21 @@ export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): C
   let ai = 0 // 审计消费指针：回合内第 k 个 tool_use 对应 audit 顺序第 k 条
   for (const turn of turns) {
     const msgs: ConversationMessage[] = []
-    for (const text of turn.reasonings) {
-      msgs.push({ role: 'assistant', kind: 'reasoning', text })
-    }
-    for (const text of turn.texts) msgs.push({ role: 'assistant', kind: 'text', text })
-    for (const call of turn.calls) {
+    const results: ConversationMessage[] = []
+    for (const block of turn.blocks) {
+      if (block.kind !== 'tool_call') {
+        msgs.push({ role: 'assistant', kind: block.kind, text: block.text })
+        continue
+      }
       msgs.push({
         role: 'assistant',
         kind: 'tool_call',
-        text: `${call.name} ${call.argsText}`.trim(),
-        toolName: call.name,
+        text: `${block.name} ${block.argsText}`.trim(),
+        toolName: block.name,
       })
-      if (ai < audit.length) msgs.push(toResultMessage(audit[ai++]))
+      if (ai < audit.length) results.push(toResultMessage(audit[ai++]))
     }
+    msgs.push(...results)
     if (msgs.length > 0) result.push({ messages: msgs })
   }
   // llm_raw 缺尾部回合（如截断）：审计链剩余调用追加，保证工具链完整可见

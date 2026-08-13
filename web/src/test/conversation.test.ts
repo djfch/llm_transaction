@@ -89,7 +89,7 @@ const RESPONSES_RAW = [
 ].join('\n')
 
 describe('buildConversation（完整对话构建）', () => {
-  it('anthropic：text/tool_use 交错展开，工具结果按 seq 插在各自调用后，最终回合文本为结论', () => {
+  it('anthropic：先保留同一响应的块顺序，再按 seq 追加工具结果', () => {
     const msgs = buildConversation(ANTHROPIC_RAW, [
       auditCall(1, 'get_account', 'equity=10842.36'),
       auditCall(2, 'get_candlesticks', '返回 20 根 K 线'),
@@ -98,8 +98,8 @@ describe('buildConversation（完整对话构建）', () => {
     expect(msgs.map((m) => `${m.role}/${m.kind}`)).toEqual([
       'assistant/text',
       'assistant/tool_call',
-      'user/tool_result',
       'assistant/tool_call',
+      'user/tool_result',
       'user/tool_result',
       'assistant/text',
       'assistant/tool_call',
@@ -108,9 +108,9 @@ describe('buildConversation（完整对话构建）', () => {
     ])
     expect(msgs[0].text).toBe('先查账户与 K 线。')
     expect(msgs[1].toolName).toBe('get_account')
-    expect(msgs[2].text).toBe('equity=10842.36')
     // tool_call 的 text 为「工具名 + 参数摘要」，args 以 llm_raw 为准
-    expect(msgs[3].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"1h","limit":20}')
+    expect(msgs[2].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"1h","limit":20}')
+    expect(msgs[3].text).toBe('equity=10842.36')
     expect(msgs.at(-1)?.text).toBe('已开多，30 分钟后复查。')
     expect(msgs.at(-1)?.kind).toBe('text')
   })
@@ -122,13 +122,13 @@ describe('buildConversation（完整对话构建）', () => {
     ])
     expect(msgs.map((m) => `${m.role}/${m.kind}`)).toEqual([
       'assistant/tool_call',
-      'user/tool_result',
       'assistant/tool_call',
+      'user/tool_result',
       'user/tool_result',
       'assistant/text',
     ])
     // arguments 原样是带转义的 JSON 字符串，解析后应为紧凑对象文本
-    expect(msgs[2].text).toBe('place_order {"contract":"BTC_USDT","size":4}')
+    expect(msgs[1].text).toBe('place_order {"contract":"BTC_USDT","size":4}')
     expect(msgs.at(-1)?.text).toBe('开多完成。')
   })
 
@@ -229,5 +229,63 @@ describe('buildConversation（完整对话构建）', () => {
     const msgs = buildConversation(raw, [auditCall(1, 'get_market_data', longResult)])
     expect(msgs.find((m) => m.kind === 'tool_call')?.text).toContain(longArgs)
     expect(msgs.find((m) => m.kind === 'tool_result')?.text).toBe(longResult)
+  })
+
+  it('同一响应内严格保持原始块顺序，并在响应结束后追加工具返回', () => {
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '文本 A' },
+        { type: 'tool_use', id: 't1', name: 'get_account', input: {} },
+        { type: 'thinking', thinking: '调用后的思考 B' },
+        { type: 'text', text: '文本 C' },
+      ],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_account', '工具结果')])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['text', '文本 A'],
+      ['tool_call', 'get_account {}'],
+      ['reasoning', '调用后的思考 B'],
+      ['text', '文本 C'],
+      ['tool_result', '工具结果'],
+    ])
+  })
+
+  it('responses：function_call 后的 message 仍先于下一轮工具回填', () => {
+    const raw = JSON.stringify({
+      output: [
+        {
+          type: 'function_call',
+          call_id: 'call_1',
+          name: 'get_account',
+          arguments: '{}',
+        },
+        {
+          type: 'message',
+          content: [{ type: 'output_text', text: '调用已发出，等待结果。' }],
+        },
+      ],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_account', '工具结果')])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['tool_call', 'get_account {}'],
+      ['text', '调用已发出，等待结果。'],
+      ['tool_result', '工具结果'],
+    ])
+  })
+
+  it('未知 JSON 降级展示也移除签名、密文与脱敏思考块', () => {
+    const raw = JSON.stringify({
+      future_schema: true,
+      text: '可见正文',
+      signature: '不可展示签名',
+      nested: { encrypted_content: '不可展示密文' },
+      blocks: [{ type: 'redacted_thinking', data: '不可展示脱敏内容' }],
+    })
+    const msgs = buildConversation(raw, [])
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].text).toContain('可见正文')
+    expect(msgs[0].text).not.toContain('不可展示')
+    expect(msgs[0].text).not.toContain('redacted_thinking')
   })
 })
