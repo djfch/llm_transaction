@@ -7,6 +7,22 @@ import { describe, expect, it } from 'vitest'
 import { mockApi } from '../api/mock'
 
 describe('mockApi · 凭证 thinking_effort 链路', () => {
+  it('编辑决策凭证后 getStatus 返回新模型、凭证名与思考强度', async () => {
+    await mockApi.updateCredential('claude-main', {
+      provider: 'openai_compat',
+      model: 'deepseek-v4-pro',
+      max_tokens: 8192,
+      openai_base_url: 'https://api.deepseek.com/v1',
+      thinking_effort: 'high',
+    })
+
+    const status = await mockApi.getStatus()
+    expect(status.llm_credential_name).toBe('claude-main')
+    expect(status.llm_provider).toBe('openai_compat')
+    expect(status.llm_model).toBe('deepseek-v4-pro')
+    expect(status.llm_thinking_effort).toBe('high')
+  })
+
   it('create 落盘思考程度；update 修改思考程度后 getConfig 回读新值', async () => {
     await mockApi.createCredential({
       name: 'deep-main',

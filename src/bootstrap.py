@@ -479,7 +479,7 @@ def _build_server(
 
         返回：
             dict：运行模式、启动时长（秒）、风控锁状态、agent 运行/在轮状态及
-            LLM 提供方、模型与配置状态
+            LLM 配置可用状态
         """
         return {
             "mode": settings.mode,
@@ -487,8 +487,6 @@ def _build_server(
             "kill_switch": settings.risk.kill_switch,
             "agent_running": ctx.scheduler.is_running,
             "in_round": ctx.scheduler.in_round,
-            "llm_provider": settings.llm.provider,
-            "llm_model": settings.llm.model,
             "llm_configured": ctx.loop.llm_configured,
         }
 

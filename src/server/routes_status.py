@@ -158,6 +158,27 @@ def _equity_baseline(
     return equity_now - pnl_fee_sum, "account"
 
 
+def _trader_llm_status(settings: Settings) -> dict[str, str]:
+    """解析决策 Agent 当前绑定凭证并生成首页 LLM 状态摘要。
+
+    参数：
+        settings: Settings，当前生效的完整运行配置
+
+    返回：
+        dict[str, str]，包含凭证名、提供商、模型名和思考强度的状态字段
+    """
+    credential_name = settings.agents.trader.credential
+    credential = next(
+        item for item in settings.llm.resolve_credentials() if item.name == credential_name
+    )
+    return {
+        "llm_credential_name": credential.name,
+        "llm_provider": credential.provider,
+        "llm_model": credential.model,
+        "llm_thinking_effort": credential.thinking_effort,
+    }
+
+
 def create_status_router(deps: ServerDeps) -> APIRouter:
     """创建只读监控路由：运行状态、账户/持仓、决策轮、成交、权益曲线、笔记、价格唤醒。
 
@@ -173,24 +194,25 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
     async def get_status() -> dict[str, Any]:
         """运行状态概览：模式、运行时长、熔断开关、agent 运行态与 LLM 配置。
 
-        mode/llm 读 config.yaml 当前值，uptime 由运行时提供者给出；
+        mode 与 LLM 优先读共享运行配置，未接线时才回退配置文件；
+        uptime 由运行时提供者给出；
         kill_switch 优先取运行时内存值（agent 连续失败触发的内存态锁不写文件）。
 
         参数：无
 
         返回：
-            dict[str, Any]：含 mode/uptime_seconds/kill_switch/agent_running/
-            llm_provider/llm_model/llm_configured 的状态字典
+            dict[str, Any]：含 mode/uptime_seconds/kill_switch/agent_running、
+            决策凭证名/provider/model/thinking_effort 与 llm_configured 的状态字典
         """
-        settings = load_settings(deps.config_path)
+        settings = deps.runtime_settings or load_settings(deps.config_path)
         runtime = deps.runtime_status()
+        llm_status = _trader_llm_status(settings)
         return {
             "mode": settings.mode,
             "uptime_seconds": runtime.get("uptime_seconds", 0),
             "kill_switch": runtime.get("kill_switch", settings.risk.kill_switch),
             "agent_running": runtime.get("agent_running", False),
-            "llm_provider": settings.llm.provider,
-            "llm_model": settings.llm.model,
+            **llm_status,
             "llm_configured": runtime.get("llm_configured", False),
         }
 

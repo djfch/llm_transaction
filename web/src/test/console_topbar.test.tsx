@@ -11,8 +11,10 @@ const baseStatus: StatusInfo = {
   mode: 'paper',
   uptime_seconds: 3600,
   kill_switch: false,
-  llm_provider: 'anthropic',
-  llm_model: 'claude-sonnet-4-5',
+  llm_credential_name: 'default',
+  llm_provider: 'openai_compat',
+  llm_model: 'deepseek-v4-pro',
+  llm_thinking_effort: 'high',
   llm_configured: true,
   agent_running: true,
 }
@@ -44,10 +46,19 @@ describe('TopBar(顶部状态栏) status 渲染', () => {
     expect(badge.className).toContain('text-cyan-300')
   })
 
-  it('显示 LLM provider/model 与已配置', () => {
+  it('显示决策凭证 provider/model/name/thinking_effort 与已配置', () => {
     renderBar()
-    expect(screen.getByText('anthropic · claude-sonnet-4-5')).toBeInTheDocument()
+    expect(
+      screen.getByText('openai_compat · deepseek-v4-pro（default / high）'),
+    ).toBeInTheDocument()
     expect(screen.getByText('已配置')).toBeInTheDocument()
+  })
+
+  it('空思考强度显示为模型默认', () => {
+    renderBar({ llm_thinking_effort: '' })
+    expect(
+      screen.getByText('openai_compat · deepseek-v4-pro（default / 模型默认）'),
+    ).toBeInTheDocument()
   })
 
   it('status=null 时 agent/kill 按钮禁用且显示占位', () => {

@@ -8,8 +8,10 @@ export interface StatusInfo {
   mode: string // 运行模式：paper / testnet / live
   uptime_seconds: number // 已运行秒数
   kill_switch: boolean // 紧急停止开关（true 时拒绝一切交易）
+  llm_credential_name: string // 决策 Agent 当前绑定的 LLM 凭证名
   llm_provider: string // LLM 提供商
   llm_model: string // LLM 模型名
+  llm_thinking_effort: string // 思考强度：空串表示跟随模型默认
   llm_configured: boolean // LLM API Key 是否已配置（false 时自动决策暂停）
   agent_running: boolean // 交易 Agent 是否在运行
 }
