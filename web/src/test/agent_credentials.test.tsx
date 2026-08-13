@@ -107,6 +107,27 @@ describe('AgentCredentialsForm(凭证分配)', () => {
     ).toBe('deepseek-backup')
   })
 
+  it('异常绑定值只出现在所属 Agent 的下拉框中', () => {
+    const degraded: AppConfig = {
+      ...CONFIG,
+      agents: {
+        trader: { credential: 'claude-main' },
+        reviewer: { credential: 'deepseek-backup' },
+        researcher: { credential: 'ghost' },
+      },
+    }
+
+    render(<AgentCredentialsForm initial={degraded} credentialNames={NAMES} onSave={vi.fn()} />)
+
+    const trader = screen.getByLabelText('agents.trader.credential') as HTMLSelectElement
+    const reviewer = screen.getByLabelText('agents.reviewer.credential') as HTMLSelectElement
+    const researcher = screen.getByLabelText('agents.researcher.credential') as HTMLSelectElement
+    expect(withinOptions(trader)).toEqual(NAMES)
+    expect(withinOptions(reviewer)).toEqual(NAMES)
+    expect(withinOptions(researcher)).toEqual([...NAMES, 'ghost'])
+    expect(researcher.value).toBe('ghost')
+  })
+
   it('保存：onSave 收到写入 agents 段的完整配置（其余段原样透传）', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<AgentCredentialsForm initial={CONFIG} credentialNames={NAMES} onSave={onSave} />)

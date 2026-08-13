@@ -39,15 +39,11 @@ export default function AgentCredentialsForm({
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // 选项 = 凭证列表（缺省 default）；并集入当前选中值，防御配置引用了列表外凭证时无法回显
-  const options = Array.from(
-    new Set([
-      ...(credentialNames.length > 0 ? credentialNames : ['default']),
-      trader,
-      reviewer,
-      researcher,
-    ]),
-  )
+  // 每个下拉只并入自己的当前值：既能回显异常绑定，又不会把无效值传播给其他 Agent
+  const optionsFor = (current: string) =>
+    Array.from(
+      new Set([...(credentialNames.length > 0 ? credentialNames : ['default']), current]),
+    )
 
   const handleSave = async () => {
     setPending(true)
@@ -85,7 +81,7 @@ export default function AgentCredentialsForm({
           }}
           className={inputCls}
         >
-          {options.map((name) => (
+          {optionsFor(value).map((name) => (
             <option key={name} value={name}>
               {name}
             </option>
