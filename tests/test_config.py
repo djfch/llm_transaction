@@ -527,8 +527,23 @@ def test_agent_binding_unknown_credential_rejected():
         )
 
 
+def test_researcher_binding_unknown_credential_is_allowed():
+    """研报 Agent 引用缺失凭证时允许加载并由运行时降级。
+
+    参数：无
+
+    返回：
+        None，通过断言冻结可选研报功能的兼容规则
+    """
+    settings = Settings(
+        agents=AgentsConfig(researcher=AgentBinding(credential="ghost")),
+    )
+
+    assert settings.agents.researcher.credential == "ghost"
+
+
 def test_agent_binding_defaults_point_to_default_credential():
-    """缺省 agents 时 trader/reviewer 都指向 default。
+    """缺省 agents 时三个 Agent 都指向 default。
 
     参数：
         无
@@ -539,6 +554,7 @@ def test_agent_binding_defaults_point_to_default_credential():
     settings = Settings()
     assert settings.agents.trader.credential == "default"
     assert settings.agents.reviewer.credential == "default"
+    assert settings.agents.researcher.credential == "default"
 
 
 def test_multi_credentials_roundtrip_via_write_settings(tmp_path: Path):
@@ -558,7 +574,11 @@ def test_multi_credentials_roundtrip_via_write_settings(tmp_path: Path):
                 {"name": "backup", "provider": "openai_compat", "model": "m2"},
             ]
         },
-        "agents": {"trader": {"credential": "main"}, "reviewer": {"credential": "backup"}},
+        "agents": {
+            "trader": {"credential": "main"},
+            "reviewer": {"credential": "backup"},
+            "researcher": {"credential": "backup"},
+        },
     }
     saved = write_settings(data, cfg)
     creds = saved.llm.resolve_credentials()
@@ -567,5 +587,6 @@ def test_multi_credentials_roundtrip_via_write_settings(tmp_path: Path):
     reloaded = load_settings(cfg)
     assert reloaded.agents.trader.credential == "main"
     assert reloaded.agents.reviewer.credential == "backup"
+    assert reloaded.agents.researcher.credential == "backup"
     with pytest.raises(ConfigError):  # 引用不存在凭证 → 落不了盘
         write_settings({**data, "agents": {"reviewer": {"credential": "ghost"}}}, cfg)

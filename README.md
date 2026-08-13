@@ -67,7 +67,7 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 - `system_prompt.md`：策略书，LLM 每轮决策的 system prompt，改完下一轮自动生效
 - `indicator_config.yaml`：指标短名单（注入决策上下文的指标，≤8 个），由复盘 agent 版本化维护（也可 PUT /api/indicator_config 人工修订）；K 线图按短名单叠加主图线/副图
 - 监控前端可修改 LLM、风控、通知开关、白名单和策略 Prompt；LLM provider/model 等保存后会尝试热重建，成功则从下一轮生效，失败会保留旧 Provider 并返回错误；`mode` 等构造期字段会返回 `needs_restart(需要重启的字段)`
-- **多 LLM 凭证**：`config.yaml` 的 `llm.credentials` 可登记多条凭证（每条 = provider+model+max_tokens+openai_base_url+`thinking_effort(思考程度，留空跟随模型默认，可选 off/on/low/medium/high/xhigh/max)`+`api_key_env(对应 .env 中的键名)`），`agents` 节给决策 agent（trader）与复盘 agent（reviewer）分别指定所用凭证。凭证定义与 key 由专用端点顺序写入 `config.yaml` 和 `.env`，跨文件不保证原子；写入或热重建失败会明确返回错误，热重建失败时旧 Provider 继续运行。key 明文永不进入 API 响应。未配置 `credentials` 时，平铺 `llm` 字段会解析为一条名为 `default` 的兼容凭证；示例见 `config.example.yaml`
+- **多 LLM 凭证**：`config.yaml` 的 `llm.credentials` 可登记多条凭证（每条 = provider+model+max_tokens+openai_base_url+`thinking_effort(思考程度，留空跟随模型默认，可选 off/on/low/medium/high/xhigh/max)`+`api_key_env(对应 .env 中的键名)`），`agents` 节给决策 agent（trader）、复盘 agent（reviewer）与研报 agent（researcher）分别指定所用凭证。凭证定义与 key 由专用端点顺序写入 `config.yaml` 和 `.env`，跨文件不保证原子；写入或热重建失败会明确返回错误，热重建失败时旧 Provider 继续运行。key 明文永不进入 API 响应。未配置 `credentials` 时，平铺 `llm` 字段会解析为一条名为 `default` 的兼容凭证；示例见 `config.example.yaml`
 - Gate 与 Telegram 密钥、Gate 主机、服务监听地址、审计和日志路径仍需在服务器 `.env` 或 `config.yaml` 中维护
 
 ## 手动验证脚本（scripts/，不进测试套件）
