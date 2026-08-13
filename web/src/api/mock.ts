@@ -324,16 +324,21 @@ function buildCandles(contract: string, interval: string, limit: number): Candle
 // ---------- 接口实现 ----------
 
 export const mockApi: ApiClient = {
-  getStatus: () =>
-    reply({
+  getStatus: () => {
+    const credentialName = config.agents?.trader.credential ?? 'default'
+    const credential = config.llm.credentials?.find((item) => item.name === credentialName)
+    return reply({
       mode: config.mode,
       uptime_seconds: Math.floor((Date.now() - bootTime) / 1000),
       kill_switch: killSwitch,
-      llm_provider: config.llm.provider,
-      llm_model: config.llm.model,
+      llm_credential_name: credential?.name ?? 'default',
+      llm_provider: credential?.provider ?? config.llm.provider,
+      llm_model: credential?.model ?? config.llm.model,
+      llm_thinking_effort: credential?.thinking_effort ?? config.llm.thinking_effort ?? '',
       llm_configured: llmConfigured,
       agent_running: agentRunning,
-    }),
+    })
+  },
   getAccount: () =>
     // available 由 paperEquity 派生，避免设置金额后账户概览自相矛盾
     reply({ equity: paperEquity, available: Math.max(0, Math.round((paperEquity - 3_527.16) * 100) / 100), unrealised_pnl: 255.6 }),

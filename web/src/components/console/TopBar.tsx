@@ -54,14 +54,18 @@ function ModeBadge({ mode }: { mode: string | undefined }) {
   )
 }
 
-/** LLM 状态：provider/model + 配置徽标（未配置琥珀） */
+/** LLM 状态：决策凭证 provider/model（name / thinking_effort）+ 配置徽标（未配置琥珀） */
 function LlmStatus({ status }: { status: StatusInfo | null }) {
   if (!status) return <span className="text-xs text-zinc-600">LLM …</span>
   const ok = status.llm_configured
+  const thinkingEffort = status.llm_thinking_effort || '模型默认'
   return (
     <div className="hidden items-center gap-1.5 text-xs text-zinc-400 xl:flex">
       <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-      LLM <span className="font-mono text-zinc-200">{`${status.llm_provider} · ${status.llm_model}`}</span>
+      LLM{' '}
+      <span className="font-mono text-zinc-200">
+        {`${status.llm_provider} · ${status.llm_model}（${status.llm_credential_name} / ${thinkingEffort}）`}
+      </span>
       <span className={ok ? 'text-emerald-400/90' : 'font-semibold text-amber-300'}>
         {ok ? '已配置' : '未配置'}
       </span>

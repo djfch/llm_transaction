@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from src.agent.providers.mock import MockProvider
 from src.bootstrap import AppContext, build_app
@@ -24,6 +25,8 @@ from src.config import (
     Settings,
     Watchlist,
 )
+from src.config_io import write_settings
+from src.server.app import create_app
 
 BTC = "BTC_USDT"
 WATCHLIST = Watchlist(contracts=[BTC])
@@ -176,6 +179,59 @@ async def test_llm_reconfigure_recovers_after_key_saved(no_llm_key, build_ctx, m
     assert ctx.loop.llm_configured is True
 
 
+async def test_status_keeps_active_trader_model_when_reconfigure_fails(
+    no_dual_llm_key, build_ctx, monkeypatch, tmp_path
+):
+    """切换到缺少密钥的凭证失败后，状态接口继续展示实际生效的旧模型。
+
+    参数：
+        no_dual_llm_key: None，已清空多凭证密钥的环境隔离夹具
+        build_ctx: Callable[..., AppContext]，构建并自动清理应用上下文的夹具工厂
+        monkeypatch: pytest.MonkeyPatch，用于逐步补齐新凭证密钥
+        tmp_path: Path，隔离公开配置与密钥写接口的临时目录
+
+    返回：
+        None，断言失败时保留旧模型，补齐密钥成功后才切换状态摘要
+    """
+    monkeypatch.setenv("LLM_KEY_MAIN", "sk-main")
+    settings = _active_status_settings()
+    config_path = tmp_path / "config.yaml"
+    write_settings(settings.model_dump(), config_path)
+    ctx = await build_ctx(settings, mock_llm=False)
+    deps = ctx.server_deps
+    assert deps is not None and deps.llm_reconfigure is not None
+    deps.config_path = config_path
+    deps.env_path = tmp_path / ".env"
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(deps)), base_url="http://test"
+    ) as client:
+        config = (await client.get("/api/config")).json()
+        config["agents"]["trader"]["credential"] = "broken"
+        changed = await client.put("/api/config", json=config)
+        assert changed.status_code == 200
+        assert changed.json()["llm_configured"] is True
+        assert "trader" in changed.json()["llm_error"]
+        _assert_llm_status(
+            (await client.get("/api/status")).json(),
+            name="main",
+            provider="anthropic",
+            model="deepseek-v4-flash",
+            effort="",
+        )
+
+        repaired = await client.post(
+            "/api/secrets", json={"credential": "broken", "api_key": "sk-fixed"}
+        )
+        assert repaired.json() == {"saved": True, "llm_configured": True, "error": ""}
+        _assert_llm_status(
+            (await client.get("/api/status")).json(),
+            name="broken",
+            provider="openai_compat",
+            model="deepseek-v4-pro",
+            effort="high",
+        )
+
+
 async def test_llm_reconfigure_short_circuits_in_mock(build_ctx):
     """mock_llm：直接回报已配置（不重建真实 provider）。
 
@@ -262,6 +318,49 @@ def _dual_settings() -> Settings:
     )
 
 
+def _active_status_settings() -> Settings:
+    """构造可验证旧模型保留与新模型成功切换的双凭证配置。
+
+    参数：无
+
+    返回：
+        Settings，三个 Agent 初始共用 main，broken 凭证等待切换
+    """
+    settings = _dual_settings()
+    settings.llm.credentials[0].model = "deepseek-v4-flash"
+    settings.llm.credentials.append(
+        CredentialConfig(
+            name="broken",
+            provider="openai_compat",
+            model="deepseek-v4-pro",
+            thinking_effort="high",
+            api_key_env="LLM_KEY_BROKEN",
+        )
+    )
+    settings.agents.reviewer.credential = "main"
+    return settings
+
+
+def _assert_llm_status(status: dict, *, name: str, provider: str, model: str, effort: str) -> None:
+    """断言状态接口完整返回实际生效的 trader 凭证摘要。
+
+    参数：
+        status: dict，GET /api/status 的 JSON 响应
+        name: str，预期凭证名称
+        provider: str，预期提供商
+        model: str，预期模型名称
+        effort: str，预期思考强度
+
+    返回：
+        None，通过断言冻结凭证四字段及已配置状态
+    """
+    assert status["llm_credential_name"] == name
+    assert status["llm_provider"] == provider
+    assert status["llm_model"] == model
+    assert status["llm_thinking_effort"] == effort
+    assert status["llm_configured"] is True
+
+
 @pytest.fixture
 def no_dual_llm_key(no_llm_key, monkeypatch: pytest.MonkeyPatch) -> None:
     """在 no_llm_key 基础上再清掉多凭证环境变量。
@@ -273,7 +372,7 @@ def no_dual_llm_key(no_llm_key, monkeypatch: pytest.MonkeyPatch) -> None:
     返回：
         None，执行上述模拟操作或副作用，无返回值
     """
-    for name in ("LLM_KEY_MAIN", "LLM_KEY_REVIEW"):
+    for name in ("LLM_KEY_MAIN", "LLM_KEY_REVIEW", "LLM_KEY_BROKEN"):
         monkeypatch.delenv(name, raising=False)
 
 

@@ -505,6 +505,57 @@ async def test_put_credential_updates_model_and_base_url(client: AsyncClient, de
     assert runtime.model == "deepseek-v4-flash"  # 运行时原地生效
 
 
+async def test_put_trader_credential_updates_status_summary(client: AsyncClient):
+    """编辑决策 Agent 当前凭证后，状态接口立即返回该凭证的完整模型摘要。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过公开凭证与状态接口断言模型、凭证名和思考强度同步生效
+    """
+    response = await client.put(
+        "/api/credentials/default",
+        json={
+            "provider": "openai_compat",
+            "model": "deepseek-v4-pro",
+            "max_tokens": 8192,
+            "openai_base_url": "https://api.deepseek.example/v1",
+            "thinking_effort": "high",
+        },
+    )
+    assert response.status_code == 200
+
+    status = (await client.get("/api/status")).json()
+    assert status["llm_credential_name"] == "default"
+    assert status["llm_provider"] == "openai_compat"
+    assert status["llm_model"] == "deepseek-v4-pro"
+    assert status["llm_thinking_effort"] == "high"
+
+
+async def test_put_unassigned_credential_keeps_trader_status(client: AsyncClient):
+    """编辑未分配凭证时，首页继续展示决策 Agent 当前绑定的 default 凭证。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None，通过公开凭证与状态接口断言未分配凭证不会污染决策状态
+    """
+    await _create(client, "backup", model="backup-v1")
+    response = await client.put(
+        "/api/credentials/backup",
+        json={"provider": "anthropic", "model": "backup-v2", "thinking_effort": "max"},
+    )
+    assert response.status_code == 200
+
+    status = (await client.get("/api/status")).json()
+    assert status["llm_credential_name"] == "default"
+    assert status["llm_provider"] == "anthropic"
+    assert status["llm_model"] == "claude-sonnet-4-5"
+    assert status["llm_thinking_effort"] == ""
+
+
 async def test_put_credential_blank_key_keeps_env(client: AsyncClient, deps: ServerDeps):
     """验证编辑凭证时留空密钥不会覆盖文件和进程中的原密钥。
 

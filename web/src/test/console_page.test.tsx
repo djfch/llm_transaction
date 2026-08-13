@@ -13,8 +13,10 @@ const STATUS: StatusInfo = {
   mode: 'paper',
   uptime_seconds: 3600,
   kill_switch: false,
+  llm_credential_name: 'default',
   llm_provider: 'anthropic',
   llm_model: 'claude-sonnet',
+  llm_thinking_effort: '',
   llm_configured: true,
   agent_running: true,
 }
@@ -71,6 +73,7 @@ const DETAIL: RoundDetail = {
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */
 const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
+  getStatus: vi.fn(() => Promise.resolve(STATUS)),
   getPortfolio: vi.fn(() =>
     Promise.resolve({
       asOf: '2026-07-20T00:00:01Z',
@@ -109,7 +112,7 @@ const holder = vi.hoisted(() => ({
 
 vi.mock('../api', () => ({
   api: {
-    getStatus: () => Promise.resolve(STATUS),
+    getStatus: () => holder.getStatus(),
     getPortfolio: () => holder.getPortfolio(),
     getOpenOrders: () => holder.getOpenOrders(),
     getAlerts: () => holder.getAlerts(),
@@ -334,7 +337,7 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(holder.getStrategy.mock.calls.length).toBe(strategyBase + 1)
   })
 
-  it('关闭配置抽屉 → 策略面板重拉（closeConfig → bumpStrategy）', async () => {
+  it('关闭配置抽屉 → 顶部状态与策略面板同时重拉', async () => {
     render(<ConsolePage />)
     await screen.findByText(/账户 · PAPER/)
 
@@ -342,10 +345,12 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开配置中心' }))
     await screen.findByLabelText('system_prompt 内容')
     const beforeClose = holder.getStrategy.mock.calls.length
+    const statusBeforeClose = holder.getStatus.mock.calls.length
 
     fireEvent.click(screen.getByRole('button', { name: '关闭配置中心' }))
 
-    // 关闭走 closeConfig → bumpStrategy：策略面板重拉（+1），抽屉自身不额外请求
+    // 关闭后重新获取状态，确保凭证编辑立即反映到 TopBar；策略面板也同步重拉。
+    await waitFor(() => expect(holder.getStatus.mock.calls.length).toBe(statusBeforeClose + 1))
     await waitFor(() => expect(holder.getStrategy.mock.calls.length).toBe(beforeClose + 1))
   })
 

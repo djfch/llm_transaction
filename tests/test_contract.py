@@ -1,7 +1,7 @@
 """前后端契约测试：冻结前端消费的全部 REST 端点响应键与类型（进常规 pytest 套件）。
 
 契约表（与 web/src/api/types.ts 对齐，前端类型变更必须同步本表）：
-- GET  /api/status → mode/uptime_seconds/kill_switch/agent_running/llm_provider/llm_model/llm_configured
+- GET  /api/status → mode/uptime_seconds/kill_switch/agent_running/llm_credential_name/llm_provider/llm_model/llm_thinking_effort/llm_configured
 - GET  /api/account → available/unrealised_pnl/equity（equity 必在，前端 AccountInfo 契约）
 - GET  /api/positions → 元素含 contract/size/entry_price/mark_price/leverage/margin/unrealised_pnl/liq_price/stop_loss_price/take_profit_price
 - GET  /api/portfolio → as_of/account/positions（同一时点的账户与持仓组合快照）
@@ -443,7 +443,8 @@ async def test_status_account_positions_contract(client: AsyncClient):
     _typed(
         body,
         "mode:s uptime_seconds:n kill_switch:b agent_running:b "
-        "llm_provider:s llm_model:s llm_configured:b",
+        "llm_credential_name:s llm_provider:s llm_model:s "
+        "llm_thinking_effort:s llm_configured:b",
         "/api/status",
     )
     body = await _get(client, "/api/account")

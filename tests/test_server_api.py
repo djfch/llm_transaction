@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from fastapi.testclient import TestClient
 
 from src.audit.trail import AuditTrail
-from src.config import AuditConfig
+from src.config import AuditConfig, Settings
 from src.config_io import write_settings
 from src.gateway.base import Account, Position
 from src.market.triggers import TriggerManager
@@ -178,10 +178,80 @@ async def test_status(client: AsyncClient):
         "uptime_seconds": 12,
         "kill_switch": False,
         "agent_running": False,  # status_provider 未提供时缺省 False
+        "llm_credential_name": "default",
         "llm_provider": "anthropic",
         "llm_model": "claude-sonnet-4-5",
+        "llm_thinking_effort": "",
         "llm_configured": False,  # status_provider 未提供时缺省 False
     }
+
+
+async def test_status_legacy_flat_llm_resolves_default_credential(
+    client: AsyncClient, deps: ServerDeps
+):
+    """旧平铺 LLM 配置仍解析为 default 凭证并保留非空思考强度。
+
+    参数：
+        client: AsyncClient，ASGI 测试客户端夹具
+        deps: ServerDeps，提供隔离配置文件路径的服务器依赖
+
+    返回：
+        None，通过状态接口断言旧配置无需迁移即可返回完整决策凭证摘要
+    """
+    write_settings(
+        {
+            "llm": {
+                "provider": "openai_compat",
+                "model": "deepseek-v4-pro",
+                "openai_base_url": "https://api.deepseek.example/v1",
+                "thinking_effort": "high",
+            }
+        },
+        deps.config_path,
+    )
+
+    status = (await client.get("/api/status")).json()
+    assert status["llm_credential_name"] == "default"
+    assert status["llm_provider"] == "openai_compat"
+    assert status["llm_model"] == "deepseek-v4-pro"
+    assert status["llm_thinking_effort"] == "high"
+
+
+async def test_status_prefers_runtime_trader_credential_when_file_is_stale_or_invalid(
+    client: AsyncClient, deps: ServerDeps
+):
+    """状态接口始终以共享运行配置中的决策凭证为准，不受旧文件阻断。
+
+    参数：
+        client: AsyncClient，ASGI 测试客户端夹具
+        deps: ServerDeps，提供共享运行配置和隔离配置文件路径的服务依赖
+
+    返回：
+        None，先断言运行中 Pro 凭证覆盖文件默认值，再断言损坏文件不影响运行状态
+    """
+    deps.runtime_settings = Settings.model_validate(
+        {
+            "llm": {
+                "credentials": [
+                    {
+                        "name": "default",
+                        "provider": "openai_compat",
+                        "model": "deepseek-v4-pro",
+                        "thinking_effort": "high",
+                    }
+                ]
+            }
+        }
+    )
+
+    status = (await client.get("/api/status")).json()
+    assert status["llm_model"] == "deepseek-v4-pro"
+    assert status["llm_thinking_effort"] == "high"
+
+    deps.config_path.write_text("mode: [invalid", encoding="utf-8")
+    status = (await client.get("/api/status")).json()
+    assert status["llm_model"] == "deepseek-v4-pro"
+    assert status["llm_thinking_effort"] == "high"
 
 
 async def test_account_and_positions(client: AsyncClient):
