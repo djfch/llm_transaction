@@ -141,6 +141,24 @@ async def test_parse_error_retried_same_params_then_raise() -> None:
     assert inner.calls[0] == inner.calls[1] == inner.calls[2]
 
 
+async def test_retry_preserves_every_failed_response_raw() -> None:
+    """验证重试成功或耗尽时都保留每次已收到但解析失败的原始响应。
+
+    参数：无
+
+    返回：
+        None，断言成功响应和最终异常的 raw 均按尝试顺序包含失败原文
+    """
+    first = LLMParseError("坏 JSON", raw="raw-bad-1")
+    success = await _wrap(_ScriptedProvider([first, _OK])).chat("sys", _MESSAGES, _TOOLS)
+    assert success.raw == "raw-bad-1\nraw-ok"
+
+    errors = [LLMParseError(f"坏 JSON {i}", raw=f"raw-bad-{i}") for i in range(1, 4)]
+    with pytest.raises(LLMParseError) as caught:
+        await _wrap(_ScriptedProvider(errors)).chat("sys", _MESSAGES, _TOOLS)
+    assert caught.value.raw == "raw-bad-1\nraw-bad-2\nraw-bad-3"
+
+
 async def test_unexpected_exception_also_retried() -> None:
     """验证非模型异常同样参与重试且第三次成功时正常放行。
 

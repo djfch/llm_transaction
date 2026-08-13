@@ -11,6 +11,7 @@ from datetime import datetime
 
 import pytest
 
+from src.agent.providers.base import LLMError
 from src.audit.logger import get_logger  # noqa: F401  （确保日志初始化）
 from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
@@ -497,7 +498,7 @@ async def test_provider_chat_raises_falls_to_error(
             异常：
                 RuntimeError: 测试场景主动触发该失败条件时抛出
             """
-            raise RuntimeError("LLM 服务不可用")
+            raise LLMError("LLM 服务不可用", raw='{"output":"已收到"}')
 
         def tool_result_message(self, call, result):
             """构造模型可消费的工具结果消息。
@@ -513,11 +514,12 @@ async def test_provider_chat_raises_falls_to_error(
 
     agent = await _build_agent(repo, settings, _RaisingProvider(), tmp_path)
     result = await agent.run()
-    assert result["ok"] is False and "RuntimeError" in result["error"]
+    assert result["ok"] is False and "LLMError" in result["error"]
     report = await repo.research.latest_report(include_error=True)
     assert report is not None and report.error != ""
     audit_round = await repo.latest_audit_round("paper")
     assert audit_round is not None and audit_round.error != ""
+    assert audit_round.llm_raw == '{"output":"已收到"}'
 
 
 async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path) -> None:

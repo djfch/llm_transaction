@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from src.agent.providers.base import LLMProvider, LLMResponse, ToolCall
 from src.audit.logger import get_logger
@@ -60,11 +61,17 @@ class RetryingProvider:
             Exception: 所有尝试均失败时重新抛出最后一次底层异常
         """
         last: Exception | None = None
+        failed_raws: list[str] = []
         for attempt in range(self._max_attempts):
             try:
-                return await self._inner.chat(system, messages, tools)
+                response = await self._inner.chat(system, messages, tools)
+                if failed_raws:
+                    response = replace(response, raw="\n".join([*failed_raws, response.raw]))
+                return response
             except Exception as exc:
                 last = exc
+                if raw := getattr(exc, "raw", ""):
+                    failed_raws.append(raw)
                 if attempt >= self._max_attempts - 1:
                     break
                 delay = self._delay(attempt)
@@ -78,6 +85,8 @@ class RetryingProvider:
                 )
                 await asyncio.sleep(delay)
         assert last is not None  # max_attempts ≥ 1，循环至少执行一次
+        if failed_raws:
+            setattr(last, "raw", "\n".join(failed_raws))
         raise last
 
     def _delay(self, attempt: int) -> float:

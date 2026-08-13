@@ -82,7 +82,12 @@ class AnthropicProvider:
             resp = await self._client.messages.create(**req)
         except anthropic.APIError as e:
             raise LLMError(f"Anthropic API 错误: {e}") from e
-        return self._parse(resp)
+        raw = resp.model_dump_json()
+        try:
+            return self._parse(resp)
+        except Exception as exc:
+            setattr(exc, "raw", raw)
+            raise
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
         """把一次工具执行结果包装成 Anthropic 原生 tool_result 消息，供回填继续对话。

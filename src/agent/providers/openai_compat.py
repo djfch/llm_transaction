@@ -85,7 +85,12 @@ class OpenAICompatProvider:
             )
         except openai.APIError as e:
             raise LLMError(f"OpenAI 兼容 API 错误: {e}") from e
-        return self._parse(resp)
+        raw = resp.model_dump_json()
+        try:
+            return self._parse(resp)
+        except Exception as exc:
+            setattr(exc, "raw", raw)
+            raise
 
     def tool_result_message(self, call: ToolCall, result: str) -> dict:
         """把一次工具执行结果包装成 OpenAI 原生 tool 消息，供回填 messages 继续对话。

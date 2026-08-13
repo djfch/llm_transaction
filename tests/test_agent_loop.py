@@ -518,7 +518,7 @@ async def test_parse_failure_no_trade(env: SimpleNamespace):
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    provider = MockProvider([LLMParseError("工具参数不是合法 JSON")])
+    provider = MockProvider([LLMParseError("工具参数不是合法 JSON", raw='{"bad":"reply"}')])
     loop = _make_loop(env, provider)
     result = await loop.run_once("price_alert")
 
@@ -527,6 +527,7 @@ async def test_parse_failure_no_trade(env: SimpleNamespace):
     assert loop.consecutive_failures == 1
     round_row = await env.repo.get_audit_round(result.round_id)
     assert round_row is not None and "LLMParseError" in round_row.error
+    assert round_row.llm_raw == '{"bad":"reply"}'
     assert round_row.ended_at is not None
     assert await env.repo.list_audit_tool_calls(result.round_id) == []
     decisions = await env.repo.list_decisions()  # 失败轮也落决策记录

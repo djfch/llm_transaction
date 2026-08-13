@@ -310,7 +310,13 @@ class ReviewAgent:
         schemas = registry.schemas()
         text, seq = "", 0
         for _ in range(self._max_turns):
-            resp = await self._provider.chat(prompt, messages, schemas)
+            try:
+                resp = await self._provider.chat(prompt, messages, schemas)
+            except Exception as exc:
+                if failed_raw := getattr(exc, "raw", ""):
+                    raw_parts.append(failed_raw)
+                    await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
+                raise
             raw_parts.append(resp.raw)
             await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             if resp.assistant_message is not None:

@@ -296,7 +296,11 @@ class ResearchAgent:
         schemas = registry.schemas()
         text, seq = "", 0
         for _ in range(self._max_turns):
-            resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
+            try:
+                resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
+            except Exception as exc:
+                await self._record_failed_raw(round_id, raw_parts, exc)
+                raise
             raw_parts.append(resp.raw)
             await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             prefix = list(messages)  # 本轮请求所用上下文快照
@@ -408,7 +412,11 @@ class ResearchAgent:
             tuple[str, list[dict]]：以同一上下文前缀原样重发，返回 (新一轮最终文本, 该文本的真实产生上下文)
         """
         messages = list(ask_messages)
-        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        try:
+            resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        except Exception as exc:
+            await self._record_failed_raw(round_id, raw_parts, exc)
+            raise
         raw_parts.append(resp.raw)
         await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         if resp.assistant_message is not None:
@@ -430,10 +438,29 @@ class ResearchAgent:
                 duration_ms=0,
             )
             messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
-        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        try:
+            resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        except Exception as exc:
+            await self._record_failed_raw(round_id, raw_parts, exc)
+            raise
         raw_parts.append(resp.raw)
         await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         return resp.text, messages
+
+    async def _record_failed_raw(self, round_id: str, raw_parts: list[str], exc: Exception) -> None:
+        """把供应商已返回但解析失败的原始响应补进当前审计轮。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+            raw_parts: list[str]，截至当前累计的模型原始响应
+            exc: Exception，可能携带 raw 属性的供应商异常
+
+        返回：
+            None，有原始响应时追加列表并实时更新审计；无内容时不写
+        """
+        if failed_raw := getattr(exc, "raw", ""):
+            raw_parts.append(failed_raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
 
     async def _fail(
         self, round_id: str, raw_parts: list[str], report_type: str, exc: Exception

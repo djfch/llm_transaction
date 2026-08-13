@@ -379,11 +379,12 @@ async def test_drain_round_emits_event_only_when_fills(tmp_path):
     env = await _make_paper_loop(tmp_path, provider, events)
     try:
         assert (await env.loop.run_once("timer")).ok
-        assert events == [
+        trade_events = [event for event in events if event["type"] == "trades_updated"]
+        assert trade_events == [
             {"type": "trades_updated", "data": {"contracts": ["BTC_USDT"], "count": 1}}
         ]
         assert (await env.loop.run_once("timer")).ok
-        assert len(events) == 1  # 第二轮无成交，不新增事件
+        assert len([event for event in events if event["type"] == "trades_updated"]) == 1
     finally:
         await env.db.close()
 

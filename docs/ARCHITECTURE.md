@@ -179,15 +179,16 @@ sequenceDiagram
 
     WakeSource->>Scheduler: wake_now(wake_source) 或定时器到期
     Scheduler->>Callback: on_wake(wake_source)
-    Callback->>Queue: round_start(决策开始)
     Callback->>Decision: run_once(wake_source)
     Decision->>Audit: begin_round(创建审计轮)
+    Decision->>Queue: round_start(审计行已可查询)
     Decision->>Context: 构建账户、持仓、行情、笔记、成交上下文
     Context-->>Decision: context_text(完整上下文)
     Decision->>Audit: record_context(记录上下文)
     loop 最多 max_turns(最大工具轮次)
         Decision->>LLM: system prompt + messages + tools
         LLM-->>Decision: 文本或 tool_calls(工具调用)
+        Decision->>Audit: record_llm_raw(实时累计原始响应)
         Decision->>Tools: execute(name, args)
         alt 下单或改单
             Tools->>Risk: check(trade_intent)
@@ -325,7 +326,7 @@ flowchart LR
 
 ## 9. 持久化与审计模型
 
-默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。每轮结束时，`AuditTrail(审计追踪器)` 还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
+默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。模型每返回一轮响应，`AuditTrail(审计追踪器)` 会先实时更新 `audit_rounds.llm_raw(模型原始响应)`，再允许执行该轮工具；解析失败时已收到的原始响应仍会保留。每轮结束时还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
 
 | 表 | 具体含义 | 关键字段 |
 | --- | --- | --- |

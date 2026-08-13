@@ -344,24 +344,27 @@ async def test_status_provider_includes_in_round(build_ctx):
 
 
 async def test_on_wake_pushes_round_start_then_round(build_ctx):
-    """验证一次唤醒先发送决策轮开始事件再发送决策轮结束事件。
+    """验证开始事件发出时新审计行已存在，随后才发送结束事件。
 
     参数：
         build_ctx: Callable，应用上下文异步构建夹具
 
     返回：
-        None，通过断言验证事件顺序与唤醒来源
+        None，断言事件顺序、唤醒来源及 round_start 对应审计行已可查询
     """
     ctx = await build_ctx()  # fixture 默认 mock_llm + mock_market
     await ctx.scheduler.start()
     try:
         ctx.scheduler.wake_now("test_event_order")
         first = await asyncio.wait_for(ctx.event_queue.get(), timeout=5)
+        started = await ctx.repo.get_audit_round(first["data"]["round_id"])
         second = await asyncio.wait_for(ctx.event_queue.get(), timeout=5)
     finally:
         await ctx.scheduler.stop()
     assert first["type"] == "round_start"
     assert first["data"]["wake_source"] == "test_event_order"
+    assert started is not None
+    assert started.ended_at is None
     assert second["type"] == "round"
 
 

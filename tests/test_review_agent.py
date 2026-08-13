@@ -269,7 +269,7 @@ async def test_run_llm_failure_lands_error_report(env):
     返回：
         None，通过断言验证上述行为，无返回值
     """
-    provider = StubProvider([LLMError("boom")])
+    provider = StubProvider([LLMError("boom", raw='{"reasoning_content":"已收到"}')])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is False and "LLMError: boom" in result["error"]
     report = await env.repo.review.get_review_report(result["report_id"])
@@ -278,6 +278,7 @@ async def test_run_llm_failure_lands_error_report(env):
     assert report.round_id == result["round_id"]  # 失败轮同样关联审计轮（便于排查）
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.error == "LLMError: boom"
+    assert round_row.llm_raw == '{"reasoning_content":"已收到"}'
     assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]
     # 失败路径也发齐两条事件，尾部 review_round 带 ok=False
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
