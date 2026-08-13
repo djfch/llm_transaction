@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AppConfig } from '../api/types'
 import AgentCredentialsForm from '../pages/config/AgentCredentialsForm'
 
-/** 配置夹具：agents 段已分配（决策 claude-main / 复盘 deepseek-backup） */
+/** 配置夹具：三个 Agent 分别回显其当前凭证分配。 */
 const CONFIG: AppConfig = {
   mode: 'paper',
   llm: {
@@ -38,7 +38,11 @@ const CONFIG: AppConfig = {
       },
     ],
   },
-  agents: { trader: { credential: 'claude-main' }, reviewer: { credential: 'deepseek-backup' } },
+  agents: {
+    trader: { credential: 'claude-main' },
+    reviewer: { credential: 'deepseek-backup' },
+    researcher: { credential: 'deepseek-backup' },
+  },
   risk: {
     max_position_pct: 0.3,
     max_total_position_pct: 0.8,
@@ -55,19 +59,22 @@ const CONFIG: AppConfig = {
 const NAMES = ['claude-main', 'deepseek-backup']
 
 describe('AgentCredentialsForm(凭证分配)', () => {
-  it('两个下拉渲染凭证选项并回显 agents 段初值', () => {
+  it('三个下拉渲染凭证选项并回显 agents 段初值', () => {
     render(<AgentCredentialsForm initial={CONFIG} credentialNames={NAMES} onSave={vi.fn()} />)
 
     const trader = screen.getByLabelText('agents.trader.credential') as HTMLSelectElement
     const reviewer = screen.getByLabelText('agents.reviewer.credential') as HTMLSelectElement
+    const researcher = screen.getByLabelText('agents.researcher.credential') as HTMLSelectElement
     expect(trader.value).toBe('claude-main')
     expect(reviewer.value).toBe('deepseek-backup')
-    for (const select of [trader, reviewer]) {
+    expect(researcher.value).toBe('deepseek-backup')
+    for (const select of [trader, reviewer, researcher]) {
       expect(withinOptions(select)).toEqual(NAMES)
     }
     // 中文释义提示
     expect(screen.getByText(/决策 agent/)).toBeInTheDocument()
     expect(screen.getByText(/复盘 agent/)).toBeInTheDocument()
+    expect(screen.getByText(/研报 agent/)).toBeInTheDocument()
   })
 
   it('无 credentials 的旧配置：选项仅 default，缺省选中 default', () => {
@@ -75,15 +82,36 @@ describe('AgentCredentialsForm(凭证分配)', () => {
     render(<AgentCredentialsForm initial={legacy} credentialNames={[]} onSave={vi.fn()} />)
 
     const trader = screen.getByLabelText('agents.trader.credential') as HTMLSelectElement
+    const researcher = screen.getByLabelText('agents.researcher.credential') as HTMLSelectElement
     expect(withinOptions(trader)).toEqual(['default'])
     expect(trader.value).toBe('default')
+    expect(researcher.value).toBe('default')
+  })
+
+  it('agents 仅包含部分 Agent 时，其余下拉安全回退 default', () => {
+    const partial: AppConfig = {
+      ...CONFIG,
+      agents: { researcher: { credential: 'deepseek-backup' } },
+    }
+
+    render(<AgentCredentialsForm initial={partial} credentialNames={NAMES} onSave={vi.fn()} />)
+
+    expect(
+      (screen.getByLabelText('agents.trader.credential') as HTMLSelectElement).value,
+    ).toBe('default')
+    expect(
+      (screen.getByLabelText('agents.reviewer.credential') as HTMLSelectElement).value,
+    ).toBe('default')
+    expect(
+      (screen.getByLabelText('agents.researcher.credential') as HTMLSelectElement).value,
+    ).toBe('deepseek-backup')
   })
 
   it('保存：onSave 收到写入 agents 段的完整配置（其余段原样透传）', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<AgentCredentialsForm initial={CONFIG} credentialNames={NAMES} onSave={onSave} />)
 
-    fireEvent.change(screen.getByLabelText('agents.reviewer.credential'), {
+    fireEvent.change(screen.getByLabelText('agents.researcher.credential'), {
       target: { value: 'claude-main' },
     })
     fireEvent.click(screen.getByRole('button', { name: '保存凭证分配' }))
@@ -92,7 +120,8 @@ describe('AgentCredentialsForm(凭证分配)', () => {
     const sent = onSave.mock.calls[0][0] as AppConfig
     expect(sent.agents).toEqual({
       trader: { credential: 'claude-main' },
-      reviewer: { credential: 'claude-main' },
+      reviewer: { credential: 'deepseek-backup' },
+      researcher: { credential: 'claude-main' },
     })
     expect(sent.llm).toEqual(CONFIG.llm)
     expect(sent.risk).toEqual(CONFIG.risk)

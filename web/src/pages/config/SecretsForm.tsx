@@ -160,7 +160,7 @@ export default function SecretsForm({
       ) : (
         <>
           <p className="rounded-lg border border-white/5 bg-zinc-900/60 px-3 py-2 text-[10px] text-zinc-500">
-            当前为旧版单凭证（default）配置：下方直接保存 Key 即可，决策与复盘 agent 共用该凭证；
+            当前为旧版单凭证（default）配置：下方直接保存 Key 即可，决策、复盘与研报 agent 共用该凭证；
             在 config.yaml 的 llm.credentials 登记多条凭证后，此处将切换为凭证管理界面。
           </p>
           <LlmKeyForm configured={status.llm_key} onSaved={onSaved} />

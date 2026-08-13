@@ -23,7 +23,7 @@ const { createCredential, updateCredential, deleteCredential } = vi.hoisted(() =
 }))
 vi.mock('../api', () => ({ api: { createCredential, updateCredential, deleteCredential } }))
 
-/** 多凭证状态夹具：claude-main 已配置且被决策引用；deepseek-backup 未配置、未被引用 */
+/** 多凭证状态夹具：claude-main 已配置且被决策与研报引用。 */
 const STATUS: SecretsStatus = {
   gate_key: true,
   llm_key: true,
@@ -35,7 +35,7 @@ const STATUS: SecretsStatus = {
       model: 'claude-sonnet-4-5',
       api_key_env: 'LLM_KEY_CLAUDE_MAIN',
       key_configured: true,
-      used_by: ['trader'],
+      used_by: ['trader', 'researcher'],
     },
     {
       name: 'deepseek-backup',
@@ -116,6 +116,7 @@ describe('SecretsForm(凭证管理) · 列表渲染', () => {
     const main = rowOf('claude-main')
     expect(within(main).getByText(/anthropic · claude-sonnet-4-5 · LLM_KEY_CLAUDE_MAIN/)).toBeInTheDocument()
     expect(within(main).getByText('决策')).toBeInTheDocument() // trader 徽标只保留中文释义
+    expect(within(main).getByText('研报')).toBeInTheDocument()
     expect(within(main).getByText('已配置')).toBeInTheDocument()
 
     const backup = rowOf('deepseek-backup')
@@ -332,7 +333,7 @@ describe('SecretsForm(凭证管理) · 编辑凭证', () => {
           model: 'claude-sonnet-4-5',
           api_key_env: 'ANTHROPIC_API_KEY',
           key_configured: true,
-          used_by: ['trader', 'reviewer'],
+          used_by: ['trader', 'reviewer', 'researcher'],
         },
       ],
     }

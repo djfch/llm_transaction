@@ -1,5 +1,5 @@
 /**
- * Agent 凭证分配：trader（决策 agent）/ reviewer（复盘 agent）各一个下拉，
+ * Agent 凭证分配：trader（决策）/ reviewer（复盘）/ researcher（研报）各一个下拉，
  * 选项来自凭证列表（旧配置无 credentials 时仅 default）；保存经 PUT /api/config 写 agents 段。
  * 表单为 props 驱动：选项与初值由宿主（ConfigDrawer）从 configQ/secretsQ 注入，
  * 保存结果（含 llm 热生效错误）由宿主统一展示，与常规设置同一模式。
@@ -15,7 +15,10 @@ const labelCls = 'mb-1 block text-[10px] text-zinc-500'
 const AGENT_HINTS = {
   trader: '决策 agent',
   reviewer: '复盘 agent',
+  researcher: '研报 agent',
 } as const
+
+type AgentId = keyof typeof AGENT_HINTS
 
 export default function AgentCredentialsForm({
   initial,
@@ -27,15 +30,23 @@ export default function AgentCredentialsForm({
   credentialNames: string[]
   onSave: (next: AppConfig) => Promise<void>
 }) {
-  const [trader, setTrader] = useState(initial.agents?.trader.credential ?? 'default')
-  const [reviewer, setReviewer] = useState(initial.agents?.reviewer.credential ?? 'default')
+  const [trader, setTrader] = useState(initial.agents?.trader?.credential ?? 'default')
+  const [reviewer, setReviewer] = useState(initial.agents?.reviewer?.credential ?? 'default')
+  const [researcher, setResearcher] = useState(
+    initial.agents?.researcher?.credential ?? 'default',
+  )
   const [pending, setPending] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // 选项 = 凭证列表（缺省 default）；并集入当前选中值，防御配置引用了列表外凭证时无法回显
   const options = Array.from(
-    new Set([...(credentialNames.length > 0 ? credentialNames : ['default']), trader, reviewer]),
+    new Set([
+      ...(credentialNames.length > 0 ? credentialNames : ['default']),
+      trader,
+      reviewer,
+      researcher,
+    ]),
   )
 
   const handleSave = async () => {
@@ -44,7 +55,11 @@ export default function AgentCredentialsForm({
     try {
       await onSave({
         ...initial,
-        agents: { trader: { credential: trader }, reviewer: { credential: reviewer } },
+        agents: {
+          trader: { credential: trader },
+          reviewer: { credential: reviewer },
+          researcher: { credential: researcher },
+        },
       })
       setSavedAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
     } catch (e) {
@@ -55,7 +70,7 @@ export default function AgentCredentialsForm({
   }
 
   const renderSelect = (
-    id: 'trader' | 'reviewer',
+    id: AgentId,
     value: string,
     onChange: (v: string) => void,
   ) => (
@@ -86,6 +101,7 @@ export default function AgentCredentialsForm({
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {renderSelect('trader', trader, setTrader)}
         {renderSelect('reviewer', reviewer, setReviewer)}
+        {renderSelect('researcher', researcher, setResearcher)}
       </div>
       <div className="flex items-center gap-3">
         <button

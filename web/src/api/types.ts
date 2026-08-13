@@ -303,9 +303,10 @@ export interface AppConfig {
     credentials?: CredentialConfig[] // 多凭证列表；缺失 = 旧版单凭证（default）配置
   }
   agents?: {
-    // 按 agent 分配凭证（缺失 = 旧配置，两者皆用 default 凭证）
-    trader: { credential: string } // 决策 agent 使用的凭证名
-    reviewer: { credential: string } // 复盘 agent 使用的凭证名
+    // 按 agent 分配凭证（缺失 = 旧配置，三个 Agent 均使用 default 凭证）
+    trader?: { credential: string } // 决策 agent 使用的凭证名；部分旧配置可能缺失
+    reviewer?: { credential: string } // 复盘 agent 使用的凭证名；部分旧配置可能缺失
+    researcher?: { credential: string } // 研报 agent 使用的凭证名；旧配置可能缺失
   }
   risk: RiskConfig
   scheduler: {
@@ -340,7 +341,7 @@ export interface CredentialStatus {
   model: string
   api_key_env: string // 该凭证 key 在服务器 .env 中的变量名
   key_configured: boolean // 该凭证的 key 是否已配置
-  used_by: string[] // 引用该凭证的 agent 名（trader=决策 / reviewer=复盘）
+  used_by: string[] // 引用该凭证的 agent 名（trader=决策 / reviewer=复盘 / researcher=研报）
 }
 
 /** 密钥配置状态：GET /api/secrets/status（只返回布尔与凭证状态，永不返回明文） */

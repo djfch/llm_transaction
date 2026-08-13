@@ -66,7 +66,7 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
         )}
       </DrawerSection>
 
-      <DrawerSection title="Agent 凭证分配 · 决策与复盘可各用一条 LLM 凭证" query={configQ}>
+      <DrawerSection title="Agent 凭证分配 · 决策、复盘与研报可各用一条 LLM 凭证" query={configQ}>
         {(config) => (
           <AgentCredentialsForm
             initial={config}

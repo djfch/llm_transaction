@@ -50,4 +50,21 @@ describe('mockApi · 凭证 thinking_effort 链路', () => {
     expect(updated?.thinking_effort).toBe('off')
     expect(updated?.max_tokens).toBe(8192) // 其余字段不受影响
   })
+
+  it('修改研报凭证分配后 used_by 引用方随配置更新', async () => {
+    const config = await mockApi.getConfig()
+    await mockApi.putConfig({
+      ...config,
+      agents: {
+        ...config.agents,
+        researcher: { credential: 'deepseek-backup' },
+      },
+    })
+
+    const status = await mockApi.getSecretsStatus()
+    const main = status.credentials?.find((item) => item.name === 'claude-main')
+    const backup = status.credentials?.find((item) => item.name === 'deepseek-backup')
+    expect(main?.used_by).not.toContain('researcher')
+    expect(backup?.used_by).toContain('researcher')
+  })
 })
