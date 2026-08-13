@@ -132,7 +132,7 @@ describe('buildConversation（完整对话构建）', () => {
     expect(msgs.at(-1)?.text).toBe('开多完成。')
   })
 
-  it('responses：reasoning 跳过、output_text 提取、function_call 转调用，顶层元数据不进对话', () => {
+  it('responses：空 reasoning 跳过、output_text 提取、function_call 转调用，顶层元数据不进对话', () => {
     const msgs = buildConversation(RESPONSES_RAW, [
       auditCall(1, 'get_candlesticks', '返回 24 根 K 线'),
     ])
@@ -187,5 +187,47 @@ describe('buildConversation（完整对话构建）', () => {
     expect(result?.riskVerdict).toBe('deny')
     expect(result?.riskReason).toBe('单仓超限')
     expect(result?.text).toBe('风控拒绝，未下单')
+  })
+
+  it('仅展示三种供应商实际返回的明文思考，忽略签名、脱敏块与密文', () => {
+    const anthropic = JSON.stringify({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'Anthropic 明文思考', signature: '不可展示签名' },
+        { type: 'redacted_thinking', data: '不可展示脱敏内容' },
+      ],
+    })
+    const compat = JSON.stringify({
+      choices: [{ message: { reasoning_content: '兼容接口明文推理', content: null } }],
+    })
+    const responses = JSON.stringify({
+      output: [
+        {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'Responses 推理摘要' }],
+          encrypted_content: '不可展示密文',
+        },
+      ],
+    })
+    const msgs = buildConversation([anthropic, compat, responses].join('\n'), [])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['reasoning', 'Anthropic 明文思考'],
+      ['reasoning', '兼容接口明文推理'],
+      ['reasoning', 'Responses 推理摘要'],
+    ])
+    const visible = msgs.map((m) => m.text).join(' ')
+    expect(visible).not.toContain('不可展示')
+  })
+
+  it('长工具参数与返回内容保持原文，不在对话构建阶段截断', () => {
+    const longArgs = '参'.repeat(3200)
+    const longResult = '果'.repeat(3600)
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 't1', name: 'get_market_data', input: { text: longArgs } }],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_market_data', longResult)])
+    expect(msgs.find((m) => m.kind === 'tool_call')?.text).toContain(longArgs)
+    expect(msgs.find((m) => m.kind === 'tool_result')?.text).toBe(longResult)
   })
 })

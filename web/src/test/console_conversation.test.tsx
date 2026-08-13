@@ -89,4 +89,15 @@ describe('ConversationThread 完整对话消息流', () => {
     const { container } = render(<ConversationThread llmRaw="" toolCalls={[]} />)
     expect(container).toBeEmptyDOMElement()
   })
+
+  it('明文思考以思考过程展示，不误标为工具调用', () => {
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: '先验证成交量，再决定是否开仓。' }],
+    })
+    render(<ConversationThread llmRaw={raw} toolCalls={[]} defaultOpen />)
+    expect(screen.getByText('ASSISTANT · 思考过程')).toBeInTheDocument()
+    expect(screen.getByText('先验证成交量，再决定是否开仓。')).toBeInTheDocument()
+    expect(screen.queryByText(/发起调用/)).not.toBeInTheDocument()
+  })
 })

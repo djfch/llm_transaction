@@ -11,7 +11,7 @@ import type { ToolCall } from '../api/types'
 /** 对话视图消息：assistant 的文本/工具调用 + user 角色的工具结果 */
 export interface ConversationMessage {
   role: 'assistant' | 'user'
-  kind: 'text' | 'tool_call' | 'tool_result'
+  kind: 'reasoning' | 'text' | 'tool_call' | 'tool_result'
   text: string // text: 思考/结论文本；tool_call: 工具名+参数摘要；tool_result: 返回内容
   toolName?: string
   riskVerdict?: string // tool_result 上携带，'deny' 时前端渲染红色
@@ -20,16 +20,9 @@ export interface ConversationMessage {
 
 /** 单回合解析产物：若干文本块 + 若干工具调用（参数已序列化为摘要文本） */
 interface AssistantTurn {
+  reasonings: string[]
   texts: string[]
   calls: Array<{ name: string; argsText: string }>
-}
-
-/** 摘要截断长度：参数/结果文本超过即截断，避免超长内容撑爆渲染 */
-const MAX_TEXT = 500
-
-/** 超长截断（末尾加省略号） */
-function clip(s: string): string {
-  return s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}…` : s
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -39,29 +32,32 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /** 参数摘要：对象 JSON 序列化，字符串原样，空值为 '' */
 function argsText(input: unknown): string {
   if (input == null) return ''
-  return clip(typeof input === 'string' ? input : JSON.stringify(input))
+  return typeof input === 'string' ? input : JSON.stringify(input)
 }
 
 /** 工具结果文本：字符串原样，对象 JSON 序列化 */
 function resultText(result: ToolCall['result']): string {
-  return clip(typeof result === 'string' ? result : JSON.stringify(result))
+  return typeof result === 'string' ? result : JSON.stringify(result)
 }
 
 /** OpenAI arguments 为 JSON 字符串：解析后重新序列化（去掉转义），失败则原样展示 */
 function openAiArgsText(args: unknown): string {
   if (typeof args !== 'string') return argsText(args)
   try {
-    return clip(JSON.stringify(JSON.parse(args)))
+    return JSON.stringify(JSON.parse(args))
   } catch {
-    return clip(args)
+    return args
   }
 }
 
-/** Anthropic 格式：{role:'assistant', content:[{type:'text'|'tool_use', ...}]} */
+/** Anthropic 格式：提取 thinking 明文；redacted_thinking/signature 不展示。 */
 function parseAnthropic(content: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { texts: [], calls: [] }
+  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
   for (const block of content) {
     if (!isRecord(block)) continue
+    if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+      turn.reasonings.push(block.thinking)
+    }
     if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
       turn.texts.push(block.text)
     }
@@ -77,7 +73,10 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   const first = choices[0]
   if (!isRecord(first) || !isRecord(first.message)) return null
   const msg = first.message
-  const turn: AssistantTurn = { texts: [], calls: [] }
+  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
+  if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+    turn.reasonings.push(msg.reasoning_content)
+  }
   if (typeof msg.content === 'string' && msg.content.trim()) turn.texts.push(msg.content)
   if (!Array.isArray(msg.tool_calls)) return turn
   for (const tc of msg.tool_calls) {
@@ -90,12 +89,23 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   return turn
 }
 
-/** OpenAI Responses 格式：{output:[{type:'message',content:[{type:'output_text',text}]}
- *  | {type:'function_call',name,arguments} | {type:'reasoning',...}（跳过）]} */
+/** OpenAI Responses 格式：reasoning 只提取 summary_text，encrypted_content 不展示。 */
 function parseResponses(output: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { texts: [], calls: [] }
+  const turn: AssistantTurn = { reasonings: [], texts: [], calls: [] }
   for (const item of output) {
     if (!isRecord(item)) continue
+    if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+      for (const summary of item.summary) {
+        if (
+          isRecord(summary) &&
+          summary.type === 'summary_text' &&
+          typeof summary.text === 'string' &&
+          summary.text.trim()
+        ) {
+          turn.reasonings.push(summary.text)
+        }
+      }
+    }
     if (item.type === 'message' && Array.isArray(item.content)) {
       for (const c of item.content) {
         if (isRecord(c) && c.type === 'output_text' && typeof c.text === 'string' && c.text.trim()) {
@@ -173,6 +183,9 @@ export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): Conver
   const msgs: ConversationMessage[] = []
   let ai = 0 // 审计消费指针：回合内第 k 个 tool_use 对应 audit 顺序第 k 条
   for (const turn of turns) {
+    for (const text of turn.reasonings) {
+      msgs.push({ role: 'assistant', kind: 'reasoning', text })
+    }
     for (const text of turn.texts) msgs.push({ role: 'assistant', kind: 'text', text })
     for (const call of turn.calls) {
       msgs.push({

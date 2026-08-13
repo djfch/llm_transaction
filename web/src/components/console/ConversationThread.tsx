@@ -8,12 +8,15 @@ import type { ToolCall } from '../../api/types'
 import type { ConversationMessage } from '../../utils/conversation'
 import { buildConversation } from '../../utils/conversation'
 
-/** assistant 消息卡：kind=text 显示思考/结论文本；kind=tool_call 显示「发起调用 工具名+参数摘要」 */
+/** assistant 消息卡：区分明文思考、回复文本与工具调用。 */
 function AssistantBubble({ msg }: { msg: ConversationMessage }) {
+  const isText = msg.kind === 'text' || msg.kind === 'reasoning'
   return (
     <div className="rounded-lg border border-violet-400/25 bg-violet-400/[.05] px-3 py-2">
-      <div className="mb-1 text-[10px] font-bold tracking-widest text-violet-300/90">ASSISTANT</div>
-      {msg.kind === 'text' ? (
+      <div className="mb-1 text-[10px] font-bold tracking-widest text-violet-300/90">
+        {msg.kind === 'reasoning' ? 'ASSISTANT · 思考过程' : 'ASSISTANT'}
+      </div>
+      {isText ? (
         <p className="whitespace-pre-wrap text-[12px] leading-5 text-zinc-300">{msg.text}</p>
       ) : (
         <p className="break-all font-mono text-[11px] leading-5 text-cyan-200/80">
