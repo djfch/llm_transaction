@@ -312,6 +312,7 @@ class ReviewAgent:
         for _ in range(self._max_turns):
             resp = await self._provider.chat(prompt, messages, schemas)
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
             text = resp.text

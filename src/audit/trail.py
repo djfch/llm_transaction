@@ -138,12 +138,24 @@ class AuditTrail:
             duration_ms=duration_ms,
         )
 
-    async def end_round(self, round_id: str, llm_raw: str, error: str = "") -> None:
+    async def record_llm_raw(self, round_id: str, llm_raw: str) -> None:
+        """实时保存截至当前收到的 LLM 原始响应全文，不结束本轮。
+
+        参数：
+            round_id: str，关联的审计轮次编号
+            llm_raw: str，本轮截至当前累计收到的 LLM 原始响应全文
+
+        返回：
+            None，更新审计主表的 llm_raw 字段
+        """
+        await self._repo.finish_audit_round(round_id, llm_raw, finish=False)
+
+    async def end_round(self, round_id: str, llm_raw: str | None, error: str = "") -> None:
         """结束一轮：补全 LLM 原始输出与异常信息，并写 JSON 全文快照。
 
         参数：
             round_id: str，关联的审计轮次编号
-            llm_raw: str，本轮 LLM 原始输出
+            llm_raw: str | None，本轮 LLM 原始输出；None 表示保留实时写入的内容
             error: str，需要记录的错误文本
 
         返回：

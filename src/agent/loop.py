@@ -292,6 +292,7 @@ class DecisionLoop:
         for _ in range(self._max_turns):
             resp = await self._provider.chat(prompt, messages, schemas)
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
             text = resp.text
@@ -369,7 +370,7 @@ class DecisionLoop:
             context_summary=ctx.summary if ctx else "",
             llm_raw="",
         )
-        await self._audit.end_round(round_id, "", error=error)
+        await self._audit.end_round(round_id, None, error=error)
         if self._consecutive_failures >= self._settings.llm.max_consecutive_failures:
             await self._engage_lock()
         return RoundResult(round_id=round_id, ok=False, wake_source=wake_source, error=error)

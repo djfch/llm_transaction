@@ -298,6 +298,7 @@ class ResearchAgent:
         for _ in range(self._max_turns):
             resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             prefix = list(messages)  # 本轮请求所用上下文快照
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
@@ -409,6 +410,7 @@ class ResearchAgent:
         messages = list(ask_messages)
         resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
         raw_parts.append(resp.raw)
+        await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         if resp.assistant_message is not None:
             messages.append(resp.assistant_message)
         if not resp.tool_calls:
@@ -430,6 +432,7 @@ class ResearchAgent:
             messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
         resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
         raw_parts.append(resp.raw)
+        await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         return resp.text, messages
 
     async def _fail(
