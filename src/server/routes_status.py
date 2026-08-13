@@ -158,15 +158,24 @@ def _equity_baseline(
     return equity_now - pnl_fee_sum, "account"
 
 
-def _trader_llm_status(settings: Settings) -> dict[str, str]:
-    """解析决策 Agent 当前绑定凭证并生成首页 LLM 状态摘要。
+def _trader_llm_status(settings: Settings, runtime: dict[str, Any]) -> dict[str, str]:
+    """优先读取实际已加载凭证，未接线时解析决策 Agent 当前配置。
 
     参数：
         settings: Settings，当前生效的完整运行配置
+        runtime: dict[str, Any]，运行状态提供器返回的实际 Provider 摘要
 
     返回：
-        dict[str, str]，包含凭证名、提供商、模型名和思考强度的状态字段
+        dict[str, str]，实际或配置回退的凭证名、提供商、模型名和思考强度
     """
+    keys = (
+        "llm_credential_name",
+        "llm_provider",
+        "llm_model",
+        "llm_thinking_effort",
+    )
+    if all(key in runtime for key in keys):
+        return {key: str(runtime[key]) for key in keys}
     credential_name = settings.agents.trader.credential
     credential = next(
         item for item in settings.llm.resolve_credentials() if item.name == credential_name
@@ -206,7 +215,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         """
         settings = deps.runtime_settings or load_settings(deps.config_path)
         runtime = deps.runtime_status()
-        llm_status = _trader_llm_status(settings)
+        llm_status = _trader_llm_status(settings, runtime)
         return {
             "mode": settings.mode,
             "uptime_seconds": runtime.get("uptime_seconds", 0),

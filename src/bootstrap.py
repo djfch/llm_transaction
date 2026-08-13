@@ -27,7 +27,7 @@ from src.agent.providers.mock import MockProvider
 from src.agent.ticker_fanout import make_on_ticker
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
-from src.config import ROOT, Settings, Watchlist
+from src.config import ROOT, CredentialConfig, Settings, Watchlist
 from src.config_io import read_settings_raw, write_settings
 from src.gateway.base import Candle, Contract, Gateway
 from src.gateway.gate_rest import GateRestGateway
@@ -74,6 +74,7 @@ class AppContext:
     candles: CandleCache
     triggers: TriggerManager
     watchlist: list[str]  # 与 DecisionLoop/ServerDeps 共享同一 list（前端改名单原地生效）
+    active_trader_credential: CredentialConfig | None = None
     started_at: float = field(default_factory=time.time)
     server: uvicorn.Server | None = None
     server_deps: ServerDeps | None = None
@@ -170,6 +171,9 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
             "error": 各 agent 失败原因（中文分号连接，空串表示全部成功）}
         """
         if mock_llm or os.environ.get("LLM_MOCK") == "1":
+            ctx.active_trader_credential = resolve_agent_credential(
+                ctx.settings, ctx.settings.agents.trader.credential
+            ).model_copy(deep=True)
             return {"llm_configured": True, "error": ""}
         targets = (
             ("trader", ctx.settings.agents.trader.credential, ctx.loop),
@@ -181,6 +185,8 @@ def _make_llm_reconfigure(ctx: AppContext, mock_llm: bool) -> Callable[[], Await
             try:
                 cred = resolve_agent_credential(ctx.settings, cred_name)
                 target.set_provider(create_provider(cred))
+                if agent_name == "trader":
+                    ctx.active_trader_credential = cred.model_copy(deep=True)
                 logger.info(
                     "LLM provider 已热重建（%s → %s / %s）", agent_name, cred.provider, cred.model
                 )
@@ -445,6 +451,13 @@ async def build_app(
         candles=candles,
         triggers=triggers,
         watchlist=watchlist.contracts,
+        active_trader_credential=(
+            resolve_agent_credential(settings, settings.agents.trader.credential).model_copy(
+                deep=True
+            )
+            if trader_provider is not None
+            else None
+        ),
     )
     ctx.server, ctx.server_deps = _build_server(ctx, audit, indicators, mock_llm=mock_llm)
     if not mock_market:  # mock 行情不接私有 WS（测试/冒烟可离线运行）
@@ -481,7 +494,7 @@ def _build_server(
             dict：运行模式、启动时长（秒）、风控锁状态、agent 运行/在轮状态及
             LLM 配置可用状态
         """
-        return {
+        status = {
             "mode": settings.mode,
             "uptime_seconds": int(time.time() - ctx.started_at),
             "kill_switch": settings.risk.kill_switch,
@@ -489,6 +502,17 @@ def _build_server(
             "in_round": ctx.scheduler.in_round,
             "llm_configured": ctx.loop.llm_configured,
         }
+        active = ctx.active_trader_credential
+        if active is not None:
+            status.update(
+                {
+                    "llm_credential_name": active.name,
+                    "llm_provider": active.provider,
+                    "llm_model": active.model,
+                    "llm_thinking_effort": active.thinking_effort,
+                }
+            )
+        return status
 
     def on_kill_switch(enabled: bool) -> None:
         """监控接口的风控锁开关回调。
