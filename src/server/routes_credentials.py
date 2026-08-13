@@ -280,14 +280,14 @@ def create_credentials_router(deps: ServerDeps) -> APIRouter:
 
     @router.delete("/credentials/{name}")
     async def delete_credential(name: str) -> dict[str, Any]:
-        """删除凭证：未知名 404；被 agents.trader/reviewer 引用 422（先解除引用）；
+        """删除凭证：未知名 404；被任一 Agent 引用时返回 422（先解除引用）；
 
         .env 里的 key 保留不删（与现状一致，无害）。
 
         参数：
             name: str，工具、凭证或对象名称
         返回：
-            dict[str, Any]，删除凭证：未知名 404；被 agents.trader/reviewer 引用 422（先解除引用）；
+            dict[str, Any]，删除凭证：未知名 404；被任一 Agent 引用时返回 422；
         异常：
             HTTPException，目标凭证不存在时返回 404，或仍被 Agent 引用时返回 422
         """
@@ -299,6 +299,7 @@ def create_credentials_router(deps: ServerDeps) -> APIRouter:
             for agent, binding in (
                 ("trader", settings.agents.trader),
                 ("reviewer", settings.agents.reviewer),
+                ("researcher", settings.agents.researcher),
             )
             if binding.credential == name
         ]

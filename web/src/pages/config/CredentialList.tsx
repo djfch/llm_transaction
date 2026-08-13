@@ -51,8 +51,12 @@ export function SaveFeedback({ result }: { result: SetSecretsResult }) {
   )
 }
 
-/** agent 引用徽标：trader→决策 / reviewer→复盘（枚举值按规范只保留中文释义） */
-const AGENT_LABELS: Record<string, string> = { trader: '决策', reviewer: '复盘' }
+/** Agent 引用徽标使用中文释义，内部枚举值保持不变。 */
+const AGENT_LABELS: Record<string, string> = {
+  trader: '决策',
+  reviewer: '复盘',
+  researcher: '研报',
+}
 
 function UsedByBadges({ usedBy }: { usedBy: string[] }) {
   if (usedBy.length === 0) return <span className="text-[10px] text-zinc-600">未被引用</span>

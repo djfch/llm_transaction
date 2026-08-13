@@ -103,7 +103,7 @@ const config: AppConfig = {
     openai_base_url: '',
     thinking_effort: '',
     max_consecutive_failures: 3,
-    // 多凭证夹具：一条 anthropic 已配置（决策用），一条 openai_compat 未配置（复盘用）
+    // 多凭证夹具：anthropic 供决策/研报，openai_compat 供复盘
     credentials: [
       {
         name: 'claude-main',
@@ -128,6 +128,7 @@ const config: AppConfig = {
   agents: {
     trader: { credential: 'claude-main' },
     reviewer: { credential: 'deepseek-backup' },
+    researcher: { credential: 'claude-main' },
   },
   risk: {
     max_position_pct: 0.3,
@@ -150,7 +151,7 @@ let credentials: CredentialStatus[] = [
     model: 'claude-sonnet-4-5',
     api_key_env: 'LLM_KEY_CLAUDE_MAIN',
     key_configured: true,
-    used_by: ['trader'],
+    used_by: ['trader', 'researcher'],
   },
   {
     name: 'deepseek-backup',
@@ -325,7 +326,7 @@ function buildCandles(contract: string, interval: string, limit: number): Candle
 
 export const mockApi: ApiClient = {
   getStatus: () => {
-    const credentialName = config.agents?.trader.credential ?? 'default'
+    const credentialName = config.agents?.trader?.credential ?? 'default'
     const credential = config.llm.credentials?.find((item) => item.name === credentialName)
     return reply({
       mode: config.mode,
@@ -434,8 +435,9 @@ export const mockApi: ApiClient = {
         api_key_env: c.api_key_env,
         key_configured: credentials.find((o) => o.name === c.name)?.key_configured ?? false,
         used_by: [
-          ...(next.agents?.trader.credential === c.name ? ['trader'] : []),
-          ...(next.agents?.reviewer.credential === c.name ? ['reviewer'] : []),
+          ...(next.agents?.trader?.credential === c.name ? ['trader'] : []),
+          ...(next.agents?.reviewer?.credential === c.name ? ['reviewer'] : []),
+          ...(next.agents?.researcher?.credential === c.name ? ['researcher'] : []),
         ],
       }))
     }

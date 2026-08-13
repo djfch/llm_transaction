@@ -556,14 +556,14 @@ async def test_strategy_save_rollback_callbacks(tmp_path: Path, build_ctx, monke
 
 
 async def test_llm_reconfigure_rebuilds_each_agent_provider(tmp_path: Path, monkeypatch):
-    """验证模型热重建为决策与复盘 agent 分别创建新的独立 provider。
+    """验证模型热重建为三个 Agent 分别创建新的独立 provider。
 
     参数：
         tmp_path: Path，pytest 临时目录，用于隔离应用数据库
         monkeypatch: MonkeyPatch，用于配置测试密钥并清除模拟模型开关
 
     返回：
-        None，通过断言验证重建成功且两个 agent 的 provider 均已独立替换
+        None，通过断言验证重建成功且三个 Agent 的 provider 均已独立替换
     """
     monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-reconfigure")
     monkeypatch.delenv("LLM_MOCK", raising=False)
@@ -574,14 +574,20 @@ async def test_llm_reconfigure_rebuilds_each_agent_provider(tmp_path: Path, monk
     )
     try:
         assert ctx.loop._provider is not None and ctx.review.agent._provider is not None
+        assert ctx.research.agent._provider is not None
         assert ctx.review.agent._provider is not ctx.loop._provider  # 各自独立实例
-        old_loop_provider, old_review_provider = ctx.loop._provider, ctx.review.agent._provider
+        assert ctx.research.agent._provider is not ctx.loop._provider
+        old_loop_provider = ctx.loop._provider
+        old_review_provider = ctx.review.agent._provider
+        old_research_provider = ctx.research.agent._provider
         deps = ctx.server_deps
         assert deps is not None and deps.llm_reconfigure is not None
         result = await deps.llm_reconfigure()
         assert result == {"llm_configured": True, "error": ""}
         assert ctx.loop._provider is not None and ctx.loop._provider is not old_loop_provider
         assert ctx.review.agent._provider is not None
-        assert ctx.review.agent._provider is not old_review_provider  # 两边都热替换
+        assert ctx.review.agent._provider is not old_review_provider
+        assert ctx.research.agent._provider is not None
+        assert ctx.research.agent._provider is not old_research_provider
     finally:
         await ctx.db.close()

@@ -305,7 +305,7 @@ async def test_post_secrets_rejects_nul_and_cr(client: AsyncClient):
 
 
 async def _put_two_credentials(client: AsyncClient) -> None:
-    """登记两条凭证并分配：trader→main，reviewer→backup。
+    """登记两条凭证并分配：trader→main，reviewer/researcher→backup。
 
     参数：
         client: AsyncClient，测试客户端
@@ -325,7 +325,11 @@ async def _put_two_credentials(client: AsyncClient) -> None:
     )
     assert r.status_code == 200
     raw = (await client.get("/api/config")).json()
-    raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "backup"}}
+    raw["agents"] = {
+        "trader": {"credential": "main"},
+        "reviewer": {"credential": "backup"},
+        "researcher": {"credential": "backup"},
+    }
     r = await client.put("/api/config", json=raw)
     assert r.status_code == 200
 
@@ -433,7 +437,7 @@ async def test_post_secrets_422_never_echoes_api_key(client: AsyncClient):
 
 
 async def test_secrets_status_default_credential(client: AsyncClient):
-    """旧配置（无 credentials）：status 含一条合成的 default 凭证，两个 agent 都引用它。
+    """旧配置（无 credentials）：status 含一条 default 凭证，三个 Agent 都引用它。
 
     参数：
         client: AsyncClient，测试客户端
@@ -451,7 +455,7 @@ async def test_secrets_status_default_credential(client: AsyncClient):
             "model": "claude-sonnet-4-5",
             "api_key_env": "ANTHROPIC_API_KEY",
             "key_configured": False,
-            "used_by": ["trader", "reviewer"],
+            "used_by": ["trader", "reviewer", "researcher"],
         }
     ]
 
@@ -484,7 +488,7 @@ async def test_secrets_status_lists_credentials_without_plaintext(
     }
     assert creds["backup"]["key_configured"] is True
     assert creds["backup"]["api_key_env"] == "LLM_KEY_BACKUP"
-    assert creds["backup"]["used_by"] == ["reviewer"]
+    assert creds["backup"]["used_by"] == ["reviewer", "researcher"]
 
 
 async def test_secrets_status_llm_key_true_with_only_llm_key_prefix(
@@ -522,11 +526,12 @@ async def test_put_config_agent_assignment_triggers_reconfigure(
         None，执行断言验证目标行为
     """
     assert deps.runtime_settings is not None
-    await _put_two_credentials(client)  # 专用端点登记凭证 + PUT 分配 trader→main / reviewer→backup
+    await _put_two_credentials(client)  # 专用端点登记凭证并完成三个 Agent 分配
     runtime = deps.runtime_settings
     assert [c.name for c in runtime.llm.credentials] == ["default", "main", "backup"]  # 原地生效
     assert runtime.agents.trader.credential == "main"
     assert runtime.agents.reviewer.credential == "backup"
+    assert runtime.agents.researcher.credential == "backup"
 
     calls_before = len(deps.reconfigure_calls)
     raw = (await client.get("/api/config")).json()
@@ -536,6 +541,32 @@ async def test_put_config_agent_assignment_triggers_reconfigure(
     assert r.json()["saved"] is True and r.json()["llm_configured"] is True
     assert len(deps.reconfigure_calls) == calls_before + 1  # 分配变化同样触发热重建
     assert deps.runtime_settings.agents.trader.credential == "backup"
+
+
+async def test_put_config_researcher_assignment_triggers_reconfigure(
+    client: AsyncClient, deps: ServerDeps
+):
+    """修改研报 Agent 凭证分配时原地写回运行配置并触发热重建。
+
+    参数：
+        client: AsyncClient，测试客户端
+        deps: ServerDeps，提供运行配置和热重建计数
+
+    返回：
+        None，断言研报凭证无需重启即可生效且只触发一次重建
+    """
+    await _put_two_credentials(client)
+    calls_before = len(deps.reconfigure_calls)
+    raw = (await client.get("/api/config")).json()
+    raw["agents"]["researcher"]["credential"] = "main"
+
+    response = await client.put("/api/config", json=raw)
+
+    assert response.status_code == 200
+    assert response.json()["needs_restart"] == []
+    assert len(deps.reconfigure_calls) == calls_before + 1
+    assert deps.runtime_settings is not None
+    assert deps.runtime_settings.agents.researcher.credential == "main"
 
 
 async def test_put_config_agents_unknown_credential_422(client: AsyncClient):

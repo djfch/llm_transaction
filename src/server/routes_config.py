@@ -55,6 +55,7 @@ _RUNTIME_KEYS = frozenset(
         "llm.credentials",
         "agents.trader.credential",
         "agents.reviewer.credential",
+        "agents.researcher.credential",
         "scheduler.default_wake_minutes",
         "scheduler.min_wake_minutes",
         "scheduler.max_wake_minutes",
@@ -76,6 +77,7 @@ _LLM_HOT_KEYS = frozenset(
         "llm.credentials",
         "agents.trader.credential",
         "agents.reviewer.credential",
+        "agents.researcher.credential",
     }
 )
 
@@ -397,6 +399,7 @@ def create_config_router(deps: ServerDeps) -> APIRouter:
         for agent_name, binding in (
             ("trader", settings.agents.trader),
             ("reviewer", settings.agents.reviewer),
+            ("researcher", settings.agents.researcher),
         ):
             if binding.credential in used_by:
                 used_by[binding.credential].append(agent_name)

@@ -41,6 +41,8 @@ llm:
 #     credential: main             # 决策 agent 用主号
 #   reviewer:
 #     credential: backup           # 复盘 agent 用备用号
+#   researcher:
+#     credential: backup           # 研报 agent 用备用号
 risk:
   max_position_pct: 0.3
   max_total_position_pct: 0.8

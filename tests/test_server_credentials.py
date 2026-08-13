@@ -4,7 +4,7 @@
 - 统一响应 {"saved": true, "key_saved": bool, "llm_configured": bool, "llm_error": str}（永不回显明文）
 - POST：重名 422、name 非法（^[a-z0-9-]+$）422、空 credentials 首次创建物化 default 再追加
 - PUT：未知名 404、api_key_env 不变、编辑 default 物化列表、api_key 留空不动 .env
-- DELETE：未知名 404、被 agents.trader/reviewer 引用 422、.env 里的 key 保留不删
+- DELETE：未知名 404、被任一 Agent 引用 422、.env 里的 key 保留不删
 三个端点写盘 + 原地写回 runtime 后都只热重建一次（reconfigure 失败不 422）。
 请求体校验补齐：model 去空白后非空、max_tokens ≥ 1、openai_compat 必须有 openai_base_url；
 api_key 纯空白按未填处理、非空写 strip 后的值；422 响应剔除 detail[].input（密钥铁规）；
@@ -681,7 +681,7 @@ async def test_delete_credential_success(client: AsyncClient, deps: ServerDeps):
 
 
 async def test_delete_credential_referenced_422(client: AsyncClient, deps: ServerDeps):
-    """验证被决策或复盘 agent 引用的凭证禁止删除且不产生配置变更。
+    """验证被任一 Agent 引用的凭证禁止删除且不产生配置变更。
 
     参数：
         client: AsyncClient，进程内异步测试客户端
@@ -690,7 +690,7 @@ async def test_delete_credential_referenced_422(client: AsyncClient, deps: Serve
     返回：
         None，通过断言验证合成与显式多凭证场景均返回 422 且保持原状
     """
-    r = await client.delete("/api/credentials/default")  # 两个 agent 都引用 default
+    r = await client.delete("/api/credentials/default")  # 三个 Agent 都引用 default
     assert r.status_code == 422
     assert "引用" in r.json()["detail"]
     assert _file_credentials(deps) == []  # 未落盘（default 仍是合成态）
@@ -700,10 +700,15 @@ async def test_delete_credential_referenced_422(client: AsyncClient, deps: Serve
     await _create(client, "main", model="m1")
     await _create(client, "backup", model="m2")
     raw = (await client.get("/api/config")).json()
-    raw["agents"] = {"trader": {"credential": "main"}, "reviewer": {"credential": "backup"}}
+    raw["agents"] = {
+        "trader": {"credential": "main"},
+        "reviewer": {"credential": "main"},
+        "researcher": {"credential": "backup"},
+    }
     assert (await client.put("/api/config", json=raw)).status_code == 200
     r = await client.delete("/api/credentials/backup")
     assert r.status_code == 422
+    assert "agents.researcher" in r.json()["detail"]
     assert [c["name"] for c in _file_credentials(deps)] == ["default", "main", "backup"]  # 未变
 
 
