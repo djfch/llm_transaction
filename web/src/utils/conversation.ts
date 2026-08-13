@@ -25,6 +25,11 @@ interface AssistantTurn {
   calls: Array<{ name: string; argsText: string }>
 }
 
+/** 单个 LLM 回合：保留该回合的思考、回复、工具调用与对应工具返回。 */
+export interface ConversationTurn {
+  messages: ConversationMessage[]
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
 }
@@ -174,15 +179,24 @@ function fallbackMessages(llmRaw: string, toolCalls: ToolCall[]): ConversationMe
  * llm_raw 被截断导致审计有剩余时，剩余调用追加在末尾；空输入返回空数组。
  */
 export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
+  return buildConversationTurns(llmRaw, toolCalls).flatMap((turn) => turn.messages)
+}
+
+/** 构建按 LLM 响应回合分组的完整对话，供界面逐回合折叠。 */
+export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): ConversationTurn[] {
   const turns = llmRaw
     .split('\n')
     .map(parseTurn)
     .filter((t): t is AssistantTurn => t !== null)
-  if (turns.length === 0) return fallbackMessages(llmRaw, toolCalls)
+  if (turns.length === 0) {
+    const messages = fallbackMessages(llmRaw, toolCalls)
+    return messages.length === 0 ? [] : [{ messages }]
+  }
   const audit = [...toolCalls].sort((a, b) => a.seq - b.seq)
-  const msgs: ConversationMessage[] = []
+  const result: ConversationTurn[] = []
   let ai = 0 // 审计消费指针：回合内第 k 个 tool_use 对应 audit 顺序第 k 条
   for (const turn of turns) {
+    const msgs: ConversationMessage[] = []
     for (const text of turn.reasonings) {
       msgs.push({ role: 'assistant', kind: 'reasoning', text })
     }
@@ -196,8 +210,13 @@ export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): Conver
       })
       if (ai < audit.length) msgs.push(toResultMessage(audit[ai++]))
     }
+    if (msgs.length > 0) result.push({ messages: msgs })
   }
   // llm_raw 缺尾部回合（如截断）：审计链剩余调用追加，保证工具链完整可见
-  for (; ai < audit.length; ai++) msgs.push(toCallMessage(audit[ai]), toResultMessage(audit[ai]))
-  return msgs
+  const remaining: ConversationMessage[] = []
+  for (; ai < audit.length; ai++) {
+    remaining.push(toCallMessage(audit[ai]), toResultMessage(audit[ai]))
+  }
+  if (remaining.length > 0) result.push({ messages: remaining })
+  return result
 }

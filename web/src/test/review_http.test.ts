@@ -248,13 +248,14 @@ describe('rounds 的 strategy_md5 适配', () => {
     expect(rounds.items[0].strategyMd5).toBe('md5-aaa')
   })
 
-  it('getRound：strategy_md5 → strategyMd5；历史数据缺省为 空串', async () => {
+  it('getRound：保留首次 USER 上下文；历史缺省字段降级为空串', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
         '/api/rounds/r1': {
           round_id: 'r1',
           prompt_snapshot: 'prompt',
+          context_snapshot: '首次 USER 上下文',
           llm_raw: 'raw',
           tool_calls: [],
           strategy_md5: 'md5-bbb',
@@ -262,8 +263,12 @@ describe('rounds 的 strategy_md5 适配', () => {
         '/api/rounds/r2': { round_id: 'r2', prompt_snapshot: 'prompt', llm_raw: 'raw', tool_calls: [] },
       }),
     )
-    expect((await httpApi.getRound('r1')).strategyMd5).toBe('md5-bbb')
-    expect((await httpApi.getRound('r2')).strategyMd5).toBe('')
+    const current = await httpApi.getRound('r1')
+    expect(current.strategyMd5).toBe('md5-bbb')
+    expect(current.context_snapshot).toBe('首次 USER 上下文')
+    const legacy = await httpApi.getRound('r2')
+    expect(legacy.strategyMd5).toBe('')
+    expect(legacy.context_snapshot).toBe('')
   })
 })
 

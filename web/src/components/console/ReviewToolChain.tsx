@@ -58,7 +58,12 @@ export default function ReviewToolChain({ roundId }: { roundId: string }) {
       </FoldSection>
       {/* 完整对话由 ConversationThread 自身折叠，默认收起 */}
       <div className="mt-2">
-        <ConversationThread llmRaw={detail.llm_raw} toolCalls={detail.tool_calls} />
+        <ConversationThread
+          llmRaw={detail.llm_raw}
+          toolCalls={detail.tool_calls}
+          promptSnapshot={detail.prompt_snapshot}
+          contextSnapshot={detail.context_snapshot}
+        />
       </div>
     </div>
   )

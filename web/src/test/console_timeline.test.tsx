@@ -70,6 +70,7 @@ function detail(roundId: string): RoundDetail {
   return {
     round_id: roundId,
     prompt_snapshot: 'prompt',
+    context_snapshot: 'ctx',
     llm_raw: `RAW-${roundId}`,
     tool_calls: [
       { seq: 1, tool: 'get_account', args: {}, risk_verdict: '', risk_reason: '', result: 'ok', duration_ms: 5 },

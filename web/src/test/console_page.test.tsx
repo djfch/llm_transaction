@@ -65,6 +65,7 @@ const LIVE: AgentLiveState = {
 const DETAIL: RoundDetail = {
   round_id: 'r-smoke-1',
   prompt_snapshot: 'prompt',
+  context_snapshot: 'ctx',
   llm_raw: 'RAW-SMOKE',
   tool_calls: [],
   strategyMd5: 'md5',

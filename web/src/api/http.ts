@@ -306,14 +306,18 @@ function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
   }
 }
 
-/** 后端 /api/rounds/{id} 详情：契约含 strategy_md5，其余键与前端 RoundDetail 一致 */
-type RawRoundDetail = Omit<RoundDetail, 'strategyMd5'> & { strategy_md5?: string }
+/** 后端详情原始形状：历史快照可能没有 context_snapshot，统一降级为空串。 */
+type RawRoundDetail = Omit<RoundDetail, 'strategyMd5' | 'context_snapshot'> & {
+  strategy_md5?: string
+  context_snapshot?: string
+}
 
 /** 后端 round 详情 → 前端 RoundDetail：strategy_md5 适配为 strategyMd5 */
 function adaptRoundDetail(raw: RawRoundDetail): RoundDetail {
   return {
     round_id: raw.round_id,
     prompt_snapshot: raw.prompt_snapshot,
+    context_snapshot: raw.context_snapshot ?? '',
     llm_raw: raw.llm_raw,
     tool_calls: raw.tool_calls,
     strategyMd5: raw.strategy_md5 ?? '',

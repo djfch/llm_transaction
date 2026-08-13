@@ -104,6 +104,7 @@ export interface ToolCall {
 export interface RoundDetail {
   round_id: string
   prompt_snapshot: string // 完整 prompt 快照
+  context_snapshot: string // 首次发送给 LLM 的 user 上下文快照
   llm_raw: string // LLM 原始输出
   tool_calls: ToolCall[] // 工具调用链
   strategyMd5: string // 策略书原文 md5（空串 = 历史数据无关联）
@@ -116,7 +117,7 @@ export interface AgentLiveRound {
   prompt_md5: string // system prompt 的 md5
   prompt_snapshot: string // 完整 prompt 快照
   context_snapshot: string // 本轮上下文快照
-  llm_raw: string // LLM 原始输出（进行中为空串）
+  llm_raw: string // 截至当前累计收到的 LLM 原始输出；尚未返回时为空串
   started_at: number // 开始时间（Unix 秒）
   ended_at: number | null // 结束时间（Unix 秒，进行中为 null）
   error: string // 本轮错误信息（空串表示无错误）

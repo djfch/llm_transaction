@@ -666,7 +666,13 @@ function idleNarrative(): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
 function buildRoundDetail(meta: RoundSummary): RoundDetail {
   const fill = trades.find((t) => t.round_id === meta.round_id)
   const body = fill ? fillNarrative(fill) : meta.summary.includes('突破') ? denyNarrative() : idleNarrative()
-  return { round_id: meta.round_id, prompt_snapshot: promptSnapshot(meta), strategyMd5: meta.strategyMd5, ...body }
+  return {
+    round_id: meta.round_id,
+    prompt_snapshot: promptSnapshot(meta),
+    context_snapshot: meta.summary,
+    strategyMd5: meta.strategyMd5,
+    ...body,
+  }
 }
 
 /** 构造实时决策样例：复用最新一轮摘要，生成一条已完成决策轮。 */

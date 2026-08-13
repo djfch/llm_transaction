@@ -57,7 +57,7 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getByText(/equity=10842\.36/)).toBeInTheDocument()
     expect(screen.getByText('USER · 工具返回 get_account')).toBeInTheDocument()
     // 标题徽标消息数：2 文本 + 2 调用 + 2 返回 = 6
-    expect(screen.getByText('6 条消息')).toBeInTheDocument()
+    expect(screen.getByText('6 条对话')).toBeInTheDocument()
     // assistant 消息卡共 4 张
     expect(screen.getAllByText('ASSISTANT')).toHaveLength(4)
   })
@@ -99,5 +99,64 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getByText('ASSISTANT · 思考过程')).toBeInTheDocument()
     expect(screen.getByText('先验证成交量，再决定是否开仓。')).toBeInTheDocument()
     expect(screen.queryByText(/发起调用/)).not.toBeInTheDocument()
+  })
+
+  it('首次 SYSTEM/USER 与每个 LLM 回合分别默认折叠', () => {
+    const { container } = render(
+      <ConversationThread
+        llmRaw={ANTHROPIC_RAW}
+        toolCalls={AUDIT}
+        promptSnapshot="完整系统提示词"
+        contextSnapshot="首次用户上下文"
+        defaultOpen
+      />,
+    )
+    expect(screen.getByText(/首次发送给 LLM/)).toBeInTheDocument()
+    expect(screen.getByText('完整系统提示词')).toBeInTheDocument()
+    expect(screen.getByText('首次用户上下文')).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 1 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 2 轮/)).toBeInTheDocument()
+    const details = [...container.querySelectorAll('details')]
+    expect(details[0]).toHaveAttribute('open')
+    expect(details.slice(1).every((item) => !item.hasAttribute('open'))).toBe(true)
+  })
+
+  it('3000 字以上思考与工具返回可完整展开，不出现破坏性省略', () => {
+    const reasoning = '思'.repeat(3200)
+    const result = '果'.repeat(3600)
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: reasoning },
+        { type: 'tool_use', id: 't1', name: 'get_market_data', input: {} },
+      ],
+    })
+    const { container } = render(
+      <ConversationThread
+        llmRaw={raw}
+        toolCalls={[
+          {
+            seq: 1,
+            tool: 'get_market_data',
+            args: {},
+            risk_verdict: '',
+            risk_reason: '',
+            result,
+            duration_ms: 9,
+          },
+        ]}
+        defaultOpen
+      />,
+    )
+    const turnSummary = [...container.querySelectorAll('summary')].find((item) =>
+      item.textContent?.includes('LLM 第 1 轮'),
+    )!
+    const turn = turnSummary.parentElement!
+    expect(turn).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText(/LLM 第 1 轮/))
+    expect(turn).toHaveAttribute('open')
+    expect(screen.getByText(reasoning)).toHaveTextContent(reasoning)
+    expect(screen.getByText(result)).toHaveTextContent(result)
+    expect(turn.textContent).not.toContain(`${'思'.repeat(500)}…`)
   })
 })

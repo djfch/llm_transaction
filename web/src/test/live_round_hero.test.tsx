@@ -134,6 +134,7 @@ beforeEach(() => {
     Promise.resolve({
       round_id: roundId,
       prompt_snapshot: 'prompt',
+      context_snapshot: 'ctx',
       llm_raw: 'RAW-CONCLUSION',
       tool_calls: [],
       strategyMd5: '',
@@ -169,6 +170,26 @@ describe('LiveRoundHero(实时决策轮多 agent)', () => {
     const mid = traderCalls()
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(traderCalls()).toBeGreaterThan(mid)
+  })
+
+  it('进行中即可展示首次输入与已收到的 LLM 回合，不等待 getRound', async () => {
+    const running = liveRound('r-trader-live', NOW_S - 10, null)
+    running.prompt_snapshot = '实时 SYSTEM 提示词'
+    running.context_snapshot = '实时 USER 上下文'
+    running.llm_raw = JSON.stringify({
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: '实时收到的明文思考' }],
+    })
+    holder.getLiveFor.mockImplementation((agent) =>
+      Promise.resolve(agent === 'trader' ? snap(running) : snap(null)),
+    )
+    await renderHero()
+    expect(screen.getByText(/首次发送给 LLM/)).toBeInTheDocument()
+    expect(screen.getByText('实时 SYSTEM 提示词')).toBeInTheDocument()
+    expect(screen.getByText('实时 USER 上下文')).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 1 轮/)).toBeInTheDocument()
+    expect(screen.getByText('实时收到的明文思考')).toBeInTheDocument()
+    expect(holder.getRound).not.toHaveBeenCalled()
   })
 
   it('review_round_start 到达 → 切换显示复盘轮', async () => {
