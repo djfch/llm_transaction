@@ -12,7 +12,20 @@ from typing import Any, Protocol
 
 
 class LLMError(Exception):
-    """LLM 调用失败（网络/鉴权/限流/服务端错误等）。"""
+    """LLM 调用失败；raw 保存服务端已返回但后续处理失败的原始响应。"""
+
+    def __init__(self, message: str, *, raw: str = "") -> None:
+        """初始化模型异常并保留可供审计的原始响应。
+
+        参数：
+            message: str，面向日志与用户的错误说明
+            raw: str，服务端已经返回的原始响应；传输失败时为空串
+
+        返回：
+            None，初始化异常消息与 raw 属性
+        """
+        super().__init__(message)
+        self.raw = raw
 
 
 class LLMParseError(LLMError):
@@ -34,7 +47,7 @@ class LLMResponse:
 
     text: str = ""  # 文本部分（可能为空）
     tool_calls: list[ToolCall] = field(default_factory=list)
-    raw: str = ""  # 原始输出全文（审计快照用）
+    raw: str = ""  # 原始输出全文；重试层返回时升级为逐次响应审计流
     assistant_message: dict[str, Any] | None = None  # 原生 assistant 消息（多轮回填用）
 
 

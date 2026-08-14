@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { ToolCall } from '../api/types'
-import { buildConversation } from '../utils/conversation'
+import { buildConversation, buildConversationTurns } from '../utils/conversation'
 
 /** 审计工具调用夹具（args 从简，断言不依赖它） */
 function auditCall(seq: number, tool: string, result: string, verdict = '', reason = ''): ToolCall {
@@ -89,7 +89,7 @@ const RESPONSES_RAW = [
 ].join('\n')
 
 describe('buildConversation（完整对话构建）', () => {
-  it('anthropic：text/tool_use 交错展开，工具结果按 seq 插在各自调用后，最终回合文本为结论', () => {
+  it('anthropic：先保留同一响应的块顺序，再按 seq 追加工具结果', () => {
     const msgs = buildConversation(ANTHROPIC_RAW, [
       auditCall(1, 'get_account', 'equity=10842.36'),
       auditCall(2, 'get_candlesticks', '返回 20 根 K 线'),
@@ -98,8 +98,8 @@ describe('buildConversation（完整对话构建）', () => {
     expect(msgs.map((m) => `${m.role}/${m.kind}`)).toEqual([
       'assistant/text',
       'assistant/tool_call',
-      'user/tool_result',
       'assistant/tool_call',
+      'user/tool_result',
       'user/tool_result',
       'assistant/text',
       'assistant/tool_call',
@@ -108,9 +108,9 @@ describe('buildConversation（完整对话构建）', () => {
     ])
     expect(msgs[0].text).toBe('先查账户与 K 线。')
     expect(msgs[1].toolName).toBe('get_account')
-    expect(msgs[2].text).toBe('equity=10842.36')
     // tool_call 的 text 为「工具名 + 参数摘要」，args 以 llm_raw 为准
-    expect(msgs[3].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"1h","limit":20}')
+    expect(msgs[2].text).toBe('get_candlesticks {"contract":"BTC_USDT","interval":"1h","limit":20}')
+    expect(msgs[3].text).toBe('equity=10842.36')
     expect(msgs.at(-1)?.text).toBe('已开多，30 分钟后复查。')
     expect(msgs.at(-1)?.kind).toBe('text')
   })
@@ -122,17 +122,17 @@ describe('buildConversation（完整对话构建）', () => {
     ])
     expect(msgs.map((m) => `${m.role}/${m.kind}`)).toEqual([
       'assistant/tool_call',
-      'user/tool_result',
       'assistant/tool_call',
+      'user/tool_result',
       'user/tool_result',
       'assistant/text',
     ])
     // arguments 原样是带转义的 JSON 字符串，解析后应为紧凑对象文本
-    expect(msgs[2].text).toBe('place_order {"contract":"BTC_USDT","size":4}')
+    expect(msgs[1].text).toBe('place_order {"contract":"BTC_USDT","size":4}')
     expect(msgs.at(-1)?.text).toBe('开多完成。')
   })
 
-  it('responses：reasoning 跳过、output_text 提取、function_call 转调用，顶层元数据不进对话', () => {
+  it('responses：空 reasoning 跳过、output_text 提取、function_call 转调用，顶层元数据不进对话', () => {
     const msgs = buildConversation(RESPONSES_RAW, [
       auditCall(1, 'get_candlesticks', '返回 24 根 K 线'),
     ])
@@ -187,5 +187,200 @@ describe('buildConversation（完整对话构建）', () => {
     expect(result?.riskVerdict).toBe('deny')
     expect(result?.riskReason).toBe('单仓超限')
     expect(result?.text).toBe('风控拒绝，未下单')
+  })
+
+  it('仅展示三种供应商实际返回的明文思考，忽略签名、脱敏块与密文', () => {
+    const anthropic = JSON.stringify({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'Anthropic 明文思考', signature: '不可展示签名' },
+        { type: 'redacted_thinking', data: '不可展示脱敏内容' },
+      ],
+    })
+    const compat = JSON.stringify({
+      choices: [{ message: { reasoning_content: '兼容接口明文推理', content: null } }],
+    })
+    const responses = JSON.stringify({
+      output: [
+        {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'Responses 推理摘要' }],
+          encrypted_content: '不可展示密文',
+        },
+      ],
+    })
+    const msgs = buildConversation([anthropic, compat, responses].join('\n'), [])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['reasoning', 'Anthropic 明文思考'],
+      ['reasoning', '兼容接口明文推理'],
+      ['reasoning', 'Responses 推理摘要'],
+    ])
+    const visible = msgs.map((m) => m.text).join(' ')
+    expect(visible).not.toContain('不可展示')
+  })
+
+  it('长工具参数与返回内容保持原文，不在对话构建阶段截断', () => {
+    const longArgs = '参'.repeat(3200)
+    const longResult = '果'.repeat(3600)
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 't1', name: 'get_market_data', input: { text: longArgs } }],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_market_data', longResult)])
+    expect(msgs.find((m) => m.kind === 'tool_call')?.text).toContain(longArgs)
+    expect(msgs.find((m) => m.kind === 'tool_result')?.text).toBe(longResult)
+  })
+
+  it('同一响应内严格保持原始块顺序，并在响应结束后追加工具返回', () => {
+    const raw = JSON.stringify({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '文本 A' },
+        { type: 'tool_use', id: 't1', name: 'get_account', input: {} },
+        { type: 'thinking', thinking: '调用后的思考 B' },
+        { type: 'text', text: '文本 C' },
+      ],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_account', '工具结果')])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['text', '文本 A'],
+      ['tool_call', 'get_account {}'],
+      ['reasoning', '调用后的思考 B'],
+      ['text', '文本 C'],
+      ['tool_result', '工具结果'],
+    ])
+  })
+
+  it('responses：function_call 后的 message 仍先于下一轮工具回填', () => {
+    const raw = JSON.stringify({
+      output: [
+        {
+          type: 'function_call',
+          call_id: 'call_1',
+          name: 'get_account',
+          arguments: '{}',
+        },
+        {
+          type: 'message',
+          content: [{ type: 'output_text', text: '调用已发出，等待结果。' }],
+        },
+      ],
+    })
+    const msgs = buildConversation(raw, [auditCall(1, 'get_account', '工具结果')])
+    expect(msgs.map((m) => [m.kind, m.text])).toEqual([
+      ['tool_call', 'get_account {}'],
+      ['text', '调用已发出，等待结果。'],
+      ['tool_result', '工具结果'],
+    ])
+  })
+
+  it('重试：拒绝响应中的工具不消费最终成功响应的审计结果', () => {
+    const rejected = JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [{ function: { name: 'get_account', arguments: '{坏 JSON' } }],
+          },
+        },
+      ],
+    })
+    const accepted = JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                function: {
+                  name: 'place_order',
+                  arguments: '{"contract":"BTC_USDT","size":4}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const raw = [
+      JSON.stringify({
+        audit_type: 'llm_response_attempt',
+        status: 'rejected',
+        raw: rejected,
+        error: 'LLMParseError: 工具参数不是合法 JSON',
+      }),
+      JSON.stringify({ audit_type: 'llm_response_attempt', status: 'accepted', raw: accepted }),
+    ].join('\n')
+    const turns = buildConversationTurns(raw, [
+      auditCall(1, 'place_order', '已成交 4 张', 'allow'),
+    ])
+    expect(turns.map((turn) => turn.status)).toEqual(['rejected', 'accepted'])
+    expect(turns[0].messages.map((message) => [message.kind, message.toolName])).toEqual([
+      ['tool_call', 'get_account'],
+    ])
+    expect(turns[1].messages.map((message) => [message.kind, message.toolName])).toEqual([
+      ['tool_call', 'place_order'],
+      ['tool_result', 'place_order'],
+    ])
+  })
+
+  it('重试：不可识别的拒绝原文与正常响应混合时仍单独保留', () => {
+    const accepted = JSON.stringify({
+      choices: [{ message: { content: '最终成功响应', tool_calls: null } }],
+    })
+    const raw = [
+      JSON.stringify({
+        audit_type: 'llm_response_attempt',
+        status: 'rejected',
+        raw: '供应商未来格式原文',
+      }),
+      JSON.stringify({ audit_type: 'llm_response_attempt', status: 'accepted', raw: accepted }),
+    ].join('\n')
+    expect(buildConversation(raw, []).map((message) => message.text)).toEqual([
+      '供应商未来格式原文',
+      '最终成功响应',
+    ])
+  })
+
+  it('重试：Responses 空 output 的拒绝响应仍保留状态与拒绝原因', () => {
+    const raw = JSON.stringify({
+      audit_type: 'llm_response_attempt',
+      status: 'rejected',
+      raw: JSON.stringify({ status: 'incomplete', output: [] }),
+      error: 'LLMError: max_output_tokens',
+    })
+
+    expect(buildConversationTurns(raw, [])).toEqual([
+      {
+        messages: [],
+        status: 'rejected',
+        error: 'LLMError: max_output_tokens',
+      },
+    ])
+  })
+
+  it('未知纯文本中的普通 signature 单词保持原文，结构化敏感字段仍定点隐藏', () => {
+    const sentence = 'Please verify the function signature before calling it.'
+    expect(buildConversation(sentence, [])[0].text).toBe(sentence)
+
+    const malformed = '{"future":true,"signature":"secret-token",broken'
+    const visible = buildConversation(malformed, [])[0].text
+    expect(visible).toContain('"signature":"（已隐藏）"')
+    expect(visible).not.toContain('secret-token')
+  })
+
+  it('未知 JSON 降级展示也移除签名、密文与脱敏思考块', () => {
+    const raw = JSON.stringify({
+      future_schema: true,
+      text: '可见正文',
+      signature: '不可展示签名',
+      nested: { encrypted_content: '不可展示密文' },
+      blocks: [{ type: 'redacted_thinking', data: '不可展示脱敏内容' }],
+    })
+    const msgs = buildConversation(raw, [])
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].text).toContain('可见正文')
+    expect(msgs[0].text).not.toContain('不可展示')
+    expect(msgs[0].text).not.toContain('redacted_thinking')
   })
 })

@@ -139,6 +139,29 @@ async def test_end_round_with_error(trail: AuditTrail, repo: Repo):
     assert row.error == "LLM 解析失败"
 
 
+async def test_realtime_llm_raw_survives_failed_round(trail: AuditTrail, repo: Repo):
+    """校验模型响应实时落库，失败收尾不会清空已收到的原始内容。
+
+    参数：
+        trail: AuditTrail，审计追踪夹具，先实时写响应再模拟失败收尾
+        repo: Repo，临时数据库仓储夹具，分别在进行中与结束后读回记录
+
+    返回：
+        None，断言进行中即可读取原文且 ended_at 为空，失败结束后原文仍完整保留
+    """
+    round_id = await trail.begin_round(MODE, WAKE, SYSTEM_PROMPT, CONTEXT)
+    await trail.record_llm_raw(round_id, "raw-1\nraw-2")
+    running = await repo.get_audit_round(round_id)
+    assert running.llm_raw == "raw-1\nraw-2"
+    assert running.ended_at is None
+
+    await trail.end_round(round_id, None, error="后续工具执行失败")
+    ended = await repo.get_audit_round(round_id)
+    assert ended.llm_raw == "raw-1\nraw-2"
+    assert ended.ended_at is not None
+    assert ended.error == "后续工具执行失败"
+
+
 # ---------- 工具调用链 ----------
 
 

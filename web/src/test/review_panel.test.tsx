@@ -62,6 +62,7 @@ const REPORTS: ReviewReportSummary[] = [
 const ROUND_DETAIL: RoundDetail = {
   round_id: 'rvw-round-6',
   prompt_snapshot: 'prompt 快照',
+  context_snapshot: '复盘简报',
   llm_raw: JSON.stringify({
     role: 'assistant',
     content: [

@@ -656,27 +656,24 @@ class Repo:
         )
         await self._conn.commit()
 
-    async def finish_audit_round(
-        self,
-        round_id: str,
-        llm_raw: str = "",
-        ended_at: float | None = None,
-        error: str = "",
-    ) -> None:
+    async def finish_audit_round(self, round_id: str, llm_raw: str | None = "", ended_at: float | None = None, error: str = "", *, finish: bool = True) -> None:  # fmt: skip
         """一轮结束时回填审计主表的 LLM 原始输出、结束时刻与错误信息。
 
         参数：
             round_id: str，决策轮唯一标识（定位待回填的审计行）
-            llm_raw: str，LLM 原始输出文本；省略时为空串
+            llm_raw: str | None，LLM 原始输出文本；None 表示保留已实时写入的内容
             ended_at: float，结束时刻（Unix 秒）；省略时取当前时间
             error: str，错误信息（无错误时为空串）；省略时为空串
+            finish: bool，是否同时标记审计轮结束；False 仅实时更新原始响应
 
         返回：
             None，写入数据库
         """
         await self._conn.execute(
-            "UPDATE audit_rounds SET llm_raw=?, ended_at=?, error=? WHERE round_id=?",
-            (llm_raw, ended_at if ended_at is not None else _now(), error, round_id),
+            "UPDATE audit_rounds SET llm_raw=COALESCE(?,llm_raw),"
+            "ended_at=CASE WHEN ? THEN ? ELSE ended_at END,"
+            "error=CASE WHEN ? THEN ? ELSE error END WHERE round_id=?",
+            (llm_raw, finish, ended_at or _now(), finish, error, round_id),
         )
         await self._conn.commit()
 

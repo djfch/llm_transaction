@@ -134,6 +134,7 @@ beforeEach(() => {
     Promise.resolve({
       round_id: roundId,
       prompt_snapshot: 'prompt',
+      context_snapshot: 'ctx',
       llm_raw: 'RAW-CONCLUSION',
       tool_calls: [],
       strategyMd5: '',
@@ -169,6 +170,26 @@ describe('LiveRoundHero(实时决策轮多 agent)', () => {
     const mid = traderCalls()
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(traderCalls()).toBeGreaterThan(mid)
+  })
+
+  it('进行中即可展示首次输入与已收到的 LLM 回合，不等待 getRound', async () => {
+    const running = liveRound('r-trader-live', NOW_S - 10, null)
+    running.prompt_snapshot = '实时 SYSTEM 提示词'
+    running.context_snapshot = '实时 USER 上下文'
+    running.llm_raw = JSON.stringify({
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: '实时收到的明文思考' }],
+    })
+    holder.getLiveFor.mockImplementation((agent) =>
+      Promise.resolve(agent === 'trader' ? snap(running) : snap(null)),
+    )
+    await renderHero()
+    expect(screen.getByText(/首次发送给 LLM/)).toBeInTheDocument()
+    expect(screen.getByText('实时 SYSTEM 提示词')).toBeInTheDocument()
+    expect(screen.getByText('实时 USER 上下文')).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 1 次响应/)).toBeInTheDocument()
+    expect(screen.getByText('实时收到的明文思考')).toBeInTheDocument()
+    expect(holder.getRound).not.toHaveBeenCalled()
   })
 
   it('review_round_start 到达 → 切换显示复盘轮', async () => {
@@ -233,6 +254,44 @@ describe('LiveRoundHero(实时决策轮多 agent)', () => {
     expect(holder.getRound).toHaveBeenCalledWith('r-research-1')
     expect(screen.getAllByText('RAW-CONCLUSION').length).toBeGreaterThan(0)
     expect(screen.queryByText(/暂无决策记录/)).not.toBeInTheDocument()
+  })
+
+  it('结束轮只有 rejected 正文时仍展示拒绝回合，但不把正文当成本轮结论', async () => {
+    const rejectedRaw = JSON.stringify({
+      audit_type: 'llm_response_attempt',
+      status: 'rejected',
+      raw: JSON.stringify({
+        choices: [{ message: { content: '未接受的模型正文', tool_calls: null } }],
+      }),
+      error: 'LLMParseError: 工具参数不是合法 JSON',
+    })
+    holder.getRound.mockResolvedValue({
+      round_id: TRADER_ENDED.round_id,
+      prompt_snapshot: 'prompt',
+      context_snapshot: 'ctx',
+      llm_raw: rejectedRaw,
+      tool_calls: [],
+      strategyMd5: '',
+    })
+
+    await renderHero()
+
+    expect(screen.getByText(/已拒绝（工具未执行）/)).toBeInTheDocument()
+    expect(screen.getAllByText('未接受的模型正文').length).toBeGreaterThan(0)
+    expect(screen.queryByText('本轮结论')).not.toBeInTheDocument()
+  })
+
+  it('结束轮带 error 时保留完整对话和错误提示，但不展示正式结论', async () => {
+    const failedRound = { ...TRADER_ENDED, error: 'LLM 响应解析失败' }
+    holder.getLiveFor.mockImplementation((agent) =>
+      Promise.resolve(agent === 'trader' ? snap(failedRound) : snap(null)),
+    )
+
+    await renderHero()
+
+    expect(screen.getByText('本轮错误：LLM 响应解析失败')).toBeInTheDocument()
+    expect(screen.getAllByText('RAW-CONCLUSION').length).toBeGreaterThan(0)
+    expect(screen.queryByText('本轮结论')).not.toBeInTheDocument()
   })
 
   it('挂载补漏：复盘/研报都在跑且复盘 started_at 最晚 → 初始显示复盘', async () => {

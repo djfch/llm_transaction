@@ -6,7 +6,9 @@
   只读重发，不修改调用方 messages
 - 全部失败抛最后一个异常（原类型原消息）：上层失败口径（error 落库、连续失败
   计数、kill_switch）与无重试时完全一致
-- 不捕 BaseException：asyncio.CancelledError（研报超时保险丝）等直接传播
+- 每次已收到的响应包装为单行审计信封，明确 accepted/rejected；失败响应只展示，
+  不得与最终成功响应共享工具执行结果
+- 不吞 asyncio.CancelledError：取消前仅附加已收到的审计响应，随后原样传播
 - 偶发坏 JSON 依赖采样非确定性自愈（默认温度非 0）；系统性格式错误重试耗尽后
   按现有 error 口径落库，作为人工调整 prompt 的信号
 """
@@ -14,11 +16,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 
 from src.agent.providers.base import LLMProvider, LLMResponse, ToolCall
 from src.audit.logger import get_logger
 
 logger = get_logger(__name__)
+
+_AUDIT_ATTEMPT_TYPE = "llm_response_attempt"
+
+
+def _audit_attempt(raw: str, status: str, error: str = "") -> str:
+    """把一次已收到的模型响应包装成带接受状态的单行审计记录。
+
+    参数：
+        raw: str，供应商返回的原始响应全文
+        status: str，本次响应是 accepted（已接受）或 rejected（解析失败未执行）
+        error: str，拒绝响应对应的异常说明；接受响应为空
+
+    返回：
+        str，可安全按换行拼接的 JSON 审计记录
+    """
+    payload = {"audit_type": _AUDIT_ATTEMPT_TYPE, "status": status, "raw": raw}
+    if error:
+        payload["error"] = error
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 class RetryingProvider:
@@ -54,17 +77,28 @@ class RetryingProvider:
             tools: list[dict]，可供模型调用的工具定义
 
         返回：
-            LLMResponse，首次成功尝试得到的统一模型响应
+            LLMResponse，首次成功尝试的统一响应；raw 为带逐次接受状态的审计流
 
         异常：
             Exception: 所有尝试均失败时重新抛出最后一次底层异常
+            asyncio.CancelledError: 调用或退避等待被取消时，携带此前已收到的响应后原样传播
         """
         last: Exception | None = None
+        attempts: list[str] = []
         for attempt in range(self._max_attempts):
             try:
-                return await self._inner.chat(system, messages, tools)
+                response = await self._inner.chat(system, messages, tools)
+                attempts.append(_audit_attempt(response.raw, "accepted"))
+                return replace(response, raw="\n".join(attempts))
+            except asyncio.CancelledError as exc:
+                if attempts:
+                    setattr(exc, "raw", "\n".join(attempts))
+                raise
             except Exception as exc:
                 last = exc
+                if raw := getattr(exc, "raw", ""):
+                    error = f"{type(exc).__name__}: {exc}"
+                    attempts.append(_audit_attempt(raw, "rejected", error))
                 if attempt >= self._max_attempts - 1:
                     break
                 delay = self._delay(attempt)
@@ -76,8 +110,15 @@ class RetryingProvider:
                     type(exc).__name__,
                     exc,
                 )
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError as cancelled:
+                    if attempts:
+                        setattr(cancelled, "raw", "\n".join(attempts))
+                    raise
         assert last is not None  # max_attempts ≥ 1，循环至少执行一次
+        if attempts:
+            setattr(last, "raw", "\n".join(attempts))
         raise last
 
     def _delay(self, attempt: int) -> float:

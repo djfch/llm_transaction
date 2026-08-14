@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 
 import pytest
 
@@ -19,6 +20,18 @@ _OK = LLMResponse(text="好", raw="raw-ok", assistant_message={"role": "assistan
 
 _MESSAGES = [{"role": "user", "content": "上下文"}]
 _TOOLS = [{"name": "t", "description": "d", "parameters": {}}]
+
+
+def _attempts(raw: str) -> list[dict]:
+    """解析重试装饰器写入的逐次响应审计记录。
+
+    参数：
+        raw: str，按换行拼接的响应尝试审计文本
+
+    返回：
+        list[dict]，按真实尝试顺序解析出的 accepted/rejected 记录
+    """
+    return [json.loads(line) for line in raw.splitlines()]
 
 
 class _ScriptedProvider:
@@ -69,6 +82,39 @@ class _ScriptedProvider:
         return {"role": "tool", "tool_call_id": call.call_id, "content": result}
 
 
+class _RejectThenHangProvider(_ScriptedProvider):
+    """首次返回可审计解析错误，第二次永久等待直到外层取消。"""
+
+    def __init__(self) -> None:
+        """初始化空脚本与调用记录。
+
+        参数：无
+
+        返回：
+            None，初始化测试提供商状态
+        """
+        super().__init__([])
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """首次抛出带原文的解析错误，后续调用等待取消。
+
+        参数：
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+
+        返回：
+            LLMResponse，本测试的第二次调用不会正常返回
+
+        异常：
+            LLMParseError: 首次调用模拟收到无法解析的响应
+        """
+        self.calls.append((system, copy.deepcopy(messages), copy.deepcopy(tools)))
+        if len(self.calls) == 1:
+            raise LLMParseError("坏 JSON", raw="raw-bad-before-timeout")
+        await asyncio.Event().wait()
+
+
 def _wrap(inner: _ScriptedProvider) -> RetryingProvider:
     """使用零退避配置包装脚本 provider，避免单元测试真实等待。
 
@@ -91,7 +137,10 @@ async def test_success_after_two_transport_errors() -> None:
     """
     inner = _ScriptedProvider([LLMError("连接超时"), LLMError("502"), _OK])
     resp = await _wrap(inner).chat("sys", _MESSAGES, _TOOLS)
-    assert resp is _OK
+    assert resp.text == _OK.text
+    assert _attempts(resp.raw) == [
+        {"audit_type": "llm_response_attempt", "status": "accepted", "raw": "raw-ok"}
+    ]
     assert len(inner.calls) == 3
     assert inner.calls[0] == inner.calls[1] == inner.calls[2] == ("sys", _MESSAGES, _TOOLS)
 
@@ -141,6 +190,33 @@ async def test_parse_error_retried_same_params_then_raise() -> None:
     assert inner.calls[0] == inner.calls[1] == inner.calls[2]
 
 
+async def test_retry_preserves_every_failed_response_raw() -> None:
+    """验证重试成功或耗尽时都保留每次已收到但解析失败的原始响应。
+
+    参数：无
+
+    返回：
+        None，断言成功响应和最终异常的 raw 均按尝试顺序包含失败原文
+    """
+    first = LLMParseError("坏 JSON", raw="raw-bad-1")
+    success = await _wrap(_ScriptedProvider([first, _OK])).chat("sys", _MESSAGES, _TOOLS)
+    assert [(item["status"], item["raw"]) for item in _attempts(success.raw)] == [
+        ("rejected", "raw-bad-1"),
+        ("accepted", "raw-ok"),
+    ]
+
+    errors = [LLMParseError(f"坏 JSON {i}", raw=f"raw-bad-{i}") for i in range(1, 4)]
+    with pytest.raises(LLMParseError) as caught:
+        await _wrap(_ScriptedProvider(errors)).chat("sys", _MESSAGES, _TOOLS)
+    attempts = _attempts(caught.value.raw)
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("rejected", "raw-bad-1"),
+        ("rejected", "raw-bad-2"),
+        ("rejected", "raw-bad-3"),
+    ]
+    assert all(item["error"].startswith("LLMParseError:") for item in attempts)
+
+
 async def test_unexpected_exception_also_retried() -> None:
     """验证非模型异常同样参与重试且第三次成功时正常放行。
 
@@ -151,7 +227,7 @@ async def test_unexpected_exception_also_retried() -> None:
     """
     inner = _ScriptedProvider([ValueError("意外"), ValueError("意外"), _OK])
     resp = await _wrap(inner).chat("sys", _MESSAGES, _TOOLS)
-    assert resp is _OK
+    assert resp.text == _OK.text
     assert len(inner.calls) == 3
 
 
@@ -169,6 +245,45 @@ async def test_cancelled_error_propagates_without_retry() -> None:
     assert len(inner.calls) == 1
 
 
+async def test_timeout_cancellation_preserves_prior_rejected_response() -> None:
+    """重试被外层超时取消时，先前已收到的拒绝响应仍挂在取消原因链上。
+
+    参数：无
+
+    返回：
+        None，断言超时原因携带拒绝响应审计信封且调用次数为二
+    """
+    inner = _RejectThenHangProvider()
+    with pytest.raises(TimeoutError) as caught:
+        await asyncio.wait_for(_wrap(inner).chat("sys", _MESSAGES, _TOOLS), timeout=0.01)
+    cancelled = caught.value.__cause__ or caught.value.__context__
+    attempts = _attempts(getattr(cancelled, "raw", ""))
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("rejected", "raw-bad-before-timeout")
+    ]
+    assert len(inner.calls) == 2
+
+
+async def test_backoff_cancellation_preserves_prior_rejected_response() -> None:
+    """首次拒绝后在退避等待中超时，取消原因仍携带已收到的响应。
+
+    参数：无
+
+    返回：
+        None，断言尚未发起第二次调用时 rejected 审计信封已经附着到取消原因
+    """
+    inner = _ScriptedProvider([LLMParseError("坏 JSON", raw="raw-before-backoff")])
+    provider = RetryingProvider(inner, backoff=(10.0,))
+    with pytest.raises(TimeoutError) as caught:
+        await asyncio.wait_for(provider.chat("sys", _MESSAGES, _TOOLS), timeout=0.01)
+    cancelled = caught.value.__cause__ or caught.value.__context__
+    attempts = _attempts(getattr(cancelled, "raw", ""))
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("rejected", "raw-before-backoff")
+    ]
+    assert len(inner.calls) == 1
+
+
 async def test_first_success_no_retry() -> None:
     """验证首次调用成功时立即返回且不会产生多余重试。
 
@@ -179,7 +294,8 @@ async def test_first_success_no_retry() -> None:
     """
     inner = _ScriptedProvider([_OK])
     resp = await _wrap(inner).chat("sys", _MESSAGES, _TOOLS)
-    assert resp is _OK
+    assert resp.text == _OK.text
+    assert _attempts(resp.raw)[0]["status"] == "accepted"
     assert len(inner.calls) == 1
 
 
@@ -239,7 +355,7 @@ async def test_backoff_sleep_between_attempts(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
     inner = _ScriptedProvider([LLMError("x"), LLMError("y"), _OK])
     resp = await RetryingProvider(inner).chat("sys", _MESSAGES, _TOOLS)  # 默认 backoff
-    assert resp is _OK
+    assert resp.text == _OK.text
     assert slept == [1.0, 3.0]
 
 

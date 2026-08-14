@@ -1,8 +1,8 @@
 /**
  * 决策轮「完整对话」构建：把 llm_raw 解析为消息流，供对话视图渲染。
  *
- * 后端事实：llm_raw = 每个 assistant 回合的原生 API 响应 JSON（单行紧凑）按 \n 连接；
- * 工具执行结果不在 llm_raw 里，而在审计 tool_calls（按 seq 顺序与回合内 tool_use 依次对应）。
+ * 后端事实：真实 provider 把每次响应包装为带 accepted/rejected 状态的单行 JSON 审计信封，
+ * 历史数据仍可能是原生 API 响应 JSON；工具执行结果不在 llm_raw 里，而在审计 tool_calls。
  * 支持 Anthropic 原生格式、OpenAI 兼容（chat.completions）与 OpenAI Responses（顶层
  * output 数组）三种格式；解析失败时降级为「原文 + 工具调用链」。
  */
@@ -11,7 +11,7 @@ import type { ToolCall } from '../api/types'
 /** 对话视图消息：assistant 的文本/工具调用 + user 角色的工具结果 */
 export interface ConversationMessage {
   role: 'assistant' | 'user'
-  kind: 'text' | 'tool_call' | 'tool_result'
+  kind: 'reasoning' | 'text' | 'tool_call' | 'tool_result'
   text: string // text: 思考/结论文本；tool_call: 工具名+参数摘要；tool_result: 返回内容
   toolName?: string
   riskVerdict?: string // tool_result 上携带，'deny' 时前端渲染红色
@@ -20,16 +20,24 @@ export interface ConversationMessage {
 
 /** 单回合解析产物：若干文本块 + 若干工具调用（参数已序列化为摘要文本） */
 interface AssistantTurn {
-  texts: string[]
-  calls: Array<{ name: string; argsText: string }>
+  blocks: Array<
+    | { kind: 'reasoning' | 'text'; text: string }
+    | { kind: 'tool_call'; name: string; argsText: string }
+  >
 }
 
-/** 摘要截断长度：参数/结果文本超过即截断，避免超长内容撑爆渲染 */
-const MAX_TEXT = 500
+/** 单个 LLM 回合：保留该回合的思考、回复、工具调用与对应工具返回。 */
+export interface ConversationTurn {
+  messages: ConversationMessage[]
+  status: 'accepted' | 'rejected'
+  error?: string
+}
 
-/** 超长截断（末尾加省略号） */
-function clip(s: string): string {
-  return s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}…` : s
+/** 后端重试层写入的单次响应审计信封。 */
+interface RawAttempt {
+  raw: string
+  status: 'accepted' | 'rejected'
+  error?: string
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -39,34 +47,41 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /** 参数摘要：对象 JSON 序列化，字符串原样，空值为 '' */
 function argsText(input: unknown): string {
   if (input == null) return ''
-  return clip(typeof input === 'string' ? input : JSON.stringify(input))
+  return typeof input === 'string' ? input : JSON.stringify(input)
 }
 
 /** 工具结果文本：字符串原样，对象 JSON 序列化 */
 function resultText(result: ToolCall['result']): string {
-  return clip(typeof result === 'string' ? result : JSON.stringify(result))
+  return typeof result === 'string' ? result : JSON.stringify(result)
 }
 
 /** OpenAI arguments 为 JSON 字符串：解析后重新序列化（去掉转义），失败则原样展示 */
 function openAiArgsText(args: unknown): string {
   if (typeof args !== 'string') return argsText(args)
   try {
-    return clip(JSON.stringify(JSON.parse(args)))
+    return JSON.stringify(JSON.parse(args))
   } catch {
-    return clip(args)
+    return args
   }
 }
 
-/** Anthropic 格式：{role:'assistant', content:[{type:'text'|'tool_use', ...}]} */
+/** Anthropic 格式：提取 thinking 明文；redacted_thinking/signature 不展示。 */
 function parseAnthropic(content: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { texts: [], calls: [] }
+  const turn: AssistantTurn = { blocks: [] }
   for (const block of content) {
     if (!isRecord(block)) continue
+    if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+      turn.blocks.push({ kind: 'reasoning', text: block.thinking })
+    }
     if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-      turn.texts.push(block.text)
+      turn.blocks.push({ kind: 'text', text: block.text })
     }
     if (block.type === 'tool_use') {
-      turn.calls.push({ name: String(block.name ?? ''), argsText: argsText(block.input) })
+      turn.blocks.push({
+        kind: 'tool_call',
+        name: String(block.name ?? ''),
+        argsText: argsText(block.input),
+      })
     }
   }
   return turn
@@ -77,12 +92,18 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   const first = choices[0]
   if (!isRecord(first) || !isRecord(first.message)) return null
   const msg = first.message
-  const turn: AssistantTurn = { texts: [], calls: [] }
-  if (typeof msg.content === 'string' && msg.content.trim()) turn.texts.push(msg.content)
+  const turn: AssistantTurn = { blocks: [] }
+  if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+    turn.blocks.push({ kind: 'reasoning', text: msg.reasoning_content })
+  }
+  if (typeof msg.content === 'string' && msg.content.trim()) {
+    turn.blocks.push({ kind: 'text', text: msg.content })
+  }
   if (!Array.isArray(msg.tool_calls)) return turn
   for (const tc of msg.tool_calls) {
     if (!isRecord(tc) || !isRecord(tc.function)) continue
-    turn.calls.push({
+    turn.blocks.push({
+      kind: 'tool_call',
       name: String(tc.function.name ?? ''),
       argsText: openAiArgsText(tc.function.arguments),
     })
@@ -90,21 +111,33 @@ function parseOpenAi(choices: unknown[]): AssistantTurn | null {
   return turn
 }
 
-/** OpenAI Responses 格式：{output:[{type:'message',content:[{type:'output_text',text}]}
- *  | {type:'function_call',name,arguments} | {type:'reasoning',...}（跳过）]} */
+/** OpenAI Responses 格式：reasoning 只提取 summary_text，encrypted_content 不展示。 */
 function parseResponses(output: unknown[]): AssistantTurn {
-  const turn: AssistantTurn = { texts: [], calls: [] }
+  const turn: AssistantTurn = { blocks: [] }
   for (const item of output) {
     if (!isRecord(item)) continue
+    if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+      for (const summary of item.summary) {
+        if (
+          isRecord(summary) &&
+          summary.type === 'summary_text' &&
+          typeof summary.text === 'string' &&
+          summary.text.trim()
+        ) {
+          turn.blocks.push({ kind: 'reasoning', text: summary.text })
+        }
+      }
+    }
     if (item.type === 'message' && Array.isArray(item.content)) {
       for (const c of item.content) {
         if (isRecord(c) && c.type === 'output_text' && typeof c.text === 'string' && c.text.trim()) {
-          turn.texts.push(c.text)
+          turn.blocks.push({ kind: 'text', text: c.text })
         }
       }
     }
     if (item.type === 'function_call') {
-      turn.calls.push({
+      turn.blocks.push({
+        kind: 'tool_call',
         name: String(item.name ?? ''),
         argsText: openAiArgsText(item.arguments),
       })
@@ -126,6 +159,28 @@ function parseTurn(line: string): AssistantTurn | null {
   if (Array.isArray(obj.choices)) return parseOpenAi(obj.choices)
   if (Array.isArray(obj.output)) return parseResponses(obj.output)
   return null
+}
+
+/** 读取逐次响应审计信封；历史裸响应默认视为已接受。 */
+function parseAttempt(line: string): RawAttempt {
+  try {
+    const value: unknown = JSON.parse(line)
+    if (
+      isRecord(value) &&
+      value.audit_type === 'llm_response_attempt' &&
+      (value.status === 'accepted' || value.status === 'rejected') &&
+      typeof value.raw === 'string'
+    ) {
+      return {
+        raw: value.raw,
+        status: value.status,
+        error: typeof value.error === 'string' ? value.error : undefined,
+      }
+    }
+  } catch {
+    // 历史原文允许是非 JSON；由后续安全降级完整展示。
+  }
+  return { raw: line, status: 'accepted' }
 }
 
 /** 审计工具调用 → assistant/tool_call 消息（llm_raw 缺失时的兜底，args 用审计口径） */
@@ -153,38 +208,108 @@ function toResultMessage(call: ToolCall): ConversationMessage {
 /** 降级渲染：保留 llm_raw 原文（非空时），并保证工具调用链可见 */
 function fallbackMessages(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
   const msgs: ConversationMessage[] = []
-  if (llmRaw.trim()) msgs.push({ role: 'assistant', kind: 'text', text: llmRaw })
+  if (llmRaw.trim()) msgs.push({ role: 'assistant', kind: 'text', text: safeFallbackText(llmRaw) })
   for (const call of toolCalls) msgs.push(toCallMessage(call), toResultMessage(call))
   return msgs
 }
 
 /**
  * 构建决策轮的完整对话消息流。
- * 每个 assistant 回合的 text/tool_call 之后，按 seq 顺序插入对应审计 tool_result；
- * llm_raw 被截断导致审计有剩余时，剩余调用追加在末尾；空输入返回空数组。
+ * accepted 响应仅在工具名一致时消费对应审计结果；rejected 响应单独展示且绝不消费结果。
+ * llm_raw 缺失调用导致审计有剩余时，剩余调用追加在末尾；空输入返回空数组。
  */
 export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
-  const turns = llmRaw
+  return buildConversationTurns(llmRaw, toolCalls).flatMap((turn) => turn.messages)
+}
+
+/** 未识别原始格式的安全降级：保留普通内容，递归移除签名、密文与脱敏思考块。 */
+function safeFallbackText(raw: string): string {
+  return raw
     .split('\n')
-    .map(parseTurn)
-    .filter((t): t is AssistantTurn => t !== null)
-  if (turns.length === 0) return fallbackMessages(llmRaw, toolCalls)
+    .map((line) => {
+      try {
+        return JSON.stringify(stripSensitive(JSON.parse(line)))
+      } catch {
+        return redactInvalidLine(line)
+      }
+    })
+    .join('\n')
+}
+
+/** 非法 JSON 仅按字段结构定点脱敏，不误伤自然语言中的同名单词。 */
+function redactInvalidLine(line: string): string {
+  const redactedBlock = /(?:^|[,{]\s*)["']?type["']?\s*[:=]\s*["']?redacted_thinking/i
+  if (redactedBlock.test(line)) return '（原始响应含不可展示的加密思考）'
+  const sensitiveField =
+    /((?:^|[,{]\s*)["']?(?:signature|encrypted_content)["']?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^,}]*)/gi
+  return line.replace(sensitiveField, '$1"（已隐藏）"')
+}
+
+/** 递归清理未知 JSON 中不可展示的供应商私有推理字段。 */
+function stripSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => !(isRecord(item) && item.type === 'redacted_thinking'))
+      .map(stripSensitive)
+  }
+  if (!isRecord(value)) return value
+  if (value.type === 'redacted_thinking') return null
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'signature' && key !== 'encrypted_content')
+      .map(([key, child]) => [key, stripSensitive(child)]),
+  )
+}
+
+/** 构建按 LLM 响应回合分组的完整对话，供界面逐回合折叠。 */
+export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): ConversationTurn[] {
+  const attempts = llmRaw
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map(parseAttempt)
+  if (attempts.length === 0) {
+    const messages = fallbackMessages(llmRaw, toolCalls)
+    return messages.length === 0 ? [] : [{ messages, status: 'accepted' }]
+  }
   const audit = [...toolCalls].sort((a, b) => a.seq - b.seq)
-  const msgs: ConversationMessage[] = []
+  const result: ConversationTurn[] = []
   let ai = 0 // 审计消费指针：回合内第 k 个 tool_use 对应 audit 顺序第 k 条
-  for (const turn of turns) {
-    for (const text of turn.texts) msgs.push({ role: 'assistant', kind: 'text', text })
-    for (const call of turn.calls) {
+  for (const attempt of attempts) {
+    const turn = parseTurn(attempt.raw)
+    const msgs: ConversationMessage[] = []
+    const results: ConversationMessage[] = []
+    if (turn === null) {
+      if (attempt.raw.trim()) {
+        msgs.push({ role: 'assistant', kind: 'text', text: safeFallbackText(attempt.raw) })
+      }
+    }
+    for (const block of turn?.blocks ?? []) {
+      if (block.kind !== 'tool_call') {
+        msgs.push({ role: 'assistant', kind: block.kind, text: block.text })
+        continue
+      }
       msgs.push({
         role: 'assistant',
         kind: 'tool_call',
-        text: `${call.name} ${call.argsText}`.trim(),
-        toolName: call.name,
+        text: `${block.name} ${block.argsText}`.trim(),
+        toolName: block.name,
       })
-      if (ai < audit.length) msgs.push(toResultMessage(audit[ai++]))
+      const call = audit[ai]
+      if (attempt.status === 'accepted' && call?.tool === block.name) {
+        results.push(toResultMessage(call))
+        ai++
+      }
+    }
+    msgs.push(...results)
+    if (msgs.length > 0 || attempt.status === 'rejected') {
+      result.push({ messages: msgs, status: attempt.status, error: attempt.error })
     }
   }
   // llm_raw 缺尾部回合（如截断）：审计链剩余调用追加，保证工具链完整可见
-  for (; ai < audit.length; ai++) msgs.push(toCallMessage(audit[ai]), toResultMessage(audit[ai]))
-  return msgs
+  const remaining: ConversationMessage[] = []
+  for (; ai < audit.length; ai++) {
+    remaining.push(toCallMessage(audit[ai]), toResultMessage(audit[ai]))
+  }
+  if (remaining.length > 0) result.push({ messages: remaining, status: 'accepted' })
+  return result
 }

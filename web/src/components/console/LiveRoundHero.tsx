@@ -1,7 +1,7 @@
 /**
  * 实时决策轮主角卡：多 agent（交易/复盘/研报）实时轮流换展示——由 useLiveAgent 选定当前 agent
  * （后到优先、结束停留），经 getLiveFor 拉取归一快照；进行中每 3 秒轮询 + WS 六事件即时刷新，
- * ended_at 从 null 变为非 null 后 lazy 拉取审计详情（llm_raw 仅详情接口有完整版），
+ * 进行中直接渲染 live 快照里实时增长的 llm_raw；结束后 lazy 拉取审计详情校准终态，
  * 渲染本轮结论与可折叠的完整对话；紫色呼吸描边仅进行中启用（prefers-reduced-motion 兜底）。
  * 三 live 端点统一在轮结束后保留终态轮（结束事件后 reload 即得服务器终态）；
  * ended_at===null 但 started_at 超僵尸阈值的轮（进程崩溃残留）不视为进行中——不呼吸、不轮询。
@@ -12,7 +12,7 @@ import type { RoundDetail } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { isLiveRoundEvent, useLiveAgent, ZOMBIE_MS } from '../../hooks/useLiveAgent'
 import { useWs } from '../../hooks/useWs'
-import { buildConversation } from '../../utils/conversation'
+import { buildConversationTurns } from '../../utils/conversation'
 import StateHint from '../StateHint'
 import ConversationThread from './ConversationThread'
 import HeroHeader from './HeroHeader'
@@ -39,7 +39,7 @@ function useNow(active: boolean): number {
   return now
 }
 
-/** 本轮结束后 lazy 拉取审计详情（llm_raw + 完整 tool_calls）；新一轮开始/进行中清空 */
+/** 本轮结束后 lazy 拉取审计详情校准终态；新一轮开始或进行中清空旧详情。 */
 function useRoundDetail(roundId: string, ended: boolean) {
   const [detail, setDetail] = useState<RoundDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -65,7 +65,7 @@ function useRoundDetail(roundId: string, ended: boolean) {
   return { detail, detailError }
 }
 
-/** 结束区：审计详情加载中/失败提示、本轮结论（末条 assistant 文本）、完整对话（默认收起） */
+/** 结束区：审计详情加载状态与本轮结论；完整对话由主卡统一实时渲染。 */
 function EndedSection({
   detail,
   detailError,
@@ -95,7 +95,6 @@ function EndedSection({
           <p className="whitespace-pre-wrap text-[13px] leading-6 text-zinc-200">{conclusion}</p>
         </div>
       )}
-      <ConversationThread llmRaw={detail.llm_raw} toolCalls={detail.tool_calls} />
     </div>
   )
 }
@@ -134,17 +133,22 @@ export default function LiveRoundHero() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟随消息变化
   }, [lastMessage])
 
-  // 本轮结论：详情对话消息流中最后一条 assistant 文本
+  // 本轮结论：仅从已接受响应中选最后一条 assistant 文本
   const conclusion = useMemo(() => {
-    if (detail === null) return ''
-    const msgs = buildConversation(detail.llm_raw, detail.tool_calls)
+    if (detail === null || round?.error !== '') return ''
+    const msgs = buildConversationTurns(detail.llm_raw, detail.tool_calls)
+      .filter((turn) => turn.status === 'accepted')
+      .flatMap((turn) => turn.messages)
     return (
       [...msgs].reverse().find((m) => m.role === 'assistant' && m.kind === 'text')?.text ?? ''
     )
-  }, [detail])
+  }, [detail, round?.error])
 
   // 工具链：结束后用审计详情的完整链，否则用实时快照（进行中流式追加）
   const shownCalls = detail?.tool_calls ?? data?.tool_calls ?? []
+  const shownRaw = detail?.llm_raw ?? round?.llm_raw ?? ''
+  const shownPrompt = detail?.prompt_snapshot ?? round?.prompt_snapshot ?? ''
+  const shownContext = detail?.context_snapshot ?? round?.context_snapshot ?? ''
   const allowCount = shownCalls.filter((c) => c.risk_verdict === 'allow').length
   const denyCount = shownCalls.filter((c) => c.risk_verdict === 'deny').length
   // llm_configured 是 trader 语义（自动决策暂停），仅展示 trader 轮时提示
@@ -191,6 +195,14 @@ export default function LiveRoundHero() {
               </span>
             </div>
             <ToolSteps toolCalls={shownCalls} />
+            <div className="mt-3 border-t border-white/5 pt-3">
+              <ConversationThread
+                llmRaw={shownRaw}
+                toolCalls={shownCalls}
+                promptSnapshot={shownPrompt}
+                contextSnapshot={shownContext}
+              />
+            </div>
             {ended && (
               <EndedSection detail={detail} detailError={detailError} conclusion={conclusion} />
             )}

@@ -14,7 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agent.providers.base import LLMError, LLMResponse, ToolCall
+from src.agent.providers.base import LLMError, LLMParseError, LLMResponse, ToolCall
+from src.agent.providers.retry import RetryingProvider
 from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
 from src.memory import Database, Repo
@@ -135,6 +136,59 @@ def _make_agent(env, provider, **kwargs) -> ReviewAgent:
     )
 
 
+def _openai_tool_raw(name: str, arguments: str) -> str:
+    """生成带单个工具调用的 OpenAI 兼容原始响应。
+
+    参数：
+        name: str，模型请求调用的工具名
+        arguments: str，供应商原样返回的工具参数字符串
+
+    返回：
+        str，紧凑 JSON 格式的供应商响应
+    """
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [{"function": {"name": name, "arguments": arguments}}],
+                }
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _retrying_review_provider() -> RetryingProvider:
+    """构造“拒绝工具 A、接受并执行工具 B、最终文本”的复盘重试脚本。
+
+    参数：无
+
+    返回：
+        RetryingProvider，零退避且包含三段模型响应的测试提供商
+    """
+    rejected = LLMParseError(
+        "工具参数不是合法 JSON", raw=_openai_tool_raw("get_round_context", "{坏 JSON")
+    )
+    accepted = LLMResponse(
+        raw=_openai_tool_raw("get_review_stats", '{"start_ts":1000,"end_ts":2000}'),
+        tool_calls=[
+            ToolCall(
+                name="get_review_stats",
+                args={"start_ts": 1000, "end_ts": 2000},
+                call_id="accepted-1",
+            )
+        ],
+    )
+    final = LLMResponse(
+        text="最终复盘结论。",
+        raw=json.dumps(
+            {"choices": [{"message": {"content": "最终复盘结论。"}}]}, ensure_ascii=False
+        ),
+    )
+    return RetryingProvider(StubProvider([rejected, accepted, final]), backoff=())
+
+
 async def _seed_trades(repo: Repo) -> None:
     """区间内一笔平仓成交（join decisions），供预统计产生非空样本。
 
@@ -181,6 +235,10 @@ async def test_run_success_without_revision(env):
     assert stats["close_count"] == 1 and stats["total_pnl"] == "8"
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.wake_source == "review"
+    assert round_row.context_snapshot.startswith("复盘区间：")
+    assert "## 当前策略书全文" in round_row.context_snapshot
+    assert _INIT in round_row.context_snapshot
+    assert "## 区间预统计" in round_row.context_snapshot
     assert round_row.ended_at is not None and round_row.error == ""
     assert len(env.alerts) == 1
     assert "策略未调整" in env.alerts[0] and len(env.alerts[0]) <= 500
@@ -260,6 +318,29 @@ async def test_run_with_strategy_revision(env):
     assert f"策略已更新至 v{version.id}" in env.alerts[0]
 
 
+async def test_retry_audit_separates_rejected_and_accepted_tool_calls(env):
+    """解析失败后重试成功时，拒绝响应不冒领最终实际工具的审计结果。
+
+    参数：
+        env: SimpleNamespace，包含真实复盘 Agent、SQLite 审计与策略依赖
+
+    返回：
+        None，断言逐次响应状态、实际工具审计及最终报告均保持一致
+    """
+    result = await _make_agent(env, _retrying_review_provider()).run(*_PERIOD)
+
+    assert result["ok"] is True
+    round_row = await env.repo.get_audit_round(result["round_id"])
+    attempts = [json.loads(line) for line in round_row.llm_raw.splitlines()]
+    assert [item["status"] for item in attempts] == ["rejected", "accepted", "accepted"]
+    assert (
+        json.loads(attempts[0]["raw"])["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
+        == "get_round_context"
+    )
+    calls = await env.repo.list_audit_tool_calls(result["round_id"])
+    assert [call.tool for call in calls] == ["get_review_stats"]
+
+
 async def test_run_llm_failure_lands_error_report(env):
     """(c) LLM 抛错：error 报告 + 审计轮 error + 失败告警，不向上抛。
 
@@ -269,7 +350,7 @@ async def test_run_llm_failure_lands_error_report(env):
     返回：
         None，通过断言验证上述行为，无返回值
     """
-    provider = StubProvider([LLMError("boom")])
+    provider = StubProvider([LLMError("boom", raw='{"reasoning_content":"已收到"}')])
     result = await _make_agent(env, provider).run(*_PERIOD)
     assert result["ok"] is False and "LLMError: boom" in result["error"]
     report = await env.repo.review.get_review_report(result["report_id"])
@@ -278,6 +359,7 @@ async def test_run_llm_failure_lands_error_report(env):
     assert report.round_id == result["round_id"]  # 失败轮同样关联审计轮（便于排查）
     round_row = await env.repo.get_audit_round(result["round_id"])
     assert round_row.error == "LLMError: boom"
+    assert round_row.llm_raw == '{"reasoning_content":"已收到"}'
     assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]
     # 失败路径也发齐两条事件，尾部 review_round 带 ok=False
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]

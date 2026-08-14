@@ -317,6 +317,20 @@ def test_parse_incomplete_status_raises_llmerror():
         OpenAIResponsesProvider._parse(resp)
 
 
+async def test_chat_parse_error_preserves_received_raw():
+    """Responses 已返回但状态不完整时，异常仍携带原始响应供审计保存。
+
+    参数：无
+
+    返回：
+        None，断言 LLMError.raw 保留 fake response 的原始 JSON
+    """
+    resp = _FakeResponse([], status="incomplete", incomplete_reason="max_output_tokens")
+    with pytest.raises(LLMError, match="reason=max_output_tokens") as caught:
+        await _provider(_FakeResponsesAPI(resp=resp)).chat("s", [], [])
+    assert caught.value.raw == "{}"
+
+
 # ---------- tool_result_message / _to_input 回放 ----------
 
 

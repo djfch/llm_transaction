@@ -5,12 +5,15 @@ provider 用确定性 Mock（不触网）；数据源用假实现；审计落 tm
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 
 import pytest
 
+from src.agent.providers.base import LLMError, LLMParseError, LLMResponse
+from src.agent.providers.retry import RetryingProvider
 from src.audit.logger import get_logger  # noqa: F401  （确保日志初始化）
 from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
@@ -273,6 +276,62 @@ class _BadJsonProvider(_SequentialProvider):
         )
 
 
+class _RejectThenHangProvider:
+    """首次抛出带原文的解析错误，第二次等待研报超时保险丝取消。"""
+
+    def __init__(self, *, main_bad_first: bool = False) -> None:
+        """初始化调用计数与是否先返回主对话坏业务 JSON。
+
+        参数：
+            main_bad_first: bool，是否先正常返回一段会触发最终 JSON 重问的文本
+
+        返回：
+            None，初始化测试提供商状态
+        """
+        self.calls = 0
+        self.main_bad_first = main_bad_first
+        self.waiting = asyncio.Event()
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+        """按配置返回主对话文本，随后拒绝一次响应并永久等待。
+
+        参数：
+            system: str，系统提示词
+            messages: list[dict]，对话消息列表
+            tools: list[dict]，工具定义列表
+
+        返回：
+            LLMResponse，配置要求时返回触发最终 JSON 重问的主对话文本
+
+        异常：
+            LLMParseError: 指定的重试阶段调用模拟响应解析失败
+        """
+        self.calls += 1
+        if self.main_bad_first and self.calls == 1:
+            return LLMResponse(
+                text="不是业务 JSON",
+                raw="raw-main-bad-json",
+                assistant_message={"role": "assistant", "content": "不是业务 JSON"},
+            )
+        reject_call = 2 if self.main_bad_first else 1
+        if self.calls == reject_call:
+            raise LLMParseError("工具参数不是合法 JSON", raw="raw-before-timeout")
+        self.waiting.set()
+        await asyncio.Event().wait()
+
+    def tool_result_message(self, call, result: str) -> dict:
+        """构造不会在本场景实际使用的工具结果消息。
+
+        参数：
+            call: object，工具调用对象
+            result: str，工具执行结果文本
+
+        返回：
+            dict，模型可消费的工具结果消息
+        """
+        return {"role": "user", "content": result}
+
+
 @pytest.fixture
 async def repo(tmp_path) -> AsyncIterator[Repo]:
     """创建测试数据库仓库并在用例结束后关闭连接。
@@ -497,7 +556,7 @@ async def test_provider_chat_raises_falls_to_error(
             异常：
                 RuntimeError: 测试场景主动触发该失败条件时抛出
             """
-            raise RuntimeError("LLM 服务不可用")
+            raise LLMError("LLM 服务不可用", raw='{"output":"已收到"}')
 
         def tool_result_message(self, call, result):
             """构造模型可消费的工具结果消息。
@@ -513,11 +572,12 @@ async def test_provider_chat_raises_falls_to_error(
 
     agent = await _build_agent(repo, settings, _RaisingProvider(), tmp_path)
     result = await agent.run()
-    assert result["ok"] is False and "RuntimeError" in result["error"]
+    assert result["ok"] is False and "LLMError" in result["error"]
     report = await repo.research.latest_report(include_error=True)
     assert report is not None and report.error != ""
     audit_round = await repo.latest_audit_round("paper")
     assert audit_round is not None and audit_round.error != ""
+    assert audit_round.llm_raw == '{"output":"已收到"}'
 
 
 async def test_json_retry_success_path(repo: Repo, settings: Settings, tmp_path) -> None:
@@ -797,6 +857,94 @@ async def test_parse_retry_phase_under_timeout_fuse(
     assert result["ok"] is False and "TimeoutError" in result["error"]
     report = await repo.research.latest_report(include_error=True)
     assert report is not None and report.error != ""
+
+
+async def test_provider_retry_timeout_keeps_prior_rejected_raw(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """provider 内部重试被研报超时取消时，先前拒绝响应仍进入审计。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言超时失败轮保留 rejected 响应信封
+    """
+    provider = RetryingProvider(_RejectThenHangProvider(), max_attempts=2, backoff=(10.0,))
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    agent._timeout = 0.02
+
+    result = await agent.run()
+
+    assert result["ok"] is False and "TimeoutError" in result["error"]
+    audit_round = await repo.latest_audit_round("paper")
+    attempts = [json.loads(line) for line in audit_round.llm_raw.splitlines()]
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("rejected", "raw-before-timeout")
+    ]
+
+
+async def test_final_json_retry_timeout_keeps_prior_rejected_raw(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """最终 JSON 重问内部超时，也必须保留已收到的拒绝响应。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言主响应与重问拒绝响应均进入同一审计轮
+    """
+    inner = _RejectThenHangProvider(main_bad_first=True)
+    provider = RetryingProvider(inner, max_attempts=2, backoff=())
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    agent._timeout = 0.02
+
+    result = await agent.run()
+
+    assert result["ok"] is False and "TimeoutError" in result["error"]
+    audit_round = await repo.latest_audit_round("paper")
+    attempts = [json.loads(line) for line in audit_round.llm_raw.splitlines()]
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("accepted", "raw-main-bad-json"),
+        ("rejected", "raw-before-timeout"),
+    ]
+
+
+async def test_external_cancel_keeps_retry_raw_and_propagates_cancelled_error(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """外部主动取消研报任务时，重试器内已收到的响应仍落审计且取消原样传播。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言取消传播、审计收尾和 rejected 响应同时成立
+    """
+    inner = _RejectThenHangProvider()
+    provider = RetryingProvider(inner, max_attempts=2, backoff=())
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    agent._timeout = 60
+    task = asyncio.create_task(agent.run())
+    await asyncio.wait_for(inner.waiting.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    audit_round = await repo.latest_audit_round("paper")
+    attempts = [json.loads(line) for line in audit_round.llm_raw.splitlines()]
+    assert [(item["status"], item["raw"]) for item in attempts] == [
+        ("rejected", "raw-before-timeout")
+    ]
+    assert audit_round.error == "CancelledError: 研报被取消"
 
 
 async def test_timeout_terminates_round(repo: Repo, settings: Settings, tmp_path) -> None:

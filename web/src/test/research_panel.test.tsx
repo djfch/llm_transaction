@@ -84,6 +84,7 @@ function detailAsset(summary: ResearchAssetSummary): ResearchAssetDetail {
 const ROUND_DETAIL: RoundDetail = {
   round_id: 'rs-round-6',
   prompt_snapshot: 'prompt 快照',
+  context_snapshot: '研报简报',
   llm_raw: '',
   tool_calls: [{
     seq: 1,

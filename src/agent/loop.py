@@ -153,6 +153,7 @@ class DecisionLoop:
         self._drain_fills = drain_fills
         self._persister = fill_persister or FillPersister(repo, settings.mode, notify_event)
         self._persist_kill_switch = persist_kill_switch
+        self._notify_event = notify_event
         self._audit = audit or AuditTrail(repo, settings.audit)
         self._deps = ToolDeps(
             gateway=gateway,
@@ -243,6 +244,7 @@ class DecisionLoop:
         round_id = await self._audit.begin_round(
             self._settings.mode, wake_source, prompt, strategy_md5=strategy_md5
         )
+        await self._emit_round_start(round_id, wake_source)
         self._deps.round_id = round_id
         ctx: AgentContext | None = None
         try:
@@ -273,6 +275,27 @@ class DecisionLoop:
         await self._drain_round_fills()
         return result
 
+    async def _emit_round_start(self, round_id: str, wake_source: str) -> None:
+        """在审计行落库后广播轮开始事件；广播失败不拖垮决策。
+
+        参数：
+            round_id: str，已落库的决策轮编号
+            wake_source: str，本轮唤醒来源
+
+        返回：
+            None，存在回调时发送 round_start 事件
+        """
+        if self._notify_event is None:
+            return
+        try:
+            payload = {
+                "type": "round_start",
+                "data": {"round_id": round_id, "wake_source": wake_source},
+            }
+            await maybe_await(self._notify_event(payload))
+        except Exception:
+            logger.exception("round=%s 开始事件广播失败（继续执行本轮）", round_id[:8])
+
     async def _chat_loop(
         self, prompt: str, ctx: AgentContext, round_id: str
     ) -> tuple[str, str, int]:
@@ -290,8 +313,15 @@ class DecisionLoop:
         raw_parts: list[str] = []
         text, total = "", 0
         for _ in range(self._max_turns):
-            resp = await self._provider.chat(prompt, messages, schemas)
+            try:
+                resp = await self._provider.chat(prompt, messages, schemas)
+            except Exception as exc:
+                if failed_raw := getattr(exc, "raw", ""):
+                    raw_parts.append(failed_raw)
+                    await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
+                raise
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
             text = resp.text
@@ -369,7 +399,7 @@ class DecisionLoop:
             context_summary=ctx.summary if ctx else "",
             llm_raw="",
         )
-        await self._audit.end_round(round_id, "", error=error)
+        await self._audit.end_round(round_id, None, error=error)
         if self._consecutive_failures >= self._settings.llm.max_consecutive_failures:
             await self._engage_lock()
         return RoundResult(round_id=round_id, ok=False, wake_source=wake_source, error=error)

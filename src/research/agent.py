@@ -19,8 +19,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import json
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -33,6 +33,7 @@ from src.research.persist import persist_payload, success_result
 from src.research.preinject import build_preinjection
 from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
+from src.research.timeout_audit import record_failed_raw, wait_with_raw
 from src.research.tools import ResearchToolRegistry
 from src.utils import maybe_await
 
@@ -182,7 +183,7 @@ class ResearchAgent:
                 full_prompt, briefing, registry, round_id, raw_parts
             )
             # JSON 重试会放大该阶段调用数，与工具循环同受超时保险丝约束
-            payload = await asyncio.wait_for(
+            payload = await wait_with_raw(
                 self._parse_json_with_retry(
                     full_prompt,
                     ask_messages,
@@ -193,7 +194,10 @@ class ResearchAgent:
                     raw_parts,
                     text,
                 ),
-                timeout=self._timeout,
+                self._timeout,
+                self._audit,
+                round_id,
+                raw_parts,
             )
             report, asset_count = await persist_payload(
                 self._repo,
@@ -263,9 +267,12 @@ class ResearchAgent:
         返回：
             tuple[str, list[dict]]：整体超时强制终止（保险丝：防 LLM/工具卡死无限烧钱）
         """
-        return await asyncio.wait_for(
+        return await wait_with_raw(
             self._chat_loop(prompt, briefing, registry, round_id, raw_parts),
-            timeout=self._timeout,
+            self._timeout,
+            self._audit,
+            round_id,
+            raw_parts,
         )
 
     async def _chat_loop(
@@ -296,8 +303,13 @@ class ResearchAgent:
         schemas = registry.schemas()
         text, seq = "", 0
         for _ in range(self._max_turns):
-            resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
+            try:
+                resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
+            except Exception as exc:
+                await record_failed_raw(self._audit, round_id, raw_parts, exc)
+                raise
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             prefix = list(messages)  # 本轮请求所用上下文快照
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
@@ -407,8 +419,13 @@ class ResearchAgent:
             tuple[str, list[dict]]：以同一上下文前缀原样重发，返回 (新一轮最终文本, 该文本的真实产生上下文)
         """
         messages = list(ask_messages)
-        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        try:
+            resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        except Exception as exc:
+            await record_failed_raw(self._audit, round_id, raw_parts, exc)
+            raise
         raw_parts.append(resp.raw)
+        await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         if resp.assistant_message is not None:
             messages.append(resp.assistant_message)
         if not resp.tool_calls:
@@ -428,8 +445,13 @@ class ResearchAgent:
                 duration_ms=0,
             )
             messages.append(self._provider.tool_result_message(call, result))  # type: ignore[union-attr]
-        resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        try:
+            resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
+        except Exception as exc:
+            await record_failed_raw(self._audit, round_id, raw_parts, exc)
+            raise
         raw_parts.append(resp.raw)
+        await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         return resp.text, messages
 
     async def _fail(

@@ -207,6 +207,7 @@ class ReviewAgent:
         try:
             stats_text, stats_json = await self._pre_stats(period_start, period_end)
             briefing = self._build_briefing(period_start, period_end, stats_text)
+            await self._audit.record_context(round_id, briefing)
             text = await self._chat_loop(full_prompt, briefing, registry, round_id, raw_parts)
             report_md = text.strip() or "（复盘未产出报告）"
             action = "rewrite" if deps.created_version_id is not None else "none"
@@ -310,8 +311,15 @@ class ReviewAgent:
         schemas = registry.schemas()
         text, seq = "", 0
         for _ in range(self._max_turns):
-            resp = await self._provider.chat(prompt, messages, schemas)
+            try:
+                resp = await self._provider.chat(prompt, messages, schemas)
+            except Exception as exc:
+                if failed_raw := getattr(exc, "raw", ""):
+                    raw_parts.append(failed_raw)
+                    await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
+                raise
             raw_parts.append(resp.raw)
+            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
             if resp.assistant_message is not None:
                 messages.append(resp.assistant_message)
             text = resp.text

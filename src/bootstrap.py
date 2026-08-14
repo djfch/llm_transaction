@@ -353,17 +353,15 @@ async def build_app(
     _backfill_candles(candles, watchlist.contracts, skip=mock_market and candle_provider is None)
 
     async def on_wake(wake_source: str) -> None:
-        """调度器唤醒回调：先广播 round_start 事件，跑一轮决策，再广播本轮结果。
+        """调度器唤醒回调：运行决策循环，再广播本轮结束结果。
 
         闭包晚绑定 loop：本回调在 loop 创建后才会被调度器调用。
 
         参数：
             wake_source: str，唤醒来源（定时唤醒/价格触发/手动抢醒等）
 
-        返回：None，向 event_queue 推送 round_start 与 round 两类事件（经 WS 广播给前端）
+        返回：None，round_start 由决策循环在审计落库后发送，此处补发 round 结束事件
         """
-        # 轮开始先推 round_start：前端实时决策卡据此立即进入"决策中"轮询态
-        await event_queue.put({"type": "round_start", "data": {"wake_source": wake_source}})
         result = await loop.run_once(wake_source)
         await event_queue.put(
             {
