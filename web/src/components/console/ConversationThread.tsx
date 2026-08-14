@@ -90,12 +90,25 @@ function MessageText({ label, text }: { label: string; text: string }) {
 
 /** 单个 LLM 回合折叠区：思考、回复、调用与返回按原顺序完整展示。 */
 function TurnSection({ turn, index }: { turn: ConversationTurn; index: number }) {
+  const rejected = turn.status === 'rejected'
   return (
-    <details className="rounded-lg border border-violet-400/15 bg-violet-400/[.02] px-2.5 py-2">
-      <summary className="cursor-pointer list-none text-[11px] text-violet-300/80">
-        ▸ LLM 第 {index + 1} 轮 · {turn.messages.length} 条内容
+    <details
+      className={`rounded-lg border px-2.5 py-2 ${
+        rejected ? 'border-amber-400/25 bg-amber-400/[.03]' : 'border-violet-400/15 bg-violet-400/[.02]'
+      }`}
+    >
+      <summary
+        className={`cursor-pointer list-none text-[11px] ${rejected ? 'text-amber-300/90' : 'text-violet-300/80'}`}
+      >
+        ▸ LLM 第 {index + 1} 次响应 · {turn.messages.length} 条内容
+        {rejected ? ' · 已拒绝（工具未执行）' : ''}
       </summary>
       <div className="mt-2 space-y-2">
+        {rejected && turn.error && (
+          <p className="rounded border border-amber-400/15 bg-amber-950/20 px-2 py-1 text-[11px] text-amber-200/80">
+            拒绝原因：{turn.error}
+          </p>
+        )}
         {turn.messages.map((message, messageIndex) =>
           message.role === 'assistant' ? (
             <AssistantBubble key={messageIndex} msg={message} />

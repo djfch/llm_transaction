@@ -187,7 +187,7 @@ describe('LiveRoundHero(实时决策轮多 agent)', () => {
     expect(screen.getByText(/首次发送给 LLM/)).toBeInTheDocument()
     expect(screen.getByText('实时 SYSTEM 提示词')).toBeInTheDocument()
     expect(screen.getByText('实时 USER 上下文')).toBeInTheDocument()
-    expect(screen.getByText(/LLM 第 1 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 1 次响应/)).toBeInTheDocument()
     expect(screen.getByText('实时收到的明文思考')).toBeInTheDocument()
     expect(holder.getRound).not.toHaveBeenCalled()
   })

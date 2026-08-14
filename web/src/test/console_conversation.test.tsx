@@ -114,8 +114,8 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getByText(/首次发送给 LLM/)).toBeInTheDocument()
     expect(screen.getByText('完整系统提示词')).toBeInTheDocument()
     expect(screen.getByText('首次用户上下文')).toBeInTheDocument()
-    expect(screen.getByText(/LLM 第 1 轮/)).toBeInTheDocument()
-    expect(screen.getByText(/LLM 第 2 轮/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 1 次响应/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM 第 2 次响应/)).toBeInTheDocument()
     const details = [...container.querySelectorAll('details')]
     expect(details[0]).toHaveAttribute('open')
     expect(details.slice(1).every((item) => !item.hasAttribute('open'))).toBe(true)
@@ -149,14 +149,38 @@ describe('ConversationThread 完整对话消息流', () => {
       />,
     )
     const turnSummary = [...container.querySelectorAll('summary')].find((item) =>
-      item.textContent?.includes('LLM 第 1 轮'),
+      item.textContent?.includes('LLM 第 1 次响应'),
     )!
     const turn = turnSummary.parentElement!
     expect(turn).not.toHaveAttribute('open')
-    fireEvent.click(screen.getByText(/LLM 第 1 轮/))
+    fireEvent.click(screen.getByText(/LLM 第 1 次响应/))
     expect(turn).toHaveAttribute('open')
     expect(screen.getByText(reasoning)).toHaveTextContent(reasoning)
     expect(screen.getByText(result)).toHaveTextContent(result)
     expect(turn.textContent).not.toContain(`${'思'.repeat(500)}…`)
+  })
+
+  it('解析失败的响应单独标为已拒绝，且不伪造工具返回', () => {
+    const rejected = JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [{ function: { name: 'get_account', arguments: '{坏 JSON' } }],
+          },
+        },
+      ],
+    })
+    const raw = JSON.stringify({
+      audit_type: 'llm_response_attempt',
+      status: 'rejected',
+      raw: rejected,
+      error: 'LLMParseError: 工具参数不是合法 JSON',
+    })
+    render(<ConversationThread llmRaw={raw} toolCalls={[]} defaultOpen />)
+    expect(screen.getByText(/已拒绝（工具未执行）/)).toBeInTheDocument()
+    expect(screen.getByText(/拒绝原因：LLMParseError/)).toBeInTheDocument()
+    expect(screen.getByText(/发起调用 get_account/)).toBeInTheDocument()
+    expect(screen.queryByText(/USER · 工具返回/)).not.toBeInTheDocument()
   })
 })

@@ -1,8 +1,8 @@
 /**
  * 决策轮「完整对话」构建：把 llm_raw 解析为消息流，供对话视图渲染。
  *
- * 后端事实：llm_raw = 每个 assistant 回合的原生 API 响应 JSON（单行紧凑）按 \n 连接；
- * 工具执行结果不在 llm_raw 里，而在审计 tool_calls（按 seq 顺序与回合内 tool_use 依次对应）。
+ * 后端事实：真实 provider 把每次响应包装为带 accepted/rejected 状态的单行 JSON 审计信封，
+ * 历史数据仍可能是原生 API 响应 JSON；工具执行结果不在 llm_raw 里，而在审计 tool_calls。
  * 支持 Anthropic 原生格式、OpenAI 兼容（chat.completions）与 OpenAI Responses（顶层
  * output 数组）三种格式；解析失败时降级为「原文 + 工具调用链」。
  */
@@ -29,6 +29,15 @@ interface AssistantTurn {
 /** 单个 LLM 回合：保留该回合的思考、回复、工具调用与对应工具返回。 */
 export interface ConversationTurn {
   messages: ConversationMessage[]
+  status: 'accepted' | 'rejected'
+  error?: string
+}
+
+/** 后端重试层写入的单次响应审计信封。 */
+interface RawAttempt {
+  raw: string
+  status: 'accepted' | 'rejected'
+  error?: string
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -152,6 +161,28 @@ function parseTurn(line: string): AssistantTurn | null {
   return null
 }
 
+/** 读取逐次响应审计信封；历史裸响应默认视为已接受。 */
+function parseAttempt(line: string): RawAttempt {
+  try {
+    const value: unknown = JSON.parse(line)
+    if (
+      isRecord(value) &&
+      value.audit_type === 'llm_response_attempt' &&
+      (value.status === 'accepted' || value.status === 'rejected') &&
+      typeof value.raw === 'string'
+    ) {
+      return {
+        raw: value.raw,
+        status: value.status,
+        error: typeof value.error === 'string' ? value.error : undefined,
+      }
+    }
+  } catch {
+    // 历史原文允许是非 JSON；由后续安全降级完整展示。
+  }
+  return { raw: line, status: 'accepted' }
+}
+
 /** 审计工具调用 → assistant/tool_call 消息（llm_raw 缺失时的兜底，args 用审计口径） */
 function toCallMessage(call: ToolCall): ConversationMessage {
   return {
@@ -184,8 +215,8 @@ function fallbackMessages(llmRaw: string, toolCalls: ToolCall[]): ConversationMe
 
 /**
  * 构建决策轮的完整对话消息流。
- * 每个 assistant 回合的 text/tool_call 之后，按 seq 顺序插入对应审计 tool_result；
- * llm_raw 被截断导致审计有剩余时，剩余调用追加在末尾；空输入返回空数组。
+ * accepted 响应仅在工具名一致时消费对应审计结果；rejected 响应单独展示且绝不消费结果。
+ * llm_raw 缺失调用导致审计有剩余时，剩余调用追加在末尾；空输入返回空数组。
  */
 export function buildConversation(llmRaw: string, toolCalls: ToolCall[]): ConversationMessage[] {
   return buildConversationTurns(llmRaw, toolCalls).flatMap((turn) => turn.messages)
@@ -199,12 +230,19 @@ function safeFallbackText(raw: string): string {
       try {
         return JSON.stringify(stripSensitive(JSON.parse(line)))
       } catch {
-        return /signature|encrypted_content|redacted_thinking/i.test(line)
-          ? '（原始响应含不可展示的签名或加密思考）'
-          : line
+        return redactInvalidLine(line)
       }
     })
     .join('\n')
+}
+
+/** 非法 JSON 仅按字段结构定点脱敏，不误伤自然语言中的同名单词。 */
+function redactInvalidLine(line: string): string {
+  const redactedBlock = /(?:^|[,{]\s*)["']?type["']?\s*[:=]\s*["']?redacted_thinking/i
+  if (redactedBlock.test(line)) return '（原始响应含不可展示的加密思考）'
+  const sensitiveField =
+    /((?:^|[,{]\s*)["']?(?:signature|encrypted_content)["']?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^,}]*)/gi
+  return line.replace(sensitiveField, '$1"（已隐藏）"')
 }
 
 /** 递归清理未知 JSON 中不可展示的供应商私有推理字段。 */
@@ -225,21 +263,27 @@ function stripSensitive(value: unknown): unknown {
 
 /** 构建按 LLM 响应回合分组的完整对话，供界面逐回合折叠。 */
 export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): ConversationTurn[] {
-  const turns = llmRaw
+  const attempts = llmRaw
     .split('\n')
-    .map(parseTurn)
-    .filter((t): t is AssistantTurn => t !== null)
-  if (turns.length === 0) {
+    .filter((line) => line.trim() !== '')
+    .map(parseAttempt)
+  if (attempts.length === 0) {
     const messages = fallbackMessages(llmRaw, toolCalls)
-    return messages.length === 0 ? [] : [{ messages }]
+    return messages.length === 0 ? [] : [{ messages, status: 'accepted' }]
   }
   const audit = [...toolCalls].sort((a, b) => a.seq - b.seq)
   const result: ConversationTurn[] = []
   let ai = 0 // 审计消费指针：回合内第 k 个 tool_use 对应 audit 顺序第 k 条
-  for (const turn of turns) {
+  for (const attempt of attempts) {
+    const turn = parseTurn(attempt.raw)
     const msgs: ConversationMessage[] = []
     const results: ConversationMessage[] = []
-    for (const block of turn.blocks) {
+    if (turn === null) {
+      if (attempt.raw.trim()) {
+        msgs.push({ role: 'assistant', kind: 'text', text: safeFallbackText(attempt.raw) })
+      }
+    }
+    for (const block of turn?.blocks ?? []) {
       if (block.kind !== 'tool_call') {
         msgs.push({ role: 'assistant', kind: block.kind, text: block.text })
         continue
@@ -250,16 +294,22 @@ export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): C
         text: `${block.name} ${block.argsText}`.trim(),
         toolName: block.name,
       })
-      if (ai < audit.length) results.push(toResultMessage(audit[ai++]))
+      const call = audit[ai]
+      if (attempt.status === 'accepted' && call?.tool === block.name) {
+        results.push(toResultMessage(call))
+        ai++
+      }
     }
     msgs.push(...results)
-    if (msgs.length > 0) result.push({ messages: msgs })
+    if (msgs.length > 0) {
+      result.push({ messages: msgs, status: attempt.status, error: attempt.error })
+    }
   }
   // llm_raw 缺尾部回合（如截断）：审计链剩余调用追加，保证工具链完整可见
   const remaining: ConversationMessage[] = []
   for (; ai < audit.length; ai++) {
     remaining.push(toCallMessage(audit[ai]), toResultMessage(audit[ai]))
   }
-  if (remaining.length > 0) result.push({ messages: remaining })
+  if (remaining.length > 0) result.push({ messages: remaining, status: 'accepted' })
   return result
 }

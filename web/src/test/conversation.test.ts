@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { ToolCall } from '../api/types'
-import { buildConversation } from '../utils/conversation'
+import { buildConversation, buildConversationTurns } from '../utils/conversation'
 
 /** 审计工具调用夹具（args 从简，断言不依赖它） */
 function auditCall(seq: number, tool: string, result: string, verdict = '', reason = ''): ToolCall {
@@ -272,6 +272,84 @@ describe('buildConversation（完整对话构建）', () => {
       ['text', '调用已发出，等待结果。'],
       ['tool_result', '工具结果'],
     ])
+  })
+
+  it('重试：拒绝响应中的工具不消费最终成功响应的审计结果', () => {
+    const rejected = JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [{ function: { name: 'get_account', arguments: '{坏 JSON' } }],
+          },
+        },
+      ],
+    })
+    const accepted = JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                function: {
+                  name: 'place_order',
+                  arguments: '{"contract":"BTC_USDT","size":4}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const raw = [
+      JSON.stringify({
+        audit_type: 'llm_response_attempt',
+        status: 'rejected',
+        raw: rejected,
+        error: 'LLMParseError: 工具参数不是合法 JSON',
+      }),
+      JSON.stringify({ audit_type: 'llm_response_attempt', status: 'accepted', raw: accepted }),
+    ].join('\n')
+    const turns = buildConversationTurns(raw, [
+      auditCall(1, 'place_order', '已成交 4 张', 'allow'),
+    ])
+    expect(turns.map((turn) => turn.status)).toEqual(['rejected', 'accepted'])
+    expect(turns[0].messages.map((message) => [message.kind, message.toolName])).toEqual([
+      ['tool_call', 'get_account'],
+    ])
+    expect(turns[1].messages.map((message) => [message.kind, message.toolName])).toEqual([
+      ['tool_call', 'place_order'],
+      ['tool_result', 'place_order'],
+    ])
+  })
+
+  it('重试：不可识别的拒绝原文与正常响应混合时仍单独保留', () => {
+    const accepted = JSON.stringify({
+      choices: [{ message: { content: '最终成功响应', tool_calls: null } }],
+    })
+    const raw = [
+      JSON.stringify({
+        audit_type: 'llm_response_attempt',
+        status: 'rejected',
+        raw: '供应商未来格式原文',
+      }),
+      JSON.stringify({ audit_type: 'llm_response_attempt', status: 'accepted', raw: accepted }),
+    ].join('\n')
+    expect(buildConversation(raw, []).map((message) => message.text)).toEqual([
+      '供应商未来格式原文',
+      '最终成功响应',
+    ])
+  })
+
+  it('未知纯文本中的普通 signature 单词保持原文，结构化敏感字段仍定点隐藏', () => {
+    const sentence = 'Please verify the function signature before calling it.'
+    expect(buildConversation(sentence, [])[0].text).toBe(sentence)
+
+    const malformed = '{"future":true,"signature":"secret-token",broken'
+    const visible = buildConversation(malformed, [])[0].text
+    expect(visible).toContain('"signature":"（已隐藏）"')
+    expect(visible).not.toContain('secret-token')
   })
 
   it('未知 JSON 降级展示也移除签名、密文与脱敏思考块', () => {
