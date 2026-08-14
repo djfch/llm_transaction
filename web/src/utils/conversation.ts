@@ -301,7 +301,7 @@ export function buildConversationTurns(llmRaw: string, toolCalls: ToolCall[]): C
       }
     }
     msgs.push(...results)
-    if (msgs.length > 0) {
+    if (msgs.length > 0 || attempt.status === 'rejected') {
       result.push({ messages: msgs, status: attempt.status, error: attempt.error })
     }
   }

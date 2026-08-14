@@ -136,7 +136,7 @@ export default function ConversationThread({
 }) {
   const turns = useMemo(() => buildConversationTurns(llmRaw, toolCalls), [llmRaw, toolCalls])
   const messageCount = turns.reduce((count, turn) => count + turn.messages.length, 0)
-  if (messageCount === 0 && promptSnapshot === '' && contextSnapshot === '') return null
+  if (turns.length === 0 && promptSnapshot === '' && contextSnapshot === '') return null
   return (
     <details open={defaultOpen} className="text-xs">
       <summary className="cursor-pointer list-none text-zinc-500 transition hover:text-violet-300">

@@ -183,4 +183,19 @@ describe('ConversationThread 完整对话消息流', () => {
     expect(screen.getByText(/发起调用 get_account/)).toBeInTheDocument()
     expect(screen.queryByText(/USER · 工具返回/)).not.toBeInTheDocument()
   })
+
+  it('空快照与空 output 仍展示零消息 rejected 回合及拒绝原因', () => {
+    const raw = JSON.stringify({
+      audit_type: 'llm_response_attempt',
+      status: 'rejected',
+      raw: JSON.stringify({ status: 'incomplete', output: [] }),
+      error: 'LLMError: max_output_tokens',
+    })
+
+    render(<ConversationThread llmRaw={raw} toolCalls={[]} defaultOpen />)
+
+    expect(screen.getByText(/完整对话 · agent loop/)).toBeInTheDocument()
+    expect(screen.getByText(/已拒绝（工具未执行）/)).toBeInTheDocument()
+    expect(screen.getByText(/拒绝原因：LLMError: max_output_tokens/)).toBeInTheDocument()
+  })
 })

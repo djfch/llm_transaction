@@ -342,6 +342,23 @@ describe('buildConversation（完整对话构建）', () => {
     ])
   })
 
+  it('重试：Responses 空 output 的拒绝响应仍保留状态与拒绝原因', () => {
+    const raw = JSON.stringify({
+      audit_type: 'llm_response_attempt',
+      status: 'rejected',
+      raw: JSON.stringify({ status: 'incomplete', output: [] }),
+      error: 'LLMError: max_output_tokens',
+    })
+
+    expect(buildConversationTurns(raw, [])).toEqual([
+      {
+        messages: [],
+        status: 'rejected',
+        error: 'LLMError: max_output_tokens',
+      },
+    ])
+  })
+
   it('未知纯文本中的普通 signature 单词保持原文，结构化敏感字段仍定点隐藏', () => {
     const sentence = 'Please verify the function signature before calling it.'
     expect(buildConversation(sentence, [])[0].text).toBe(sentence)

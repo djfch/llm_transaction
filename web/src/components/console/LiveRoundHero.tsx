@@ -12,7 +12,7 @@ import type { RoundDetail } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { isLiveRoundEvent, useLiveAgent, ZOMBIE_MS } from '../../hooks/useLiveAgent'
 import { useWs } from '../../hooks/useWs'
-import { buildConversation } from '../../utils/conversation'
+import { buildConversationTurns } from '../../utils/conversation'
 import StateHint from '../StateHint'
 import ConversationThread from './ConversationThread'
 import HeroHeader from './HeroHeader'
@@ -133,14 +133,16 @@ export default function LiveRoundHero() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只跟随消息变化
   }, [lastMessage])
 
-  // 本轮结论：详情对话消息流中最后一条 assistant 文本
+  // 本轮结论：仅从已接受响应中选最后一条 assistant 文本
   const conclusion = useMemo(() => {
-    if (detail === null) return ''
-    const msgs = buildConversation(detail.llm_raw, detail.tool_calls)
+    if (detail === null || round?.error !== '') return ''
+    const msgs = buildConversationTurns(detail.llm_raw, detail.tool_calls)
+      .filter((turn) => turn.status === 'accepted')
+      .flatMap((turn) => turn.messages)
     return (
       [...msgs].reverse().find((m) => m.role === 'assistant' && m.kind === 'text')?.text ?? ''
     )
-  }, [detail])
+  }, [detail, round?.error])
 
   // 工具链：结束后用审计详情的完整链，否则用实时快照（进行中流式追加）
   const shownCalls = detail?.tool_calls ?? data?.tool_calls ?? []

@@ -326,7 +326,7 @@ flowchart LR
 
 ## 9. 持久化与审计模型
 
-默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。模型每返回一轮响应，`AuditTrail(审计追踪器)` 会先实时更新 `audit_rounds.llm_raw(模型响应审计流)`，再允许执行该轮工具。真实 provider 的每次已收到响应都包装为单行 JSON，携带 `status(接受状态)`：`accepted(已接受并可执行)` 或 `rejected(解析失败且工具未执行)`；原始供应商正文保存在信封内，前端只让 accepted 响应消费工具审计结果，避免重试失败响应伪造执行链。研报的内部超时、退避取消和外部任务取消也会在退出前回收已经收到的响应。每轮结束时还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
+默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。模型每返回一轮响应，`AuditTrail(审计追踪器)` 会先实时更新 `audit_rounds.llm_raw(模型响应审计流)`，再允许执行该轮工具。真实 provider 的每次已收到响应都包装为单行 JSON，携带 `status(接受状态)`：`accepted(已接受并可执行)` 或 `rejected(解析失败且工具未执行)`；原始供应商正文保存在信封内，前端只让 accepted 响应消费工具审计结果，避免重试失败响应伪造执行链。rejected 响应即使没有可见正文也保留状态与拒绝原因；“本轮结论”只从无错误审计轮的 accepted 响应提取。研报的内部超时、退避取消和外部任务取消也会在退出前回收已经收到的响应。每轮结束时还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
 
 | 表 | 具体含义 | 关键字段 |
 | --- | --- | --- |
