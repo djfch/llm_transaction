@@ -252,7 +252,7 @@ sequenceDiagram
 
 ### 复盘链路
 
-复盘链路与交易决策链路同进程但解耦，不复用上述唤醒调度。距上次复盘满 `review.interval_days` 天且到达触发时刻（`review.daily_time`，巡检循环每分钟检查）或经 `POST /api/review/run` 手动触发后，`ReviewAgent` 以 `wake_source='review'` 开启一条审计轮：先向 LLM 发送中文简报（复盘区间——最近 interval_days 天、当前策略书全文、代码侧预统计），随后进行最多 12 轮只读工具调用，工具循环结束后的最终文本落库为复盘报告。若 LLM 调用 `submit_strategy_revision`，`StrategyStore` 校验（strip 后 ≥100 字符、UTF-8 ≤32KB、与当前版本有差异）通过后经临时文件原子替换 `system_prompt.md` 并落新版本，下一轮决策由 `PromptLoader` mtime 热重载自动生效。复盘任何失败只落 error 报告、审计轮 error 并告警，绝不向上抛，交易决策循环零感知。
+复盘链路与交易决策链路同进程但解耦，不复用上述唤醒调度。距上次复盘满 `review.interval_days` 天且到达触发时刻（`review.daily_time`，巡检循环每分钟检查）或经 `POST /api/review/run` 手动触发后，`ReviewAgent` 以 `wake_source='review'` 开启一条审计轮：先构造中文简报（复盘区间——最近 interval_days 天、当前策略书全文、代码侧预统计）并在调用 LLM 前回填到上下文快照，随后进行最多 12 轮只读工具调用，工具循环结束后的最终文本落库为复盘报告。若 LLM 调用 `submit_strategy_revision`，`StrategyStore` 校验（strip 后 ≥100 字符、UTF-8 ≤32KB、与当前版本有差异）通过后经临时文件原子替换 `system_prompt.md` 并落新版本，下一轮决策由 `PromptLoader` mtime 热重载自动生效。复盘任何失败只落 error 报告、审计轮 error 并告警，绝不向上抛，交易决策循环零感知。
 
 ## 6. 风控边界
 
@@ -326,7 +326,7 @@ flowchart LR
 
 ## 9. 持久化与审计模型
 
-默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。模型每返回一轮响应，`AuditTrail(审计追踪器)` 会先实时更新 `audit_rounds.llm_raw(模型原始响应)`，再允许执行该轮工具；解析失败时已收到的原始响应仍会保留。每轮结束时还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
+默认数据库为 `data/agent.db`，使用 SQLite WAL 模式。模型每返回一轮响应，`AuditTrail(审计追踪器)` 会先实时更新 `audit_rounds.llm_raw(模型响应审计流)`，再允许执行该轮工具。真实 provider 的每次已收到响应都包装为单行 JSON，携带 `status(接受状态)`：`accepted(已接受并可执行)` 或 `rejected(解析失败且工具未执行)`；原始供应商正文保存在信封内，前端只让 accepted 响应消费工具审计结果，避免重试失败响应伪造执行链。研报的内部超时、退避取消和外部任务取消也会在退出前回收已经收到的响应。每轮结束时还会把完整记录写入 `logs/audit/round_<round_id>.json`，形成 SQLite 与 JSON 快照双写。
 
 | 表 | 具体含义 | 关键字段 |
 | --- | --- | --- |

@@ -207,6 +207,7 @@ class ReviewAgent:
         try:
             stats_text, stats_json = await self._pre_stats(period_start, period_end)
             briefing = self._build_briefing(period_start, period_end, stats_text)
+            await self._audit.record_context(round_id, briefing)
             text = await self._chat_loop(full_prompt, briefing, registry, round_id, raw_parts)
             report_md = text.strip() or "（复盘未产出报告）"
             action = "rewrite" if deps.created_version_id is not None else "none"

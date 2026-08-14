@@ -19,8 +19,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import json
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -33,6 +33,7 @@ from src.research.persist import persist_payload, success_result
 from src.research.preinject import build_preinjection
 from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
+from src.research.timeout_audit import record_failed_raw, wait_with_raw
 from src.research.tools import ResearchToolRegistry
 from src.utils import maybe_await
 
@@ -182,7 +183,7 @@ class ResearchAgent:
                 full_prompt, briefing, registry, round_id, raw_parts
             )
             # JSON 重试会放大该阶段调用数，与工具循环同受超时保险丝约束
-            payload = await asyncio.wait_for(
+            payload = await wait_with_raw(
                 self._parse_json_with_retry(
                     full_prompt,
                     ask_messages,
@@ -193,7 +194,10 @@ class ResearchAgent:
                     raw_parts,
                     text,
                 ),
-                timeout=self._timeout,
+                self._timeout,
+                self._audit,
+                round_id,
+                raw_parts,
             )
             report, asset_count = await persist_payload(
                 self._repo,
@@ -263,9 +267,12 @@ class ResearchAgent:
         返回：
             tuple[str, list[dict]]：整体超时强制终止（保险丝：防 LLM/工具卡死无限烧钱）
         """
-        return await asyncio.wait_for(
+        return await wait_with_raw(
             self._chat_loop(prompt, briefing, registry, round_id, raw_parts),
-            timeout=self._timeout,
+            self._timeout,
+            self._audit,
+            round_id,
+            raw_parts,
         )
 
     async def _chat_loop(
@@ -299,7 +306,7 @@ class ResearchAgent:
             try:
                 resp = await self._provider.chat(prompt, messages, schemas)  # type: ignore[union-attr]
             except Exception as exc:
-                await self._record_failed_raw(round_id, raw_parts, exc)
+                await record_failed_raw(self._audit, round_id, raw_parts, exc)
                 raise
             raw_parts.append(resp.raw)
             await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
@@ -415,7 +422,7 @@ class ResearchAgent:
         try:
             resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
         except Exception as exc:
-            await self._record_failed_raw(round_id, raw_parts, exc)
+            await record_failed_raw(self._audit, round_id, raw_parts, exc)
             raise
         raw_parts.append(resp.raw)
         await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
@@ -441,26 +448,11 @@ class ResearchAgent:
         try:
             resp = await self._provider.chat(prompt, messages, registry.schemas())  # type: ignore[union-attr]
         except Exception as exc:
-            await self._record_failed_raw(round_id, raw_parts, exc)
+            await record_failed_raw(self._audit, round_id, raw_parts, exc)
             raise
         raw_parts.append(resp.raw)
         await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
         return resp.text, messages
-
-    async def _record_failed_raw(self, round_id: str, raw_parts: list[str], exc: Exception) -> None:
-        """把供应商已返回但解析失败的原始响应补进当前审计轮。
-
-        参数：
-            round_id: str，关联的审计轮次编号
-            raw_parts: list[str]，截至当前累计的模型原始响应
-            exc: Exception，可能携带 raw 属性的供应商异常
-
-        返回：
-            None，有原始响应时追加列表并实时更新审计；无内容时不写
-        """
-        if failed_raw := getattr(exc, "raw", ""):
-            raw_parts.append(failed_raw)
-            await self._audit.record_llm_raw(round_id, "\n".join(raw_parts))
 
     async def _fail(
         self, round_id: str, raw_parts: list[str], report_type: str, exc: Exception

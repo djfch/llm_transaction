@@ -47,7 +47,7 @@ class LLMResponse:
 
     text: str = ""  # 文本部分（可能为空）
     tool_calls: list[ToolCall] = field(default_factory=list)
-    raw: str = ""  # 原始输出全文（审计快照用）
+    raw: str = ""  # 原始输出全文；重试层返回时升级为逐次响应审计流
     assistant_message: dict[str, Any] | None = None  # 原生 assistant 消息（多轮回填用）
 
 
