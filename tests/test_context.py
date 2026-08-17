@@ -8,14 +8,17 @@
 """
 
 from decimal import Decimal
+from unittest.mock import Mock
 
 from src.agent.context import ContextBuilder
-from src.gateway.base import Candle
+from src.config import PaperConfig
+from src.gateway.base import Candle, Contract, Ticker
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.indicator_service import IndicatorService
 from src.market.triggers import TriggerManager
 from src.memory import Database, Repo
+from src.paper.setup import build_paper_gateway
 
 
 async def _build_text(triggers: TriggerManager, tmp_path, alerts_n: int = 20) -> str:
@@ -100,6 +103,68 @@ async def test_alerts_section_truncates_to_alerts_n(tmp_path):
     assert "- BTC_USDT above 20000" in text
     assert "- BTC_USDT above 30000" not in text  # 超出部分截断
     assert "另有 1 条未显示" in text
+
+
+async def test_paper_market_section_uses_real_ticker_statistics(tmp_path):
+    """校验 paper 初始上下文保留公共行情的真实 24h 统计与最新资金费率。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，用于隔离测试数据库
+    返回：
+        None，断言行情行采用外部 ticker 的涨跌、高低价和资金费率，
+        不再由标记价合成伪 24h 数据
+    """
+    public = Mock()
+    public.get_tickers.return_value = [
+        Ticker(
+            contract="BTC_USDT",
+            last=Decimal("63120.5"),
+            mark_price=Decimal("63118.8"),
+            funding_rate=Decimal("0.000087"),
+            high_24h=Decimal("63888.8"),
+            low_24h=Decimal("62111.1"),
+            change_percentage=Decimal("1.23"),
+        )
+    ]
+    gateway = build_paper_gateway(
+        PaperConfig(),
+        [
+            Contract(
+                name="BTC_USDT",
+                quanto_multiplier=Decimal("0.001"),
+                mark_price=Decimal("63040.8"),
+                order_size_min=Decimal("1"),
+                order_size_max=Decimal("1000000"),
+                order_price_round=Decimal("0.1"),
+                enable_decimal=False,
+                funding_rate=Decimal("0.0001"),
+                funding_interval=28800,
+                maker_fee_rate=Decimal("0.0002"),
+                taker_fee_rate=Decimal("0.0005"),
+                status="trading",
+                in_delisting=False,
+            )
+        ],
+        None,
+        public,
+    )
+    db = Database()
+    await db.open(tmp_path / "agent.db")
+    try:
+        builder = ContextBuilder(
+            gateway,
+            Repo(db),
+            CandleCache(gateway, ManualPriceSource()),
+            TriggerManager(lambda t, p: None),
+            ["BTC_USDT"],
+        )
+        text = (await builder.build("timer")).text
+    finally:
+        await db.close()
+
+    assert (
+        "BTC_USDT: 标记价 63118.8，资金费率 0.000087，24h涨跌 1.23%，24h高/低 63888.8/62111.1"
+    ) in text
 
 
 # ---------- 指标短名单行（行情段每合约第三行） ----------

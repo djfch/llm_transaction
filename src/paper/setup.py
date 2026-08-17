@@ -4,11 +4,20 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ..config import PaperConfig
-from ..gateway.base import Candle, Contract
+from ..gateway.base import Candle, Contract, Ticker
 from .engine import PaperGateway
 
 
 class PublicMarketGateway(Protocol):
+    def get_tickers(self) -> list[Ticker]:
+        """读取全部合约的最新行情摘要。
+
+        参数：无
+        返回：
+            list[Ticker]，包含标记价、资金费率、24h 涨跌与高低价的实时行情列表
+        """
+        ...
+
     def get_candlesticks(self, *args: object, **kwargs: object) -> list[Candle]:
         """读取合约 K 线数据，查询条件原样透传给底层行情源。
 
@@ -67,6 +76,7 @@ def build_paper_gateway(
     gateway = PaperGateway(
         config,
         candle_provider=provider,
+        ticker_provider=public.get_tickers if public else None,
         oi_provider=public.fetch_open_interest if public else None,
         oi_history_provider=public.fetch_open_interest_history if public else None,
     )
