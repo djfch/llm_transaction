@@ -60,19 +60,6 @@ class CalendarLike(Protocol):
         ...
 
 
-def _beijing_day_start(ts: float) -> float:
-    """计算时间戳对应 UTC+8 自然日的零点。
-
-    参数：
-        ts: float，Unix 秒
-
-    返回：
-        float：UTC+8 当日零点 Unix 秒
-    """
-    local = datetime.fromtimestamp(ts, BEIJING_TZ)
-    return datetime.combine(local.date(), clock.min, BEIJING_TZ).timestamp()
-
-
 def _fire_at(schedule: ResearchSchedule, target: date) -> datetime:
     """计算调度项在目标 UTC+8 日期对应的绝对触发时刻。
 
@@ -211,7 +198,11 @@ class ResearchScheduler:
         # 否则手动任务可在数据库查询期间抢锁，自动任务随后排队形成补跑。
         await self._lock.acquire()
         try:
-            if await self._repo.research.has_report_since(schedule.id, _beijing_day_start(stamp)):
+            current = next((item for item in cfg.schedules if item.id == schedule.id), None)
+            if not cfg.enabled or current is None or not self._is_due(current, local):
+                return
+            claimed = await self._repo.research.claim_schedule_run(current.id, local.date())
+            if not claimed:
                 return
             current = next((item for item in cfg.schedules if item.id == schedule.id), None)
             if not cfg.enabled or current is None or not self._is_due(current, local):

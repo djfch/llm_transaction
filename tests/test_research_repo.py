@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from src.memory import Database, Repo
@@ -383,6 +385,21 @@ async def test_has_report_since(repo: Repo) -> None:
     assert await repo.research.has_report_since("us", ok.created_at + 1) is False  # 之后无
     assert await repo.research.has_report_since("asia", fail.created_at) is True  # 失败也算已跑
     assert await repo.research.has_report_since("europe", ok.created_at) is False  # 类型不匹配
+
+
+async def test_claim_schedule_run_is_unique_per_scheduled_date(repo: Repo) -> None:
+    """同一调度同一计划日期只能认领一次，不同日期可分别认领。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言数据库唯一约束提供调度幂等语义
+    """
+    scheduled = date(2026, 8, 17)
+    assert await repo.research.claim_schedule_run("asia_open", scheduled) is True
+    assert await repo.research.claim_schedule_run("asia_open", scheduled) is False
+    assert await repo.research.claim_schedule_run("asia_open", date(2026, 8, 18)) is True
 
 
 async def test_latest_research_audit_round(repo: Repo) -> None:

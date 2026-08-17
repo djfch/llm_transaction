@@ -341,6 +341,7 @@ flowchart LR
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |
 | `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议固定为 v2 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)` |
+| `research_schedule_runs(研报调度执行记录)` | 以计划日期独立记录自动调度认领，避免报告跨零点完成时串占次日名额 | `schedule_id(调度项标识)`、`scheduled_date(UTC+8计划日期)` |
 | `research_asset_views(研报逐标的结论)` | 一个报告内每个合约唯一，保存结论、输入快照与验证占位 | `contract(合约)`、`basis_type(依据类型)`、`market_context_json(市场输入快照)`、`verify_result(验证结果)` |
 | `review_reports(复盘报告)` | 每次复盘的区间统计、报告全文与策略动作 | `period_start/period_end(复盘区间)`、`strategy_action(策略动作)`、`new_version_id(产生的新版本)`、`round_id(产生报告的审计轮，老报告为空串不回填)` |
 

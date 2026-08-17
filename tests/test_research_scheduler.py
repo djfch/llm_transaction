@@ -11,7 +11,6 @@ import pytest
 from src.config import FixedTimeSchedule, ResearchConfig, Settings
 from src.memory import Database, Repo
 from src.research.scheduler import ResearchScheduler
-from tests.research_helpers import save_report_fixture
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 
@@ -280,19 +279,51 @@ async def test_custom_market_calendars_skip_their_holiday(repo: Repo, market: st
 
 
 async def test_same_schedule_attempt_is_idempotent(repo: Repo):
-    """同一日同一预设已有失败记录时不重复执行。
+    """同一计划日期同一调度即使 Agent 未落报告也只执行一次。
 
     参数：
         repo: Repo，隔离仓储
 
     返回：
-        None：断言数据库幂等阻止重复
+        None：断言独立调度执行记录阻止重复
     """
-    await save_report_fixture(repo, report_type="asia_open", error="解析失败")
     agent = StubAgent()
     scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
-    await scheduler.tick(_bj(2026, 8, 17, 7, 30))
-    assert agent.calls == []
+    target = _bj(2026, 8, 17, 7, 30)
+    await scheduler.tick(target)
+    await scheduler.tick(target)
+    assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
+
+
+async def test_report_completed_after_midnight_does_not_block_next_scheduled_date(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+):
+    """前一日任务跨零点完成后，次日相同调度仍可按时执行。
+
+    参数：
+        repo: Repo，隔离仓储
+        monkeypatch: pytest.MonkeyPatch，固定报告完成时间
+
+    返回：
+        None：断言报告完成日期不再承担调度幂等语义
+    """
+    schedule_id = "00000000-0000-4000-8000-000000000001"
+    monkeypatch.setattr("src.memory.research_repo._now", lambda: _bj(2026, 8, 18, 0, 5))
+    await repo.research.save_failed_report(
+        report_type=schedule_id,
+        error="前一日 23:59 任务跨零点完成",
+    )
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value="23:59")),
+        agent,
+        repo,
+        calendar=StubCalendar(),
+    )
+
+    await scheduler.tick(_bj(2026, 8, 18, 23, 59))
+
+    assert agent.calls == [{"report_type": schedule_id, "hours": 24}]
 
 
 async def test_hot_toggle_applies_without_restart(repo: Repo):
@@ -434,19 +465,19 @@ class BlockingResearchHistory:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def has_report_since(self, _report_type: str, _since_ts: float) -> bool:
+    async def claim_schedule_run(self, _schedule_id: str, _scheduled_date: date) -> bool:
         """通知查询已开始并等待测试释放。
 
         参数：
-            _report_type: str，报告类型（本桩不使用）
-            _since_ts: float，幂等窗口起点（本桩不使用）
+            _schedule_id: str，调度标识（本桩不使用）
+            _scheduled_date: date，计划日期（本桩不使用）
 
         返回：
-            bool：固定返回 False
+            bool：固定返回 True，模拟首次认领成功
         """
         self.entered.set()
         await self.release.wait()
-        return False
+        return True
 
 
 class BlockingRepo:
