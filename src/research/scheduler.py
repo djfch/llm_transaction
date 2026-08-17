@@ -13,7 +13,7 @@ from src.audit.logger import get_logger
 from src.config import ROOT, FixedTimeSchedule, MarketOpenSchedule, ResearchSchedule, Settings
 from src.memory.repo import Repo
 from src.research.agent import ResearchAgent
-from src.research.calendars import MarketCalendarProvider
+from src.research.calendars import CalendarRefreshResult, MarketCalendarProvider
 
 logger = get_logger(__name__)
 
@@ -23,18 +23,19 @@ _MARKET_OPEN = {
     "XLON": (ZoneInfo("Europe/London"), clock(8, 0)),
     "XNYS": (ZoneInfo("America/New_York"), clock(9, 30)),
 }
+_REFRESH_BACKOFF_MINUTES = (5, 15, 30, 60)
 
 
 class CalendarLike(Protocol):
     """调度器依赖的官方交易日日历最小接口。"""
 
-    async def refresh(self) -> None:
+    async def refresh(self) -> CalendarRefreshResult:
         """刷新官方日历缓存。
 
         参数：无
 
         返回：
-            None：更新实现内部缓存
+            CalendarRefreshResult：逐来源与缓存写入结果
         """
 
     def is_trading_day(self, market: str, target: date) -> bool:
@@ -122,7 +123,9 @@ class ResearchScheduler:
         path = cache_path or ROOT / "data" / "market_calendar_cache.json"
         self._calendar = calendar or MarketCalendarProvider(path)
         self._lock = asyncio.Lock()
-        self._last_refresh_date: date | None = None
+        self._last_refresh_at: datetime | None = None
+        self._next_refresh_at: datetime | None = None
+        self._refresh_failures = 0
 
     async def run_forever(self) -> None:
         """立即检查当前分钟，刷新日历，此后对齐自然分钟巡检并每日刷新。
@@ -132,15 +135,15 @@ class ResearchScheduler:
         返回：
             None：长期运行直至任务被取消
         """
-        await self._safe_refresh()
+        await self._safe_refresh(datetime.now(BEIJING_TZ))
         await self._safe_tick()
         while True:
             delay = 60 - (time.time() % 60) + 0.01
             await asyncio.sleep(delay)
-            await self._safe_tick()
             local = datetime.now(BEIJING_TZ)
-            if local.time() >= clock(0, 10) and self._last_refresh_date != local.date():
-                await self._safe_refresh()
+            if self._should_refresh(local):
+                await self._safe_refresh(local)
+            await self._safe_tick()
 
     async def _safe_tick(self) -> None:
         """执行一次巡检并吞掉异常，保护长期任务。
@@ -155,19 +158,48 @@ class ResearchScheduler:
         except Exception:
             logger.exception("研报调度巡检异常")
 
-    async def _safe_refresh(self) -> None:
-        """刷新官方日历并吞掉顶层异常，保留缓存降级能力。
+    async def _safe_refresh(self, current: datetime) -> bool:
+        """刷新官方日历，失败时安排当日退避重试。
 
-        参数：无
+        参数：
+            current: datetime，本次刷新对应的 UTC+8 时刻
 
         返回：
-            None：刷新后记录 UTC+8 日期
+            bool：三家来源与缓存全部成功时为 True
         """
         try:
-            await self._calendar.refresh()
+            result = await self._calendar.refresh()
         except Exception:
             logger.exception("官方交易日日历刷新异常")
-        self._last_refresh_date = datetime.now(BEIJING_TZ).date()
+        else:
+            if result.complete:
+                self._last_refresh_at = current
+                self._next_refresh_at = None
+                self._refresh_failures = 0
+                return True
+        index = min(self._refresh_failures, len(_REFRESH_BACKOFF_MINUTES) - 1)
+        self._refresh_failures += 1
+        daily_at = datetime.combine(current.date(), clock(0, 10), BEIJING_TZ)
+        retry_at = current + timedelta(minutes=_REFRESH_BACKOFF_MINUTES[index])
+        self._next_refresh_at = daily_at if current < daily_at else retry_at
+        return False
+
+    def _should_refresh(self, current: datetime) -> bool:
+        """判断每日 00:10 刷新或失败退避重试是否到期。
+
+        参数：
+            current: datetime，当前 UTC+8 时刻
+
+        返回：
+            bool：需要在本分钟先刷新日历时为 True
+        """
+        daily_at = datetime.combine(current.date(), clock(0, 10), BEIJING_TZ)
+        if current < daily_at:
+            return False
+        last = self._last_refresh_at
+        if last is not None and last.date() == current.date() and last >= daily_at:
+            return False
+        return self._next_refresh_at is None or current >= self._next_refresh_at
 
     async def tick(self, now: float | None = None) -> None:
         """检查当前绝对分钟，命中一个启用调度且当日未执行时生成研报。

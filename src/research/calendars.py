@@ -7,10 +7,12 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from datetime import date, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -27,6 +29,40 @@ MARKET_URLS = {
 }
 _PARSERS: dict[str, Callable[[str], dict[int, set[str]]]] = {}
 CalendarFetcher = Callable[[str, str], Awaitable[str]]
+CalendarToday = Callable[[], date]
+_MIN_HOLIDAYS_PER_YEAR = {"XTKS": 10, "XLON": 6, "XNYS": 8}
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class CalendarRefreshResult:
+    """一次官方日历刷新的逐市场结果与缓存写入状态。"""
+
+    succeeded: tuple[str, ...]
+    failed: dict[str, str]
+    cache_saved: bool
+
+    @property
+    def complete(self) -> bool:
+        """判断三家来源和磁盘缓存是否全部成功。
+
+        参数：无
+
+        返回：
+            bool：三家市场成功且缓存已写入时为 True
+        """
+        return self.cache_saved and set(self.succeeded) == set(MARKET_URLS)
+
+
+def _beijing_today() -> date:
+    """返回 UTC+8 当前日期，避免服务器本地时区影响覆盖年份。
+
+    参数：无
+
+    返回：
+        date：Asia/Shanghai 当前日期
+    """
+    return datetime.now(_BEIJING_TZ).date()
 
 
 class _TableParser(HTMLParser):
@@ -120,6 +156,33 @@ def _require(result: dict[int, set[str]], source: str) -> dict[int, set[str]]:
     if not result or not any(result.values()):
         raise ValueError(f"{source} 页面没有解析出年度休市日")
     return result
+
+
+def _validate_coverage(
+    market: str, parsed: dict[int, set[str]], today: date
+) -> dict[int, set[str]]:
+    """校验当前年非空与下一年度完整数量下限。
+
+    参数：
+        market: str，市场代码
+        parsed: dict[int, set[str]]，解析出的年度休市日
+        today: date，UTC+8 当前日期
+
+    返回：
+        dict[int, set[str]]：通过完整性校验的原结果
+
+    异常：
+        ValueError：当前年为空或下一年数量低于市场下限时抛出
+    """
+    current_count = len(parsed.get(today.year, set()))
+    if current_count < 1:
+        raise ValueError(f"{market} {today.year} 年没有解析出休市日")
+    minimum = _MIN_HOLIDAYS_PER_YEAR[market]
+    next_year = today.year + 1
+    count = len(parsed.get(next_year, set()))
+    if count < minimum:
+        raise ValueError(f"{market} {next_year} 年仅解析出 {count} 个休市日，低于 {minimum}")
+    return parsed
 
 
 def parse_jpx(content: str) -> dict[int, set[str]]:
@@ -221,21 +284,70 @@ def parse_nyse(content: str) -> dict[int, set[str]]:
 _PARSERS.update({"XTKS": parse_jpx, "XLON": parse_lse, "XNYS": parse_nyse})
 
 
+def _decode_cache(payload: Any) -> tuple[float | None, dict[str, dict[int, set[str]]]]:
+    """校验并解码磁盘缓存，成功后再整体交给实例状态。
+
+    参数：
+        payload: Any，json.loads 返回的缓存对象
+
+    返回：
+        tuple[float | None, dict[str, dict[int, set[str]]]]：刷新时间与年度休市日
+
+    异常：
+        ValueError：顶层、市场、年份或日期集合结构不符合缓存协议时抛出
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("日历缓存顶层必须是对象")
+    refreshed_at = payload.get("last_refreshed_at")
+    if refreshed_at is not None and (
+        isinstance(refreshed_at, bool) or not isinstance(refreshed_at, (int, float))
+    ):
+        raise ValueError("last_refreshed_at 必须是数字或 null")
+    raw_holidays = payload.get("holidays")
+    if not isinstance(raw_holidays, dict):
+        raise ValueError("holidays 必须是对象")
+    holidays: dict[str, dict[int, set[str]]] = {}
+    for market, raw_years in raw_holidays.items():
+        if market not in MARKET_URLS or not isinstance(raw_years, dict):
+            raise ValueError("市场代码或年度结构无效")
+        years: dict[int, set[str]] = {}
+        for raw_year, raw_days in raw_years.items():
+            if not isinstance(raw_days, list) or not all(isinstance(day, str) for day in raw_days):
+                raise ValueError("休市日集合必须是字符串数组")
+            try:
+                year = int(raw_year)
+                parsed_days = {date.fromisoformat(day) for day in raw_days}
+            except ValueError as exc:
+                raise ValueError("年份或休市日格式无效") from exc
+            if any(day.year != year for day in parsed_days):
+                raise ValueError("休市日年份与年度键不一致")
+            years[year] = {day.isoformat() for day in parsed_days}
+        holidays[market] = years
+    return (float(refreshed_at) if refreshed_at is not None else None), holidays
+
+
 class MarketCalendarProvider:
     """刷新三家官方休市日并提供带缓存、可降级的交易日判断。"""
 
-    def __init__(self, cache_path: Path, fetcher: CalendarFetcher | None = None) -> None:
+    def __init__(
+        self,
+        cache_path: Path,
+        fetcher: CalendarFetcher | None = None,
+        today: CalendarToday | None = None,
+    ) -> None:
         """初始化缓存路径和可注入 HTTP 边界，并读取已有缓存。
 
         参数：
             cache_path: Path，JSON 缓存路径
             fetcher: CalendarFetcher | None，可注入的异步页面读取函数
+            today: CalendarToday | None，可注入的 UTC+8 当前日期边界
 
         返回：
             None：就地初始化日历状态
         """
         self._path = cache_path
         self._fetcher = fetcher or self._fetch
+        self._today = today or _beijing_today
         self._holidays: dict[str, dict[int, set[str]]] = {}
         self._last_refreshed_at: float | None = None
         self._errors: dict[str, str] = {}
@@ -261,14 +373,16 @@ class MarketCalendarProvider:
             response.raise_for_status()
             return response.text
 
-    async def refresh(self) -> None:
+    async def refresh(self) -> CalendarRefreshResult:
         """并行刷新三家官方页面，单源失败保留原缓存。
 
         参数：无
 
         返回：
-            None：更新内存与磁盘缓存，并记录逐来源错误
+            CalendarRefreshResult：逐来源成功/失败与缓存写入结果
         """
+
+        today = self._today()
 
         async def one(market: str) -> tuple[str, dict[int, set[str]] | None, str]:
             """读取并解析单个市场来源。
@@ -281,26 +395,42 @@ class MarketCalendarProvider:
             """
             try:
                 content = await self._fetcher(market, MARKET_URLS[market])
-                return market, _PARSERS[market](content), ""
+                parsed = _PARSERS[market](content)
+                return market, _validate_coverage(market, parsed, today), ""
             except Exception as exc:
                 return market, None, str(exc)
 
         results = await asyncio.gather(*(one(market) for market in MARKET_URLS))
         self._errors = {}
-        any_success = False
+        succeeded: list[str] = []
+        candidate = dict(self._holidays)
         for market, parsed, error in results:
             if parsed is None:
                 self._errors[market] = error
                 logger.warning("%s 官方交易日刷新失败：%s", market, error)
                 continue
-            self._holidays[market] = parsed
-            any_success = True
-        self._live = any_success and not self._errors
-        if self._live:
+            merged = dict(parsed)
+            cached_current = self._holidays.get(market, {}).get(today.year, set())
+            merged[today.year] = cached_current | parsed[today.year]
+            candidate[market] = merged
+            succeeded.append(market)
+        cache_saved = False
+        if succeeded:
+            refreshed_at = time.time()
+            old_holidays, old_refreshed_at = self._holidays, self._last_refreshed_at
+            self._holidays, self._last_refreshed_at = candidate, refreshed_at
+            try:
+                self._save()
+                cache_saved = True
+            except OSError as exc:
+                self._holidays, self._last_refreshed_at = old_holidays, old_refreshed_at
+                self._errors["cache"] = str(exc)
+                logger.warning("官方交易日日历缓存写入失败：%s", exc)
+        result = CalendarRefreshResult(tuple(succeeded), dict(self._errors), cache_saved)
+        self._live = result.complete
+        if result.complete:
             self._fallback_used = False
-        if any_success:
-            self._last_refreshed_at = time.time()
-            self._save()
+        return result
 
     def is_trading_day(self, market: str, target: date) -> bool:
         """判断目标日期是否为市场交易日；未知工作日按约定降级为开市。
@@ -351,12 +481,11 @@ class MarketCalendarProvider:
             return
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-            self._last_refreshed_at = payload.get("last_refreshed_at")
-            self._holidays = {
-                market: {int(year): set(days) for year, days in years.items()}
-                for market, years in payload.get("holidays", {}).items()
-            }
-        except (OSError, ValueError, TypeError):
+            refreshed_at, holidays = _decode_cache(payload)
+            self._last_refreshed_at = refreshed_at
+            self._holidays = holidays
+        except (OSError, ValueError, TypeError) as exc:
+            self._errors["cache"] = str(exc)
             logger.warning("官方交易日日历缓存损坏，已降级为空缓存", exc_info=True)
 
     def _save(self) -> None:

@@ -1,5 +1,7 @@
 """官方市场日历解析、缓存与降级语义测试。"""
 
+import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -9,6 +11,17 @@ from src.research.calendars import MarketCalendarProvider, parse_jpx, parse_lse,
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "calendar"
+
+
+def _today() -> date:
+    """返回夹具覆盖的固定 UTC+8 当前日期。
+
+    参数：无
+
+    返回：
+        date：固定为 2026-08-17
+    """
+    return date(2026, 8, 17)
 
 
 def _fixture(name: str) -> str:
@@ -31,9 +44,12 @@ def test_official_calendar_parsers_extract_full_day_closures():
     返回：
         None：通过已知日期字面量校验三个解析器
     """
-    assert parse_jpx(_fixture("jpx.html"))[2026] == {"2026-01-01", "2026-02-23"}
-    assert parse_lse(_fixture("lse.json"))[2026] == {"2026-08-31"}
-    assert parse_nyse(_fixture("nyse.html"))[2026] == {"2026-01-01", "2026-04-03"}
+    jpx = parse_jpx(_fixture("jpx.html"))[2026]
+    lse = parse_lse(_fixture("lse.json"))[2026]
+    nyse = parse_nyse(_fixture("nyse.html"))[2026]
+    assert {"2026-01-01", "2026-02-23"} <= jpx and len(jpx) == 10
+    assert "2026-08-31" in lse and "2026-12-24" not in lse and len(lse) == 6
+    assert {"2026-01-01", "2026-04-03"} <= nyse and len(nyse) == 8
 
 
 def test_calendar_parser_rejects_missing_year_data():
@@ -77,7 +93,7 @@ async def test_provider_uses_cache_and_unknown_weekday_defaults_open(tmp_path: P
         """
         return pages[market]
 
-    provider = MarketCalendarProvider(tmp_path / "calendar.json", fetcher=fetch)
+    provider = MarketCalendarProvider(tmp_path / "calendar.json", fetcher=fetch, today=_today)
     await provider.refresh()
     assert provider.is_trading_day("XTKS", date(2026, 1, 1)) is False
     assert provider.is_trading_day("XLON", date(2026, 12, 24)) is True
@@ -154,15 +170,15 @@ async def test_failed_refresh_keeps_cache_and_reports_degraded_state(tmp_path: P
         return pages[market]
 
     path = tmp_path / "calendar.json"
-    provider = MarketCalendarProvider(path, fetcher=seed)
+    provider = MarketCalendarProvider(path, fetcher=seed, today=_today)
     await provider.refresh()
 
-    degraded = MarketCalendarProvider(path, fetcher=recoverable)
+    degraded = MarketCalendarProvider(path, fetcher=recoverable, today=_today)
     await degraded.refresh()
     assert degraded.is_trading_day("XTKS", date(2026, 1, 1)) is False
     assert degraded.status()["state"] == "fallback"
 
-    empty = MarketCalendarProvider(tmp_path / "empty.json", fetcher=fail)
+    empty = MarketCalendarProvider(tmp_path / "empty.json", fetcher=fail, today=_today)
     await empty.refresh()
     assert empty.is_trading_day("XNYS", date(2026, 1, 2)) is True
     assert empty.status()["state"] == "error"
@@ -215,10 +231,188 @@ async def test_single_source_failure_preserves_only_its_old_cache(tmp_path: Path
         return "<html>broken</html>" if market == "XTKS" else pages[market]
 
     path = tmp_path / "calendar.json"
-    await MarketCalendarProvider(path, fetcher=seed).refresh()
-    provider = MarketCalendarProvider(path, fetcher=partial)
+    await MarketCalendarProvider(path, fetcher=seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=partial, today=_today)
     await provider.refresh()
 
     assert provider.is_trading_day("XTKS", date(2026, 2, 23)) is False
     assert set(provider.status()["errors"]) == {"XTKS"}
     assert provider.status()["state"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_partial_year_refresh_preserves_complete_market_cache(tmp_path: Path):
+    """新页面缺少下一年度时不得覆盖该市场原有完整缓存。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言残缺 JPX 结果降级且保留 2027 休市日
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def seed(market: str, _url: str) -> str:
+        """返回完整的当前年与下一年夹具。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    async def missing_next_year(market: str, _url: str) -> str:
+        """仅让 JPX 新页面缺失下一年度。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：残缺 JPX 或其他市场完整夹具
+        """
+        if market != "XTKS":
+            return pages[market]
+        return (
+            '<h2 class="heading-title"><span>2026</span></h2>'
+            "<table><tr><td>Jan. 1 (Thu.)</td><td>New Year</td></tr></table>"
+        )
+
+    path = tmp_path / "calendar.json"
+    await MarketCalendarProvider(path, fetcher=seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=missing_next_year, today=_today)
+    await provider.refresh()
+
+    assert provider.is_trading_day("XTKS", date(2027, 1, 1)) is False
+    assert set(provider.status()["errors"]) == {"XTKS"}
+    assert provider.status()["state"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_rolling_current_year_page_merges_with_existing_cache(tmp_path: Path):
+    """官方页面仅保留当前年未来日期时，应合并而不是删除旧休市日。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言刷新完整成功且旧的元旦休市日仍保留
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def seed(market: str, _url: str) -> str:
+        """返回完整夹具以建立旧缓存。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    payload = json.loads(pages["XLON"])
+    table = payload["components"][0]["content"][0]["value"]["table"]
+    table = re.sub(r"<tr><th>.*? 2026</th>.*?</tr>", "", table)
+    rolling_row = (
+        "<tr><th>Monday 31 August 2026</th><td>Summer Bank Holiday</td>"
+        "<td>NON-trading day.</td></tr>"
+    )
+    payload["components"][0]["content"][0]["value"]["table"] = table.replace(
+        "<table>", f"<table>{rolling_row}"
+    )
+    rolling_lse = json.dumps(payload)
+
+    async def rolling(market: str, _url: str) -> str:
+        """让 LSE 当前年只返回剩余日期，下一年仍完整。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：滚动 LSE 或其他市场完整夹具
+        """
+        return rolling_lse if market == "XLON" else pages[market]
+
+    path = tmp_path / "calendar.json"
+    await MarketCalendarProvider(path, fetcher=seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=rolling, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.complete is True
+    assert provider.is_trading_day("XLON", date(2026, 1, 1)) is False
+    assert provider.status()["state"] == "ok"
+
+
+@pytest.mark.parametrize("payload", [[], None, {"holidays": []}])
+def test_valid_json_with_invalid_cache_shape_degrades_safely(tmp_path: Path, payload: object):
+    """合法 JSON 但结构错误的缓存不得阻止应用构造。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+        payload: object，合法 JSON 的错误缓存结构
+
+    返回：
+        None：断言构造成功、状态报错且未知工作日按开市降级
+    """
+    path = tmp_path / "calendar.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    provider = MarketCalendarProvider(path)
+
+    assert provider.status()["state"] == "error"
+    assert provider.is_trading_day("XNYS", date(2026, 8, 17)) is True
+
+
+@pytest.mark.asyncio
+async def test_cache_write_failure_is_reported_without_replacing_memory(tmp_path: Path):
+    """缓存写盘失败时刷新不得伪报完整成功或抛出顶层异常。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言结果暴露写盘失败且状态进入 error
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def fetch(market: str, _url: str) -> str:
+        """返回三个市场的完整夹具。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    blocked_parent = tmp_path / "blocked"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+    provider = MarketCalendarProvider(blocked_parent / "calendar.json", fetcher=fetch, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.cache_saved is False
+    assert result.complete is False
+    assert "cache" in result.failed
+    assert provider.status()["state"] == "error"

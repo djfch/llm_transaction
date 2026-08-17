@@ -10,6 +10,7 @@ import pytest
 
 from src.config import FixedTimeSchedule, ResearchConfig, Settings
 from src.memory import Database, Repo
+from src.research.calendars import CalendarRefreshResult
 from src.research.scheduler import ResearchScheduler
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -57,15 +58,16 @@ class StubCalendar:
         self.closed = closed or set()
         self.refresh_calls = 0
 
-    async def refresh(self) -> None:
+    async def refresh(self) -> CalendarRefreshResult:
         """模拟官方日历刷新成功。
 
         参数：无
 
         返回：
-            None：刷新计数加一
+            CalendarRefreshResult：三家来源与缓存均成功
         """
         self.refresh_calls += 1
+        return CalendarRefreshResult(("XTKS", "XLON", "XNYS"), {}, True)
 
     def is_trading_day(self, market: str, target: date) -> bool:
         """判断市场日期是否不在关闭集合且不是周末。
@@ -588,3 +590,127 @@ async def test_run_forever_refreshes_on_start_and_aligns_natural_minute(
         await scheduler.run_forever()
     assert calendar.refresh_calls == 1
     assert delays == [pytest.approx(30.01)]
+
+
+@pytest.mark.parametrize(
+    ("start_stamp", "target_stamp", "target_time"),
+    [
+        (_bj(2026, 8, 17, 0, 9) + 30, _bj(2026, 8, 17, 0, 10), "00:10"),
+        (_bj(2026, 8, 17, 0, 10), _bj(2026, 8, 17, 0, 15), "00:15"),
+    ],
+)
+async def test_failed_refresh_recovers_before_same_day_schedule(
+    repo: Repo,
+    monkeypatch: pytest.MonkeyPatch,
+    start_stamp: float,
+    target_stamp: float,
+    target_time: str,
+):
+    """刷新失败后同日按退避重试，并在目标任务判断前恢复日历。
+
+    参数：
+        repo: Repo，隔离仓储
+        monkeypatch: pytest.MonkeyPatch，控制调度循环时钟与睡眠
+        start_stamp: float，首次刷新与巡检时刻
+        target_stamp: float，下一次循环推进到的目标时刻
+        target_time: str，自定义调度的 UTC+8 时间
+
+    返回：
+        None：断言第二次刷新先于 00:10 调度并允许任务执行
+    """
+
+    class RecoveringCalendar(StubCalendar):
+        """第一次刷新失败、第二次成功后才确认交易日的日历桩。"""
+
+        def __init__(self) -> None:
+            """初始化为不可确认交易日。
+
+            参数：无
+
+            返回：
+                None：就地初始化失败次数和开市状态
+            """
+            super().__init__()
+            self.ready = False
+
+        async def refresh(self) -> CalendarRefreshResult:
+            """首次返回失败，第二次恢复完整来源与缓存。
+
+            参数：无
+
+            返回：
+                CalendarRefreshResult：本次刷新结果
+            """
+            self.refresh_calls += 1
+            if self.refresh_calls == 1:
+                return CalendarRefreshResult((), {"XNYS": "network down"}, False)
+            self.ready = True
+            return CalendarRefreshResult(("XTKS", "XLON", "XNYS"), {}, True)
+
+        def is_trading_day(self, market: str, target: date) -> bool:
+            """仅在日历恢复后确认工作日开市。
+
+            参数：
+                market: str，市场代码
+                target: date，待判断日期
+
+            返回：
+                bool：恢复后工作日为 True
+            """
+            return self.ready and target.weekday() < 5
+
+    class StopLoop(Exception):
+        """完成目标分钟巡检后终止长期循环。"""
+
+    state = {"stamp": start_stamp, "sleeps": 0}
+
+    class FakeDateTime(datetime):
+        """从可变测试状态返回 UTC+8 当前时刻。"""
+
+        @classmethod
+        def now(cls, tz=None):
+            """返回测试状态中的当前时刻。
+
+            参数：
+                tz: tzinfo | None，目标时区
+
+            返回：
+                datetime：测试状态对应时间
+            """
+            return datetime.fromtimestamp(state["stamp"], tz)
+
+    async def advance_to_target(_delay: float) -> None:
+        """首次睡眠推进到 00:10，第二次终止循环。
+
+        参数：
+            _delay: float，调度器计算的睡眠秒数
+
+        返回：
+            None：首次调用只更新时间
+
+        异常：
+            StopLoop：第二次调用时终止循环
+        """
+        state["sleeps"] += 1
+        if state["sleeps"] == 1:
+            state["stamp"] = target_stamp
+            return
+        raise StopLoop
+
+    calendar = RecoveringCalendar()
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=target_time, calendar="XNYS")),
+        agent,
+        repo,
+        calendar=calendar,
+    )
+    monkeypatch.setattr("src.research.scheduler.datetime", FakeDateTime)
+    monkeypatch.setattr("src.research.scheduler.time.time", lambda: state["stamp"])
+    monkeypatch.setattr("src.research.scheduler.asyncio.sleep", advance_to_target)
+
+    with pytest.raises(StopLoop):
+        await scheduler.run_forever()
+
+    assert calendar.refresh_calls == 2
+    assert agent.calls == [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]
