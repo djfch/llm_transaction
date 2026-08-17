@@ -149,8 +149,10 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/review/run")
     async def run_review_now(body: _ReviewRunBody | None = Body(None)) -> dict[str, Any]:
-        """手动触发复盘：无 body 维持最近 interval_days 天区间；有 body（人工补跑）按指定区间透传。
+        """手动触发复盘（点火即返回）：无 body 维持最近 interval_days 天区间；有 body（人工补跑）按指定区间透传。
 
+        点火成功立即返回 started/period_start/period_end，不等待生成完成；生成进度与结果经
+        WS 事件、/review/live 轮询与报告列表呈现（失败报告照常落库入列）。
         回调未接线 503；LLM 未配置 503；复盘进行中 409；区间非法 422。
         状态码映射走回调返回的结构化 error_code（llm_not_configured/busy/invalid_period），
         不做错误文案子串匹配。
@@ -159,11 +161,10 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
             body: _ReviewRunBody | None，可选的手动触发请求体
 
         返回：
-            dict[str, Any]，手动触发复盘：无 body 维持最近 interval_days 天区间；有 body（人工补跑）按指定区间透传。  回调未接线 503；LLM 未配置 503；复盘进行中 409；区间非法 422。 状态码映射走回调返回的结构化 error_code（llm_not_configured/busy/invalid_period）， 不做错误文案子串匹配
+            dict[str, Any]：点火结果（started、period_start、period_end 回显），不含执行结果
 
         异常：
             HTTPException，复盘未接线或 LLM 未配置时以 503 响应；调度锁占用时以 409 响应；补跑区间非法时以 422 响应
-
         """
         if deps.review_run is None:
             raise HTTPException(status_code=503, detail="复盘未接线（agent 未装配复盘调度）")

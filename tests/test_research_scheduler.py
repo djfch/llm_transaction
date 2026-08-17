@@ -20,7 +20,7 @@ class StubAgent:
     """记录调用并返回固定成功结果的研报 Agent 边界桩。"""
 
     def __init__(self) -> None:
-        """初始化空调用记录。
+        """初始化空调用记录与已配置 LLM 标记。
 
         参数：无
 
@@ -28,6 +28,7 @@ class StubAgent:
             None：就地创建调用列表
         """
         self.calls: list[dict] = []
+        self.llm_configured = True
 
     async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
         """记录报告类型和回看小时并返回成功结果。
@@ -502,44 +503,150 @@ async def test_accidental_same_minute_collision_runs_only_first(repo: Repo):
     assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
 
 
-async def test_run_now_busy_success_and_no_llm(repo: Repo):
-    """手动触发保持忙、成功与 LLM 未配置三种公开结果。
+async def test_start_now_returns_immediately_and_runs_in_background(repo: Repo):
+    """点火即返回：start_now 返回 started=True 时 Agent 尚未执行，后台任务结束后调用发生。
 
     参数：
         repo: Repo，隔离仓储
 
     返回：
-        None：断言手动入口兼容原契约
+        None：断言点火契约与后台任务完成后的 Agent 调用
     """
     agent = StubAgent()
     scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
-    result = await scheduler.run_now(report_type="event", hours=12)
-    assert result["started"] is True
+    result = await scheduler.start_now(report_type="event", hours=12)
+    assert result == {"started": True, "report_type": "event", "hours": 12}
+    assert agent.calls == []  # 点火返回时后台任务尚未执行
+    assert scheduler._manual_task is not None
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert not scheduler._lock.locked()  # 后台任务收尾释放锁
 
+
+async def test_start_now_busy_and_no_llm_are_synchronous(repo: Repo):
+    """锁占用同步返回 busy、未配置 LLM 同步返回 llm_not_configured，均不点火。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言两条同步失败路径不起后台任务
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
     await scheduler._lock.acquire()
     try:
-        assert (await scheduler.run_now())["error_code"] == "busy"
+        busy = await scheduler.start_now()
     finally:
         scheduler._lock.release()
+    assert busy["started"] is False
+    assert busy["error_code"] == "busy"
 
-    class NoLlmAgent:
-        """返回 LLM 未配置结果的边界桩。"""
+    agent.llm_configured = False
+    no_llm = await scheduler.start_now()
+    assert no_llm["started"] is False
+    assert no_llm["error_code"] == "llm_not_configured"
+    assert scheduler._manual_task is None
+    assert agent.calls == []
 
-        async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-            """返回结构化 LLM 未配置失败。
 
-            参数：
-                report_type: str，研报类型
-                hours: int，回看小时数
+class BlockingAgent:
+    """run 挂起直至测试释放的研报 Agent 边界桩（模拟生成进行中）。"""
 
-            返回：
-                dict：llm_not_configured 失败结果
-            """
-            return {"ok": False, "error": "未配置", "error_code": "llm_not_configured"}
+    def __init__(self) -> None:
+        """初始化调用记录、开始与释放事件。
 
-    no_llm = ResearchScheduler(_settings(), NoLlmAgent(), repo, calendar=StubCalendar())
-    assert (await no_llm.run_now())["started"] is False
+        参数：无
+
+        返回：
+            None：就地初始化事件与已配置 LLM 标记
+        """
+        self.calls: list[dict] = []
+        self.llm_configured = True
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
+        """记录调用、标记开始并挂起，直到测试释放后返回成功结果。
+
+        参数：
+            report_type: str，研报类型
+            hours: int，回看小时数
+
+        返回：
+            dict：固定成功结果
+        """
+        self.calls.append({"report_type": report_type, "hours": hours})
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True, "report_id": 1, "round_id": "r1"}
+
+
+async def test_start_now_background_survives_caller_cancellation(repo: Repo):
+    """取消不变量（断连回归）：点火后取消调用方任务，后台生成仍跑完。
+
+    模拟 HTTP 断连：调用方协程点火后挂起（如保持连接），被取消时后台任务不受影响。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言调用方被取消而后台研报执行到底
+    """
+    agent = BlockingAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    outcome: dict = {}
+
+    async def http_like_call() -> None:
+        """模拟请求处理：点火后挂起等待连接生命周期结束。
+
+        参数：无
+
+        返回：
+            None：点火结果写入 outcome 后永久挂起，直至被取消
+        """
+        outcome["result"] = await scheduler.start_now(report_type="event", hours=12)
+        await asyncio.Event().wait()  # 模拟响应发送/连接保持：挂起直到断连取消
+
+    request = asyncio.create_task(http_like_call())
+    await agent.started.wait()
+    assert outcome["result"] == {"started": True, "report_type": "event", "hours": 12}
+    request.cancel()  # 浏览器断连：请求任务被取消
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    assert scheduler._manual_task is not None and not scheduler._manual_task.done()
+    agent.release.set()
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert not scheduler._lock.locked()
+
+
+async def test_shutdown_cancels_running_manual_task(repo: Repo, caplog: pytest.LogCaptureFixture):
+    """shutdown 取消进行中的后台任务：任务收尾释放锁、异常被取回且无未捕获噪音。
+
+    参数：
+        repo: Repo，隔离仓储
+        caplog: pytest.LogCaptureFixture，日志捕获夹具
+
+    返回：
+        None：断言任务被取消、锁释放且取消日志留痕
+    """
+    agent = BlockingAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    await scheduler.start_now()
+    await agent.started.wait()
+    task = scheduler._manual_task
+    assert task is not None
+
+    with caplog.at_level("INFO", logger="src.research.scheduler"):
+        await scheduler.shutdown()
+
+    assert task.done()
+    assert task.exception() is None  # CancelledError 已被包装协程吞掉并取回
+    assert not scheduler._lock.locked()
+    assert "手动研报后台任务被取消" in caplog.text
+    await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
 
 
 async def test_schedule_status_exposes_next_run_and_calendar(repo: Repo):
@@ -622,7 +729,7 @@ async def test_auto_tick_claims_execution_before_first_await():
     automatic = asyncio.create_task(scheduler.tick(_bj(2026, 8, 17, 7, 30)))
     await history.entered.wait()
 
-    manual = await scheduler.run_now()
+    manual = await scheduler.start_now()
     history.release.set()
     await automatic
 

@@ -4,8 +4,8 @@
 - GET /api/research/reports(+{id})：分页/最新在前/含失败记录与逐标的摘要；
   详情逐标的 evidence/risks/narrative、404、causal_links 解析与空数组；
 - GET /api/research/live：空库 round=null、进行中轮 tool_calls 组装、交易轮不串台；
-- POST /api/research/run：未接线 503、LLM 未配置 503、进行中 409、成功 200 透传、
-  body 透传 report_type+hours、hours 越界/非数字 422。
+- POST /api/research/run：未接线 503、LLM 未配置 503、进行中 409、成功 200 点火契约
+  （含 started=true，不含执行结果字段）、body 透传 report_type+hours、hours 越界/非数字 422。
 """
 
 from collections.abc import AsyncIterator
@@ -361,14 +361,14 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
         }
 
     async def _ok() -> dict:
-        """假研报回调：返回成功结果，验证 200 原样透传。
+        """假研报回调：返回点火结果，验证 200 点火契约（不含执行结果字段）。
 
         参数：无
 
         返回：
-            dict：启动成功的假研报运行结果（含 report_id 与 round_id）
+            dict：点火成功的假结果（started + 回显参数）
         """
-        return {"started": True, "ok": True, "report_id": 7, "round_id": "rs-7"}
+        return {"started": True, "report_type": "manual", "hours": 24}
 
     async with _client_of(_deps(repo, tmp_path, research_run=_busy)) as c:
         assert (await c.post("/api/research/run")).status_code == 409
@@ -377,11 +377,10 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, research_run=_ok)) as c:
         r = await c.post("/api/research/run")
         assert r.status_code == 200
-        assert r.json() == {  # 成功 200 原样透传回调结果
+        assert r.json() == {  # 点火即返回：只含 started 与回显参数，不含执行结果
             "started": True,
-            "ok": True,
-            "report_id": 7,
-            "round_id": "rs-7",
+            "report_type": "manual",
+            "hours": 24,
         }
 
 
@@ -398,20 +397,25 @@ async def test_research_run_body_passthrough_and_validation(repo: Repo, tmp_path
     calls: list[dict] = []
 
     async def _run(**kwargs) -> dict:
-        """假研报回调：记录收到的 kwargs，返回带序号的假结果。
+        """假研报回调：记录收到的 kwargs，返回点火结果。
 
         参数：
             kwargs: dict，POST body 透传给研报回调的参数（如 report_type、hours）
 
         返回：
-            dict：启动成功的假研报运行结果，report_id 取累计调用次数
+            dict：点火成功的假结果（started + 回显参数，缺省走调度默认值）
         """
         calls.append(kwargs)
-        return {"started": True, "ok": True, "report_id": len(calls)}
+        return {
+            "started": True,
+            "report_type": kwargs.get("report_type", "manual"),
+            "hours": kwargs.get("hours", 24),
+        }
 
     async with _client_of(_deps(repo, tmp_path, research_run=_run)) as c:
         r = await c.post("/api/research/run", json={"report_type": "event", "hours": 6})
-        assert r.status_code == 200 and r.json()["report_id"] == 1
+        assert r.status_code == 200
+        assert r.json() == {"started": True, "report_type": "event", "hours": 6}  # 点火回显
         assert calls == [{"report_type": "event", "hours": 6}]  # 透传
         r = await c.post("/api/research/run")  # 无 body：调度默认值（无参回调）
         assert r.status_code == 200 and calls[-1] == {}

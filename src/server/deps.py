@@ -130,14 +130,14 @@ class ServerDeps:
     # None 时 /api/alerts 诚实 503
     alerts_provider: Callable[[], list[Any]] | None = None
     # 复盘/策略版本写回调（主程序接线；None 时对应端点诚实 503）：
-    # review_run 手动触发一次复盘，可选 period_start/period_end 指定补跑区间
-    # （409 进行中/503 未配置/422 区间非法由路由按返回的 error_code 映射）；
+    # review_run 点火一次后台复盘（点火即返回，不等待生成完成），可选 period_start/period_end
+    # 指定补跑区间（409 进行中/503 未配置/422 区间非法由路由按返回的 error_code 映射）；
     # strategy_save 经 StrategyStore 落版本（校验失败抛 StrategyValidationError，路由映 422）；
     # strategy_rollback 回滚到指定版本（版本不存在抛 StrategyValidationError，路由映 404）
     review_run: Callable[..., Awaitable[dict]] | None = None
     strategy_save: Callable[[str], Awaitable[dict]] | None = None
     strategy_rollback: Callable[[int], Awaitable[dict]] | None = None
-    # 手动触发研报（主程序接线；None 时端点 503）：
+    # 手动触发研报（主程序接线；None 时端点 503）：点火即返回，生成在后台任务执行
     # 可选 report_type/hours 指定类型与回看窗口（409 进行中/503 LLM 未配置由路由按 error_code 映射）
     research_run: Callable[..., Awaitable[dict]] | None = None
     # 研报自动调度只读状态（总开关、下一次运行、官方日历健康度）：

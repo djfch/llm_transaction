@@ -239,8 +239,10 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/research/run")
     async def run_research_now(body: _ResearchRunBody | None = Body(None)) -> dict[str, Any]:
-        """手动触发研报：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。
+        """手动触发研报（点火即返回）：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。
 
+        点火成功立即返回 started/report_type/hours，不等待生成完成；生成进度与结果经
+        WS 事件、/research/live 轮询与报告列表呈现（失败报告照常落库入列）。
         回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。
         状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）。
 
@@ -248,11 +250,10 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
             body: _ResearchRunBody | None，可选的手动触发请求体
 
         返回：
-            dict[str, Any]，手动触发研报：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。  回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。 状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）
+            dict[str, Any]：点火结果（started、report_type、hours 回显），不含执行结果
 
         异常：
             HTTPException，研报未接线或 LLM 未配置时以 503 响应，调度锁占用时以 409 响应
-
         """
         if deps.research_run is None:
             raise HTTPException(status_code=503, detail="研报未接线（agent 未装配研报调度）")

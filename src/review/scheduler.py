@@ -3,8 +3,9 @@
 - run_forever：每 60s 巡检一次（镜像 paper.funding_patrol.funding_loop），到点且距上次复盘
   已满 interval_days 则触发「最近 interval_days 天（对齐当日 00:00）」区间；
   幂等以 review_reports 落库记录（latest_review_period_end）为准，重启不重复；
-- run_now：手动触发；无参维持最近 interval_days 天区间，有参（人工补跑历史区间）
-  校验后按指定区间跑；与定时触发共用同一把锁，进行中返回忙（server 层映 409）；
+- start_now：手动触发（点火即返回，后台任务执行，HTTP 断连不影响生成）；无参维持最近
+  interval_days 天区间，有参（人工补跑历史区间）校验后按指定区间跑；与定时触发共用
+  同一把锁，进行中同步返回忙（server 层映 409），不排队等锁；
 - 单次触发异常吞掉记日志，护住巡检循环（复盘失败不影响交易决策循环）。
 """
 
@@ -79,12 +80,13 @@ class ReviewScheduler:
             repo: Repo，持久化仓库（经 review 子仓库读取上次复盘区间，用于落库幂等判定）
 
         返回：
-            None，就地初始化调度器依赖与 asyncio 防重入锁
+            None，就地初始化调度器依赖、asyncio 防重入锁与手动后台任务引用
         """
         self._settings = settings
         self._agent = agent
         self._repo = repo
         self._lock = asyncio.Lock()
+        self._manual_task: asyncio.Task[None] | None = None
 
     async def run_forever(self) -> None:
         """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。
@@ -126,20 +128,23 @@ class ReviewScheduler:
         async with self._lock:
             await self._agent.run(day_start - span, day_start)
 
-    async def run_now(
+    async def start_now(
         self, period_start: float | None = None, period_end: float | None = None
     ) -> dict:
-        """手动触发复盘；进行中返回忙（error_code='busy'，server 层映 409）。
+        """手动触发复盘（点火即返回）：同步校验后点火后台任务，调用方被取消不影响生成。
 
         无参维持最近 interval_days 天区间；有参（人工补跑历史区间）先校验
-        （数字且 start < end），非法返回 error_code='invalid_period'（server 层映 422），
-        不触发 agent。
+        （数字且 start < end），非法同步返回 error_code='invalid_period'（server 层映 422），
+        不点火。生成进度与结果经 WS 事件、/live 轮询与报告列表呈现，不在本调用中等待。
 
         参数：
             period_start: float | None，复盘区间起点
             period_end: float | None，复盘区间终点
         返回：
-            dict，手动触发复盘；进行中返回忙（error_code='busy'，server 层映 409）
+            dict：点火成功 {"started": True, "period_start": ..., "period_end": ...}；
+            同步失败 {"started": False, "error": ..., "error_code": ...}，error_code 为
+            llm_not_configured（未配置 LLM）、busy（进行中，server 层映 409）或
+            invalid_period（区间非法，server 层映 422）
         """
         if period_start is None and period_end is None:
             day_start = local_day_start(time.time())
@@ -151,10 +156,46 @@ class ReviewScheduler:
                 "error": "复盘区间非法（需两端齐全、为数字且 start < end）",
                 "error_code": "invalid_period",
             }
+        if not self._agent.llm_configured:
+            return {"started": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
         if self._lock.locked():
             return {"started": False, "error": "复盘进行中", "error_code": "busy"}
-        async with self._lock:
-            result = await self._agent.run(period_start, period_end)
-        # LLM 未配置时复盘未实际开始，started 诚实为 False（按结构化 error_code 判定）
-        started = result.get("error_code") != "llm_not_configured"
-        return {"started": started, **result}
+        # asyncio.Lock 在未占用时会同步取得锁；必须在首次让出前占有执行权，
+        # 否则定时巡检可在让出窗口抢锁，本任务随后排队等锁，破坏不排队语义。
+        await self._lock.acquire()
+        self._manual_task = asyncio.create_task(self._run_manual(period_start, period_end))
+        return {"started": True, "period_start": period_start, "period_end": period_end}
+
+    async def _run_manual(self, period_start: float, period_end: float) -> None:
+        """后台执行手动复盘：finally 释放锁，取消与意外异常只记日志、就地取回。
+
+        参数：
+            period_start: float，复盘区间起点
+            period_end: float，复盘区间终点
+
+        返回：
+            None：CancelledError 记日志后吞掉（agent.run 已做取消收尾并落失败报告），
+            意外异常记 logger.exception；任务异常永远被取回，杜绝 never-retrieved 噪音
+        """
+        try:
+            await self._agent.run(period_start, period_end)
+        except asyncio.CancelledError:
+            logger.info("手动复盘后台任务被取消（period_start=%s）", period_start)
+        except Exception:
+            logger.exception("手动复盘后台任务异常（period_start=%s）", period_start)
+        finally:
+            self._lock.release()
+
+    async def shutdown(self) -> None:
+        """取消进行中的手动后台任务并等待其收尾（停机序列调用，须在数据库关闭前）。
+
+        参数：无
+
+        返回：
+            None：无进行中任务时立即返回；否则取消任务并 gather 取回结果
+        """
+        task = self._manual_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

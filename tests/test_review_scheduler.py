@@ -1,10 +1,11 @@
 """src/review/scheduler.py 测试：时间逻辑走可注入 now 的 _tick 与纯函数，不 sleep 60s。
 
 覆盖：到点触发（enabled 且 latest None）、间隔内不重复（latest 距今不足 interval_days）、
-disabled 跳过、未到点跳过、锁占用时巡检跳过、run_now 持锁返回「复盘进行中」、
-run_now 正常触发最近 interval_days 天区间（默认 1 天）。
+disabled 跳过、未到点跳过、锁占用时巡检跳过、start_now 点火即返回（后台任务执行）、
+锁占用/未配置 LLM/区间非法的同步失败路径、断连取消不变量与 shutdown 取消收尾。
 """
 
+import asyncio
 import time
 
 import pytest
@@ -18,7 +19,7 @@ class StubAgent:
     """记录调用区间并返回固定结果的 stub（鸭子类型替代 ReviewAgent）。"""
 
     def __init__(self) -> None:
-        """初始化空调用记录列表。
+        """初始化空调用记录列表与已配置 LLM 标记。
 
         参数：无
 
@@ -26,6 +27,7 @@ class StubAgent:
             None，就地初始化 calls 为空列表，供后续断言调用区间
         """
         self.calls: list[tuple[float, float]] = []
+        self.llm_configured = True
 
     async def run(self, period_start: float, period_end: float) -> dict:
         """记录本次调用区间并返回固定的成功结果。
@@ -171,8 +173,8 @@ async def test_tick_skips_when_locked(repo):
     assert agent.calls == []
 
 
-async def test_run_now_busy_when_locked(repo):
-    """调度锁被占用时 run_now 不等待、立即返回 busy，不触发 agent。
+async def test_start_now_busy_when_locked(repo):
+    """调度锁被占用时 start_now 不等待、同步返回 busy，不点火后台任务。
 
     参数：
         repo: Repo，临时数据库仓储夹具，提供复盘报告存储
@@ -184,83 +186,84 @@ async def test_run_now_busy_when_locked(repo):
     scheduler = ReviewScheduler(_settings(), agent, repo)
     await scheduler._lock.acquire()
     try:
-        result = await scheduler.run_now()
+        result = await scheduler.start_now()
     finally:
         scheduler._lock.release()
     assert result["started"] is False
     assert result["error_code"] == "busy"  # server 层据此映 409（不判中文文案）
     assert result["error"]  # 文案非空即可
+    assert scheduler._manual_task is None
     assert agent.calls == []
 
 
-async def test_run_now_llm_not_configured_started_false(repo):
-    """agent 回报 llm_not_configured（复盘未实际开始）→ run_now 包装 started=False（语义诚实）。
+async def test_start_now_llm_not_configured_started_false(repo):
+    """agent 未配置 LLM → start_now 同步返回 llm_not_configured（server 层映 503），不点火。
 
     参数：
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言 started=False、error_code=llm_not_configured 且 agent 零调用
     """
-
-    class _NoLlmAgent:
-        async def run(self, period_start: float, period_end: float) -> dict:
-            """返回 llm_not_configured 失败结果，模拟未配置 LLM 的复盘 agent。
-
-            参数：
-                period_start: float，复盘区间起点（本桩不使用）
-                period_end: float，复盘区间终点（本桩不使用）
-
-            返回：
-                dict：ok=False 且 error_code=llm_not_configured 的失败结果
-            """
-            return {"ok": False, "error": "任意错误文案", "error_code": "llm_not_configured"}
-
-    scheduler = ReviewScheduler(_settings(), _NoLlmAgent(), repo)
-    result = await scheduler.run_now()
+    agent = StubAgent()
+    agent.llm_configured = False
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    result = await scheduler.start_now()
     assert result["started"] is False
     assert result["error_code"] == "llm_not_configured"
+    assert scheduler._manual_task is None
+    assert agent.calls == []
 
 
-async def test_run_now_runs_yesterday_period(repo):
-    """run_now 无参触发：默认跑「昨日00:00 ~ 当日00:00」区间并正常完成。
+async def test_start_now_runs_yesterday_period(repo):
+    """start_now 无参点火：立即返回 started=True，后台任务跑「昨日00:00 ~ 当日00:00」区间。
 
     参数：
         repo: Repo，临时数据库仓储夹具，提供复盘报告存储
 
     返回：
-        None，断言 started=True、ok=True 且 agent 收到昨日区间调用
+        None，断言点火契约与后台任务完成后的 agent 调用区间
     """
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
     day_start = local_day_start(time.time())
-    result = await scheduler.run_now()
-    assert result["started"] is True and result["ok"] is True
+    result = await scheduler.start_now()
+    assert result == {
+        "started": True,
+        "period_start": day_start - 86400,
+        "period_end": day_start,
+    }
+    assert agent.calls == []  # 点火返回时后台任务尚未执行
+    assert scheduler._manual_task is not None
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [(day_start - 86400, day_start)]
+    assert not scheduler._lock.locked()  # 后台任务收尾释放锁
 
 
 # ---------- 人工补跑指定区间 ----------
 
 
-async def test_run_now_with_explicit_period_passthrough(repo):
-    """人工补跑：指定区间原样透传到 agent.run（不走昨日区间）。
+async def test_start_now_with_explicit_period_passthrough(repo):
+    """人工补跑：指定区间原样透传到后台 agent.run（不走昨日区间）。
 
     参数：
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言点火回显区间与后台任务完成后的 agent 调用区间
     """
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
-    result = await scheduler.run_now(period_start=1000.0, period_end=2000.0)
-    assert result["started"] is True and result["ok"] is True
+    result = await scheduler.start_now(period_start=1000.0, period_end=2000.0)
+    assert result == {"started": True, "period_start": 1000.0, "period_end": 2000.0}
+    assert scheduler._manual_task is not None
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [(1000.0, 2000.0)]
 
 
-async def test_run_now_invalid_period(repo):
-    """非法区间（start>=end、非数字、只给一端、bool）→ started=False +
-    error_code=invalid_period（server 层映 422），不触发 agent。
+async def test_start_now_invalid_period(repo):
+    """非法区间（start>=end、非数字、只给一端、bool）→ 同步 started=False +
+    error_code=invalid_period（server 层映 422），不点火后台任务。
 
     参数：
         repo: Repo，临时数据库仓储夹具
@@ -278,10 +281,114 @@ async def test_run_now_invalid_period(repo):
         (True, 2000.0),
     ]
     for start, end in bad_periods:
-        result = await scheduler.run_now(period_start=start, period_end=end)
+        result = await scheduler.start_now(period_start=start, period_end=end)
         assert result["started"] is False, (start, end)
         assert result["error_code"] == "invalid_period", (start, end)
+    assert scheduler._manual_task is None
     assert agent.calls == []
+
+
+class BlockingAgent:
+    """run 挂起直至测试释放的复盘 Agent 边界桩（模拟生成进行中）。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录、开始与释放事件。
+
+        参数：无
+
+        返回：
+            None：就地初始化事件与已配置 LLM 标记
+        """
+        self.calls: list[tuple[float, float]] = []
+        self.llm_configured = True
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self, period_start: float, period_end: float) -> dict:
+        """记录调用区间、标记开始并挂起，直到测试释放后返回成功结果。
+
+        参数：
+            period_start: float，复盘区间起点（Unix 时间戳）
+            period_end: float，复盘区间终点（Unix 时间戳）
+
+        返回：
+            dict：固定成功结果
+        """
+        self.calls.append((period_start, period_end))
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True, "report_id": 1}
+
+
+async def test_start_now_background_survives_caller_cancellation(repo):
+    """取消不变量（断连回归）：点火后取消调用方任务，后台复盘仍跑完。
+
+    模拟 HTTP 断连：调用方协程点火后挂起（如保持连接），被取消时后台任务不受影响。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言调用方被取消而后台复盘执行到底
+    """
+    agent = BlockingAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    outcome: dict = {}
+
+    async def http_like_call() -> None:
+        """模拟请求处理：点火后挂起等待连接生命周期结束。
+
+        参数：无
+
+        返回：
+            None：点火结果写入 outcome 后永久挂起，直至被取消
+        """
+        outcome["result"] = await scheduler.start_now(period_start=1000.0, period_end=2000.0)
+        await asyncio.Event().wait()  # 模拟响应发送/连接保持：挂起直到断连取消
+
+    request = asyncio.create_task(http_like_call())
+    await agent.started.wait()
+    assert outcome["result"] == {
+        "started": True,
+        "period_start": 1000.0,
+        "period_end": 2000.0,
+    }
+    request.cancel()  # 浏览器断连：请求任务被取消
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    assert scheduler._manual_task is not None and not scheduler._manual_task.done()
+    agent.release.set()
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [(1000.0, 2000.0)]
+    assert not scheduler._lock.locked()
+
+
+async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCaptureFixture):
+    """shutdown 取消进行中的后台任务：任务收尾释放锁、异常被取回且无未捕获噪音。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        caplog: pytest.LogCaptureFixture，日志捕获夹具
+
+    返回：
+        None：断言任务被取消、锁释放且取消日志留痕
+    """
+    agent = BlockingAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    await scheduler.start_now()
+    await agent.started.wait()
+    task = scheduler._manual_task
+    assert task is not None
+
+    with caplog.at_level("INFO", logger="src.review.scheduler"):
+        await scheduler.shutdown()
+
+    assert task.done()
+    assert task.exception() is None  # CancelledError 已被包装协程吞掉并取回
+    assert not scheduler._lock.locked()
+    assert "手动复盘后台任务被取消" in caplog.text
+    await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
 
 
 # ---------- interval_days：指定间隔天数复盘 ----------
@@ -360,18 +467,24 @@ async def test_tick_interval_first_run_uses_span(repo):
     assert agent.calls == [(day_start - 3 * 86400, day_start)]
 
 
-async def test_run_now_uses_interval_span(repo):
-    """run_now 无参：默认区间同步为最近 interval_days 天。
+async def test_start_now_uses_interval_span(repo):
+    """start_now 无参：默认区间同步为最近 interval_days 天，后台任务按该区间执行。
 
     参数：
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言点火回显区间与后台任务完成后的 agent 调用区间
     """
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
     day_start = local_day_start(time.time())
-    result = await scheduler.run_now()
-    assert result["started"] is True and result["ok"] is True
+    result = await scheduler.start_now()
+    assert result == {
+        "started": True,
+        "period_start": day_start - 3 * 86400,
+        "period_end": day_start,
+    }
+    assert scheduler._manual_task is not None
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [(day_start - 3 * 86400, day_start)]

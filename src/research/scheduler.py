@@ -118,7 +118,7 @@ class ResearchScheduler:
         calendar: CalendarLike | None = None,
         cache_path: Path | None = None,
     ) -> None:
-        """保存共享配置、Agent、仓储与官方日历，并创建防重入锁。
+        """保存共享配置、Agent、仓储与官方日历，并创建防重入锁与手动后台任务引用。
 
         参数：
             settings: Settings，共享运行配置，保存后原地热更新
@@ -136,6 +136,7 @@ class ResearchScheduler:
         path = cache_path or ROOT / "data" / "market_calendar_cache.json"
         self._calendar = calendar or MarketCalendarProvider(path)
         self._lock = asyncio.Lock()
+        self._manual_task: asyncio.Task[None] | None = None
         self._last_refresh_at: datetime | None = None
         self._next_refresh_at: datetime | None = None
         self._refresh_failures = 0
@@ -326,19 +327,61 @@ class ResearchScheduler:
                 return fire.timestamp()
         return None
 
-    async def run_now(self, report_type: str = "manual", hours: int = 24) -> dict:
-        """手动触发研报；不受自动开关和交易日限制，进行中返回 busy。
+    async def start_now(self, report_type: str = "manual", hours: int = 24) -> dict:
+        """手动触发研报（点火即返回）：同步校验后点火后台任务，调用方被取消不影响生成。
+
+        不受自动开关和交易日限制；生成进度与结果经 WS 事件、/live 轮询与报告列表呈现，
+        不在本调用中等待。
 
         参数：
             report_type: str，研报类型
             hours: int，回看小时数
 
         返回：
-            dict：started 与 Agent 结构化结果
+            dict：点火成功 {"started": True, "report_type": ..., "hours": ...}；
+            同步失败 {"started": False, "error": ..., "error_code": ...}，
+            error_code 为 llm_not_configured（未配置 LLM）或 busy（已有生成进行中）
         """
+        if not self._agent.llm_configured:
+            return {"started": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
         if self._lock.locked():
             return {"started": False, "error": "研报生成中", "error_code": "busy"}
-        async with self._lock:
-            result = await self._agent.run(report_type=report_type, hours=hours)
-        started = result.get("error_code") != "llm_not_configured"
-        return {"started": started, **result}
+        # asyncio.Lock 在未占用时会同步取得锁；必须在首次让出前占有执行权（同 tick 模式），
+        # 否则自动调度可在让出窗口抢锁，本任务随后排队等锁，破坏不排队语义。
+        await self._lock.acquire()
+        self._manual_task = asyncio.create_task(self._run_manual(report_type, hours))
+        return {"started": True, "report_type": report_type, "hours": hours}
+
+    async def _run_manual(self, report_type: str, hours: int) -> None:
+        """后台执行手动研报：finally 释放锁，取消与意外异常只记日志、就地取回。
+
+        参数：
+            report_type: str，研报类型
+            hours: int，回看小时数
+
+        返回：
+            None：CancelledError 记日志后吞掉（agent.run 已做取消收尾并落失败报告），
+            意外异常记 logger.exception；任务异常永远被取回，杜绝 never-retrieved 噪音
+        """
+        try:
+            await self._agent.run(report_type=report_type, hours=hours)
+        except asyncio.CancelledError:
+            logger.info("手动研报后台任务被取消（report_type=%s）", report_type)
+        except Exception:
+            logger.exception("手动研报后台任务异常（report_type=%s）", report_type)
+        finally:
+            self._lock.release()
+
+    async def shutdown(self) -> None:
+        """取消进行中的手动后台任务并等待其收尾（停机序列调用，须在数据库关闭前）。
+
+        参数：无
+
+        返回：
+            None：无进行中任务时立即返回；否则取消任务并 gather 取回结果
+        """
+        task = self._manual_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

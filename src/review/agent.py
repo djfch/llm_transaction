@@ -177,6 +177,17 @@ class ReviewAgent:
         """
         self._provider = provider
 
+    @property
+    def llm_configured(self) -> bool:
+        """是否已注入 LLM provider（供调度器点火前同步判定 503）。
+
+        参数：无
+
+        返回：
+            bool：True 表示已注入 LLM provider，可执行复盘
+        """
+        return self._provider is not None
+
     async def run(self, period_start: float, period_end: float) -> dict:
         """执行一次完整复盘并保存报告、版本关联与审计记录。
 
