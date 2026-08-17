@@ -158,31 +158,50 @@ def _require(result: dict[int, set[str]], source: str) -> dict[int, set[str]]:
     return result
 
 
-def _validate_coverage(
-    market: str, parsed: dict[int, set[str]], today: date
-) -> dict[int, set[str]]:
-    """校验当前年非空与下一年度完整数量下限。
+def _reconcile_years(
+    market: str,
+    parsed: dict[int, set[str]],
+    today: date,
+    cached: dict[int, set[str]],
+) -> tuple[dict[int, set[str]], str]:
+    """逐年协调新结果与旧缓存，并返回完整性错误。
 
     参数：
         market: str，市场代码
         parsed: dict[int, set[str]]，解析出的年度休市日
         today: date，UTC+8 当前日期
+        cached: dict[int, set[str]]，该市场已有年度缓存
 
     返回：
-        dict[int, set[str]]：通过完整性校验的原结果
-
-    异常：
-        ValueError：当前年为空或下一年数量低于市场下限时抛出
+        tuple[dict[int, set[str]], str]：安全合并结果与降级原因
     """
-    current_count = len(parsed.get(today.year, set()))
-    if current_count < 1:
-        raise ValueError(f"{market} {today.year} 年没有解析出休市日")
+    merged = {year: set(days) for year, days in cached.items()}
+    errors: list[str] = []
+    current_year = today.year
+    current_days = parsed.get(current_year, set())
+    cached_current = cached.get(current_year, set())
+    if not current_days:
+        errors.append(f"{market} {current_year} 年没有解析出休市日")
+    elif not cached_current or cached_current <= current_days:
+        merged[current_year] = set(current_days)
+    elif current_days <= cached_current:
+        merged[current_year] = set(cached_current)
+    else:
+        errors.append(f"{market} {current_year} 年新结果与已缓存休市日冲突")
+
     minimum = _MIN_HOLIDAYS_PER_YEAR[market]
-    next_year = today.year + 1
-    count = len(parsed.get(next_year, set()))
+    next_year = current_year + 1
+    next_days = parsed.get(next_year, set())
+    count = len(next_days)
     if count < minimum:
-        raise ValueError(f"{market} {next_year} 年仅解析出 {count} 个休市日，低于 {minimum}")
-    return parsed
+        errors.append(f"{market} {next_year} 年仅解析出 {count} 个休市日，低于 {minimum}")
+    else:
+        missing_cached = cached.get(next_year, set()) - next_days
+        if missing_cached:
+            errors.append(f"{market} {next_year} 年新结果缺少 {len(missing_cached)} 个已缓存休市日")
+        else:
+            merged[next_year] = set(next_days)
+    return merged, "；".join(errors)
 
 
 def parse_jpx(content: str) -> dict[int, set[str]]:
@@ -396,26 +415,32 @@ class MarketCalendarProvider:
             try:
                 content = await self._fetcher(market, MARKET_URLS[market])
                 parsed = _PARSERS[market](content)
-                return market, _validate_coverage(market, parsed, today), ""
+                return market, parsed, ""
             except Exception as exc:
                 return market, None, str(exc)
 
         results = await asyncio.gather(*(one(market) for market in MARKET_URLS))
         self._errors = {}
         succeeded: list[str] = []
+        accepted: list[str] = []
         candidate = dict(self._holidays)
         for market, parsed, error in results:
             if parsed is None:
                 self._errors[market] = error
                 logger.warning("%s 官方交易日刷新失败：%s", market, error)
                 continue
-            merged = dict(parsed)
-            cached_current = self._holidays.get(market, {}).get(today.year, set())
-            merged[today.year] = cached_current | parsed[today.year]
+            merged, coverage_error = _reconcile_years(
+                market, parsed, today, self._holidays.get(market, {})
+            )
             candidate[market] = merged
+            accepted.append(market)
+            if coverage_error:
+                self._errors[market] = coverage_error
+                logger.warning("%s 官方交易日覆盖不完整：%s", market, coverage_error)
+                continue
             succeeded.append(market)
         cache_saved = False
-        if succeeded:
+        if accepted:
             refreshed_at = time.time()
             old_holidays, old_refreshed_at = self._holidays, self._last_refreshed_at
             self._holidays, self._last_refreshed_at = candidate, refreshed_at

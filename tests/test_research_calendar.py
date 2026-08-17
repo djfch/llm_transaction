@@ -49,7 +49,7 @@ def test_official_calendar_parsers_extract_full_day_closures():
     nyse = parse_nyse(_fixture("nyse.html"))[2026]
     assert {"2026-01-01", "2026-02-23"} <= jpx and len(jpx) == 10
     assert "2026-08-31" in lse and "2026-12-24" not in lse and len(lse) == 6
-    assert {"2026-01-01", "2026-04-03"} <= nyse and len(nyse) == 8
+    assert {"2026-01-01", "2026-04-03"} <= nyse and len(nyse) == 9
 
 
 def test_calendar_parser_rejects_missing_year_data():
@@ -293,6 +293,224 @@ async def test_partial_year_refresh_preserves_complete_market_cache(tmp_path: Pa
     assert provider.is_trading_day("XTKS", date(2027, 1, 1)) is False
     assert set(provider.status()["errors"]) == {"XTKS"}
     assert provider.status()["state"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_current_year_is_kept_when_next_year_is_not_published(tmp_path: Path):
+    """空缓存且下一年未发布时，当前年已知休市日仍须生效并持久化。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言当前年证据保留、下一年降级且重载后一致
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html").split('<h2 class="heading-title"><span>2027</span></h2>')[0],
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def current_only(market: str, _url: str) -> str:
+        """让东京来源只发布当前年，其他市场保持完整。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场页面夹具
+        """
+        return pages[market]
+
+    path = tmp_path / "calendar.json"
+    provider = MarketCalendarProvider(path, fetcher=current_only, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.complete is False
+    assert provider.is_trading_day("XTKS", date(2026, 1, 1)) is False
+    assert provider.is_trading_day("XTKS", date(2027, 1, 4)) is True
+    assert provider.status()["state"] == "fallback"
+    reloaded = MarketCalendarProvider(path, today=_today)
+    assert reloaded.is_trading_day("XTKS", date(2026, 1, 1)) is False
+    assert reloaded.is_trading_day("XNYS", date(2027, 1, 1)) is False
+
+
+@pytest.mark.asyncio
+async def test_threshold_sized_partial_year_cannot_shrink_old_cache(tmp_path: Path):
+    """新结果恰好达到数量阈值但少于旧缓存时，不得静默删除休市日。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言旧日期保留、状态降级且重载后一致
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def seed(market: str, _url: str) -> str:
+        """返回含纽约下一年 9 个休市日的完整夹具。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    partial_nyse = pages["XNYS"].replace("<td>Monday, September 6</td>", "<td>Unavailable</td>")
+
+    async def shrink_next_year(market: str, _url: str) -> str:
+        """让纽约下一年结果从 9 天缩至阈值 8 天。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：缩水纽约或其他市场完整夹具
+        """
+        return partial_nyse if market == "XNYS" else pages[market]
+
+    path = tmp_path / "calendar.json"
+    await MarketCalendarProvider(path, fetcher=seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=shrink_next_year, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.complete is False
+    assert provider.is_trading_day("XNYS", date(2027, 9, 6)) is False
+    assert provider.status()["state"] == "fallback"
+    reloaded = MarketCalendarProvider(path, today=_today)
+    assert reloaded.is_trading_day("XNYS", date(2027, 9, 6)) is False
+
+
+@pytest.mark.asyncio
+async def test_complete_next_year_superset_restores_ok_state(tmp_path: Path):
+    """下一年完整结果是旧缓存超集时，应接纳新增日期并恢复正常状态。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言 8 天缓存升级为 9 天后 complete 与状态均正常
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+    eight_day_nyse = pages["XNYS"].replace("<td>Monday, September 6</td>", "<td>Unavailable</td>")
+
+    async def partial_seed(market: str, _url: str) -> str:
+        """首次给纽约下一年返回达到下限的 8 个日期。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：8 天纽约或其他市场完整夹具
+        """
+        return eight_day_nyse if market == "XNYS" else pages[market]
+
+    async def complete(market: str, _url: str) -> str:
+        """第二次返回包含旧集合的完整超集。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    path = tmp_path / "calendar.json"
+    await MarketCalendarProvider(path, fetcher=partial_seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=complete, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.complete is True
+    assert provider.status()["state"] == "ok"
+    assert provider.is_trading_day("XNYS", date(2027, 9, 6)) is False
+
+
+@pytest.mark.asyncio
+async def test_shrunken_year_with_false_date_cannot_poison_cache(tmp_path: Path):
+    """缩水结果混入错误日期时不得写入，官方恢复后应重新变为正常。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言错误日期始终不进入缓存且后续完整刷新恢复 ok
+    """
+    pages = {
+        "XTKS": _fixture("jpx.html"),
+        "XLON": _fixture("lse.json"),
+        "XNYS": _fixture("nyse.html"),
+    }
+
+    async def seed(market: str, _url: str) -> str:
+        """返回含纽约下一年 9 个休市日的完整夹具。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：对应市场完整夹具
+        """
+        return pages[market]
+
+    poisoned = (
+        pages["XNYS"]
+        .replace("<td>Monday, September 6</td>", "<td>Unavailable</td>")
+        .replace(
+            "</tbody>",
+            "<tr><th>Malformed row</th><td>Unavailable</td>"
+            "<td>Friday, December 31</td></tr></tbody>",
+        )
+    )
+    state = {"poisoned": True}
+
+    async def recoverable(market: str, _url: str) -> str:
+        """先返回缩水且混入错误日期的纽约页面，随后恢复完整页面。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：当前阶段对应的市场页面
+        """
+        if market == "XNYS" and state["poisoned"]:
+            return poisoned
+        return pages[market]
+
+    path = tmp_path / "calendar.json"
+    await MarketCalendarProvider(path, fetcher=seed, today=_today).refresh()
+    provider = MarketCalendarProvider(path, fetcher=recoverable, today=_today)
+    degraded = await provider.refresh()
+    assert degraded.complete is False
+    assert provider.is_trading_day("XNYS", date(2027, 12, 31)) is True
+
+    state["poisoned"] = False
+    recovered = await provider.refresh()
+
+    assert recovered.complete is True
+    assert provider.status()["state"] == "ok"
+    assert provider.is_trading_day("XNYS", date(2027, 12, 31)) is True
+    assert provider.is_trading_day("XNYS", date(2027, 9, 6)) is False
 
 
 @pytest.mark.asyncio
