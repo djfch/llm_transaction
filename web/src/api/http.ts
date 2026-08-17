@@ -36,6 +36,7 @@ import type {
   ResearchReportDetail,
   ResearchReportsPage,
   ResearchReportSummary,
+  ResearchScheduleStatus,
   ReviewLive,
   ReviewReport,
   ReviewReportsPage,
@@ -839,6 +840,7 @@ export const httpApi: ApiClient = {
     ),
   // 与 getReviewLive 同约定：响应契约即最终形态，无需适配
   getResearchLive: () => request<ResearchLive>('/research/live'),
+  getResearchScheduleStatus: () => request<ResearchScheduleStatus>('/research/schedule-status'),
   // 按 agent 转发三端点；返回值类型收窄为 LiveSnapshot（in_round / strategy_md5 等端点私有字段随之丢弃）
   getLiveFor: (agent): Promise<LiveSnapshot> => {
     switch (agent) {

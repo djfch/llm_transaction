@@ -18,9 +18,11 @@ import {
   createChart,
   HistogramSeries,
   LineSeries,
+  TickMarkType,
   type IChartApi,
   type ISeriesApi,
   type LogicalRange,
+  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { api } from '../../api'
@@ -31,6 +33,7 @@ import { useWs } from '../../hooks/useWs'
 import { barStart, intervalToSec, mergeTick, type LiveBar } from '../../utils/candleLive'
 import { fmtPrice, fmtSignedPct } from '../../utils/format'
 import { changePct24h, liveMaValue, ma20Points, sortedUnique, toCandlePoint, toVolumePoint } from '../../utils/klineStats'
+import { formatUtc8Crosshair, formatUtc8Tick } from '../../utils/klineTime'
 import MarkersOverlay from './MarkersOverlay'
 import StrategyIndicatorsBar from './StrategyIndicatorsBar'
 
@@ -60,7 +63,17 @@ function createKlineChart(el: HTMLDivElement) {
     layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#a1a1aa', fontSize: 11 },
     grid: { vertLines: { color: '#27272a' }, horzLines: { color: '#27272a' } },
     rightPriceScale: { borderColor: '#3f3f46' },
-    timeScale: { borderColor: '#3f3f46', timeVisible: true, secondsVisible: false },
+    localization: {
+      locale: 'zh-CN',
+      timeFormatter: (time: Time) => (typeof time === 'number' ? formatUtc8Crosshair(time) : String(time)),
+    },
+    timeScale: {
+      borderColor: '#3f3f46',
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (time: Time, type: TickMarkType) =>
+        typeof time === 'number' ? formatUtc8Tick(time, type as TickMarkType) : null,
+    },
   })
   const upDown = { upColor: '#34d399', downColor: '#fb7185', wickUpColor: '#34d399', wickDownColor: '#fb7185' }
   const candle = chart.addSeries(CandlestickSeries, { ...upDown, borderVisible: false })
@@ -290,7 +303,8 @@ export default function KlinePanel() {
           <span className="font-mono font-bold text-emerald-400">b</span> 买入成交 ·{' '}
           <span className="font-mono font-bold text-rose-400">s</span> 卖出成交（有归属决策轮的标记可点击跳转）
         </span>
-        <span className="ml-auto font-mono">⟷ 拖拽 / 滚轮平移</span>
+        <span className="ml-auto font-mono text-zinc-500">UTC+8</span>
+        <span className="font-mono">⟷ 拖拽 / 滚轮平移</span>
       </footer>
     </section>
   )

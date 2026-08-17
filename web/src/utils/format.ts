@@ -28,14 +28,15 @@ export function fmtTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
-/** 秒数 → 人类可读运行时长，如 "1天2小时3分" */
+/** 秒数 → 人类可读运行时长，如 "1天2小时3分4秒" */
 export function fmtUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400)
   const h = Math.floor((seconds % 86400) / 3600)
   const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}天${h}小时${m}分`
-  if (h > 0) return `${h}小时${m}分`
-  return `${m}分${Math.floor(seconds % 60)}秒`
+  const s = Math.floor(seconds % 60)
+  if (d > 0) return `${d}天${h}小时${m}分${s}秒`
+  if (h > 0) return `${h}小时${m}分${s}秒`
+  return `${m}分${s}秒`
 }
 
 /** 盈亏配色：正绿负红零灰 */

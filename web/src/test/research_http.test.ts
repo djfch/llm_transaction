@@ -163,6 +163,16 @@ describe('研报端点适配', () => {
     })
   })
 
+  it('调度状态接口原样返回下一次 UTC+8 执行与日历状态', async () => {
+    const raw = {
+      enabled: true,
+      items: [{ id: 'asia_open', kind: 'market_open', enabled: true, next_run_at: 1788201000 }],
+      calendar: { state: 'fallback', last_refreshed_at: 1788000000, errors: {}, warning: '日历降级' },
+    }
+    vi.stubGlobal('fetch', stubFetch({ '/api/research/schedule-status': raw }))
+    await expect(httpApi.getResearchScheduleStatus()).resolves.toEqual(raw)
+  })
+
   for (const [status, detail] of [[409, '研报生成中'], [503, 'LLM 未配置'], [422, 'hours 越界']] as const) {
     it('runResearch 错误状态 ' + status + ' 透传 detail', async () => {
       vi.stubGlobal(

@@ -26,7 +26,7 @@ const PAGE_SIZE = 5
 /** 空列表复用同一引用，避免 effect 依赖因新建空数组而反复变化。 */
 const EMPTY_REPORTS: ResearchReportSummary[] = []
 
-/** 研报类型 → 中文徽标文案（枚举值只保留中文释义，未知值原样展示） */
+/** 研报类型 → 中文徽标文案（枚举值只保留中文释义）。 */
 const REPORT_TYPE_LABELS: Record<string, string> = {
   manual: '手动',
   asia_open: '亚盘',
@@ -70,12 +70,18 @@ function findReplacer(links: CausalLinkView[], linkId: number): number | null {
 
 const BADGE_BASE = 'rounded border px-2 py-0.5 text-[10px] font-medium'
 
-/** 类型徽标：手动/亚盘/欧盘/美盘；未知类型原样灰显，空串不渲染 */
+/** 判断报告类型是否为自定义调度生成的 UUID（兼容早期 custom_ 前缀）。 */
+function isCustomScheduleType(type: string): boolean {
+  return type.startsWith('custom_') || /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(type)
+}
+
+/** 类型徽标：预设显示盘别、自定义项统一显示“自定义”，空串不渲染。 */
 function TypeBadge({ type }: { type: string }) {
   if (type === '') return null
+  const label = REPORT_TYPE_LABELS[type] ?? (isCustomScheduleType(type) ? '自定义' : type)
   return (
     <span className={`${BADGE_BASE} border-zinc-600/50 bg-zinc-700/30 text-zinc-400`}>
-      {REPORT_TYPE_LABELS[type] ?? type}
+      {label}
     </span>
   )
 }

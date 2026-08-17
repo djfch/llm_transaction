@@ -4,8 +4,8 @@
  * 决策时间线 / Agent 笔记 / 成交记录 / 配置抽屉（RoundFocusProvider 由页面内部包裹）；
  * 并验证 WS round 事件触发账户、持仓、权益与笔记面板（唯一笔记消费者）的刷新。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentLiveState, AppConfig, LiveAgentKind, LiveSnapshot, OpenOrder, PriceAlert, RoundDetail, StatusInfo, WsMessage } from '../api/types'
 import ConsolePage from '../pages/ConsolePage'
 
@@ -74,6 +74,8 @@ const DETAIL: RoundDetail = {
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */
 const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
+  connected: true,
+  chartOptions: null as Record<string, unknown> | null,
   getStatus: vi.fn(() => Promise.resolve(STATUS)),
   getPortfolio: vi.fn(() =>
     Promise.resolve({
@@ -138,6 +140,11 @@ vi.mock('../api', () => ({
     getResearchReports: () => Promise.resolve({ items: [], total: 0 }),
     // 研报进行中进度条数据源：无进行中研报轮（进度条保持隐藏）
     getResearchLive: () => Promise.resolve({ round: null, tool_calls: [] }),
+    getResearchScheduleStatus: () => Promise.resolve({
+      enabled: false,
+      items: [],
+      calendar: { state: 'ok', last_refreshed_at: null, errors: {}, warning: '' },
+    }),
     getStrategyVersions: () => Promise.resolve([]),
     getConfig: () => Promise.resolve(CONFIG),
     getWatchlist: () => Promise.resolve({ settle: 'USDT', contracts: ['BTC_USDT'] }),
@@ -167,7 +174,7 @@ vi.mock('../api', () => ({
 }))
 // 隔离真实 WS（jsdom 无 WebSocket）：消息经 holder.lastMessage 可控派发
 vi.mock('../hooks/useWs', () => ({
-  useWs: () => ({ connected: true, lastMessage: holder.lastMessage }),
+  useWs: () => ({ connected: holder.connected, lastMessage: holder.lastMessage }),
 }))
 // jsdom 无 canvas：lightweight-charts 换最小桩（K线创建/序列/坐标换算全空操作）
 vi.mock('lightweight-charts', () => ({
@@ -175,7 +182,9 @@ vi.mock('lightweight-charts', () => ({
   CandlestickSeries: 'candlestick',
   HistogramSeries: 'histogram',
   LineSeries: 'line',
-  createChart: () => ({
+  createChart: (_element: HTMLElement, options: Record<string, unknown>) => {
+    holder.chartOptions = options
+    return {
     addSeries: () => ({
       setData: vi.fn(),
       update: vi.fn(),
@@ -206,7 +215,8 @@ vi.mock('lightweight-charts', () => ({
     addPane: () => ({ paneIndex: () => 1, setStretchFactor: vi.fn() }),
     panes: () => [{}],
     removePane: vi.fn(),
-  }),
+    }
+  },
 }))
 
 beforeAll(() => {
@@ -222,9 +232,39 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllMocks()
   holder.lastMessage = null
+  holder.connected = true
+  holder.chartOptions = null
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('ConsolePage(AI 大脑观察舱)', () => {
+  it('每60秒重新获取状态以校准 uptime', async () => {
+    vi.useFakeTimers()
+    render(<ConsolePage />)
+    await act(async () => Promise.resolve())
+    const before = holder.getStatus.mock.calls.length
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000)
+      await Promise.resolve()
+    })
+    expect(holder.getStatus).toHaveBeenCalledTimes(before + 1)
+  })
+
+  it('WebSocket 重连后立即重新获取状态以校准 uptime', async () => {
+    holder.connected = false
+    const view = render(<ConsolePage />)
+    await waitFor(() => expect(holder.getStatus).toHaveBeenCalled())
+    const before = holder.getStatus.mock.calls.length
+
+    holder.connected = true
+    view.rerender(<ConsolePage />)
+    await waitFor(() => expect(holder.getStatus.mock.calls.length).toBeGreaterThan(before))
+  })
+
   it('整页渲染冒烟：TopBar/账户/实时轮/K线/持仓/时间线/笔记/成交记录关键区域齐备', async () => {
     render(<ConsolePage />)
 
@@ -232,6 +272,13 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     expect(screen.getByText(/AI 大脑观察舱/)).toBeInTheDocument()
     expect(await screen.findByText('PAPER · 模拟盘')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '打开配置中心' })).toBeInTheDocument()
+    await waitFor(() => expect(holder.chartOptions).not.toBeNull())
+    const chartOptions = holder.chartOptions as {
+      localization: { timeFormatter: (time: number) => string }
+      timeScale: { tickMarkFormatter: (time: number, type: number) => string }
+    }
+    expect(chartOptions.localization.timeFormatter(1_788_134_400)).toBe('2026-08-31 08:00')
+    expect(chartOptions.timeScale.tickMarkFormatter(1_788_134_400, 3)).toBe('08:00')
     // 左栏：账户面板 + 权益曲线
     expect(await screen.findByText(/账户 · PAPER/)).toBeInTheDocument()
     // 权益大数字（账户面板与权益曲线末值各出现一次）

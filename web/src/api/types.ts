@@ -280,6 +280,74 @@ export interface RiskConfig {
   kill_switch: boolean // 总开关（此处只读回显，操作走 /api/kill_switch）
 }
 
+/** 官方交易所代码：用于开盘预设与自定义日期规则。 */
+export type ResearchMarketCode = 'XTKS' | 'XLON' | 'XNYS'
+
+/** 自定义日期规则：daily=每天，其余值表示对应交易所的交易日。 */
+export type ResearchCalendarCode = 'daily' | ResearchMarketCode
+
+/** 不可删除的市场开盘前研报预设。 */
+export interface MarketOpenResearchSchedule {
+  id: 'asia_open' | 'europe_open' | 'us_open'
+  kind: 'market_open'
+  market: ResearchMarketCode
+  enabled: boolean
+  lead_minutes: 30
+}
+
+/** 用户添加的 UTC+8 固定时间研报。 */
+export interface FixedTimeResearchSchedule {
+  id: string
+  kind: 'fixed_time'
+  enabled: boolean
+  time: string
+  calendar: ResearchCalendarCode
+}
+
+/** 自动研报调度项。 */
+export type ResearchSchedule = MarketOpenResearchSchedule | FixedTimeResearchSchedule
+
+/** 配置中心实际编辑的研报自动执行子集。 */
+export interface ResearchScheduleConfig {
+  enabled: boolean
+  schedules: ResearchSchedule[]
+}
+
+/** 后端 research 完整配置；自动执行表单只提交其中两个热生效字段。 */
+export interface ResearchConfig extends ResearchScheduleConfig {
+  max_turns: number
+  timeout_seconds: number
+  jin10_mcp_url: string
+  blockbeats_mcp_cmd: string
+  fred_base_url: string
+  polymarket_base_url: string
+  gate_enabled: boolean
+  gate_max_age_hours: number
+}
+
+/** 单个调度项的只读运行状态。 */
+export interface ResearchScheduleStatusItem {
+  id: string
+  kind: ResearchSchedule['kind']
+  enabled: boolean
+  next_run_at: number | null
+}
+
+/** 官方交易日日历的只读运行状态。 */
+export interface ResearchCalendarStatus {
+  state: 'ok' | 'fallback' | 'error'
+  last_refreshed_at: number | null
+  errors: Record<string, string>
+  warning: string
+}
+
+/** GET /api/research/schedule-status 的完整响应。 */
+export interface ResearchScheduleStatus {
+  enabled: boolean
+  items: ResearchScheduleStatusItem[]
+  calendar: ResearchCalendarStatus
+}
+
 /** LLM 凭证定义：llm.credentials 数组项；增改删只经 /api/credentials 专用端点。 */
 export interface CredentialConfig {
   name: string // 凭证名（小写字母数字连字符，如 claude-main）
@@ -318,6 +386,12 @@ export interface AppConfig {
   notify: {
     telegram_enabled: boolean
   }
+  research?: ResearchConfig
+}
+
+/** 配置局部 PUT；research 允许只提交热生效的 enabled/schedules。 */
+export type AppConfigPatch = Omit<Partial<AppConfig>, 'research'> & {
+  research?: Partial<ResearchConfig>
 }
 
 /** 交易对白名单：GET/PUT /api/watchlist */
@@ -614,7 +688,7 @@ export interface ApiClient {
   getPlan(): Promise<TradePlan>
   getDailyStats(): Promise<DailyStats>
   getConfig(): Promise<AppConfig>
-  putConfig(config: AppConfig): Promise<PutConfigResult>
+  putConfig(config: AppConfigPatch): Promise<PutConfigResult>
   getStrategy(): Promise<string>
   putStrategy(content: string): Promise<string>
   getWatchlist(): Promise<Watchlist>
@@ -644,6 +718,8 @@ export interface ApiClient {
   runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
   /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null。 */
   getResearchLive(): Promise<ResearchLive>
+  /** 自动研报的下次执行时间与官方日历状态。 */
+  getResearchScheduleStatus(): Promise<ResearchScheduleStatus>
   /** 按 agent 取实时轮快照（三端点归一为 LiveSnapshot；进行中以 round.ended_at === null 判定）。 */
   getLiveFor(agent: LiveAgentKind): Promise<LiveSnapshot>
   /** 策略版本列表（最新在前，不含 content 全文）。 */

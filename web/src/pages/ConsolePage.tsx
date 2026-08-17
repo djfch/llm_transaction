@@ -9,7 +9,7 @@
  * 时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import type { AccountInfo, DailyStats, EquityPoint, OpenOrder, Position, PriceAlert } from '../api/types'
 import AccountPanel from '../components/console/AccountPanel'
@@ -51,10 +51,24 @@ function useConsoleData() {
   const [planTick, setPlanTick] = useState(0)
   const bumpPlan = useCallback(() => setPlanTick((t) => t + 1), [])
   const { connected, lastMessage } = portfolio
+  const { reload: reloadStatus } = status
   const { reload: reloadOpenOrders } = openOrders
   const { reload: reloadAlerts } = alerts
   const { reload: reloadEquity } = equity
   const { reload: reloadDaily } = daily
+  const previousConnected = useRef(connected)
+
+  // uptime 每秒由 TopBar 本地推导；每分钟与服务端重新校准，避免服务重启后继续沿用旧基准。
+  useEffect(() => {
+    const timer = window.setInterval(reloadStatus, 60_000)
+    return () => window.clearInterval(timer)
+  }, [reloadStatus])
+
+  // WebSocket 从断开恢复时立即校准状态；首次挂载不额外重复请求。
+  useEffect(() => {
+    if (connected && !previousConnected.current) reloadStatus()
+    previousConnected.current = connected
+  }, [connected, reloadStatus])
   useEffect(() => {
     if (lastMessage?.type === 'strategy_updated') bumpStrategy()
     if (lastMessage?.type === 'plan_updated') bumpPlan()
