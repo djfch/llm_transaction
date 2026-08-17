@@ -32,3 +32,8 @@ scripts/demo_tools.py
 
 # Qoder 本地评审/分析输出（不入库）
 .qoder/
+
+# 本地 agent skill（不入库）
+.agents/
+
+book/
