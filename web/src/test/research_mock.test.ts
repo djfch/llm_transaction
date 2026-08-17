@@ -48,6 +48,12 @@ describe('mock 初始研报', () => {
 })
 
 describe('mock 手动研报与实时状态', () => {
+  // 注意：getResearchLive 的模块级状态会被 runResearch 点火（null → 进行中 → 已结束），
+  // 「未点火无研报轮」断言必须先于文件内任何 runResearch 调用执行，故本用例置于 describe 顶部。
+  it('未点火前无进行中研报轮', async () => {
+    expect(await mockApi.getResearchLive()).toEqual({ round: null, tool_calls: [] })
+  })
+
   it('手动生成后列表新增两个白名单结论', async () => {
     const before = (await mockApi.getResearchReports(0, 1)).total
     const result = await mockApi.runResearch('manual', 24)
@@ -68,7 +74,23 @@ describe('mock 手动研报与实时状态', () => {
     expect(detail.globalRisks).toEqual(['临近美盘开盘，事件驱动风险上升'])
   })
 
-  it('没有进行中研报轮', async () => {
-    expect(await mockApi.getResearchLive()).toEqual({ round: null, tool_calls: [] })
+  it('点火后先返进行中轮、再轮询翻转为已结束；再次点火重新进入进行中轮', async () => {
+    await mockApi.runResearch('manual', 24)
+    const activeLive = await mockApi.getResearchLive()
+    expect(activeLive.round).not.toBeNull()
+    expect(activeLive.round!.wake_source).toBe('research')
+    expect(activeLive.round!.ended_at).toBeNull() // 进行中
+    expect(activeLive.tool_calls.length).toBeGreaterThanOrEqual(2)
+    // 工具 result 一律 {text} 包装（与后端 research agent 对齐）
+    for (const call of activeLive.tool_calls) expect(call.result).toHaveProperty('text')
+
+    const doneLive = await mockApi.getResearchLive()
+    expect(doneLive.round!.ended_at).not.toBeNull() // 已结束
+    expect(doneLive.round!.llm_raw).not.toBe('')
+
+    // 第二次点火也有完整进出循环
+    await mockApi.runResearch('manual', 24)
+    const reignited = await mockApi.getResearchLive()
+    expect(reignited.round!.ended_at).toBeNull()
   })
 })

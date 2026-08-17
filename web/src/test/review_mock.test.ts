@@ -28,14 +28,23 @@ describe('mock 实时复盘状态', () => {
     expect(round.strategy_md5).toBe(versions[0].md5)
   })
 
-  it('getReviewLive：手动复盘完成后翻转为已结束轮（ended_at 非空、llm_raw 有结论、工具链保留）', async () => {
+  it('getReviewLive：手动复盘后先返进行中轮、再轮询翻转为已结束（演示进度条完整进出循环）', async () => {
     await mockApi.runReview()
-    const live = await mockApi.getReviewLive()
-    const round = live.round!
+    const activeLive = await mockApi.getReviewLive()
+    expect(activeLive.round!.ended_at).toBeNull() // 进行中
+    const doneLive = await mockApi.getReviewLive()
+    const round = doneLive.round!
     expect(round.ended_at).not.toBeNull()
     expect(round.ended_at!).toBeGreaterThan(round.started_at)
     expect(round.llm_raw).not.toBe('')
-    expect(live.tool_calls.length).toBeGreaterThanOrEqual(2)
+    expect(doneLive.tool_calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('getReviewLive：再次手动复盘重新进入进行中轮（每次点火都有完整进出循环）', async () => {
+    await mockApi.runReview()
+    const live = await mockApi.getReviewLive()
+    expect(live.round).not.toBeNull()
+    expect(live.round!.ended_at).toBeNull()
   })
 })
 

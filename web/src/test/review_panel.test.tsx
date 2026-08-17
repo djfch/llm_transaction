@@ -1,7 +1,8 @@
 /**
  * 复盘报告面板测试：列表渲染（时间/复盘区间/动作徽标/error 红字）、展开详情
  * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」点火提示
- * （点火即返回，结果经状态条 onFinished 刷新）与 409/503 的 ApiError.detail 提示、服务端分页、工具调用链内嵌
+ * （点火即返回，review-round-ignite 事件激活状态条，结果经状态条 onFinished 刷新）、
+ * 409（成功样式）/503（错误红）的 ApiError.detail 提示、服务端分页、工具调用链内嵌
  * （roundId 非空 lazy 拉取 getRound；空串 = 老报告灰字降级且不拉取）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -101,15 +102,20 @@ const holder = vi.hoisted(() => ({
   getReviewLive: vi.fn(),
   lastMessage: null as WsMessage | null,
 }))
-vi.mock('../api', () => ({
-  api: {
-    getReviewReports: (offset: number, limit: number) => holder.getReviewReports(offset, limit),
-    getReviewReport: (id: number) => holder.getReviewReport(id),
-    getRound: (roundId: string) => holder.getRound(roundId),
-    runReview: () => holder.runReview(),
-    getReviewLive: () => holder.getReviewLive(),
-  },
-}))
+vi.mock('../api', async () => {
+  // 面板 runNow 的 catch 分支做 instanceof ApiError：mock 必须透出真实类，测试经 ../api/http 构造的实例才能命中
+  const { ApiError } = await import('../api/http')
+  return {
+    api: {
+      getReviewReports: (offset: number, limit: number) => holder.getReviewReports(offset, limit),
+      getReviewReport: (id: number) => holder.getReviewReport(id),
+      getRound: (roundId: string) => holder.getRound(roundId),
+      runReview: () => holder.runReview(),
+      getReviewLive: () => holder.getReviewLive(),
+    },
+    ApiError,
+  }
+})
 
 // ReviewLiveStrip 经 useWs 订阅复盘事件；lastMessage 经 holder 可控派发（默认 null 无消息，进度条隐藏）
 vi.mock('../hooks/useWs', () => ({
@@ -259,24 +265,49 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore)
   })
 
-  it('立即复盘 409：展示 ApiError.detail（复盘进行中）', async () => {
+  it('立即复盘 409（进行中）：按成功样式提示 ApiError.detail，不用错误红', async () => {
     holder.runReview.mockRejectedValueOnce(new ApiError(409, '复盘进行中'))
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('复盘进行中')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('复盘进行中')
+    expect(alert.className).toContain('emerald')
+    expect(alert.className).not.toContain('rose')
   })
 
-  it('立即复盘 503：展示 ApiError.detail（LLM 未配置）', async () => {
+  it('立即复盘 503：红字展示 ApiError.detail（LLM 未配置）', async () => {
     holder.runReview.mockRejectedValueOnce(new ApiError(503, 'LLM 未配置'))
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('LLM 未配置')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('LLM 未配置')
+    expect(alert.className).toContain('rose')
+  })
+
+  it('点火联动：点火后状态条不经 WS 即激活，WS 轮结束事件后状态条消失、提示清空并自动刷新列表', async () => {
+    const { rerender } = render(<ReviewPanel />)
+    await screen.findByText(/第 5 份报告/)
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+
+    // 点火：绿提示出现 + 状态条经 review-round-ignite 事件激活（覆盖 WS 断线窗口内点火场景）
+    fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
+    expect(await screen.findByText('复盘已启动，进度见下方状态条')).toBeInTheDocument()
+    expect(await screen.findByTestId('review-live-strip')).toBeInTheDocument()
+
+    // WS 注入复盘结束事件：状态条消失，onFinished（即 refreshToLatest）清提示并自动刷新报告列表
+    const callsBefore = holder.getReviewReports.mock.calls.length
+    holder.lastMessage = { type: 'review_round', data: { round_id: 'rv-ignite', ok: true } }
+    rerender(<ReviewPanel />)
+
+    await waitFor(() => expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument())
+    await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
+    expect(screen.queryByText('复盘已启动，进度见下方状态条')).not.toBeInTheDocument()
   })
 
   it('分页：下一页拉取 offset=5 并渲染第二页内容', async () => {

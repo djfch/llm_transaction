@@ -1,5 +1,6 @@
 /**
- * 复盘进行中进度条测试：WS 事件驱动进出进行中态、3 秒轮询刷新工具链、
+ * 复盘进行中进度条测试：WS 事件驱动进出进行中态、面板点火事件（review-round-ignite）
+ * 不依赖 WS 激活、WS 断线恢复后重跑补漏、3 秒轮询刷新工具链、
  * 双通道结束（WS review_round / 轮询发现 ended_at 非空）停止轮询并回调 onFinished、
  * 挂载补漏（含 30 分钟僵尸轮防线）、轮询失败静默保留进度条。
  */
@@ -10,6 +11,7 @@ import ReviewLiveStrip from '../components/console/ReviewLiveStrip'
 
 const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
+  connected: true,
   getReviewLive: vi.fn<() => Promise<ReviewLive>>(),
 }))
 
@@ -18,7 +20,7 @@ vi.mock('../api', () => ({
 }))
 
 vi.mock('../hooks/useWs', () => ({
-  useWs: () => ({ connected: true, lastMessage: holder.lastMessage }),
+  useWs: () => ({ connected: holder.connected, lastMessage: holder.lastMessage }),
 }))
 
 const NOW_S = 1_784_600_000 // 固定「现在」（Unix 秒），配合 setSystemTime 保证僵尸轮判定确定
@@ -56,6 +58,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.setSystemTime(NOW_S * 1000)
   holder.lastMessage = null
+  holder.connected = true
   holder.getReviewLive.mockReset()
   holder.getReviewLive.mockResolvedValue({ round: null, tool_calls: [] })
 })
@@ -152,5 +155,37 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('面板点火事件 review-round-ignite → 不经 WS 直接进入进行中态（WS 断线窗口点火兜底）', async () => {
+    await renderStrip(vi.fn())
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('review-round-ignite'))
+    })
+
+    expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
+    expect(screen.getByText('复盘进行中 · 等待 LLM 发起调用…')).toBeInTheDocument()
+  })
+
+  it('WS 由断开恢复为连接 → 重跑补漏查询，找回断线期间自动点火的进行中轮', async () => {
+    const { rerender } = await renderStrip(vi.fn())
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+    const callsAtMount = holder.getReviewLive.mock.calls.length
+    expect(callsAtMount).toBeGreaterThan(0) // 挂载补漏已查一次
+
+    // 断线期间自动调度点火（补漏数据源返进行中轮），但 start 事件随断线丢失
+    holder.connected = false
+    rerender(<ReviewLiveStrip onFinished={vi.fn()} />)
+    holder.getReviewLive.mockResolvedValue({ round: liveRound(NOW_S - 20), tool_calls: TWO_CALLS })
+
+    holder.connected = true
+    rerender(<ReviewLiveStrip onFinished={vi.fn()} />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+
+    expect(holder.getReviewLive.mock.calls.length).toBeGreaterThan(callsAtMount)
+    expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
+    expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
   })
 })

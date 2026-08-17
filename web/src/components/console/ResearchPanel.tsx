@@ -7,10 +7,10 @@
  * 依次渲染 结论条（方向+置信度+前瞻窗口）→ narrative 全文 → 证据/风险列表（无数据整块不渲染）
  * → 因果链（chip 节点链 + 状态/置信度 + timeline 溯源标注）→ 关联审计轮工具调用链
  * （roundId 空串 = 无工具调用记录，灰字降级提示）。
- * 409（研报生成中）/ 503（LLM 未配置或未接线）/ 422（hours 越界）经 ApiError.detail 提示。
+ * 409（研报生成中，按成功样式提示而非错误红）/ 503（LLM 未配置或未接线）/ 422（hours 越界）经 ApiError.detail 提示。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api } from '../../api'
+import { api, ApiError } from '../../api'
 import type { CausalLinkView, ChainNode, ResearchReportDetail, ResearchReportSummary } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { usePageState } from '../../hooks/usePageState'
@@ -278,7 +278,7 @@ function ReportItem({
   )
 }
 
-/** 研报面板：列表分页自管，「生成研报」成功后回到第一页看最新研报。 */
+/** 研报面板：列表分页自管；「生成研报」点火即返回，新研报落库后经状态条 onFinished 回第一页刷新。 */
 export default function ResearchPanel() {
   const [total, setTotal] = useState(0)
   const [expandedId, setExpandedId] = useState<number | null>(null)
@@ -303,22 +303,28 @@ export default function ResearchPanel() {
     [goToPage, page],
   )
 
-  /** 新研报出现在最前：收起展开项，回第一页（deps 驱动刷新）；已在第一页则原地刷新。 */
+  /** 新研报出现在最前：收起展开项，回第一页（deps 驱动刷新）；已在第一页则原地刷新。轮结束顺手清掉「已启动」提示，避免绿条滞留。 */
   const refreshToLatest = useCallback(() => {
+    setNotice(null)
     setExpandedId(null)
     if (page !== 0 && totalPages > 0) goToPage(0)
     else reload()
   }, [goToPage, page, reload, totalPages])
 
-  /** 手动触发研报（manual + 最近 24 小时）：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表；409/503/422 经 ApiError.detail 提示。 */
+  /** 手动触发研报（manual + 最近 24 小时）：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表。
+   *  点火成功广播 research-round-ignite：状态条不依赖 WS 也能激活（覆盖 WS 断线窗口内点火）。
+   *  409（生成中）按成功样式提示而非错误红；503/422 经 ApiError.detail 红字提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
       await api.runResearch('manual', 24)
       setNotice({ ok: true, text: '研报已启动，进度见下方状态条' })
+      window.dispatchEvent(new CustomEvent('research-round-ignite'))
     } catch (e) {
-      setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
+      // 409 = 已有研报在生成中：是状态提示而非失败，避免红色误导
+      if (e instanceof ApiError && e.status === 409) setNotice({ ok: true, text: e.detail })
+      else setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {
       setRunning(false)
     }

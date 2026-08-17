@@ -1,7 +1,8 @@
 /**
  * 复盘进行中进度条：复盘报告面板顶部的实时状态条。
- * 进入进行中态：WS 收到 review_round_start，或挂载补漏发现进行中的复盘轮
- * （started_at 距今 ≤30 分钟，超出的视为僵尸轮不展示）；进行中每 3 秒轮询 /api/review/live 刷新工具链。
+ * 进入进行中态（三条通路）：WS 收到 review_round_start；面板点火事件 review-round-ignite
+ * （WS 断线窗口内手动点火的兜底，不依赖 WS）；挂载或 WS 重连补漏发现进行中的复盘轮
+ * （started_at 距今 ≤30 分钟，超出的视为僵尸轮不展示）。进行中每 3 秒轮询 /api/review/live 刷新工具链。
  * 退出进行中态：WS 收到 review_round，或轮询发现 round.ended_at 非空；
  * 退出时停止轮询并回调 onFinished（父组件据此刷新报告列表）。轮询失败静默保留进度条。
  */
@@ -20,7 +21,7 @@ interface ReviewLiveStripProps {
 }
 
 export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
-  const { lastMessage } = useWs()
+  const { connected, lastMessage } = useWs()
   const [active, setActive] = useState(false)
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   // activeRef 与 active 同步：轮询/WS 双通道退出时经它去重，避免 onFinished 重复触发
@@ -61,37 +62,62 @@ export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
     return () => clearInterval(timer)
   }, [active, pollOnce])
 
-  // WS：复盘轮开始 → 进入进行中态（清空旧工具链）；轮结束 → 退出并通知
+  /** 进入进行中态（WS start 事件与面板点火事件共用）：清空旧工具链并激活轮询 */
+  const enterActive = useCallback(() => {
+    setToolCalls([])
+    activeRef.current = true
+    setActive(true)
+  }, [])
+
+  // WS：复盘轮开始 → 进入进行中态；轮结束 → 退出并通知
   useEffect(() => {
     if (!lastMessage) return
-    if (lastMessage.type === 'review_round_start') {
-      setToolCalls([])
-      activeRef.current = true
-      setActive(true)
-    } else if (lastMessage.type === 'review_round') {
-      exitActive(true)
-    }
-  }, [lastMessage, exitActive])
+    if (lastMessage.type === 'review_round_start') enterActive()
+    else if (lastMessage.type === 'review_round') exitActive(true)
+  }, [lastMessage, enterActive, exitActive])
 
-  // 挂载补漏：页面打开时复盘可能已在跑（错过 review_round_start）；
-  // 一次性查询，进行中且非僵尸轮则直接进入进行中态；查询失败静默视为无进行中复盘
+  // 面板点火事件：WS 断线窗口内手动点火时不依赖 WS 的激活通路（与 review_round_start 同语义）
   useEffect(() => {
-    let alive = true
+    window.addEventListener('review-round-ignite', enterActive)
+    return () => window.removeEventListener('review-round-ignite', enterActive)
+  }, [enterActive])
+
+  // mountedRef：补漏查询异步回填前确认组件仍挂载（挂载/重连两条触发路径共用）
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  /** 补漏查询：进行中且非僵尸轮则进入进行中态（保留轮到的工具链）；查询失败静默视为无进行中复盘 */
+  const catchUp = useCallback(() => {
     api
       .getReviewLive()
       .then((live) => {
         const round = live.round
-        if (!alive || !round || round.ended_at !== null) return
+        if (!mountedRef.current || !round || round.ended_at !== null) return
         if (Date.now() - round.started_at * 1000 > ZOMBIE_MS) return
         activeRef.current = true
         setToolCalls(live.tool_calls)
         setActive(true)
       })
       .catch(() => {})
-    return () => {
-      alive = false
-    }
   }, [])
+
+  // 挂载补漏：页面打开时复盘可能已在跑（错过 review_round_start），一次性查询
+  useEffect(() => {
+    catchUp()
+  }, [catchUp])
+
+  // WS 重连补漏：断线期间自动调度点火的 start 事件不重放，connected 翻 true 时重查一次
+  const wasConnectedRef = useRef(connected)
+  useEffect(() => {
+    const was = wasConnectedRef.current
+    wasConnectedRef.current = connected
+    if (connected && !was) catchUp()
+  }, [connected, catchUp])
 
   if (!active) return null
   const last = toolCalls[toolCalls.length - 1]

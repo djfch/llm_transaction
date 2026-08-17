@@ -1,4 +1,6 @@
-/** 研报面板只展示当前逐标的结构，并覆盖成功、失败、分页和手动触发。 */
+/** 研报面板测试：列表渲染（失败红字/逐标的标签/分页摘要）、展开详情（逐标的+因果链+工具链）、
+ *  失败卡片不可展开、手动触发点火（绿提示、按钮立即恢复、不主动刷新、research-round-ignite 事件激活状态条）、
+ *  409 按成功样式提示、503 红字 ApiError.detail、状态条结束后清提示并自动刷新列表、服务端分页。 */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
@@ -107,15 +109,20 @@ const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
 }))
 
-vi.mock('../api', () => ({
-  api: {
-    getResearchReports: (offset: number, limit: number) => holder.getResearchReports(offset, limit),
-    getResearchReport: (id: number) => holder.getResearchReport(id),
-    getRound: (roundId: string) => holder.getRound(roundId),
-    runResearch: (reportType?: string, hours?: number) => holder.runResearch(reportType, hours),
-    getResearchLive: () => holder.getResearchLive(),
-  },
-}))
+vi.mock('../api', async () => {
+  // 面板 runNow 的 catch 分支做 instanceof ApiError：mock 必须透出真实类，测试经 ../api/http 构造的实例才能命中
+  const { ApiError } = await import('../api/http')
+  return {
+    api: {
+      getResearchReports: (offset: number, limit: number) => holder.getResearchReports(offset, limit),
+      getResearchReport: (id: number) => holder.getResearchReport(id),
+      getRound: (roundId: string) => holder.getRound(roundId),
+      runResearch: (reportType?: string, hours?: number) => holder.runResearch(reportType, hours),
+      getResearchLive: () => holder.getResearchLive(),
+    },
+    ApiError,
+  }
+})
 
 vi.mock('../hooks/useWs', () => ({
   useWs: () => ({ connected: true, lastMessage: holder.lastMessage }),
@@ -203,11 +210,43 @@ describe('ResearchPanel(研报面板)', () => {
     expect(holder.getResearchReports).toHaveBeenCalledTimes(before)
   })
 
-  it('生成研报错误显示后端 detail', async () => {
+  it('生成研报 409（进行中）：按成功样式提示 ApiError.detail，不用错误红', async () => {
     holder.runResearch.mockRejectedValueOnce(new ApiError(409, '研报生成中'))
     render(<ResearchPanel />)
     fireEvent.click(await screen.findByRole('button', { name: '生成研报' }))
-    expect(await screen.findByText('研报生成中')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('研报生成中')
+    expect(alert.className).toContain('emerald')
+    expect(alert.className).not.toContain('rose')
+  })
+
+  it('生成研报 503：红字展示 ApiError.detail（LLM 未配置）', async () => {
+    holder.runResearch.mockRejectedValueOnce(new ApiError(503, 'LLM 未配置'))
+    render(<ResearchPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '生成研报' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('LLM 未配置')
+    expect(alert.className).toContain('rose')
+  })
+
+  it('进度条联动：点火后状态条不经 WS 即激活，WS 轮结束事件后状态条消失、提示清空并自动刷新列表', async () => {
+    const { rerender } = render(<ResearchPanel />)
+    await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
+    expect(screen.queryByTestId('research-live-strip')).not.toBeInTheDocument()
+
+    // 点火：绿提示出现 + 状态条经 research-round-ignite 事件激活（覆盖 WS 断线窗口内点火场景）
+    fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
+    expect(await screen.findByText('研报已启动，进度见下方状态条')).toBeInTheDocument()
+    expect(await screen.findByTestId('research-live-strip')).toBeInTheDocument()
+
+    // WS 注入研报结束事件：状态条消失，onFinished（即 refreshToLatest）清提示并自动刷新研报列表
+    const callsBefore = holder.getResearchReports.mock.calls.length
+    holder.lastMessage = { type: 'research_round', data: { round_id: 'rs-live', ok: true } }
+    rerender(<ResearchPanel />)
+
+    await waitFor(() => expect(screen.queryByTestId('research-live-strip')).not.toBeInTheDocument())
+    await waitFor(() => expect(holder.getResearchReports).toHaveBeenCalledTimes(callsBefore + 1))
+    expect(screen.queryByText('研报已启动，进度见下方状态条')).not.toBeInTheDocument()
   })
 
   it('分页到第二页按 offset=5 拉取', async () => {
