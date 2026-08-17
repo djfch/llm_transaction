@@ -140,6 +140,8 @@ class ServerDeps:
     # 手动触发研报（主程序接线；None 时端点 503）：
     # 可选 report_type/hours 指定类型与回看窗口（409 进行中/503 LLM 未配置由路由按 error_code 映射）
     research_run: Callable[..., Awaitable[dict]] | None = None
+    # 研报自动调度只读状态（总开关、下一次运行、官方日历健康度）：
+    research_schedule_status: Callable[[], dict[str, Any]] | None = None
     # 指标子系统回调束（主程序装配注入；None 时 /api/indicators* 与 /api/indicator_config
     # 写端点诚实 503；版本族读端点经 repo.indicator_config 直取，同策略版本先例）
     indicators: IndicatorBundle | None = None

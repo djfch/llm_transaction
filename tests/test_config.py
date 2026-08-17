@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from src.config import (
@@ -283,7 +284,7 @@ def test_review_daily_time_invalid():
 
 
 def test_research_config_defaults():
-    """研报配置默认值：三盘口时刻（北京时间）、美盘 DST 顺延开、方向闸门开、有效期 13h。
+    """研报配置默认值：总开关关闭，三市场预设开启，方向闸门保持开启。
 
     参数：
         无
@@ -292,14 +293,18 @@ def test_research_config_defaults():
         None：通过断言校验目标场景，无返回值
     """
     cfg = ResearchConfig()
-    assert (cfg.time_asia, cfg.time_europe, cfg.time_us) == ("08:30", "14:30", "21:00")
-    assert cfg.us_dst_adjust is True
+    assert cfg.enabled is False
+    assert [(item.id, item.kind, item.enabled) for item in cfg.schedules] == [
+        ("asia_open", "market_open", True),
+        ("europe_open", "market_open", True),
+        ("us_open", "market_open", True),
+    ]
     assert cfg.gate_enabled is True
     assert cfg.gate_max_age_hours == 13
 
 
-def test_research_schedule_time_valid():
-    """合法触发时刻：边界值 0:00 与 23:59 接受。
+def test_research_legacy_schedule_migrates_without_changing_switches():
+    """旧三时间字段加载为新预设，同时保留总开关与方向闸门配置。
 
     参数：
         无
@@ -307,12 +312,53 @@ def test_research_schedule_time_valid():
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    cfg = ResearchConfig(time_asia="0:00", time_europe="23:59", time_us="12:30")
-    assert (cfg.time_asia, cfg.time_europe, cfg.time_us) == ("0:00", "23:59", "12:30")
+    cfg = ResearchConfig(
+        enabled=True,
+        time_asia="08:30",
+        time_europe="14:30",
+        time_us="21:00",
+        us_dst_adjust=False,
+        gate_enabled=False,
+    )
+    assert cfg.enabled is True
+    assert [item.id for item in cfg.schedules] == ["asia_open", "europe_open", "us_open"]
+    assert cfg.gate_enabled is False
 
 
-def test_research_schedule_time_invalid():
-    """三个 time 字段非法值均拒绝：越界时刻、非 HH:MM 结构，报错指明字段名。
+def test_research_legacy_schedule_writeback_is_idempotent(tmp_path: Path):
+    """旧字段首次写回后只保留新列表，重复读写不再改变调度结构。
+
+    参数：
+        tmp_path: Path，隔离的配置文件目录
+
+    返回：
+        None：校验迁移落盘结构与二次写回一致
+    """
+    path = tmp_path / "config.yaml"
+    legacy = {
+        "research": {
+            "enabled": True,
+            "time_asia": "08:30",
+            "time_europe": "14:30",
+            "time_us": "21:00",
+            "us_dst_adjust": False,
+            "gate_enabled": False,
+        }
+    }
+    first = write_settings(legacy, path)
+    first_raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    second = write_settings(first_raw, path)
+    second_raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert "time_asia" not in first_raw["research"]
+    assert first_raw["research"]["enabled"] is True
+    assert first_raw["research"]["gate_enabled"] is False
+    assert first_raw["research"]["schedules"] == second_raw["research"]["schedules"]
+    assert first.research == second.research
+
+
+def test_research_custom_schedule_valid():
+    """合法自定义时间接受 UTC+8 时刻与四种日期规则。
 
     参数：
         无
@@ -320,10 +366,62 @@ def test_research_schedule_time_invalid():
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    for field in ("time_asia", "time_europe", "time_us"):
-        for bad in ["25:00", "8:60", "0830", "ab:cd"]:
-            with pytest.raises(ValidationError, match=field):
-                ResearchConfig(**{field: bad})
+    base = [item.model_dump() for item in ResearchConfig().schedules]
+    for calendar in ("daily", "XTKS", "XLON", "XNYS"):
+        cfg = ResearchConfig(
+            schedules=[
+                *base,
+                {
+                    "id": f"00000000-0000-4000-8000-00000000000{len(calendar)}",
+                    "kind": "fixed_time",
+                    "enabled": True,
+                    "time": "12:30",
+                    "calendar": calendar,
+                },
+            ]
+        )
+        assert cfg.schedules[-1].calendar == calendar
+
+
+def test_research_custom_schedule_rejects_invalid_or_conflicting_times():
+    """非法时刻、重复启用时刻及与市场预设可能时刻冲突时拒绝保存。
+
+    参数：无
+
+    返回：
+        None：通过断言校验自定义调度冲突门禁
+    """
+    base = [item.model_dump() for item in ResearchConfig().schedules]
+
+    def custom(suffix: str, time_value: str) -> dict:
+        """构造自定义调度测试字典。
+
+        参数：
+            suffix: str，UUID 最后一位
+            time_value: str，UTC+8 触发时刻
+
+        返回：
+            dict：可传给 ResearchConfig 的自定义调度项
+        """
+        return {
+            "id": f"00000000-0000-4000-8000-00000000000{suffix}",
+            "kind": "fixed_time",
+            "enabled": True,
+            "time": time_value,
+            "calendar": "daily",
+        }
+
+    for bad in ("25:00", "8:60", "0830", "ab:cd"):
+        with pytest.raises(ValidationError):
+            ResearchConfig(schedules=[*base, custom("1", bad)])
+    with pytest.raises(ValidationError, match="重复"):
+        ResearchConfig(schedules=[*base, custom("1", "12:30"), custom("2", "12:30")])
+    with pytest.raises(ValidationError, match="冲突"):
+        ResearchConfig(schedules=[*base, custom("1", "21:00")])
+    duplicate_lower = custom("a", "12:30")
+    duplicate_upper = {**custom("b", "13:30"), "id": duplicate_lower["id"].upper()}
+    with pytest.raises(ValidationError, match="id 不能重复"):
+        ResearchConfig(schedules=[*base, duplicate_lower, duplicate_upper])
 
 
 def test_research_gate_max_age_hours_bounds():

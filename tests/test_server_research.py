@@ -76,6 +76,32 @@ def _client_of(deps: ServerDeps) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=create_app(deps)), base_url="http://test")
 
 
+# ---------- GET /api/research/schedule-status ----------
+
+
+async def test_schedule_status_passthrough_and_unwired_503(repo: Repo, tmp_path: Path):
+    """调度状态接线时原样返回，未接线时诚实返回 503。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None：断言状态端点的成功与未接线行为
+    """
+    expected = {
+        "enabled": True,
+        "items": [{"id": "asia_open", "enabled": True, "next_run_at": 123.0}],
+        "calendar": {"state": "ok", "last_refreshed_at": 1.0, "errors": {}, "warning": ""},
+    }
+    deps = _deps(repo, tmp_path, research_schedule_status=lambda: expected)
+    async with _client_of(deps) as client:
+        assert (await client.get("/api/research/schedule-status")).json() == expected
+
+    async with _client_of(_deps(repo, tmp_path)) as client:
+        assert (await client.get("/api/research/schedule-status")).status_code == 503
+
+
 # ---------- GET /api/research/reports ----------
 
 

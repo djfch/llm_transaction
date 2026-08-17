@@ -594,6 +594,7 @@ def _build_server(
         alerts_provider=lambda: ctx.triggers.list(),
         review_run=ctx.review.scheduler.run_now,
         research_run=ctx.research.scheduler.run_now,
+        research_schedule_status=ctx.research.scheduler.status,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,
         runtime_settings=settings,

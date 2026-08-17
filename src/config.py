@@ -8,10 +8,11 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -226,11 +227,112 @@ class ReviewConfig(BaseModel):
         return self
 
 
+MarketCode = Literal["XTKS", "XLON", "XNYS"]
+CalendarCode = Literal["daily", "XTKS", "XLON", "XNYS"]
+
+
+class MarketOpenSchedule(BaseModel):
+    """市场开盘前调度：市场、提前分钟数与独立启停状态。"""
+
+    id: Literal["asia_open", "europe_open", "us_open"]
+    kind: Literal["market_open"] = "market_open"
+    market: MarketCode
+    enabled: bool = True
+    lead_minutes: Literal[30] = 30
+
+    @model_validator(mode="after")
+    def _check_market_id(self) -> MarketOpenSchedule:
+        """校验预设 ID 与市场代码一一对应。
+
+        参数：无
+
+        返回：
+            MarketOpenSchedule：通过对应关系校验的预设调度
+
+        异常：
+            ValueError，预设 ID 与市场代码不匹配时抛出
+        """
+        expected = {"asia_open": "XTKS", "europe_open": "XLON", "us_open": "XNYS"}
+        if expected[self.id] != self.market:
+            raise ValueError(f"{self.id} 必须绑定市场 {expected[self.id]}")
+        return self
+
+
+class FixedTimeSchedule(BaseModel):
+    """自定义 UTC+8 固定时间调度，可选择每日或指定市场交易日。"""
+
+    id: str
+    kind: Literal["fixed_time"] = "fixed_time"
+    enabled: bool = True
+    time: str
+    calendar: CalendarCode = "daily"
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        """校验自定义调度 ID 为 UUID。
+
+        参数：
+            value: str，自定义调度 ID
+
+        返回：
+            str：通过校验的原值
+
+        异常：
+            ValueError，ID 不是合法 UUID 时抛出
+        """
+        try:
+            normalized = str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("自定义调度 id 必须为合法 UUID") from exc
+        return normalized
+
+    @field_validator("time")
+    @classmethod
+    def _check_time(cls, value: str) -> str:
+        """校验 UTC+8 执行时间为严格 HH:MM。
+
+        参数：
+            value: str，待校验执行时间
+
+        返回：
+            str：通过校验的 HH:MM
+
+        异常：
+            ValueError，时间格式或范围非法时抛出
+        """
+        parts = value.split(":")
+        if len(parts) != 2 or any(len(part) != 2 or not part.isdigit() for part in parts):
+            raise ValueError("自定义调度 time 必须为 HH:MM")
+        if not 0 <= int(parts[0]) <= 23 or not 0 <= int(parts[1]) <= 59:
+            raise ValueError("自定义调度 time 超出合法范围")
+        return value
+
+
+ResearchSchedule = Annotated[MarketOpenSchedule | FixedTimeSchedule, Field(discriminator="kind")]
+
+
+def _default_research_schedules() -> list[ResearchSchedule]:
+    """创建三个不可删除的市场开盘预设。
+
+    参数：无
+
+    返回：
+        list[ResearchSchedule]：东京、伦敦、纽约三个默认开启的开盘前调度
+    """
+    return [
+        MarketOpenSchedule(id="asia_open", market="XTKS"),
+        MarketOpenSchedule(id="europe_open", market="XLON"),
+        MarketOpenSchedule(id="us_open", market="XNYS"),
+    ]
+
+
 class ResearchConfig(BaseModel):
-    """研报 agent：数据源接入、循环参数与每日三盘口定时调度（亚盘/欧盘/美盘，北京时间）。
+    """研报 agent：数据源、循环参数、可配置自动调度与方向闸门。
 
     密钥不在此配置（只存 .env）：JIN10_MCP_TOKEN / BLOCKBEATS_API_KEY / FRED_API_KEY。
-    time_* 为三盘口触发时刻；us_dst_adjust 控制美盘按美国冬夏令时顺延；
+    schedules 统一保存三市场预设与自定义 UTC+8 时间；旧 time_* 字段加载时被忽略，
+    缺少 schedules 的旧配置自动采用新三市场预设，首次写回后完成幂等迁移；
     gate_enabled/gate_max_age_hours 为方向闸门硬约束：研报方向结论在有效期内约束交易方向。
     """
 
@@ -241,37 +343,51 @@ class ResearchConfig(BaseModel):
     blockbeats_mcp_cmd: str = "npx -y blockbeats-mcp"
     fred_base_url: str = "https://api.stlouisfed.org/fred"
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
-    # 每日定时调度触发时刻（北京时间 HH:MM）：亚盘 / 欧盘 / 美盘
-    time_asia: str = "08:30"
-    time_europe: str = "14:30"
-    time_us: str = "21:00"
-    # 美盘按美国冬夏令时顺延 1 小时（冬令时生效）
-    us_dst_adjust: bool = True
+    schedules: list[ResearchSchedule] = Field(default_factory=_default_research_schedules)
     # 方向闸门硬约束开关：研报结论（多/空/中性）在 gate_max_age_hours 小时内强制生效
     gate_enabled: bool = True
     gate_max_age_hours: int = Field(default=13, ge=1, le=48)
 
     @model_validator(mode="after")
-    def _check_schedule_times(self) -> ResearchConfig:
-        """time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）。
+    def _check_schedules(self) -> ResearchConfig:
+        """校验三预设完整、自定义 ID 唯一且启用时间不冲突。
 
         参数：无
 
         返回：
-            ResearchConfig，time_asia/time_europe/time_us 必须为 HH:MM（时 0-23、分 0-59）
+            ResearchConfig：通过调度结构与冲突校验的研报配置
 
         异常：
-            ValueError，任一盘口时间不是合法 HH:MM 时抛出
+            ValueError，预设缺失、ID 重复或启用时间冲突时抛出
         """
-        for field in ("time_asia", "time_europe", "time_us"):
-            parts = getattr(self, field).split(":")
-            if (
-                len(parts) != 2
-                or not all(p.isdigit() for p in parts)
-                or not 0 <= int(parts[0]) <= 23
-                or not 0 <= int(parts[1]) <= 59
-            ):
-                raise ValueError(f"{field} 必须为 HH:MM 格式（时 0-23，分 0-59）")
+        ids = [item.id for item in self.schedules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("研报调度 id 不能重复")
+        presets = {item.id for item in self.schedules if item.kind == "market_open"}
+        if presets != {"asia_open", "europe_open", "us_open"}:
+            raise ValueError("研报调度必须完整保留亚盘、欧盘、美盘三个预设")
+
+        enabled_custom = [
+            item for item in self.schedules if item.kind == "fixed_time" and item.enabled
+        ]
+        times = [item.time for item in enabled_custom]
+        if len(times) != len(set(times)):
+            raise ValueError("启用的自定义研报时间不能重复")
+        possible = {
+            "asia_open": {"07:30"},
+            "europe_open": {"14:30", "15:30"},
+            "us_open": {"21:00", "22:00"},
+        }
+        blocked = set().union(
+            *(
+                possible[item.id]
+                for item in self.schedules
+                if item.kind == "market_open" and item.enabled
+            )
+        )
+        collision = sorted(set(times) & blocked)
+        if collision:
+            raise ValueError(f"自定义研报时间与市场预设冲突：{', '.join(collision)}")
         return self
 
 
