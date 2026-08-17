@@ -18,7 +18,8 @@ def test_missing_file_warns_once(tmp_path, monkeypatch):
     monkeypatch.setattr(prompts.logger, "warning", lambda *args: warnings.append(str(args)))
     loader = ReviewPromptLoader(tmp_path / "review_prompt.md")  # 文件不存在
     full, _ = loader.system_prompt("工具说明")
-    assert full == "\n\n工具说明"  # 空正文兜底（不抛错，工具说明段仍组成可用 prompt）
+    assert "REVIEW_ATTRIBUTION_POLICY_V1" in full  # 空正文仍获得强制归因纪律
+    assert full.endswith("\n\n工具说明")  # 工具说明仍位于完整提示词末尾
     loader.system_prompt("工具说明")
     loader.system_prompt("工具说明")
     assert len(warnings) == 1
@@ -39,5 +40,6 @@ def test_existing_file_no_warning(tmp_path, monkeypatch):
     path = tmp_path / "review_prompt.md"
     path.write_text("# 复盘纪律", encoding="utf-8")
     full, _ = ReviewPromptLoader(path).system_prompt("工具说明")
-    assert full == "# 复盘纪律\n\n工具说明"
+    assert full.startswith("# 复盘纪律\n\n## 强制复盘附录")
+    assert full.endswith("\n\n工具说明")
     assert warnings == []
