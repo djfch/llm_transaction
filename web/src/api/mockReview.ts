@@ -116,15 +116,16 @@ function seedVersions(currentStrategy: string): void {
   ]
 }
 
-/** 手动复盘：立即出一份「未调整」报告（最新在前），演示成功后列表刷新；实时复盘轮随之翻转为已结束。 */
-function runMockReview(): number {
+/** 手动复盘：立即出一份「未调整」报告（最新在前），演示列表刷新；实时复盘轮随之翻转为已结束。返回新报告 ID 与统计区间（Unix 秒）。 */
+function runMockReview(): { id: number; periodStart: number; periodEnd: number } {
   const newId = Math.max(0, ...reviewReports.map((r) => r.id)) + 1
-  const end = Date.now()
+  const periodEnd = Math.floor(Date.now() / 1000)
+  const periodStart = periodEnd - 24 * 3600
   liveRoundActive = false // 复盘完成：getReviewLive 改返已结束轮，进度条轮询发现后退出并触发列表自动刷新
   reviewReports.unshift({
     id: newId,
-    periodStart: new Date(end - 24 * 3600_000).toISOString(),
-    periodEnd: new Date(end).toISOString(),
+    periodStart: new Date(periodStart * 1000).toISOString(),
+    periodEnd: new Date(periodEnd * 1000).toISOString(),
     statsJson:
       '{"close_count":3,"total_pnl":"18.40","win_count":2,"win_rate":"0.6667","total_profit":"30.10","total_loss":"-11.70","profit_factor":"2.5726","avg_win":"15.05000000","avg_loss":"-11.70000000","max_loss":"-11.70","per_contract":{"BTC_USDT":{"count":3,"pnl":"18.40"}}}',
     reportMd:
@@ -132,10 +133,10 @@ function runMockReview(): number {
     strategyAction: 'none',
     newVersionId: null,
     error: '',
-    roundId: `rv-mock-${newId}`, // 与下方 runReview 返回的 roundId 自洽，演示新报告内嵌工具链
-    time: new Date(end).toISOString(),
+    roundId: `rv-mock-${newId}`, // 非空 roundId：演示新报告内嵌工具链
+    time: new Date(periodEnd * 1000).toISOString(),
   })
-  return newId
+  return { id: newId, periodStart, periodEnd }
 }
 
 /** 复盘轮进行状态：默认进行中（演示进度条出现）；手动复盘完成后翻转为已结束（演示进度条退出 + 列表自动刷新） */
@@ -206,16 +207,9 @@ export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef
       return reply({ ...report })
     },
     runReview: () => {
-      const newId = runMockReview()
-      return reply({
-        started: true,
-        ok: true,
-        reportId: newId,
-        roundId: `rv-mock-${newId}`,
-        strategyAction: 'none',
-        newVersionId: null,
-        error: '',
-      })
+      const { periodStart, periodEnd } = runMockReview()
+      // 点火契约：立即返回 started + 统计区间回显；新报告已同步落库，演示列表刷新后出现新条目
+      return reply({ started: true, periodStart, periodEnd })
     },
     getReviewLive: () => reply(buildReviewLive(liveRoundActive)),
     getStrategyVersions: () =>

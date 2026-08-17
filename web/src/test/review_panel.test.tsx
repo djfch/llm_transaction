@@ -1,7 +1,7 @@
 /**
  * 复盘报告面板测试：列表渲染（时间/复盘区间/动作徽标/error 红字）、展开详情
- * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」成功刷新
- * 与 409/503 的 ApiError.detail 提示、服务端分页、工具调用链内嵌
+ * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」点火提示
+ * （点火即返回，结果经状态条 onFinished 刷新）与 409/503 的 ApiError.detail 提示、服务端分页、工具调用链内嵌
  * （roundId 非空 lazy 拉取 getRound；空串 = 老报告灰字降级且不拉取）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -134,12 +134,8 @@ beforeEach(() => {
   holder.runReview.mockImplementation(() =>
     Promise.resolve({
       started: true,
-      ok: true,
-      reportId: 8,
-      roundId: 'rv-8',
-      strategyAction: 'none',
-      newVersionId: null,
-      error: '',
+      periodStart: 1784505600,
+      periodEnd: 1784592000,
     }),
   )
   // 默认给任意 roundId 返回同一份审计详情（id6 展开即触发）
@@ -249,16 +245,18 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(holder.getRound).not.toHaveBeenCalled()
   })
 
-  it('立即复盘成功：提示成功并刷新列表', async () => {
+  it('立即复盘点火成功：提示已启动、按钮立即恢复且不主动刷新列表', async () => {
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
     const callsBefore = holder.getReviewReports.mock.calls.length
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('复盘已完成，最新报告已入列')).toBeInTheDocument()
+    expect(await screen.findByText('复盘已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runReview).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
+    // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
+    expect(screen.getByRole('button', { name: '立即复盘' })).toBeEnabled()
+    expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore)
   })
 
   it('立即复盘 409：展示 ApiError.detail（复盘进行中）', async () => {
@@ -279,27 +277,6 @@ describe('ReviewPanel(复盘报告)', () => {
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
     expect(await screen.findByText('LLM 未配置')).toBeInTheDocument()
-  })
-
-  it('立即复盘返回 started=true 但 ok=false（复盘执行失败）：红色提示失败原因且仍刷新列表', async () => {
-    // 后端路由仅把「LLM 未配置」「复盘进行中」映 503/409，其余失败以 200 返回 ok=false（失败报告已落库）
-    holder.runReview.mockResolvedValueOnce({
-      started: true,
-      ok: false,
-      reportId: 8,
-      roundId: 'rv-8',
-      strategyAction: 'none',
-      newVersionId: null,
-      error: 'LLM 调用异常',
-    })
-    render(<ReviewPanel />)
-    await screen.findByText(/第 5 份报告/)
-    const callsBefore = holder.getReviewReports.mock.calls.length
-
-    fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('复盘失败：LLM 调用异常')
-    await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
   })
 
   it('分页：下一页拉取 offset=5 并渲染第二页内容', async () => {

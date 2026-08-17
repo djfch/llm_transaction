@@ -63,15 +63,15 @@ describe('mock 复盘端点', () => {
     expect((err as ApiError).status).toBe(404)
   })
 
-  it('runReview：started/ok 且列表最前新增一条「未调整」报告', async () => {
+  it('runReview：点火返回 started + 区间回显，且列表最前新增一条「未调整」报告', async () => {
     const before = (await mockApi.getReviewReports(0, 1)).total
     const result = await mockApi.runReview()
+    // 点火契约：仅 started + 统计区间回显，不含执行结果
     expect(result.started).toBe(true)
-    expect(result.ok).toBe(true)
+    expect(result.periodEnd!).toBeGreaterThan(result.periodStart!)
     const after = await mockApi.getReviewReports(0, 1)
     expect(after.total).toBe(before + 1)
     expect(after.items[0].strategyAction).toBe('none')
-    expect(after.items[0].id).toBe(result.reportId)
     expect(after.items[0].error).toBe('')
   })
 

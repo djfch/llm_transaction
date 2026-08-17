@@ -155,11 +155,8 @@ beforeEach(() => {
   holder.getRound.mockResolvedValue(ROUND_DETAIL)
   holder.runResearch.mockResolvedValue({
     started: true,
-    ok: true,
-    reportId: 8,
-    roundId: 'rs-8',
-    assetCount: 2,
-    error: '',
+    reportType: 'manual',
+    hours: 24,
   })
 })
 
@@ -194,14 +191,16 @@ describe('ResearchPanel(研报面板)', () => {
     expect(holder.getResearchReport).not.toHaveBeenCalledWith(7)
   })
 
-  it('生成研报成功后刷新第一页', async () => {
+  it('生成研报点火成功：提示已启动、按钮立即恢复且不主动刷新列表', async () => {
     render(<ResearchPanel />)
     await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
     const before = holder.getResearchReports.mock.calls.length
     fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
-    expect(await screen.findByText('研报已生成，最新研报已入列')).toBeInTheDocument()
+    expect(await screen.findByText('研报已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runResearch).toHaveBeenCalledWith('manual', 24)
-    await waitFor(() => expect(holder.getResearchReports).toHaveBeenCalledTimes(before + 1))
+    // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
+    expect(screen.getByRole('button', { name: '生成研报' })).toBeEnabled()
+    expect(holder.getResearchReports).toHaveBeenCalledTimes(before)
   })
 
   it('生成研报错误显示后端 detail', async () => {

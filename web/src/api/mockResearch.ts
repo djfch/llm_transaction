@@ -190,15 +190,9 @@ export function createResearchMock(reply: <T>(value: T) => Promise<T>) {
         : Promise.reject(new ApiError(404, '研报不存在: ' + id))
     },
     runResearch: (reportType = 'manual', hours = 24) => {
-      const id = runMockResearch(reportType, hours)
-      return reply({
-        started: true,
-        ok: true,
-        reportId: id,
-        roundId: 'rs-mock-' + id,
-        assetCount: 2,
-        error: '',
-      })
+      runMockResearch(reportType, hours)
+      // 点火契约：立即返回 started + 回显参数；mock 同步落库一条新研报，演示列表刷新后出现新条目
+      return reply({ started: true, reportType, hours })
     },
     getResearchLive: () => reply({ round: null, tool_calls: [] }),
   }

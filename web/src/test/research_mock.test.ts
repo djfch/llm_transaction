@@ -52,9 +52,9 @@ describe('mock 手动研报与实时状态', () => {
     const before = (await mockApi.getResearchReports(0, 1)).total
     const result = await mockApi.runResearch('manual', 24)
     const after = await mockApi.getResearchReports(0, 1)
-    expect(result).toMatchObject({ started: true, ok: true, assetCount: 2 })
+    // 点火契约：返回 started + 回显参数；新研报已同步落库，从列表取最新条目核对
+    expect(result).toMatchObject({ started: true, reportType: 'manual', hours: 24 })
     expect(after.total).toBe(before + 1)
-    expect(after.items[0].roundId).toBe(result.roundId)
     expect(after.items[0].assetViews.map((view) => view.contract)).toEqual([
       'BTC_USDT',
       'ETH_USDT',
@@ -64,7 +64,7 @@ describe('mock 手动研报与实时状态', () => {
         ['确认', '冲突', '中性', '不可用'].includes(view.technicalConfirmation),
       ),
     ).toBe(true)
-    const detail = await mockApi.getResearchReport(result.reportId!)
+    const detail = await mockApi.getResearchReport(after.items[0].id)
     expect(detail.globalRisks).toEqual(['临近美盘开盘，事件驱动风险上升'])
   })
 

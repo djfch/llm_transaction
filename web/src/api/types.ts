@@ -492,15 +492,14 @@ export interface ReviewReportsPage {
   total: number
 }
 
-/** 手动触发复盘结果：POST /api/review/run（409=进行中 / 503=未配置，经 ApiError 抛出） */
+/** 手动触发复盘点火响应：POST /api/review/run 点火即返回（409=进行中 / 503=未配置 / 422=invalid_period，经 ApiError 抛出）；
+ * 进度与结果经 WS 事件与 /api/review/live 轮询呈现（失败报告也落库入列），响应不含执行结果。 */
 export interface RunReviewResult {
-  started: boolean // 是否真正启动了复盘（false 见 error）
-  ok?: boolean // 复盘是否成功
-  reportId?: number // 产出的报告 ID
-  roundId?: string // 复盘审计轮 ID
-  strategyAction?: string // 策略动作（none/rewrite）
-  newVersionId?: number | null // 产出的策略版本 ID
+  started: boolean // 是否已点火启动复盘（成功恒为 true）
+  periodStart?: number // 复盘统计区间起（Unix 秒，由 period_start 适配回显）
+  periodEnd?: number // 复盘统计区间止（Unix 秒，由 period_end 适配回显）
   error?: string // 失败原因（空串/缺省 = 正常）
+  errorCode?: string // 错误码（由 error_code 适配）
 }
 
 /** 逐标的结论摘要：列表接口不包含证据、风险、研判和市场快照。 */
@@ -572,15 +571,14 @@ export interface ResearchReportsPage {
   total: number
 }
 
-/** 手动触发研报结果：POST /api/research/run（409=生成中 / 503=LLM 未配置 / 422=hours 越界，经 ApiError 抛出） */
+/** 手动触发研报点火响应：POST /api/research/run 点火即返回（409=生成中 / 503=LLM 未配置 / 422=hours 越界，经 ApiError 抛出）；
+ * 进度与结果经 WS 事件与 /api/research/live 轮询呈现（失败报告也落库入列），响应不含执行结果。 */
 export interface RunResearchResult {
-  started: boolean // 是否真正启动了研报（false 见 error）
-  ok?: boolean // 研报是否成功
-  reportId?: number // 产出的研报 ID
-  roundId?: string // 研报审计轮 ID
+  started: boolean // 是否已点火启动研报（成功恒为 true）
+  reportType?: string // 研报类型回显（由 report_type 适配）
+  hours?: number // 覆盖窗口小时数回显
   error?: string // 失败原因（空串/缺省 = 正常）
   errorCode?: string // 错误码（由 error_code 适配）
-  assetCount?: number // 逐标的结论数量
 }
 
 /** 实时研报轮快照：GET /api/research/live 的 round 字段（形状与 AgentLiveRound 一致并透传 snake_case） */

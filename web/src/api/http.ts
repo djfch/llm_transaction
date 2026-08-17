@@ -371,27 +371,23 @@ function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
   }
 }
 
-/** 后端 POST /api/review/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+/** 后端 POST /api/review/run 点火响应（成功仅回显统计区间；409/503/422 走 ApiError，不进本适配） */
 interface RawRunReview {
   started: boolean
-  ok?: boolean
-  report_id?: number
-  round_id?: string
-  strategy_action?: string
-  new_version_id?: number | null
+  period_start?: number
+  period_end?: number
   error?: string
+  error_code?: string
 }
 
-/** 后端 run 响应 → 前端 RunReviewResult：snake_case 转 camelCase */
+/** 后端 run 点火响应 → 前端 RunReviewResult：snake_case 转 camelCase */
 function adaptRunReview(raw: RawRunReview): RunReviewResult {
   return {
     started: Boolean(raw.started),
-    ok: raw.ok,
-    reportId: raw.report_id,
-    roundId: raw.round_id,
-    strategyAction: raw.strategy_action,
-    newVersionId: raw.new_version_id ?? null,
+    periodStart: raw.period_start,
+    periodEnd: raw.period_end,
     error: raw.error ?? '',
+    errorCode: raw.error_code,
   }
 }
 
@@ -571,25 +567,21 @@ function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReport
     causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
   }
 }
-/** 后端 POST /api/research/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+/** 后端 POST /api/research/run 点火响应（成功仅回显类型与窗口；409/503/422 走 ApiError，不进本适配） */
 interface RawRunResearch {
   started: boolean
-  ok?: boolean
-  report_id?: number
-  round_id?: string
-  asset_count?: number
+  report_type?: string
+  hours?: number
   error?: string
   error_code?: string
 }
 
-/** 后端 run 响应 → 前端 RunResearchResult：snake_case 转 camelCase */
+/** 后端 run 点火响应 → 前端 RunResearchResult：snake_case 转 camelCase */
 function adaptRunResearch(raw: RawRunResearch): RunResearchResult {
   return {
     started: Boolean(raw.started),
-    ok: raw.ok,
-    reportId: raw.report_id,
-    roundId: raw.round_id,
-    assetCount: raw.asset_count,
+    reportType: raw.report_type,
+    hours: raw.hours,
     error: raw.error ?? '',
     errorCode: raw.error_code,
   }

@@ -136,7 +136,7 @@ describe('研报端点适配', () => {
     expect(link.chain).toEqual([{ node: '有效节点', kind: '结论' }])
   })
 
-  it('runResearch 发送报告类型和窗口，只映射逐标的数量', async () => {
+  it('runResearch 发送报告类型和窗口，点火响应回显类型与窗口', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -145,21 +145,17 @@ describe('研报端点适配', () => {
         expect(JSON.parse(String(init?.body))).toEqual({ report_type: 'asia_open', hours: 8 })
         return new Response(JSON.stringify({
           started: true,
-          ok: true,
-          report_id: 8,
-          round_id: 'rs-run',
-          asset_count: 2,
-          error: '',
+          report_type: 'asia_open',
+          hours: 8,
         }))
       }),
     )
     const result = await httpApi.runResearch('asia_open', 8)
+    // 点火契约：仅 started + 回显参数，不含执行结果
     expect(result).toMatchObject({
       started: true,
-      ok: true,
-      reportId: 8,
-      roundId: 'rs-run',
-      assetCount: 2,
+      reportType: 'asia_open',
+      hours: 8,
     })
   })
 

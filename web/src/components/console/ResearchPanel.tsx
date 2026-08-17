@@ -310,25 +310,13 @@ export default function ResearchPanel() {
     else reload()
   }, [goToPage, page, reload, totalPages])
 
-  /** 手动触发研报（manual + 最近 24 小时）；409/503/422 经 ApiError.detail 提示。 */
+  /** 手动触发研报（manual + 最近 24 小时）：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表；409/503/422 经 ApiError.detail 提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
-      const result = await api.runResearch('manual', 24)
-      if (!result.started) {
-        setNotice({ ok: false, text: result.error || '研报未启动' })
-        return
-      }
-      // started=true 不代表执行成功：路由只把「LLM 未配置」「生成中」映 503/409，
-      // 其余失败经 scheduler 以 200 返回 ok=false（失败研报已落库）。
-      // 无论成败都刷新列表；失败必须红提示，不能误报「研报已生成」。
-      if (result.ok === false) {
-        setNotice({ ok: false, text: `研报失败：${result.error || '未知原因'}` })
-      } else {
-        setNotice({ ok: true, text: '研报已生成，最新研报已入列' })
-      }
-      refreshToLatest()
+      await api.runResearch('manual', 24)
+      setNotice({ ok: true, text: '研报已启动，进度见下方状态条' })
     } catch (e) {
       setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {

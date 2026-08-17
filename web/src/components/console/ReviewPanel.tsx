@@ -223,25 +223,13 @@ export default function ReviewPanel() {
     else reload()
   }, [goToPage, page, reload, totalPages])
 
-  /** 手动触发复盘：后端同步执行完毕才返回；409/503 经 ApiError.detail 提示。 */
+  /** 手动触发复盘：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表；409/503 经 ApiError.detail 提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
-      const result = await api.runReview()
-      if (!result.started) {
-        setNotice({ ok: false, text: result.error || '复盘未启动' })
-        return
-      }
-      // started=true 不代表执行成功：路由只把「LLM 未配置」「复盘进行中」映 503/409，
-      // 其余失败经 scheduler 以 200 返回 ok=false（失败报告已落库）。
-      // 无论成败都刷新列表；失败必须红提示，不能误报「复盘已完成」。
-      if (result.ok === false) {
-        setNotice({ ok: false, text: `复盘失败：${result.error || '未知原因'}` })
-      } else {
-        setNotice({ ok: true, text: '复盘已完成，最新报告已入列' })
-      }
-      refreshToLatest()
+      await api.runReview()
+      setNotice({ ok: true, text: '复盘已启动，进度见下方状态条' })
     } catch (e) {
       setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {

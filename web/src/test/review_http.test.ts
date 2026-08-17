@@ -98,26 +98,22 @@ describe('复盘端点适配', () => {
     expect(r.roundId).toBe('rvw-round-7')
   })
 
-  it('runReview：started/ok 保留，snake 键转 camelCase', async () => {
+  it('runReview：点火响应 started + 统计区间回显，snake 键转 camelCase', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
         '/api/review/run': {
           started: true,
-          ok: true,
-          report_id: 8,
-          round_id: 'rv-round',
-          strategy_action: 'none',
-          new_version_id: null,
+          period_start: 1784505600,
+          period_end: 1784592000,
         },
       }),
     )
     const r = await httpApi.runReview()
+    // 点火契约：仅 started + 区间回显，不含执行结果
     expect(r.started).toBe(true)
-    expect(r.ok).toBe(true)
-    expect(r.reportId).toBe(8)
-    expect(r.roundId).toBe('rv-round')
-    expect(r.newVersionId).toBeNull()
+    expect(r.periodStart).toBe(1784505600)
+    expect(r.periodEnd).toBe(1784592000)
   })
 
   it('runReview：409 复盘进行中 → ApiError 带 detail（message 同 detail）', async () => {
