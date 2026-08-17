@@ -177,19 +177,26 @@ def _reconcile_years(
     """
     merged = {year: set(days) for year, days in cached.items()}
     errors: list[str] = []
+    minimum = _MIN_HOLIDAYS_PER_YEAR[market]
     current_year = today.year
     current_days = parsed.get(current_year, set())
     cached_current = cached.get(current_year, set())
     if not current_days:
         errors.append(f"{market} {current_year} 年没有解析出休市日")
-    elif not cached_current or cached_current <= current_days:
+    elif not cached_current:
+        if len(current_days) < minimum:
+            errors.append(
+                f"{market} {current_year} 年仅解析出 {len(current_days)} 个休市日，低于 {minimum}"
+            )
+        else:
+            merged[current_year] = set(current_days)
+    elif cached_current <= current_days:
         merged[current_year] = set(current_days)
     elif current_days <= cached_current:
         merged[current_year] = set(cached_current)
     else:
         errors.append(f"{market} {current_year} 年新结果与已缓存休市日冲突")
 
-    minimum = _MIN_HOLIDAYS_PER_YEAR[market]
     next_year = current_year + 1
     next_days = parsed.get(next_year, set())
     count = len(next_days)

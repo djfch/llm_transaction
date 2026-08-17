@@ -338,6 +338,45 @@ async def test_current_year_is_kept_when_next_year_is_not_published(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_empty_cache_rejects_undersized_current_year(tmp_path: Path):
+    """空缓存时当前年休市日低于数量下限不得被接纳为完整结果。
+
+    参数：
+        tmp_path: Path，隔离的日历缓存目录
+
+    返回：
+        None：断言刷新不完整、东京降级报错且下一年完整数据仍生效
+    """
+    jpx = _fixture("jpx.html")
+    undersized_current = (
+        jpx[:48] + "<table><tr><td><td>Jan. 1 (Thu.)</td><td>New Year</td></tr></table>" + jpx[647:]
+    )
+
+    async def fetch(market: str, _url: str) -> str:
+        """让东京当前年仅剩 1 个休市日，其余市场保持完整夹具。
+
+        参数：
+            market: str，市场代码
+            _url: str，官方来源地址（夹具不使用）
+
+        返回：
+            str：残缺 JPX 或其他市场完整夹具
+        """
+        if market == "XTKS":
+            return undersized_current
+        return _fixture({"XLON": "lse.json", "XNYS": "nyse.html"}[market])
+
+    provider = MarketCalendarProvider(tmp_path / "calendar.json", fetcher=fetch, today=_today)
+
+    result = await provider.refresh()
+
+    assert result.complete is False
+    assert provider.status()["state"] == "fallback"
+    assert "XTKS" in provider.status()["errors"]
+    assert provider.is_trading_day("XTKS", date(2027, 1, 1)) is False
+
+
+@pytest.mark.asyncio
 async def test_threshold_sized_partial_year_cannot_shrink_old_cache(tmp_path: Path):
     """新结果恰好达到数量阈值但少于旧缓存时，不得静默删除休市日。
 
