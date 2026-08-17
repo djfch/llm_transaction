@@ -16,6 +16,27 @@ import AgentCredentialsForm from '../../pages/config/AgentCredentialsForm'
 import StrategyEditor from '../../pages/config/StrategyEditor'
 import StrategyVersions from '../../pages/config/StrategyVersions'
 import WatchlistEditor from '../../pages/config/WatchlistEditor'
+import ResearchScheduleForm from '../../pages/config/ResearchScheduleForm'
+import type { ResearchConfig, ResearchScheduleConfig } from '../../api/types'
+
+const DEFAULT_RESEARCH: ResearchScheduleConfig = {
+  enabled: false,
+  schedules: [
+    { id: 'asia_open', kind: 'market_open', market: 'XTKS', enabled: true, lead_minutes: 30 },
+    { id: 'europe_open', kind: 'market_open', market: 'XLON', enabled: true, lead_minutes: 30 },
+    { id: 'us_open', kind: 'market_open', market: 'XNYS', enabled: true, lead_minutes: 30 },
+  ],
+}
+
+/** 把旧配置的研报总开关带入新结构，市场预设采用安全默认值。 */
+function normalizeResearch(research: ResearchConfig | undefined): ResearchScheduleConfig {
+  return {
+    enabled: research?.enabled ?? false,
+    schedules: structuredClone(
+      research?.schedules?.length ? research.schedules : DEFAULT_RESEARCH.schedules,
+    ),
+  }
+}
 
 /** 抽屉小节：标题 + 加载/失败/空态 + 表单内容 */
 function DrawerSection<T>({
@@ -45,6 +66,7 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
   const secretsQ = useApiData(() => api.getSecretsStatus(), [])
   const watchlistQ = useApiData(() => api.getWatchlist(), [])
   const strategyQ = useApiData(() => api.getStrategy(), [])
+  const scheduleQ = useApiData(() => api.getResearchScheduleStatus(), [])
   // PUT /api/config 响应附带的 LLM 热生效错误（空 = 正常）
   const [llmError, setLlmError] = useState<string | null>(null)
   // 策略保存成功信号：递增驱动 StrategyVersions 重拉版本列表（保存会生成新版本落库）
@@ -94,6 +116,24 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
           />
         )}
       </DrawerSection>
+
+      <DrawerSection title="研报自动执行 · 所有时间均为 UTC+8，保存后立即生效" query={configQ}>
+        {(config) => (
+          <ResearchScheduleForm
+            initial={normalizeResearch(config.research)}
+            status={scheduleQ.data}
+            onSave={async (research) => {
+              await api.putConfig({ research })
+              await Promise.all([configQ.reload(), scheduleQ.reload()])
+            }}
+          />
+        )}
+      </DrawerSection>
+      {scheduleQ.error && (
+        <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          调度状态暂不可用：{scheduleQ.error}
+        </p>
+      )}
       {llmError && (
         <p
           role="alert"

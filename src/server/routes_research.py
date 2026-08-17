@@ -154,6 +154,22 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
     """
     router = APIRouter(prefix="/api")
 
+    @router.get("/research/schedule-status")
+    async def get_research_schedule_status() -> dict[str, Any]:
+        """读取研报自动调度总开关、下一次执行与官方日历状态。
+
+        参数：无
+
+        返回：
+            dict[str, Any]：调度器生成的只读状态快照
+
+        异常：
+            HTTPException，研报调度状态未接线时返回 503
+        """
+        if deps.research_schedule_status is None:
+            raise HTTPException(status_code=503, detail="研报自动调度状态未接线")
+        return deps.research_schedule_status()
+
     @router.get("/research/reports")
     async def list_research_reports(
         offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200)

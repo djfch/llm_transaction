@@ -73,13 +73,31 @@ review:
   # 注意：复盘失败也计入幂等记录（不自动重试，防 LLM 故障时每分钟重发），
   # 间隔设得越大，单次失败跨过的周期越长；可在监控页「立即复盘」手动补跑
 research:
-  enabled: false  # 研报 agent：定时调度已接入（每天亚盘/欧盘/美盘自动产出，时刻见下）
+  enabled: false  # 自动研报总开关；关闭仍保留调度项，手动生成不受影响
   max_turns: 30   # 工具调用上限（防死循环保险丝，非能力限制）
   timeout_seconds: 900  # 单次研报超时强制终止
-  time_asia: "08:30"    # 亚盘触发时刻（北京时间 HH:MM）
-  time_europe: "14:30"  # 欧盘触发时刻（北京时间 HH:MM）
-  time_us: "21:00"      # 美盘触发时刻（北京时间 HH:MM，冬令时自动 +1h）
-  us_dst_adjust: true   # 美盘按美国冬夏令时顺延 1 小时（默认开启）
+  schedules:
+    - id: asia_open
+      kind: market_open
+      market: XTKS
+      enabled: true
+      lead_minutes: 30
+    - id: europe_open
+      kind: market_open
+      market: XLON
+      enabled: true
+      lead_minutes: 30
+    - id: us_open
+      kind: market_open
+      market: XNYS
+      enabled: true
+      lead_minutes: 30
+    # 自定义项由配置中心生成 UUID；time 固定按 UTC+8，calendar 可选 daily/XTKS/XLON/XNYS
+    # - id: 00000000-0000-4000-8000-000000000001
+    #   kind: fixed_time
+    #   enabled: true
+    #   time: "12:30"
+    #   calendar: daily
   gate_enabled: true    # 方向闸门硬约束开关（研报方向结论约束交易方向）
   gate_max_age_hours: 13  # 研报结论硬约束有效期（小时，范围 1-48）
   jin10_mcp_url: https://mcp.jin10.com/mcp

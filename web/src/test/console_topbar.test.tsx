@@ -2,8 +2,8 @@
  * 顶部状态栏测试：status 渲染（产品名/mode 徽标/LLM 状态）、
  * llm_configured=false 琥珀横幅、WS 连接指示灯、配置入口回调。
  */
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { StatusInfo } from '../api/types'
 import TopBar from '../components/console/TopBar'
 
@@ -32,6 +32,10 @@ function renderBar(overrides: Partial<StatusInfo> | null = {}, wsConnected = tru
 }
 
 describe('TopBar(顶部状态栏) status 渲染', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('渲染产品名与 paper 徽标（琥珀）', () => {
     renderBar()
     expect(screen.getByText(/LLM 交易/)).toBeInTheDocument()
@@ -66,6 +70,43 @@ describe('TopBar(顶部状态栏) status 渲染', () => {
     expect(screen.getByRole('button', { name: '启动' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '⏻ 熔断 KILL' })).toBeDisabled()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('uptime 使用服务端样本为基准每秒实时推进', () => {
+    vi.useFakeTimers()
+    renderBar({ uptime_seconds: 3600 })
+
+    expect(screen.getByText('1小时0分0秒')).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(2000))
+    expect(screen.getByText('1小时0分2秒')).toBeInTheDocument()
+  })
+
+  it('定时器被后台节流后按单调时钟一次追平，并可由新服务端样本归零', () => {
+    vi.useFakeTimers()
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0)
+    const view = render(
+      <TopBar status={{ ...baseStatus, uptime_seconds: 3600 }} wsConnected onOpenConfig={vi.fn()} />,
+    )
+    now.mockReturnValue(65_000)
+    act(() => vi.advanceTimersByTime(1000))
+    expect(screen.getByText('1小时1分5秒')).toBeInTheDocument()
+
+    view.rerender(
+      <TopBar status={{ ...baseStatus, uptime_seconds: 5 }} wsConnected onOpenConfig={vi.fn()} />,
+    )
+    expect(screen.getByText('0分5秒')).toBeInTheDocument()
+    now.mockRestore()
+  })
+
+  it('卸载时清理每秒定时器', () => {
+    vi.useFakeTimers()
+    const clear = vi.spyOn(window, 'clearInterval')
+    const view = render(
+      <TopBar status={baseStatus} wsConnected onOpenConfig={vi.fn()} />,
+    )
+    view.unmount()
+    expect(clear).toHaveBeenCalled()
+    clear.mockRestore()
   })
 })
 

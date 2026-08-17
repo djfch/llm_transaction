@@ -63,6 +63,8 @@ _RUNTIME_KEYS = frozenset(
         "review.enabled",
         "review.daily_time",
         "review.interval_days",
+        "research.enabled",
+        "research.schedules",
     }
 )
 

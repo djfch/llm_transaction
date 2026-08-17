@@ -148,6 +148,12 @@ CREATE TABLE IF NOT EXISTS research_reports (
     round_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_schedule_runs (
+    schedule_id TEXT NOT NULL,
+    scheduled_date TEXT NOT NULL,
+    claimed_at REAL NOT NULL,
+    PRIMARY KEY(schedule_id, scheduled_date)
+);
 CREATE TABLE IF NOT EXISTS research_asset_views (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_id INTEGER NOT NULL,

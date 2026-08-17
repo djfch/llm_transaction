@@ -1,187 +1,344 @@
-"""研报调度：每日三盘口（亚盘/欧盘/美盘，北京时间）定时触发 + 手动触发，asyncio.Lock 防重入。
-
-- run_forever：每 60s 巡检一次（镜像 review.scheduler 模式），单次异常吞掉记日志护住循环
-  （研报失败不影响交易决策循环）；
-- _tick：enabled 热开关每 tick 现读 settings；取当日「已到触发时刻的最新一个盘口」，
-  以 research_reports 落库记录（has_report_since，当日 00:00 锚点）幂等跳过；
-  只看最新到点盘口、不回看更早盘口——重启补跑只补最近一篇，不连补三篇；
-- 美盘顺延：us_dst_adjust=True 且触发时刻美国为冬令时（非 DST）时，美盘触发时刻 +1h；
-  北京时间与纽约时间的换算在纯函数内完成（_slot_fire_ts 可注入时间戳测试）；
-- run_now：手动触发，与定时共用同一把锁，进行中返回忙（error_code='busy'，server 层映 409）。
-"""
+"""研报自动调度：市场开盘预设、自定义 UTC+8 时间、官方交易日与手动触发。"""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import date, datetime, time as clock, timedelta
+from pathlib import Path
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.audit.logger import get_logger
-from src.config import ResearchConfig, Settings
+from src.config import ROOT, FixedTimeSchedule, MarketOpenSchedule, ResearchSchedule, Settings
 from src.memory.repo import Repo
 from src.research.agent import ResearchAgent
+from src.research.calendars import CalendarRefreshResult, MarketCalendarProvider
 
 logger = get_logger(__name__)
 
-_NY_TZ = ZoneInfo("America/New_York")
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+_MARKET_OPEN = {
+    "XTKS": (ZoneInfo("Asia/Tokyo"), clock(9, 0)),
+    "XLON": (ZoneInfo("Europe/London"), clock(8, 0)),
+    "XNYS": (ZoneInfo("America/New_York"), clock(9, 30)),
+}
+_REFRESH_BACKOFF_MINUTES = (5, 15, 30, 60)
 
 
-def _day_start(ts: float) -> float:
-    """ts 所在自然日的本地 00:00 时间戳（镜像 review.scheduler.local_day_start）。
+class CalendarLike(Protocol):
+    """调度器依赖的官方交易日日历最小接口。"""
+
+    async def refresh(self) -> CalendarRefreshResult:
+        """刷新官方日历缓存。
+
+        参数：无
+
+        返回：
+            CalendarRefreshResult：逐来源与缓存写入结果
+        """
+
+    def is_trading_day(self, market: str, target: date) -> bool:
+        """判断市场日期是否交易。
+
+        参数：
+            market: str，市场代码
+            target: date，市场日期
+
+        返回：
+            bool：是否交易
+        """
+        ...
+
+    def status(self) -> dict[str, Any]:
+        """返回日历刷新状态。
+
+        参数：无
+
+        返回：
+            dict[str, Any]：前端可展示状态
+        """
+        ...
+
+
+def _fire_at(schedule: ResearchSchedule, target: date) -> datetime:
+    """计算调度项在目标 UTC+8 日期对应的绝对触发时刻。
 
     参数：
-        ts: float，Unix 秒时间戳
+        schedule: ResearchSchedule，市场预设或自定义项
+        target: date，UTC+8 会话日期
 
     返回：
-        float：ts 所在自然日的本地 00:00 时间戳（镜像 review.scheduler.local_day_start）
+        datetime：转换到 UTC+8 的带时区触发时刻
     """
-    lt = time.localtime(ts)
-    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    if isinstance(schedule, FixedTimeSchedule):
+        hour, minute = (int(part) for part in schedule.time.split(":"))
+        return datetime.combine(target, clock(hour, minute), BEIJING_TZ)
+    market_tz, open_time = _MARKET_OPEN[schedule.market]
+    opening = datetime.combine(target, open_time, market_tz)
+    return (opening - timedelta(minutes=schedule.lead_minutes)).astimezone(BEIJING_TZ)
 
 
-def _is_ny_dst(ts: float) -> bool:
-    """ts 时刻纽约是否处于夏令时（dst() 非零即夏令时；绝对时刻换算，与本地时区无关）。
+def _calendar_code(schedule: ResearchSchedule) -> str | None:
+    """取得调度项的交易日日历代码；daily 返回 None。
 
     参数：
-        ts: float，Unix 秒时间戳
+        schedule: ResearchSchedule，市场预设或自定义项
 
     返回：
-        bool：ts 时刻纽约是否处于夏令时（dst() 非零即夏令时；绝对时刻换算，与本地时区无关）
+        str | None：XTKS/XLON/XNYS，或每天执行的 None
     """
-    return bool(datetime.fromtimestamp(ts, tz=_NY_TZ).dst())
+    if isinstance(schedule, MarketOpenSchedule):
+        return schedule.market
+    return None if schedule.calendar == "daily" else schedule.calendar
 
 
-def _slot_fire_ts(daily_time: str, ts: float, *, us_dst_adjust: bool = False) -> float:
-    """ts 当日盘口触发时刻（本地 HH:MM）时间戳。
-
-    us_dst_adjust=True 且触发时刻纽约为冬令时（非 DST）时 +1h（美盘冬令时顺延）；
-    隐含触发时刻 +1h 不跨自然日假设（默认 21:00→22:00 成立）。
+def _market_calendar_date(calendar: str, fire: datetime) -> date:
+    """把 UTC+8 触发时刻换算到目标市场当地日期，用于交易日判断。
 
     参数：
-        daily_time: str，本地每日触发时间
-        ts: float，Unix 秒时间戳
-        us_dst_adjust: bool，是否按美国冬夏令时调整美盘时刻
+        calendar: str，市场日历代码
+        fire: datetime，UTC+8 触发时刻
 
     返回：
-        float：ts 当日盘口触发时刻（本地 HH:MM）时间戳
+        date：触发时刻在市场时区下的当地日期
     """
-    hour, minute = daily_time.split(":")
-    lt = time.localtime(ts)
-    fire = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(hour), int(minute), 0, 0, 0, -1))
-    if us_dst_adjust and not _is_ny_dst(fire):
-        fire += 3600
-    return fire
+    return fire.astimezone(_MARKET_OPEN[calendar][0]).date()
 
 
 class ResearchScheduler:
-    """研报调度器：触发逻辑集中在可注入时间的 _tick，巡检循环只是 sleep + 调用。"""
+    """严格命中目标分钟的研报调度器；错过、忙碌或休市均不补跑。"""
 
-    def __init__(self, settings: Settings, agent: ResearchAgent, repo: Repo) -> None:
-        """初始化研报调度器，保存配置、研报 agent 与持久化仓库并创建防重入锁。
+    def __init__(
+        self,
+        settings: Settings,
+        agent: ResearchAgent,
+        repo: Repo,
+        *,
+        calendar: CalendarLike | None = None,
+        cache_path: Path | None = None,
+    ) -> None:
+        """保存共享配置、Agent、仓储与官方日历，并创建防重入锁。
 
         参数：
-            settings: Settings，全局配置（research 热开关每 tick 现读，支持热更新）
-            agent: ResearchAgent，研报 agent，到点或手动触发时执行研报生成
-            repo: Repo，持久化仓库，用于按落库记录判定当日盘口是否已跑
+            settings: Settings，共享运行配置，保存后原地热更新
+            agent: ResearchAgent，研报执行入口
+            repo: Repo，研报幂等查询仓储
+            calendar: CalendarLike | None，可注入的交易日日历
+            cache_path: Path | None，默认日历缓存路径
 
         返回：
-            None，就地初始化实例状态
+            None：就地初始化调度器
         """
         self._settings = settings
         self._agent = agent
         self._repo = repo
+        path = cache_path or ROOT / "data" / "market_calendar_cache.json"
+        self._calendar = calendar or MarketCalendarProvider(path)
         self._lock = asyncio.Lock()
+        self._last_refresh_at: datetime | None = None
+        self._next_refresh_at: datetime | None = None
+        self._refresh_failures = 0
 
     async def run_forever(self) -> None:
-        """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。
+        """立即检查当前分钟，刷新日历，此后对齐自然分钟巡检并每日刷新。
 
-        参数：
-            无
+        参数：无
 
         返回：
-            None：巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环
+            None：长期运行直至任务被取消
         """
+        await self._safe_refresh(datetime.now(BEIJING_TZ))
+        await self._safe_tick()
         while True:
-            await asyncio.sleep(60)
-            try:
-                await self._tick()
-            except Exception:
-                logger.exception("研报调度巡检异常")
+            delay = 60 - (time.time() % 60) + 0.01
+            await asyncio.sleep(delay)
+            local = datetime.now(BEIJING_TZ)
+            if self._should_refresh(local):
+                await self._safe_refresh(local)
+            await self._safe_tick()
 
-    async def _tick(self, now: float | None = None) -> None:
-        """单次巡检：最新到点盘口当日未跑则触发（now 可注入，供测试）。
+    async def _safe_tick(self) -> None:
+        """执行一次巡检并吞掉异常，保护长期任务。
 
-        参数：
-            now: float | None，可注入的当前时间戳
+        参数：无
 
         返回：
-            None：单次巡检：最新到点盘口当日未跑则触发（now 可注入，供测试）
+            None：异常仅记录日志
         """
-        cfg = self._settings.research  # enabled 等热开关每 tick 现读
+        try:
+            await self.tick()
+        except Exception:
+            logger.exception("研报调度巡检异常")
+
+    async def _safe_refresh(self, current: datetime) -> bool:
+        """刷新官方日历，失败时安排当日退避重试。
+
+        参数：
+            current: datetime，本次刷新对应的 UTC+8 时刻
+
+        返回：
+            bool：三家来源与缓存全部成功时为 True
+        """
+        try:
+            result = await self._calendar.refresh()
+        except Exception:
+            logger.exception("官方交易日日历刷新异常")
+        else:
+            if result.complete:
+                self._last_refresh_at = current
+                self._next_refresh_at = None
+                self._refresh_failures = 0
+                return True
+        index = min(self._refresh_failures, len(_REFRESH_BACKOFF_MINUTES) - 1)
+        self._refresh_failures += 1
+        daily_at = datetime.combine(current.date(), clock(0, 10), BEIJING_TZ)
+        retry_at = current + timedelta(minutes=_REFRESH_BACKOFF_MINUTES[index])
+        self._next_refresh_at = daily_at if current < daily_at else retry_at
+        return False
+
+    def _should_refresh(self, current: datetime) -> bool:
+        """判断每日 00:10 刷新或失败退避重试是否到期。
+
+        参数：
+            current: datetime，当前 UTC+8 时刻
+
+        返回：
+            bool：需要在本分钟先刷新日历时为 True
+        """
+        daily_at = datetime.combine(current.date(), clock(0, 10), BEIJING_TZ)
+        if current < daily_at:
+            return False
+        last = self._last_refresh_at
+        if last is not None and last.date() == current.date() and last >= daily_at:
+            return False
+        return self._next_refresh_at is None or current >= self._next_refresh_at
+
+    async def tick(self, now: float | None = None) -> None:
+        """检查当前绝对分钟，命中一个启用调度且当日未执行时生成研报。
+
+        参数：
+            now: float | None，可注入 Unix 秒；省略时使用当前时间
+
+        返回：
+            None：最多触发一次研报；错过不补跑
+        """
+        cfg = self._settings.research
         if not cfg.enabled:
             return
-        now = time.time() if now is None else now
-        slot = await self._due_slot(cfg, now)
-        if slot is None:
+        stamp = time.time() if now is None else now
+        local = datetime.fromtimestamp(stamp, BEIJING_TZ)
+        due = [item for item in cfg.schedules if self._is_due(item, local)]
+        if not due:
             return
+        if len(due) > 1:
+            logger.warning(
+                "多个研报调度同时到期，仅执行首项：%s", ",".join(item.id for item in due)
+            )
+        schedule = due[0]
         if self._lock.locked():
-            return  # 手动触发进行中：跳过本次，下一分钟巡检再试
-        async with self._lock:
-            await self._agent.run(report_type=slot, hours=24)
+            logger.info("研报调度命中但 Agent 正忙，按不补跑规则跳过：%s", schedule.id)
+            return
+        # asyncio.Lock 在未占用时会同步取得锁；必须在首次 await 前占有执行权，
+        # 否则手动任务可在数据库查询期间抢锁，自动任务随后排队形成补跑。
+        await self._lock.acquire()
+        try:
+            current = next((item for item in cfg.schedules if item.id == schedule.id), None)
+            if not cfg.enabled or current is None or not self._is_due(current, local):
+                return
+            claimed = await self._repo.research.claim_schedule_run(current.id, local.date())
+            if not claimed:
+                return
+            current = next((item for item in cfg.schedules if item.id == schedule.id), None)
+            if not cfg.enabled or current is None or not self._is_due(current, local):
+                return
+            await self._agent.run(report_type=current.id, hours=24)
+        finally:
+            self._lock.release()
 
-    async def _due_slot(self, cfg: ResearchConfig, now: float) -> str | None:
-        """当日最新到点盘口未跑则返回其 report_type；未跑判定以落库成功研报（当日锚点）为准。
-
-        参数：
-            cfg: ResearchConfig，已校验的配置对象
-            now: float，可注入的当前时间戳
-
-        返回：
-            str | None：当日最新到点盘口未跑则返回其 report_type；未跑判定以落库成功研报（当日锚点）为准
-        """
-        slot = self._latest_due_slot(cfg, now)
-        if slot is None:
-            return None
-        if await self._repo.research.has_report_since(slot, _day_start(now)):
-            return None
-        return slot
-
-    def _latest_due_slot(self, cfg: ResearchConfig, now: float) -> str | None:
-        """当日已到触发时刻的最新盘口名（全部未到点返回 None；不回看更早盘口）。
+    def _is_due(self, schedule: ResearchSchedule, now: datetime) -> bool:
+        """判断启用项是否在当前分钟到期且符合日期规则。
 
         参数：
-            cfg: ResearchConfig，已校验的配置对象
-            now: float，可注入的当前时间戳
+            schedule: ResearchSchedule，待判断调度项
+            now: datetime，当前 UTC+8 时间
 
         返回：
-            str | None：当日已到触发时刻的最新盘口名（全部未到点返回 None；不回看更早盘口）
+            bool：是否应在本分钟触发
         """
-        fires = [
-            ("asia_open", _slot_fire_ts(cfg.time_asia, now)),
-            ("europe_open", _slot_fire_ts(cfg.time_europe, now)),
-            ("us_open", _slot_fire_ts(cfg.time_us, now, us_dst_adjust=cfg.us_dst_adjust)),
+        if not schedule.enabled:
+            return False
+        calendar = _calendar_code(schedule)
+        fire = _fire_at(schedule, now.date())
+        if calendar is not None and not self._calendar.is_trading_day(
+            calendar, _market_calendar_date(calendar, fire)
+        ):
+            return False
+        return int(fire.timestamp() // 60) == int(now.timestamp() // 60)
+
+    def status(self, now: float | None = None) -> dict[str, Any]:
+        """返回配置中心所需总开关、各项下一次执行时间与日历状态。
+
+        参数：
+            now: float | None，可注入当前 Unix 秒
+
+        返回：
+            dict[str, Any]：调度状态接口响应
+        """
+        stamp = time.time() if now is None else now
+        current = datetime.fromtimestamp(stamp, BEIJING_TZ)
+        items = [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "enabled": item.enabled,
+                "next_run_at": self._next_run(item, current),
+            }
+            for item in self._settings.research.schedules
         ]
-        fires.sort(key=lambda p: p[1])  # 按触发时刻排序，防配置时刻乱序
-        due = [name for name, fire in fires if now >= fire]
-        return due[-1] if due else None
+        return {
+            "enabled": self._settings.research.enabled,
+            "items": items,
+            "calendar": self._calendar.status(),
+        }
+
+    def _next_run(self, schedule: ResearchSchedule, now: datetime) -> float | None:
+        """搜索未来 370 天内下一个符合日期规则的触发时刻。
+
+        参数：
+            schedule: ResearchSchedule，待搜索调度项
+            now: datetime，当前 UTC+8 时间
+
+        返回：
+            float | None：下一次 Unix 秒；禁用或范围内无日期时为 None
+        """
+        if not schedule.enabled:
+            return None
+        calendar = _calendar_code(schedule)
+        for offset in range(371):
+            target = now.date() + timedelta(days=offset)
+            fire = _fire_at(schedule, target)
+            if fire <= now:
+                continue
+            if calendar is None or self._calendar.is_trading_day(
+                calendar, _market_calendar_date(calendar, fire)
+            ):
+                return fire.timestamp()
+        return None
 
     async def run_now(self, report_type: str = "manual", hours: int = 24) -> dict:
-        """手动触发研报；进行中返回忙（error_code='busy'，server 层映 409）。
-
-        agent.run 的结构化结果（ok/report_id/error_code 等）原样并入返回。
+        """手动触发研报；不受自动开关和交易日限制，进行中返回 busy。
 
         参数：
-            report_type: str，研报盘口类型
-            hours: int，向前回溯的小时数
+            report_type: str，研报类型
+            hours: int，回看小时数
 
         返回：
-            dict：手动触发研报；进行中返回忙（error_code='busy'，server 层映 409）
+            dict：started 与 Agent 结构化结果
         """
         if self._lock.locked():
             return {"started": False, "error": "研报生成中", "error_code": "busy"}
         async with self._lock:
             result = await self._agent.run(report_type=report_type, hours=hours)
-        # LLM 未配置时研报未实际开始，started 诚实为 False（按结构化 error_code 判定）
         started = result.get("error_code") != "llm_not_configured"
         return {"started": started, **result}

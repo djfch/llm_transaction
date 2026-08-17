@@ -4,6 +4,7 @@
  * llm_configured=false 时在栏下渲染琥珀色横幅（自动决策暂停）。
  * 数据由父级装配层下发（哑组件）；启停/kill 写操作沿用 ApiError 错误展示（由复用按钮内部处理）。
  */
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import type { StatusInfo } from '../../api/types'
 import AgentControl from '../AgentControl'
@@ -15,6 +16,32 @@ const MODE_BADGE: Record<string, { text: string; cls: string }> = {
   paper: { text: 'PAPER · 模拟盘', cls: 'border-amber-300/40 bg-amber-300/10 text-amber-300' },
   testnet: { text: 'TESTNET · 沙盒', cls: 'border-cyan-300/40 bg-cyan-400/10 text-cyan-300' },
   live: { text: 'LIVE · 实盘', cls: 'border-rose-500/50 bg-rose-500/10 text-rose-400' },
+}
+
+/** 以服务端 uptime 样本为基准，用单调时钟推导当前运行秒数。 */
+function useLiveUptime(serverSeconds: number | null): number | null {
+  const sampleRef = useRef({ seconds: serverSeconds ?? 0, at: performance.now() })
+  const [current, setCurrent] = useState<number | null>(serverSeconds)
+
+  useEffect(() => {
+    if (serverSeconds === null) {
+      setCurrent(null)
+      return
+    }
+    sampleRef.current = { seconds: serverSeconds, at: performance.now() }
+    setCurrent(serverSeconds)
+  }, [serverSeconds])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (serverSeconds === null) return
+      const sample = sampleRef.current
+      setCurrent(sample.seconds + Math.floor((performance.now() - sample.at) / 1000))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [serverSeconds])
+
+  return current
 }
 
 /** 品牌区：神经元图标 + 产品名 */
@@ -123,6 +150,7 @@ export default function TopBar({
   /** agent 启停 / kill_switch 变更后的刷新回调（可选） */
   onChanged?: () => void
 }) {
+  const liveUptime = useLiveUptime(status?.uptime_seconds ?? null)
   const handleAgentToggle = async (next: boolean) => {
     if (next) await api.startAgent()
     else await api.stopAgent()
@@ -156,11 +184,11 @@ export default function TopBar({
           <div className="hidden h-6 w-px bg-white/10 lg:block" />
           <LlmStatus status={status} />
           <WsDot connected={wsConnected} />
-          {status && (
+          {liveUptime !== null && (
             <div className="hidden text-xs text-zinc-500 2xl:block">
               uptime{' '}
               <span className="font-mono tabular-nums text-zinc-300">
-                {fmtUptime(status.uptime_seconds)}
+                {fmtUptime(liveUptime)}
               </span>
             </div>
           )}

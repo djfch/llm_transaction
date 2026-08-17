@@ -18,8 +18,10 @@ import type {
   OpenOrder,
   PriceAlert,
   Position,
+  ResearchConfig,
   RoundDetail,
   RoundSummary,
+  ResearchScheduleStatus,
   ToolCall,
   Trade,
 } from './types'
@@ -141,6 +143,36 @@ const config: AppConfig = {
   },
   scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
   notify: { telegram_enabled: false },
+  research: {
+    enabled: false,
+    max_turns: 30,
+    timeout_seconds: 900,
+    jin10_mcp_url: 'https://mcp.jin10.com/mcp',
+    blockbeats_mcp_cmd: 'npx -y blockbeats-mcp',
+    fred_base_url: 'https://api.stlouisfed.org/fred',
+    polymarket_base_url: 'https://gamma-api.polymarket.com',
+    gate_enabled: true,
+    gate_max_age_hours: 13,
+    schedules: [
+      { id: 'asia_open', kind: 'market_open', market: 'XTKS', enabled: true, lead_minutes: 30 },
+      { id: 'europe_open', kind: 'market_open', market: 'XLON', enabled: true, lead_minutes: 30 },
+      { id: 'us_open', kind: 'market_open', market: 'XNYS', enabled: true, lead_minutes: 30 },
+    ],
+  },
+}
+
+/** mock 调度状态随内存配置生成，便于配置中心独立预览。 */
+function researchScheduleStatus(): ResearchScheduleStatus {
+  return {
+    enabled: config.research?.enabled ?? false,
+    items: (config.research?.schedules ?? []).map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      enabled: item.enabled,
+      next_run_at: item.enabled ? Math.floor(Date.now() / 1000) + 3600 : null,
+    })),
+    calendar: { state: 'ok', last_refreshed_at: Math.floor(Date.now() / 1000), errors: {}, warning: '' },
+  }
 }
 
 // 凭证 key 配置状态（与 config.llm.credentials 对应；setSecrets 可翻转 key_configured）
@@ -425,9 +457,13 @@ export const mockApi: ApiClient = {
     reply({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: config.risk.max_orders_per_day }),
   getConfig: () => reply(structuredClone(config)),
   putConfig: (next) => {
+    const previousResearch = config.research
     Object.assign(config, next)
+    if (next.research) {
+      config.research = { ...previousResearch, ...next.research } as ResearchConfig
+    }
     // llm.credentials 整体替换时同步密钥状态列表：key_configured 按名保留，used_by 按 agents 分配重算
-    if (next.llm.credentials) {
+    if (next.llm?.credentials) {
       credentials = next.llm.credentials.map((c) => ({
         name: c.name,
         provider: c.provider,
@@ -558,6 +594,7 @@ export const mockApi: ApiClient = {
   getResearchReport: researchMock.handlers.getResearchReport,
   runResearch: researchMock.handlers.runResearch,
   getResearchLive: researchMock.handlers.getResearchLive,
+  getResearchScheduleStatus: () => reply(researchScheduleStatus()),
   // 按 agent 转发三实现并归一为 LiveSnapshot（mock 行为与现状一致：trader 上轮、复盘/研报无进行中轮）
   getLiveFor: (agent): Promise<LiveSnapshot> => {
     switch (agent) {

@@ -175,6 +175,29 @@ async def test_put_config_updates_shared_runtime_scheduler(deps: ServerDeps, cli
     assert runtime.scheduler.default_wake_minutes == 30
 
 
+async def test_put_config_hot_applies_research_patch(deps: ServerDeps, client: AsyncClient):
+    """研报总开关和调度列表以局部补丁保存并原地热写回共享配置。
+
+    参数：
+        deps: ServerDeps，可接入共享 Settings 的服务器依赖
+        client: AsyncClient，进程内异步测试客户端
+
+    返回：
+        None：断言无需重启且未提交配置段保持不变
+    """
+    runtime = Settings()
+    deps.runtime_settings = runtime
+    schedules = [item.model_dump(mode="json") for item in runtime.research.schedules]
+    schedules[0]["enabled"] = False
+    response = await client.put(
+        "/api/config", json={"research": {"enabled": True, "schedules": schedules}}
+    )
+    assert response.json() == {"saved": True, "needs_restart": []}
+    assert runtime.research.enabled is True
+    assert runtime.research.schedules[0].enabled is False
+    assert runtime.risk.max_leverage == 5
+
+
 async def test_put_config_restart_fields_not_written_back(deps: ServerDeps, client: AsyncClient):
     """验证运行模式等构造期字段只标记需重启而不会改写当前运行时对象。
 

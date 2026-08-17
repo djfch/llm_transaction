@@ -16,6 +16,7 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import time
 
@@ -266,6 +267,24 @@ class ResearchRepo(ResearchAssetRepoMixin):
             (report_type, since_ts),
         )
         return await cur.fetchone() is not None
+
+    async def claim_schedule_run(self, schedule_id: str, scheduled_date: date) -> bool:
+        """原子认领某调度在指定 UTC+8 计划日期的执行权。
+
+        参数：
+            schedule_id: str，调度项唯一标识
+            scheduled_date: date，UTC+8 计划执行日期
+
+        返回：
+            bool：首次认领返回 True，重复认领返回 False
+        """
+        cur = await self._conn.execute(
+            "INSERT OR IGNORE INTO research_schedule_runs"
+            "(schedule_id,scheduled_date,claimed_at) VALUES(?,?,?)",
+            (schedule_id, scheduled_date.isoformat(), _now()),
+        )
+        await self._conn.commit()
+        return cur.rowcount == 1
 
     # ---------- causal_links（分析笔记，研报 agent 提交） ----------
 

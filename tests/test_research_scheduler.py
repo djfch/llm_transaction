@@ -1,61 +1,106 @@
-"""src/research/scheduler.py 测试：时间逻辑走可注入 now 的 _tick 与纯函数，不 sleep 60s。
+"""研报严格分钟调度、市场时区、交易日与手动触发测试。"""
 
-覆盖：到点触发、enabled=False 跳过、未到点跳过、已跑幂等跳过（落库为准）、锁占用跳过、
-补跑只补最新一篇（更早盘口不回看）、run_now busy/成功透传/llm 未配置、
-美国冬夏令时美盘顺延（纯函数 + tick 两级）、enabled 热开关。
+import asyncio
 
-DST 用例注入固定的本地日期（1 月冬令时 / 7 月夏令时）：纽约 DST 判定走绝对时刻换算，
-与测试机本地时区无关；预存研报的 created_at 为真实当前时刻，必然落在注入的过往
-日期锚点之后，has_report_since 判定为「当日已跑」。
-"""
-
-import time
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.config import ResearchConfig, Settings
+from src.config import FixedTimeSchedule, ResearchConfig, Settings
 from src.memory import Database, Repo
-from tests.research_helpers import save_report_fixture
-from src.research.scheduler import ResearchScheduler, _slot_fire_ts
+from src.research.calendars import CalendarRefreshResult
+from src.research.scheduler import ResearchScheduler
+
+BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 class StubAgent:
-    """记录调用并返回固定结果的 stub（鸭子类型替代 ResearchAgent）。"""
+    """记录调用并返回固定成功结果的研报 Agent 边界桩。"""
 
     def __init__(self) -> None:
-        """初始化空调用记录，供调度触发断言使用。
+        """初始化空调用记录。
 
-        参数：
-            无
+        参数：无
 
         返回：
-            None：执行测试辅助操作，无返回值
+            None：就地创建调用列表
         """
         self.calls: list[dict] = []
 
     async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-        """记录研报类型与回看时长并返回固定成功结果。
+        """记录报告类型和回看小时并返回成功结果。
 
         参数：
-            report_type: str，研报或复盘类型
-            hours: int，回溯小时数
+            report_type: str，研报类型
+            hours: int，回看小时数
 
         返回：
-            dict：固定包含成功状态、研报编号、轮次编号与中性方向的结果
+            dict：固定成功结果
         """
         self.calls.append({"report_type": report_type, "hours": hours})
         return {"ok": True, "report_id": 1, "round_id": "r1", "direction": "中性"}
 
 
+class StubCalendar:
+    """按关闭日期集合判断交易日的日历边界桩。"""
+
+    def __init__(self, closed: set[tuple[str, date]] | None = None) -> None:
+        """初始化关闭日期集合。
+
+        参数：
+            closed: set[tuple[str, date]] | None，市场与休市日元组
+
+        返回：
+            None：就地保存休市集合
+        """
+        self.closed = closed or set()
+        self.refresh_calls = 0
+
+    async def refresh(self) -> CalendarRefreshResult:
+        """模拟官方日历刷新成功。
+
+        参数：无
+
+        返回：
+            CalendarRefreshResult：三家来源与缓存均成功
+        """
+        self.refresh_calls += 1
+        return CalendarRefreshResult(("XTKS", "XLON", "XNYS"), {}, True)
+
+    def is_trading_day(self, market: str, target: date) -> bool:
+        """判断市场日期是否不在关闭集合且不是周末。
+
+        参数：
+            market: str，市场代码
+            target: date，市场日期
+
+        返回：
+            bool：目标日期是否交易
+        """
+        return target.weekday() < 5 and (market, target) not in self.closed
+
+    def status(self) -> dict:
+        """返回固定健康日历状态。
+
+        参数：无
+
+        返回：
+            dict：前端状态契约
+        """
+        return {"state": "ok", "last_refreshed_at": 1.0, "errors": {}, "warning": ""}
+
+
 @pytest.fixture
-async def repo(tmp_path):
-    """创建隔离数据库的仓储夹具。
+async def repo(tmp_path: Path):
+    """创建隔离数据库仓储。
 
     参数：
-        tmp_path: Path，pytest 提供的临时目录夹具
+        tmp_path: Path，pytest 临时目录
 
     返回：
-        AsyncIterator[Repo]：yield 已打开临时数据库的仓储，并在夹具收尾关闭数据库
+        AsyncIterator[Repo]：已打开的仓储
     """
     db = Database()
     await db.open(tmp_path / "test.db")
@@ -63,386 +108,715 @@ async def repo(tmp_path):
     await db.close()
 
 
-def _settings(enabled: bool = True, us_dst_adjust: bool = True) -> Settings:
-    """构造定时器测试所需的设置对象。
+def _settings(enabled: bool = True, *, custom: dict | None = None) -> Settings:
+    """构造含三个预设和可选自定义项的设置。
 
     参数：
-        enabled: bool，是否启用定时任务
-        us_dst_adjust: bool，是否启用美国冬夏令时调整
+        enabled: bool，研报总开关
+        custom: dict | None，可选自定义调度
 
     返回：
-        Settings：三盘口时间固定、开关与冬夏令时参数可调的研报配置
+        Settings：测试设置
     """
-    return Settings(
-        research=ResearchConfig(
-            enabled=enabled,
-            time_asia="08:30",
-            time_europe="14:30",
-            time_us="21:00",
-            us_dst_adjust=us_dst_adjust,
-        )
-    )
+    schedules = [item.model_dump() for item in ResearchConfig().schedules]
+    if custom is not None:
+        schedules.append(custom)
+    return Settings(research=ResearchConfig(enabled=enabled, schedules=schedules))
 
 
-def _local(y: int, m: int, d: int, hh: int, mm: int) -> float:
-    """本地某时刻的时间戳（与实现同走 mktime/localtime 口径）。
+def _custom(time_value: str = "12:30", calendar: str = "daily") -> dict:
+    """构造合法自定义调度。
 
     参数：
-        y: int，本地年份
-        m: int，本地月份
-        d: int，本地日期
-        hh: int，本地小时
-        mm: int，本地分钟
+        time_value: str，UTC+8 执行时刻
+        calendar: str，日期规则
 
     返回：
-        float：指定本地日期时间对应的 Unix 时间戳
+        dict：自定义调度配置
     """
-    return time.mktime((y, m, d, hh, mm, 0, 0, 0, -1))
+    return {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "kind": "fixed_time",
+        "enabled": True,
+        "time": time_value,
+        "calendar": calendar,
+    }
 
 
-def _today(hh: int, mm: int) -> float:
-    """今日本地 hh:mm 的时间戳。
+def _bj(year: int, month: int, day: int, hour: int, minute: int) -> float:
+    """构造 UTC+8 固定时刻时间戳。
 
     参数：
-        hh: int，今天的目标小时
-        mm: int，今天的目标分钟
+        year: int，年份
+        month: int，月份
+        day: int，日期
+        hour: int，小时
+        minute: int，分钟
 
     返回：
-        float：今天指定时分对应的本地 Unix 时间戳
+        float：Unix 秒
     """
-    lt = time.localtime()
-    return _local(lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm)
+    return datetime(year, month, day, hour, minute, tzinfo=BEIJING).timestamp()
 
 
-async def _save_report(repo: Repo, report_type: str) -> None:
-    """落库一份成功研报（created_at 为真实当前时刻，供幂等判定）。
+@pytest.mark.parametrize(
+    ("stamp", "report_type"),
+    [
+        (_bj(2026, 8, 17, 7, 30), "asia_open"),
+        (_bj(2026, 7, 15, 14, 30), "europe_open"),
+        (_bj(2026, 1, 15, 15, 30), "europe_open"),
+        (_bj(2026, 7, 15, 21, 0), "us_open"),
+        (_bj(2026, 1, 15, 22, 0), "us_open"),
+        (_bj(2026, 3, 27, 15, 30), "europe_open"),
+        (_bj(2026, 3, 30, 14, 30), "europe_open"),
+        (_bj(2026, 10, 23, 14, 30), "europe_open"),
+        (_bj(2026, 10, 26, 15, 30), "europe_open"),
+        (_bj(2026, 3, 6, 22, 0), "us_open"),
+        (_bj(2026, 3, 9, 21, 0), "us_open"),
+        (_bj(2026, 10, 30, 21, 0), "us_open"),
+        (_bj(2026, 11, 2, 22, 0), "us_open"),
+    ],
+)
+async def test_market_presets_fire_at_exact_utc8_minute(repo: Repo, stamp: float, report_type: str):
+    """东京、伦敦、纽约预设在开盘前半小时的准确 UTC+8 分钟触发。
 
     参数：
-        repo: Repo，临时数据库仓储夹具
-        report_type: str，研报或复盘类型
+        repo: Repo，隔离仓储
+        stamp: float，目标时间戳
+        report_type: str，预期研报类型
 
     返回：
-        None：执行测试辅助操作，无返回值
-    """
-    await save_report_fixture(repo, report_type=report_type, direction="中性", confidence="低")
-
-
-# ---------- 定时触发 ----------
-
-
-async def test_tick_fires_asia_after_time(repo):
-    """到点（08:30 后）且当日未跑 → 触发亚盘研报（hours=24）。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言唯一 Agent 调用
     """
     agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await scheduler._tick(now=_today(8, 31))
+    scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
+    await scheduler.tick(stamp)
+    assert agent.calls == [{"report_type": report_type, "hours": 24}]
+
+
+async def test_missed_minute_is_not_backfilled(repo: Repo):
+    """目标分钟过去后不补跑。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言无自动调用
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
+    await scheduler.tick(_bj(2026, 8, 17, 7, 31))
+    assert agent.calls == []
+
+
+async def test_disabled_locked_or_holiday_skips(repo: Repo):
+    """总开关关闭、锁占用和官方休市日都跳过自动执行。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言三个场景均不调用 Agent
+    """
+    target = _bj(2026, 8, 17, 7, 30)
+    agent = StubAgent()
+    await ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar()).tick(target)
+    holiday = StubCalendar({("XTKS", date(2026, 8, 17))})
+    await ResearchScheduler(_settings(), agent, repo, calendar=holiday).tick(target)
+    locked = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
+    await locked._lock.acquire()
+    try:
+        await locked.tick(target)
+    finally:
+        locked._lock.release()
+    assert agent.calls == []
+
+
+async def test_custom_time_honors_selected_calendar(repo: Repo):
+    """自定义 UTC+8 时刻仅在所选市场交易日执行，daily 不受市场休市影响。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言市场日历与 daily 两种行为
+    """
+    target = _bj(2026, 8, 17, 12, 30)
+    closed = StubCalendar({("XNYS", date(2026, 8, 17))})
+    market_agent = StubAgent()
+    market = ResearchScheduler(
+        _settings(custom=_custom(calendar="XNYS")), market_agent, repo, calendar=closed
+    )
+    await market.tick(target)
+    assert market_agent.calls == []
+
+    daily_agent = StubAgent()
+    daily = ResearchScheduler(
+        _settings(custom=_custom(calendar="daily")), daily_agent, repo, calendar=closed
+    )
+    await daily.tick(target)
+    assert daily_agent.calls == [
+        {"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}
+    ]
+
+
+@pytest.mark.parametrize("market", ["XTKS", "XLON", "XNYS"])
+async def test_custom_market_calendars_skip_their_holiday(repo: Repo, market: str):
+    """自定义项选择三种市场日历时，各自休市日均不执行。
+
+    参数：
+        repo: Repo，隔离仓储
+        market: str，待验证市场代码
+
+    返回：
+        None：断言所选市场休市时无调用
+    """
+    closed = StubCalendar({(market, date(2026, 8, 17))})
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(calendar=market)), agent, repo, calendar=closed
+    )
+    await scheduler.tick(_bj(2026, 8, 17, 12, 30))
+    assert agent.calls == []
+
+
+@pytest.mark.parametrize(
+    ("time_value", "market", "stamp", "should_run"),
+    [
+        ("00:30", "XNYS", _bj(2026, 8, 17, 0, 30), False),
+        ("00:30", "XNYS", _bj(2026, 8, 22, 0, 30), True),
+        ("00:30", "XLON", _bj(2026, 8, 17, 0, 30), False),
+        ("23:30", "XTKS", _bj(2026, 8, 21, 23, 30), False),
+        ("23:30", "XTKS", _bj(2026, 8, 23, 23, 30), True),
+    ],
+)
+async def test_custom_time_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, stamp: float, should_run: bool
+):
+    """自定义时刻绑定市场日历时按市场当地日期判断交易日，而非北京日期。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        stamp: float，当前时间戳
+        should_run: bool，该市场当地日期是否交易日
+
+    返回：
+        None：断言 Agent 调用与市场预期一致
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        agent,
+        repo,
+        calendar=StubCalendar(),
+    )
+    await scheduler.tick(stamp)
+    expected = [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]
+    assert agent.calls == (expected if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("time_value", "market", "holiday", "stamp", "should_run"),
+    [
+        ("00:30", "XNYS", date(2026, 8, 17), _bj(2026, 8, 18, 0, 30), False),
+        ("00:30", "XNYS", date(2026, 8, 22), _bj(2026, 8, 22, 0, 30), True),
+        ("23:30", "XTKS", date(2026, 8, 24), _bj(2026, 8, 24, 23, 30), True),
+    ],
+)
+async def test_custom_market_holiday_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, holiday: date, stamp: float, should_run: bool
+):
+    """休市日按市场当地日期命中：与北京日期错位时仍以市场日期为准。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        holiday: date，市场当地休市日
+        stamp: float，当前时间戳
+        should_run: bool，该市场当地日期是否交易日
+
+    返回：
+        None：断言 Agent 调用与市场预期一致
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        agent,
+        repo,
+        calendar=StubCalendar({(market, holiday)}),
+    )
+    await scheduler.tick(stamp)
+    expected = [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]
+    assert agent.calls == (expected if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("time_value", "market", "now_stamp", "expected"),
+    [
+        ("00:30", "XNYS", _bj(2026, 8, 22, 0, 30), _bj(2026, 8, 25, 0, 30)),
+        ("23:30", "XTKS", _bj(2026, 8, 21, 12, 0), _bj(2026, 8, 23, 23, 30)),
+    ],
+)
+async def test_custom_next_run_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, now_stamp: float, expected: float
+):
+    """下一次执行时间按市场当地日期跳过休市日，与到期判断口径一致。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        now_stamp: float，当前时间戳
+        expected: float，预期下一次执行时间戳
+
+    返回：
+        None：断言状态接口 next_run_at 与预期一致
+    """
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        StubAgent(),
+        repo,
+        calendar=StubCalendar(),
+    )
+    status = scheduler.status(now_stamp)
+    item = next(i for i in status["items"] if i["id"] == "00000000-0000-4000-8000-000000000001")
+    assert item["next_run_at"] == expected
+
+
+async def test_same_schedule_attempt_is_idempotent(repo: Repo):
+    """同一计划日期同一调度即使 Agent 未落报告也只执行一次。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言独立调度执行记录阻止重复
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
+    target = _bj(2026, 8, 17, 7, 30)
+    await scheduler.tick(target)
+    await scheduler.tick(target)
     assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
 
 
-async def test_tick_skips_before_time(repo):
-    """08:29 未到亚盘触发时刻 → 跳过。
+async def test_report_completed_after_midnight_does_not_block_next_scheduled_date(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+):
+    """前一日任务跨零点完成后，次日相同调度仍可按时执行。
 
     参数：
-        repo: Repo，临时数据库仓储夹具
+        repo: Repo，隔离仓储
+        monkeypatch: pytest.MonkeyPatch，固定报告完成时间
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言报告完成日期不再承担调度幂等语义
     """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await scheduler._tick(now=_today(8, 29))
-    assert agent.calls == []
-
-
-async def test_tick_skips_when_disabled(repo):
-    """研报功能关闭时即使亚盘到点也不调用 Agent。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(enabled=False), agent, repo)
-    await scheduler._tick(now=_today(8, 31))
-    assert agent.calls == []
-
-
-async def test_tick_skips_when_already_ran(repo):
-    """当日已跑过该盘口（先落库成功研报）→ 不重复触发（重启幂等以落库为准）。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await _save_report(repo, "asia_open")
-    await scheduler._tick(now=_today(8, 31))
-    assert agent.calls == []
-
-
-async def test_tick_skips_after_failed_report(repo):
-    """当日失败研报也计入幂等：error 非空落库后不自动重跑（防 LLM 故障每分钟重发）。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await save_report_fixture(
-        repo, report_type="asia_open", direction="中性", confidence="低", error="LLM 故障"
+    schedule_id = "00000000-0000-4000-8000-000000000001"
+    monkeypatch.setattr("src.memory.research_repo._now", lambda: _bj(2026, 8, 18, 0, 5))
+    await repo.research.save_failed_report(
+        report_type=schedule_id,
+        error="前一日 23:59 任务跨零点完成",
     )
-    await scheduler._tick(now=_today(8, 31))
-    assert agent.calls == []
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value="23:59")),
+        agent,
+        repo,
+        calendar=StubCalendar(),
+    )
+
+    await scheduler.tick(_bj(2026, 8, 18, 23, 59))
+
+    assert agent.calls == [{"report_type": schedule_id, "hours": 24}]
 
 
-async def test_tick_skips_when_locked(repo):
-    """锁被占用（手动触发进行中）→ 巡检跳过，下一分钟再试。
+async def test_hot_toggle_applies_without_restart(repo: Repo):
+    """共享配置总开关原地改为开启后，未来命中分钟立即生效。
 
     参数：
-        repo: Repo，临时数据库仓储夹具
+        repo: Repo，隔离仓储
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言热开关读取共享对象
     """
+    settings = _settings(False)
     agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await scheduler._lock.acquire()
-    try:
-        await scheduler._tick(now=_today(8, 31))
-    finally:
-        scheduler._lock.release()
-    assert agent.calls == []
-
-
-async def test_tick_backfills_only_latest_slot(repo):
-    """三盘口全过时且都未跑 → 每 tick 最多补一篇，且只补最新的美盘。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await scheduler._tick(now=_today(23, 30))  # 美盘冬令时 22:00 亦已过
-    assert agent.calls == [{"report_type": "us_open", "hours": 24}]
-
-
-async def test_tick_no_backfill_when_latest_ran(repo):
-    """最新到点盘口（美盘）已跑 → 不触发；更早的亚盘/欧盘未跑也不回看不连补。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await _save_report(repo, "us_open")
-    await scheduler._tick(now=_today(23, 30))
-    assert agent.calls == []
-
-
-async def test_tick_enabled_hot_toggle(repo):
-    """enabled 每 tick 现读 settings：巡检中途改为 True 立即生效。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    settings = _settings(enabled=False)
-    agent = StubAgent()
-    scheduler = ResearchScheduler(settings, agent, repo)
-    await scheduler._tick(now=_today(8, 31))
-    assert agent.calls == []
+    scheduler = ResearchScheduler(settings, agent, repo, calendar=StubCalendar())
+    await scheduler.tick(_bj(2026, 8, 17, 7, 30))
     settings.research.enabled = True
-    await scheduler._tick(now=_today(8, 31))
+    await scheduler.tick(_bj(2026, 8, 18, 7, 30))
     assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
 
 
-# ---------- 手动触发 ----------
-
-
-async def test_run_now_busy_when_locked(repo):
-    """调度锁已占用时 run_now 立即返回 busy 且不调用 Agent。
+async def test_item_toggle_add_and_delete_apply_hot(repo: Repo):
+    """单项启停、自定义新增与删除都读取共享列表并立即生效。
 
     参数：
-        repo: Repo，临时数据库仓储夹具
+        repo: Repo，隔离仓储
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言无需重启即可改变未来分钟行为
+    """
+    settings = _settings()
+    asia = settings.research.schedules[0]
+    asia.enabled = False
+    agent = StubAgent()
+    scheduler = ResearchScheduler(settings, agent, repo, calendar=StubCalendar())
+    await scheduler.tick(_bj(2026, 8, 17, 7, 30))
+    asia.enabled = True
+    await scheduler.tick(_bj(2026, 8, 18, 7, 30))
+
+    custom = FixedTimeSchedule(**_custom())
+    settings.research.schedules.append(custom)
+    await scheduler.tick(_bj(2026, 8, 18, 12, 30))
+    settings.research.schedules.remove(custom)
+    await scheduler.tick(_bj(2026, 8, 19, 12, 30))
+
+    assert [call["report_type"] for call in agent.calls] == [
+        "asia_open",
+        "00000000-0000-4000-8000-000000000001",
+    ]
+
+
+async def test_accidental_same_minute_collision_runs_only_first(repo: Repo):
+    """热变更意外制造同分钟冲突时只执行配置列表首项。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言碰撞不会产生两个 LLM 调用
+    """
+    schedules = [item.model_dump() for item in ResearchConfig().schedules]
+    schedules[0]["enabled"] = False
+    schedules.append(_custom(time_value="07:30"))
+    settings = Settings(research=ResearchConfig(enabled=True, schedules=schedules))
+    settings.research.schedules[0].enabled = True
+    agent = StubAgent()
+    scheduler = ResearchScheduler(settings, agent, repo, calendar=StubCalendar())
+    await scheduler.tick(_bj(2026, 8, 17, 7, 30))
+    assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
+
+
+async def test_run_now_busy_success_and_no_llm(repo: Repo):
+    """手动触发保持忙、成功与 LLM 未配置三种公开结果。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言手动入口兼容原契约
     """
     agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    result = await scheduler.run_now(report_type="event", hours=12)
+    assert result["started"] is True
+    assert agent.calls == [{"report_type": "event", "hours": 12}]
+
     await scheduler._lock.acquire()
     try:
-        result = await scheduler.run_now()
+        assert (await scheduler.run_now())["error_code"] == "busy"
     finally:
         scheduler._lock.release()
-    assert result["started"] is False
-    assert result["error_code"] == "busy"  # server 层据此映 409（不判中文文案）
-    assert result["error"]  # 文案非空即可
-    assert agent.calls == []
 
+    class NoLlmAgent:
+        """返回 LLM 未配置结果的边界桩。"""
 
-async def test_run_now_success_passthrough(repo):
-    """正常触发：started=True 且 agent.run 结构化结果原样并入返回，参数透传。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    result = await scheduler.run_now(report_type="us_open", hours=12)
-    assert result["started"] is True and result["ok"] is True
-    assert result["report_id"] == 1 and result["round_id"] == "r1"
-    assert agent.calls == [{"report_type": "us_open", "hours": 12}]
-
-
-async def test_run_now_default_args(repo):
-    """无参 run_now：report_type='manual'、hours=24。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    result = await scheduler.run_now()
-    assert result["started"] is True
-    assert agent.calls == [{"report_type": "manual", "hours": 24}]
-
-
-async def test_run_now_llm_not_configured_started_false(repo):
-    """agent 回报 llm_not_configured（研报未实际开始）→ started=False（语义诚实）。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-
-    class _NoLlmAgent:
         async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-            """返回 LLM 未配置结果，模拟研报无法启动。
+            """返回结构化 LLM 未配置失败。
 
             参数：
-                report_type: str，研报或复盘类型
-                hours: int，回溯小时数
+                report_type: str，研报类型
+                hours: int，回看小时数
 
             返回：
-                dict：携带 llm_not_configured 错误码的失败结果
+                dict：llm_not_configured 失败结果
             """
-            return {"ok": False, "error": "任意错误文案", "error_code": "llm_not_configured"}
+            return {"ok": False, "error": "未配置", "error_code": "llm_not_configured"}
 
-    scheduler = ResearchScheduler(_settings(), _NoLlmAgent(), repo)
-    result = await scheduler.run_now()
-    assert result["started"] is False
-    assert result["error_code"] == "llm_not_configured"
+    no_llm = ResearchScheduler(_settings(), NoLlmAgent(), repo, calendar=StubCalendar())
+    assert (await no_llm.run_now())["started"] is False
 
 
-# ---------- 美国冬夏令时：美盘顺延（纯函数级） ----------
-
-
-async def test_slot_fire_ts_winter_us_delayed():
-    """冬令时（1 月）美盘触发时刻 +1h：本地 21:00 → 22:00。
+async def test_schedule_status_exposes_next_run_and_calendar(repo: Repo):
+    """调度状态返回总开关、各项下一次 UTC+8 时间和日历健康状态。
 
     参数：
-        无
+        repo: Repo，隔离仓储
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言前端状态接口所需字段
     """
-    ts = _local(2026, 1, 15, 12, 0)
-    assert _slot_fire_ts("21:00", ts, us_dst_adjust=True) == _local(2026, 1, 15, 22, 0)
+    scheduler = ResearchScheduler(_settings(), StubAgent(), repo, calendar=StubCalendar())
+    status = scheduler.status(_bj(2026, 8, 17, 6, 0))
+    assert status["enabled"] is True
+    assert status["calendar"]["state"] == "ok"
+    asia = next(item for item in status["items"] if item["id"] == "asia_open")
+    assert asia["next_run_at"] == _bj(2026, 8, 17, 7, 30)
 
 
-async def test_slot_fire_ts_summer_us_not_delayed():
-    """夏令时（7 月）美盘触发时刻不顺延：本地 21:00 不变。
+class BlockingResearchHistory:
+    """在幂等查询中挂起，用于稳定复现调度并发窗口。"""
 
-    参数：
-        无
+    def __init__(self) -> None:
+        """创建进入与释放两个同步事件。
+
+        参数：无
+
+        返回：
+            None：就地初始化事件
+        """
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def claim_schedule_run(self, _schedule_id: str, _scheduled_date: date) -> bool:
+        """通知查询已开始并等待测试释放。
+
+        参数：
+            _schedule_id: str，调度标识（本桩不使用）
+            _scheduled_date: date，计划日期（本桩不使用）
+
+        返回：
+            bool：固定返回 True，模拟首次认领成功
+        """
+        self.entered.set()
+        await self.release.wait()
+        return True
+
+
+class BlockingRepo:
+    """只暴露调度器需要的 research 幂等仓储。"""
+
+    def __init__(self, history: BlockingResearchHistory) -> None:
+        """保存可控幂等仓储。
+
+        参数：
+            history: BlockingResearchHistory，可控查询边界
+
+        返回：
+            None：就地设置 research 属性
+        """
+        self.research = history
+
+
+async def test_auto_tick_claims_execution_before_first_await():
+    """自动任务命中后先取得执行权，手动任务不得抢锁后让自动任务排队补跑。
+
+    参数：无
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言手动入口返回 busy，自动项只执行一次
     """
-    ts = _local(2026, 7, 15, 12, 0)
-    assert _slot_fire_ts("21:00", ts, us_dst_adjust=True) == _local(2026, 7, 15, 21, 0)
-
-
-async def test_slot_fire_ts_adjust_disabled():
-    """us_dst_adjust=False：冬令时也不顺延。
-
-    参数：
-        无
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    ts = _local(2026, 1, 15, 12, 0)
-    assert _slot_fire_ts("21:00", ts, us_dst_adjust=False) == _local(2026, 1, 15, 21, 0)
-
-
-# ---------- 美国冬夏令时：美盘顺延（tick 级，注入北京时间戳） ----------
-
-
-async def test_tick_us_winter_delayed(repo):
-    """冬令时（1 月 15 日）：21:30 美盘未触发（顺延至 22:00），22:30 触发。
-
-    亚盘/欧盘预存成功研报（更早盘口本就不回看，预存只为聚焦美盘判定）。
-
-    参数：
-        repo: Repo，临时数据库仓储夹具
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
+    history = BlockingResearchHistory()
     agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await _save_report(repo, "asia_open")
-    await _save_report(repo, "europe_open")
-    await scheduler._tick(now=_local(2026, 1, 15, 21, 30))
+    scheduler = ResearchScheduler(
+        _settings(),
+        agent,
+        BlockingRepo(history),
+        calendar=StubCalendar(),  # type: ignore[arg-type]
+    )
+    automatic = asyncio.create_task(scheduler.tick(_bj(2026, 8, 17, 7, 30)))
+    await history.entered.wait()
+
+    manual = await scheduler.run_now()
+    history.release.set()
+    await automatic
+
+    assert manual["error_code"] == "busy"
+    assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
+
+
+async def test_hot_disabled_item_is_rechecked_before_agent_call():
+    """幂等查询期间热停用命中项后，本轮必须放弃且不得按旧快照执行。
+
+    参数：无
+
+    返回：
+        None：断言热停用后没有 Agent 调用
+    """
+    history = BlockingResearchHistory()
+    settings = _settings()
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        settings,
+        agent,
+        BlockingRepo(history),
+        calendar=StubCalendar(),  # type: ignore[arg-type]
+    )
+    automatic = asyncio.create_task(scheduler.tick(_bj(2026, 8, 17, 7, 30)))
+    await history.entered.wait()
+    settings.research.schedules[0].enabled = False
+    history.release.set()
+    await automatic
+
     assert agent.calls == []
-    await scheduler._tick(now=_local(2026, 1, 15, 22, 30))
-    assert agent.calls == [{"report_type": "us_open", "hours": 24}]
 
 
-async def test_tick_us_summer_fires_at_21(repo):
-    """夏令时（7 月 15 日）：21:30 美盘已触发（不顺延）。
+async def test_run_forever_refreshes_on_start_and_aligns_natural_minute(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+):
+    """长期循环启动先刷新日历，随后睡眠到下一个自然分钟边界。
 
     参数：
-        repo: Repo，临时数据库仓储夹具
+        repo: Repo，隔离仓储
+        monkeypatch: pytest.MonkeyPatch，替换时钟和睡眠边界
 
     返回：
-        None：通过断言校验目标场景，无返回值
+        None：断言启动刷新次数和 30.01 秒对齐延迟
     """
+    calendar = StubCalendar()
+    scheduler = ResearchScheduler(_settings(False), StubAgent(), repo, calendar=calendar)
+    delays: list[float] = []
+
+    class StopLoop(Exception):
+        """终止长期循环的测试专用异常。"""
+
+    async def stop_after_first_sleep(delay: float) -> None:
+        """记录首次睡眠并终止循环。
+
+        参数：
+            delay: float，调度器计算的等待秒数
+
+        返回：
+            None：此桩始终抛错，不会正常返回
+
+        异常：
+            StopLoop：记录延迟后固定抛出
+        """
+        delays.append(delay)
+        raise StopLoop
+
+    monkeypatch.setattr("src.research.scheduler.time.time", lambda: 90.0)
+    monkeypatch.setattr("src.research.scheduler.asyncio.sleep", stop_after_first_sleep)
+    with pytest.raises(StopLoop):
+        await scheduler.run_forever()
+    assert calendar.refresh_calls == 1
+    assert delays == [pytest.approx(30.01)]
+
+
+@pytest.mark.parametrize(
+    ("start_stamp", "target_stamp", "target_time"),
+    [
+        (_bj(2026, 8, 17, 0, 9) + 30, _bj(2026, 8, 17, 0, 10), "00:10"),
+        (_bj(2026, 8, 17, 0, 10), _bj(2026, 8, 17, 0, 15), "00:15"),
+    ],
+)
+async def test_failed_refresh_recovers_before_same_day_schedule(
+    repo: Repo,
+    monkeypatch: pytest.MonkeyPatch,
+    start_stamp: float,
+    target_stamp: float,
+    target_time: str,
+):
+    """刷新失败后同日按退避重试，并在目标任务判断前恢复日历。
+
+    参数：
+        repo: Repo，隔离仓储
+        monkeypatch: pytest.MonkeyPatch，控制调度循环时钟与睡眠
+        start_stamp: float，首次刷新与巡检时刻
+        target_stamp: float，下一次循环推进到的目标时刻
+        target_time: str，自定义调度的 UTC+8 时间
+
+    返回：
+        None：断言第二次刷新先于 00:10 调度并允许任务执行
+    """
+
+    class RecoveringCalendar(StubCalendar):
+        """第一次刷新失败、第二次成功后才确认交易日的日历桩。"""
+
+        def __init__(self) -> None:
+            """初始化为不可确认交易日。
+
+            参数：无
+
+            返回：
+                None：就地初始化失败次数和开市状态
+            """
+            super().__init__()
+            self.ready = False
+
+        async def refresh(self) -> CalendarRefreshResult:
+            """首次返回失败，第二次恢复完整来源与缓存。
+
+            参数：无
+
+            返回：
+                CalendarRefreshResult：本次刷新结果
+            """
+            self.refresh_calls += 1
+            if self.refresh_calls == 1:
+                return CalendarRefreshResult((), {"XNYS": "network down"}, False)
+            self.ready = True
+            return CalendarRefreshResult(("XTKS", "XLON", "XNYS"), {}, True)
+
+        def is_trading_day(self, market: str, target: date) -> bool:
+            """仅在日历恢复后确认工作日开市。
+
+            参数：
+                market: str，市场代码
+                target: date，待判断日期
+
+            返回：
+                bool：恢复后工作日为 True
+            """
+            return self.ready and target.weekday() < 5
+
+    class StopLoop(Exception):
+        """完成目标分钟巡检后终止长期循环。"""
+
+    state = {"stamp": start_stamp, "sleeps": 0}
+
+    class FakeDateTime(datetime):
+        """从可变测试状态返回 UTC+8 当前时刻。"""
+
+        @classmethod
+        def now(cls, tz=None):
+            """返回测试状态中的当前时刻。
+
+            参数：
+                tz: tzinfo | None，目标时区
+
+            返回：
+                datetime：测试状态对应时间
+            """
+            return datetime.fromtimestamp(state["stamp"], tz)
+
+    async def advance_to_target(_delay: float) -> None:
+        """首次睡眠推进到 00:10，第二次终止循环。
+
+        参数：
+            _delay: float，调度器计算的睡眠秒数
+
+        返回：
+            None：首次调用只更新时间
+
+        异常：
+            StopLoop：第二次调用时终止循环
+        """
+        state["sleeps"] += 1
+        if state["sleeps"] == 1:
+            state["stamp"] = target_stamp
+            return
+        raise StopLoop
+
+    calendar = RecoveringCalendar()
     agent = StubAgent()
-    scheduler = ResearchScheduler(_settings(), agent, repo)
-    await _save_report(repo, "asia_open")
-    await _save_report(repo, "europe_open")
-    await scheduler._tick(now=_local(2026, 7, 15, 21, 30))
-    assert agent.calls == [{"report_type": "us_open", "hours": 24}]
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=target_time, calendar="XTKS")),
+        agent,
+        repo,
+        calendar=calendar,
+    )
+    monkeypatch.setattr("src.research.scheduler.datetime", FakeDateTime)
+    monkeypatch.setattr("src.research.scheduler.time.time", lambda: state["stamp"])
+    monkeypatch.setattr("src.research.scheduler.asyncio.sleep", advance_to_target)
+
+    with pytest.raises(StopLoop):
+        await scheduler.run_forever()
+
+    assert calendar.refresh_calls == 2
+    assert agent.calls == [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]

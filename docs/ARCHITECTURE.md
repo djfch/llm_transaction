@@ -234,6 +234,8 @@ sequenceDiagram
 工具异常会被转换为可读结果返回给 LLM，使其有机会在本轮修正参数；工具内部异常仍写日志，但不会直接击穿整轮循环。
 ### 研报链路
 
+自动调度由 `research.enabled(自动研报总开关)` 与 `research.schedules(调度列表)` 共同决定。东京、伦敦、纽约预设根据市场当地开盘时间、时区和官方休市日换算为 UTC+8；自定义项使用固定 UTC+8 时间，并可绑定每天或指定市场交易日。调度只在自然分钟完全相等时触发，启动晚、忙锁占用、开关晚开或日历晚恢复都不补跑；手动触发绕过自动开关和交易日日历。三家日历独立刷新并写入 `data/market_calendar_cache.json(日历缓存)`；当前年与下一年逐年协调，缩水或冲突结果保留旧缓存并进入降级，只有相同集合或可靠超集才接纳。每日 UTC+8 00:10 先刷新再判断任务，失败按 5/15/30/60 分钟退避并在当天重试；单一来源失败不会污染其他来源，未知工作日降级为交易日并通过状态接口告警。
+
 研报 Agent 每轮先冻结 `watchlist.contracts(白名单合约)`，预注入宏观日历、指标、快讯、
 历史判断与待验证因果链。LLM 必须对每个白名单合约恰好调用一次
 `get_research_market_data(获取研报市场数据)`；工具固定返回 `4h(K线)` 与
@@ -339,6 +341,7 @@ flowchart LR
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |
 | `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议固定为 v2 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)` |
+| `research_schedule_runs(研报调度执行记录)` | 以计划日期独立记录自动调度认领，避免报告跨零点完成时串占次日名额 | `schedule_id(调度项标识)`、`scheduled_date(UTC+8计划日期)` |
 | `research_asset_views(研报逐标的结论)` | 一个报告内每个合约唯一，保存结论、输入快照与验证占位 | `contract(合约)`、`basis_type(依据类型)`、`market_context_json(市场输入快照)`、`verify_result(验证结果)` |
 | `review_reports(复盘报告)` | 每次复盘的区间统计、报告全文与策略动作 | `period_start/period_end(复盘区间)`、`strategy_action(策略动作)`、`new_version_id(产生的新版本)`、`round_id(产生报告的审计轮，老报告为空串不回填)` |
 

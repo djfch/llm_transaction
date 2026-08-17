@@ -4,7 +4,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AppConfig, StrategyVersion } from '../api/types'
+import type { AppConfig, AppConfigPatch, StrategyVersion } from '../api/types'
 import ConfigDrawer from '../components/console/ConfigDrawer'
 
 /** 配置夹具（paper 模式，触发权益重置小节；与 console_page.test.tsx 同构） */
@@ -29,6 +29,22 @@ const CONFIG: AppConfig = {
   },
   scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
   notify: { telegram_enabled: false },
+  research: {
+    enabled: false,
+    max_turns: 30,
+    timeout_seconds: 900,
+    jin10_mcp_url: 'https://mcp.jin10.com/mcp',
+    blockbeats_mcp_cmd: 'npx -y blockbeats-mcp',
+    fred_base_url: 'https://api.stlouisfed.org/fred',
+    polymarket_base_url: 'https://gamma-api.polymarket.com',
+    gate_enabled: true,
+    gate_max_age_hours: 13,
+    schedules: [
+      { id: 'asia_open', kind: 'market_open', market: 'XTKS', enabled: true, lead_minutes: 30 },
+      { id: 'europe_open', kind: 'market_open', market: 'XLON', enabled: true, lead_minutes: 30 },
+      { id: 'us_open', kind: 'market_open', market: 'XNYS', enabled: true, lead_minutes: 30 },
+    ],
+  },
 }
 
 /** 版本夹具（最新在前）：v2 为当前（唯一非当前 v1 才有回滚按钮） */
@@ -43,11 +59,18 @@ const holder = vi.hoisted(() => ({
   getStrategyDiff: vi.fn(),
   rollbackStrategy: vi.fn(),
   putStrategy: vi.fn(),
+  putConfig: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
   api: {
     getConfig: () => Promise.resolve(CONFIG),
+    putConfig: (body: AppConfigPatch) => holder.putConfig(body),
+    getResearchScheduleStatus: () => Promise.resolve({
+      enabled: false,
+      items: [],
+      calendar: { state: 'ok', last_refreshed_at: null, errors: {}, warning: '' },
+    }),
     getSecretsStatus: () => Promise.resolve({ gate_key: true, llm_key: true, telegram: false }),
     getWatchlist: () => Promise.resolve({ settle: 'usdt', contracts: ['BTC_USDT'] }),
     getStrategy: () => holder.getStrategy(),
@@ -87,6 +110,7 @@ beforeEach(() => {
     ]
     return Promise.resolve(content)
   })
+  holder.putConfig.mockResolvedValue({ saved: true, needs_restart: [] })
 })
 
 afterEach(() => vi.unstubAllGlobals())
@@ -151,5 +175,26 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     expect(await screen.findByText('v3')).toBeInTheDocument()
     expect(screen.getByText('手动保存')).toBeInTheDocument()
     expect(screen.getByText(/^已保存 /)).toBeInTheDocument()
+  })
+
+  it('研报表单仅提交 research 段，避免旧快照覆盖其他配置', async () => {
+    render(<ConfigDrawer open onClose={() => {}} />)
+
+    await screen.findByRole('checkbox', { name: '启用自动研报' })
+    fireEvent.click(screen.getByRole('checkbox', { name: '启用自动研报' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存研报设置' }))
+
+    await waitFor(() => expect(holder.putConfig).toHaveBeenCalledTimes(1))
+    expect(holder.putConfig.mock.calls[0][0]).toEqual({
+      research: {
+        enabled: true,
+        schedules: [
+          { id: 'asia_open', kind: 'market_open', market: 'XTKS', enabled: true, lead_minutes: 30 },
+          { id: 'europe_open', kind: 'market_open', market: 'XLON', enabled: true, lead_minutes: 30 },
+          { id: 'us_open', kind: 'market_open', market: 'XNYS', enabled: true, lead_minutes: 30 },
+        ],
+      },
+    })
+    expect(screen.getByText('已生效')).toBeInTheDocument()
   })
 })
