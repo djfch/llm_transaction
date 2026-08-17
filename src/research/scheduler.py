@@ -93,6 +93,19 @@ def _calendar_code(schedule: ResearchSchedule) -> str | None:
     return None if schedule.calendar == "daily" else schedule.calendar
 
 
+def _market_calendar_date(calendar: str, fire: datetime) -> date:
+    """把 UTC+8 触发时刻换算到目标市场当地日期，用于交易日判断。
+
+    参数：
+        calendar: str，市场日历代码
+        fire: datetime，UTC+8 触发时刻
+
+    返回：
+        date：触发时刻在市场时区下的当地日期
+    """
+    return fire.astimezone(_MARKET_OPEN[calendar][0]).date()
+
+
 class ResearchScheduler:
     """严格命中目标分钟的研报调度器；错过、忙碌或休市均不补跑。"""
 
@@ -256,9 +269,12 @@ class ResearchScheduler:
         if not schedule.enabled:
             return False
         calendar = _calendar_code(schedule)
-        if calendar is not None and not self._calendar.is_trading_day(calendar, now.date()):
+        fire = _fire_at(schedule, now.date())
+        if calendar is not None and not self._calendar.is_trading_day(
+            calendar, _market_calendar_date(calendar, fire)
+        ):
             return False
-        return int(_fire_at(schedule, now.date()).timestamp() // 60) == int(now.timestamp() // 60)
+        return int(fire.timestamp() // 60) == int(now.timestamp() // 60)
 
     def status(self, now: float | None = None) -> dict[str, Any]:
         """返回配置中心所需总开关、各项下一次执行时间与日历状态。
@@ -304,7 +320,9 @@ class ResearchScheduler:
             fire = _fire_at(schedule, target)
             if fire <= now:
                 continue
-            if calendar is None or self._calendar.is_trading_day(calendar, target):
+            if calendar is None or self._calendar.is_trading_day(
+                calendar, _market_calendar_date(calendar, fire)
+            ):
                 return fire.timestamp()
         return None
 

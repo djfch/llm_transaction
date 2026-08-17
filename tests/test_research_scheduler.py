@@ -280,6 +280,112 @@ async def test_custom_market_calendars_skip_their_holiday(repo: Repo, market: st
     assert agent.calls == []
 
 
+@pytest.mark.parametrize(
+    ("time_value", "market", "stamp", "should_run"),
+    [
+        ("00:30", "XNYS", _bj(2026, 8, 17, 0, 30), False),
+        ("00:30", "XNYS", _bj(2026, 8, 22, 0, 30), True),
+        ("00:30", "XLON", _bj(2026, 8, 17, 0, 30), False),
+        ("23:30", "XTKS", _bj(2026, 8, 21, 23, 30), False),
+        ("23:30", "XTKS", _bj(2026, 8, 23, 23, 30), True),
+    ],
+)
+async def test_custom_time_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, stamp: float, should_run: bool
+):
+    """自定义时刻绑定市场日历时按市场当地日期判断交易日，而非北京日期。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        stamp: float，当前时间戳
+        should_run: bool，该市场当地日期是否交易日
+
+    返回：
+        None：断言 Agent 调用与市场预期一致
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        agent,
+        repo,
+        calendar=StubCalendar(),
+    )
+    await scheduler.tick(stamp)
+    expected = [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]
+    assert agent.calls == (expected if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("time_value", "market", "holiday", "stamp", "should_run"),
+    [
+        ("00:30", "XNYS", date(2026, 8, 17), _bj(2026, 8, 18, 0, 30), False),
+        ("00:30", "XNYS", date(2026, 8, 22), _bj(2026, 8, 22, 0, 30), True),
+        ("23:30", "XTKS", date(2026, 8, 24), _bj(2026, 8, 24, 23, 30), True),
+    ],
+)
+async def test_custom_market_holiday_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, holiday: date, stamp: float, should_run: bool
+):
+    """休市日按市场当地日期命中：与北京日期错位时仍以市场日期为准。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        holiday: date，市场当地休市日
+        stamp: float，当前时间戳
+        should_run: bool，该市场当地日期是否交易日
+
+    返回：
+        None：断言 Agent 调用与市场预期一致
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        agent,
+        repo,
+        calendar=StubCalendar({(market, holiday)}),
+    )
+    await scheduler.tick(stamp)
+    expected = [{"report_type": "00000000-0000-4000-8000-000000000001", "hours": 24}]
+    assert agent.calls == (expected if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("time_value", "market", "now_stamp", "expected"),
+    [
+        ("00:30", "XNYS", _bj(2026, 8, 22, 0, 30), _bj(2026, 8, 25, 0, 30)),
+        ("23:30", "XTKS", _bj(2026, 8, 21, 12, 0), _bj(2026, 8, 23, 23, 30)),
+    ],
+)
+async def test_custom_next_run_uses_market_local_date(
+    repo: Repo, time_value: str, market: str, now_stamp: float, expected: float
+):
+    """下一次执行时间按市场当地日期跳过休市日，与到期判断口径一致。
+
+    参数：
+        repo: Repo，隔离仓储
+        time_value: str，UTC+8 执行时刻
+        market: str，市场日历代码
+        now_stamp: float，当前时间戳
+        expected: float，预期下一次执行时间戳
+
+    返回：
+        None：断言状态接口 next_run_at 与预期一致
+    """
+    scheduler = ResearchScheduler(
+        _settings(custom=_custom(time_value=time_value, calendar=market)),
+        StubAgent(),
+        repo,
+        calendar=StubCalendar(),
+    )
+    status = scheduler.status(now_stamp)
+    item = next(i for i in status["items"] if i["id"] == "00000000-0000-4000-8000-000000000001")
+    assert item["next_run_at"] == expected
+
+
 async def test_same_schedule_attempt_is_idempotent(repo: Repo):
     """同一计划日期同一调度即使 Agent 未落报告也只执行一次。
 
@@ -700,7 +806,7 @@ async def test_failed_refresh_recovers_before_same_day_schedule(
     calendar = RecoveringCalendar()
     agent = StubAgent()
     scheduler = ResearchScheduler(
-        _settings(custom=_custom(time_value=target_time, calendar="XNYS")),
+        _settings(custom=_custom(time_value=target_time, calendar="XTKS")),
         agent,
         repo,
         calendar=calendar,
