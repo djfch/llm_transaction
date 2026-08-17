@@ -30,8 +30,12 @@ const DEFAULT_RESEARCH: ResearchScheduleConfig = {
 
 /** 把旧配置的研报总开关带入新结构，市场预设采用安全默认值。 */
 function normalizeResearch(research: ResearchConfig | undefined): ResearchScheduleConfig {
-  if (research?.schedules?.length) return research
-  return { ...structuredClone(DEFAULT_RESEARCH), enabled: research?.enabled ?? false }
+  return {
+    enabled: research?.enabled ?? false,
+    schedules: structuredClone(
+      research?.schedules?.length ? research.schedules : DEFAULT_RESEARCH.schedules,
+    ),
+  }
 }
 
 /** 抽屉小节：标题 + 加载/失败/空态 + 表单内容 */

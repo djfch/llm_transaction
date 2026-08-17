@@ -29,6 +29,22 @@ const CONFIG: AppConfig = {
   },
   scheduler: { default_wake_minutes: 60, min_wake_minutes: 5, max_wake_minutes: 720 },
   notify: { telegram_enabled: false },
+  research: {
+    enabled: false,
+    max_turns: 30,
+    timeout_seconds: 900,
+    jin10_mcp_url: 'https://mcp.jin10.com/mcp',
+    blockbeats_mcp_cmd: 'npx -y blockbeats-mcp',
+    fred_base_url: 'https://api.stlouisfed.org/fred',
+    polymarket_base_url: 'https://gamma-api.polymarket.com',
+    gate_enabled: true,
+    gate_max_age_hours: 13,
+    schedules: [
+      { id: 'asia_open', kind: 'market_open', market: 'XTKS', enabled: true, lead_minutes: 30 },
+      { id: 'europe_open', kind: 'market_open', market: 'XLON', enabled: true, lead_minutes: 30 },
+      { id: 'us_open', kind: 'market_open', market: 'XNYS', enabled: true, lead_minutes: 30 },
+    ],
+  },
 }
 
 /** 版本夹具（最新在前）：v2 为当前（唯一非当前 v1 才有回滚按钮） */
