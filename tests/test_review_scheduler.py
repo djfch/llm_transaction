@@ -1,8 +1,9 @@
 """src/review/scheduler.py 测试：时间逻辑走可注入 now 的 _tick 与纯函数，不 sleep 60s。
 
 覆盖：到点触发（enabled 且 latest None）、间隔内不重复（latest 距今不足 interval_days）、
-disabled 跳过、未到点跳过、锁占用时巡检跳过、start_now 点火即返回（后台任务执行）、
-锁占用/未配置 LLM/区间非法的同步失败路径、断连取消不变量与 shutdown 取消收尾。
+disabled 跳过、未到点跳过、锁占用时巡检跳过、巡检持锁时 start_now 同步 busy 不排队、
+start_now 点火即返回（后台任务执行）、锁占用/未配置 LLM/区间非法的同步失败路径、
+断连取消不变量、shutdown 取消（桩级取消语义 + 真实 ReviewAgent 取消收尾副作用）。
 """
 
 import asyncio
@@ -10,9 +11,13 @@ import time
 
 import pytest
 
-from src.config import ReviewConfig, Settings
+from src.audit.trail import AuditTrail
+from src.config import AuditConfig, ReviewConfig, Settings
 from src.memory import Database, Repo
+from src.review.agent import ReviewAgent
+from src.review.prompts import ReviewPromptLoader
 from src.review.scheduler import ReviewScheduler, daily_fire_ts, local_day_start
+from src.review.strategy import StrategyStore
 
 
 class StubAgent:
@@ -320,6 +325,74 @@ class BlockingAgent:
         return {"ok": True, "report_id": 1}
 
 
+class HangingProvider:
+    """chat 挂起的 provider 桩（模拟真实 ReviewAgent 生成进行中，供 shutdown 取消回归）。"""
+
+    def __init__(self) -> None:
+        """初始化进入事件。
+
+        参数：无
+
+        返回：
+            None：就地初始化 entered 事件，供测试等待 chat 真正开始
+        """
+        self.entered = asyncio.Event()
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> dict:
+        """标记进入后挂起，直至任务被取消（永不正常返回）。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            dict，永不返回；挂起只能被外部取消打断
+        """
+        self.entered.set()
+        await asyncio.sleep(60)  # 远超测试等待，仅取消可打断
+
+    def tool_result_message(self, call: object, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息（本桩不会走到）。
+
+        参数：
+            call: object，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool 与结果内容的工具消息
+        """
+        return {"role": "tool", "content": result}
+
+
+async def test_tick_holding_lock_makes_start_now_busy(repo):
+    """巡检持锁进行中时 start_now 同步返回 busy，不点火也不排队等锁（竞态回归）。
+
+    与 research 侧 test_auto_tick_claims_execution_before_first_await 对称：
+    _tick 在锁内执行 agent.run 期间，手动入口必须在首个 await 前看到锁已占用。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言 busy 同步返回、无后台任务且巡检调用仅发生一次
+    """
+    agent = BlockingAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    day_start, fire = _anchors()
+    tick_task = asyncio.create_task(scheduler._tick(now=fire + 1))
+    await agent.started.wait()  # 巡检已持锁进入 agent.run
+
+    result = await scheduler.start_now()
+    agent.release.set()
+    await tick_task
+
+    assert result["started"] is False
+    assert result["error_code"] == "busy"
+    assert scheduler._manual_task is None
+    assert agent.calls == [(day_start - 86400, day_start)]  # 仅巡检那一次，未排队补跑
+
+
 async def test_start_now_background_survives_caller_cancellation(repo):
     """取消不变量（断连回归）：点火后取消调用方任务，后台复盘仍跑完。
 
@@ -365,14 +438,14 @@ async def test_start_now_background_survives_caller_cancellation(repo):
 
 
 async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCaptureFixture):
-    """shutdown 取消进行中的后台任务：任务收尾释放锁、异常被取回且无未捕获噪音。
+    """shutdown 取消进行中的后台任务：任务以取消态收尾、释放锁且无未捕获噪音。
 
     参数：
         repo: Repo，临时数据库仓储夹具
         caplog: pytest.LogCaptureFixture，日志捕获夹具
 
     返回：
-        None：断言任务被取消、锁释放且取消日志留痕
+        None：断言任务呈取消态、锁释放且取消日志留痕
     """
     agent = BlockingAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
@@ -385,10 +458,61 @@ async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCapt
         await scheduler.shutdown()
 
     assert task.done()
-    assert task.exception() is None  # CancelledError 已被包装协程吞掉并取回
+    assert task.cancelled()  # 取消语义保留：_run_manual 原样传播，shutdown gather 取回
     assert not scheduler._lock.locked()
     assert "手动复盘后台任务被取消" in caplog.text
     await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
+
+
+async def test_shutdown_cancel_finishes_real_agent_cleanup(repo, tmp_path):
+    """shutdown 取消进行中手动复盘：真实 ReviewAgent 完成取消收尾（B1 回归）。
+
+    全链路：start_now 点火 → provider 挂起 → shutdown 取消 → 断言 ①error 报告落库、
+    ②审计轮 ended_at 非空且 error 含 CancelledError、③事件序列以 review_round ok=False 收尾。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言取消态与失败收尾副作用同时成立
+    """
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("初始策略书", encoding="utf-8")
+    store = StrategyStore(prompt_file, repo)
+    await store.seed_if_empty()
+    review_prompt = tmp_path / "review_prompt.md"
+    review_prompt.write_text("# 复盘纪律", encoding="utf-8")
+    events: list[dict] = []
+    settings = _settings()
+    provider = HangingProvider()
+    agent = ReviewAgent(
+        settings=settings,
+        provider=provider,
+        repo=repo,
+        audit=AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit"))),
+        store=store,
+        prompt_loader=ReviewPromptLoader(review_prompt),
+        notify_event=lambda payload: events.append(payload),
+    )
+    scheduler = ReviewScheduler(settings, agent, repo)
+    await scheduler.start_now(period_start=1000.0, period_end=2000.0)
+    await asyncio.wait_for(provider.entered.wait(), timeout=1)
+    task = scheduler._manual_task
+    assert task is not None
+
+    await scheduler.shutdown()
+
+    assert task.cancelled()
+    assert not scheduler._lock.locked()
+    reports, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "CancelledError: 复盘被取消"
+    round_row = await repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == "CancelledError: 复盘被取消"
+    assert [e["type"] for e in events] == ["review_round_start", "review_round"]
+    assert events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}
 
 
 # ---------- interval_days：指定间隔天数复盘 ----------

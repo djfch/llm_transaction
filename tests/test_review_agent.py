@@ -7,6 +7,7 @@
 未配置零事件）、事件回调抛错容错（run 不受影响）。
 """
 
+import asyncio
 import json
 from collections import deque
 from decimal import Decimal
@@ -545,3 +546,75 @@ async def test_watchlist_hot_update_visible_to_review_agent(env, tmp_path):
     calls = await env.repo.list_audit_tool_calls(result["round_id"])
     assert len(calls) == 1 and calls[0].tool == "get_indicators"
     assert "不在 watchlist" not in calls[0].result_json  # 活引用：新合约不再被拦截
+
+
+class HangingProvider:
+    """chat 挂起的 provider 桩（模拟复盘生成进行中，供外部取消回归）。"""
+
+    def __init__(self) -> None:
+        """初始化进入事件。
+
+        参数：无
+
+        返回：
+            None，就地初始化 entered 事件，供测试等待 chat 真正开始
+        """
+        self.entered = asyncio.Event()
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """标记进入后挂起，直至任务被取消（永不正常返回）。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            LLMResponse，永不返回；挂起只能被外部取消打断
+        """
+        self.entered.set()
+        await asyncio.sleep(60)  # 远超测试等待，仅取消可打断
+
+    def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息（本桩不会走到）。
+
+        参数：
+            call: ToolCall，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool、call_id 与结果内容的工具消息
+        """
+        return {"role": "tool", "call_id": call.call_id, "content": result}
+
+
+async def test_run_external_cancel_lands_error_report_and_propagates(env):
+    """外部取消（如停机 shutdown）：失败收尾三件套齐全，取消原样传播。
+
+    断言：①error 报告落库；②审计轮 ended_at 非空且 error 含 CancelledError；
+    ③事件序列以 review_round ok=False 收尾；task 以 CancelledError 结束。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+    provider = HangingProvider()
+    agent = _make_agent(env, provider)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    await asyncio.wait_for(provider.entered.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "CancelledError: 复盘被取消"
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == "CancelledError: 复盘被取消"
+    # 轮始事件已发，尾部 review_round 带 ok=False（与 LLM 失败路径同构）
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}

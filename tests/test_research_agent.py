@@ -920,17 +920,21 @@ async def test_external_cancel_keeps_retry_raw_and_propagates_cancelled_error(
 ) -> None:
     """外部主动取消研报任务时，重试器内已收到的响应仍落审计且取消原样传播。
 
+    同时断言取消收尾副作用：失败报告落库、审计轮以 CancelledError 结束、
+    事件序列以 research_round ok=False 收尾。
+
     参数：
         repo: Repo，测试数据库仓库
         settings: Settings，测试配置
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言取消传播、审计收尾和 rejected 响应同时成立
+        None，断言取消传播、审计收尾、失败报告和 rejected 响应同时成立
     """
     inner = _RejectThenHangProvider()
     provider = RetryingProvider(inner, max_attempts=2, backoff=())
-    agent = await _build_agent(repo, settings, provider, tmp_path)
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, provider, tmp_path, notify_event=events.append)
     agent._timeout = 60
     task = asyncio.create_task(agent.run())
     await asyncio.wait_for(inner.waiting.wait(), timeout=1)
@@ -945,6 +949,11 @@ async def test_external_cancel_keeps_retry_raw_and_propagates_cancelled_error(
         ("rejected", "raw-before-timeout")
     ]
     assert audit_round.error == "CancelledError: 研报被取消"
+    assert audit_round.ended_at is not None
+    report = await repo.research.latest_report(include_error=True)
+    assert report is not None and report.error == "CancelledError: 研报被取消"
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": False}
 
 
 async def test_timeout_terminates_round(repo: Repo, settings: Settings, tmp_path) -> None:

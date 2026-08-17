@@ -9,13 +9,15 @@
   结束审计轮后广播 review_round（成功 ok=True / _fail 路径 ok=False）；
   事件失败只记日志绝不影响复盘；provider None 提前返回时零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 失败告警，返回 {'ok': False}，
-  绝不向上抛，确保复盘失败不影响交易决策循环；
+  绝不向上抛，确保复盘失败不影响交易决策循环；唯独外部取消（asyncio.CancelledError，
+  如停机 shutdown）走同一失败收尾后原样抛出，保持取消语义；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
   src.agent.providers.base.LLMProvider 协议一致，生产由 bootstrap 复用同一实例）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import time
@@ -197,6 +199,9 @@ class ReviewAgent:
 
         返回：
             dict，成功时包含报告、审计轮和策略版本信息；失败时包含错误与失败报告编号
+
+        异常：
+            asyncio.CancelledError：外部取消（如停机 shutdown）时完成失败收尾后原样抛出
         """
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次复盘")
@@ -212,10 +217,11 @@ class ReviewAgent:
         )
         registry = ReviewToolRegistry(deps)
         full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
-        round_id = await self._audit.begin_round(self._settings.mode, "review", full_prompt)
-        await self._emit_event({"type": "review_round_start", "data": {"round_id": round_id}})
         raw_parts: list[str] = []
+        round_id = ""
         try:
+            round_id = await self._audit.begin_round(self._settings.mode, "review", full_prompt)
+            await self._emit_event({"type": "review_round_start", "data": {"round_id": round_id}})
             stats_text, stats_json = await self._pre_stats(period_start, period_end)
             briefing = self._build_briefing(period_start, period_end, stats_text)
             await self._audit.record_context(round_id, briefing)
@@ -238,6 +244,16 @@ class ReviewAgent:
                     deps.indicator_config_version_id, report.id
                 )
             await self._audit.end_round(round_id, "\n".join(raw_parts))
+        except asyncio.CancelledError:
+            # 外部取消：落 error 报告收尾审计后重新抛出（保持 asyncio 取消语义）
+            await self._fail(
+                round_id,
+                raw_parts,
+                period_start,
+                period_end,
+                asyncio.CancelledError("复盘被取消"),
+            )
+            raise
         except Exception as e:
             return await self._fail(round_id, raw_parts, period_start, period_end, e)
         await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
@@ -380,29 +396,42 @@ class ReviewAgent:
         period_end: float,
         exc: Exception,
     ) -> dict:
-        """保存失败报告并完成审计、事件广播和告警收尾。
+        """失败收尾：落 error 报告 + 审计轮 error + 失败事件与告警，绝不向上抛。
+
+        round_id 为空（begin_round 前失败或被取消）时跳过审计结束与轮末事件；
+        落库/审计自身失败只记日志，不把失败升级为异常（取消收尾路径必须兜住，
+        不得掩盖待传播的 CancelledError）。
 
         参数：
-            round_id: str，失败复盘的审计轮次编号
+            round_id: str，失败复盘的审计轮次编号；空串表示审计轮尚未开启
             raw_parts: list[str]，本轮已累计的 LLM 原始输出
             period_start: float，失败复盘区间起始时间戳
             period_end: float，失败复盘区间结束时间戳
             exc: Exception，触发失败收尾的原始异常
 
         返回：
-            dict，包含 ok=False、错误文本、失败报告编号和审计轮次编号
+            dict，包含 ok=False、错误文本、失败报告编号（落库失败时为 None）和审计轮次编号
         """
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("复盘失败：%s", error)
-        report = await self._repo.review.save_review_report(
-            period_start, period_end, "{}", "", "none", error=error, round_id=round_id
-        )
-        await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)
-        await self._emit_event(
-            {"type": "review_round", "data": {"round_id": round_id, "ok": False}}
-        )
+        report_id: int | None = None
+        try:
+            report = await self._repo.review.save_review_report(
+                period_start, period_end, "{}", "", "none", error=error, round_id=round_id
+            )
+            report_id = report.id
+        except Exception:
+            logger.exception("复盘失败报告落库失败（继续返回失败结果）")
+        if round_id:
+            try:
+                await self._audit.end_round(round_id, "\n".join(raw_parts), error=error)
+            except Exception:
+                logger.exception("复盘审计轮结束失败（继续返回失败结果）")
+            await self._emit_event(
+                {"type": "review_round", "data": {"round_id": round_id, "ok": False}}
+            )
         await self._notify(_escape_alert(f"【复盘失败】{error}"))
-        return {"ok": False, "error": error, "report_id": report.id, "round_id": round_id}
+        return {"ok": False, "error": error, "report_id": report_id, "round_id": round_id}
 
     async def _notify(self, msg: str) -> None:
         """通过可同步或异步回调发送复盘告警。

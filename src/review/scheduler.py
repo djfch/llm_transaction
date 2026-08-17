@@ -167,20 +167,26 @@ class ReviewScheduler:
         return {"started": True, "period_start": period_start, "period_end": period_end}
 
     async def _run_manual(self, period_start: float, period_end: float) -> None:
-        """后台执行手动复盘：finally 释放锁，取消与意外异常只记日志、就地取回。
+        """后台执行手动复盘：finally 释放锁；取消原样抛出，意外异常记日志就地取回。
 
         参数：
             period_start: float，复盘区间起点
             period_end: float，复盘区间终点
 
         返回：
-            None：CancelledError 记日志后吞掉（agent.run 已做取消收尾并落失败报告），
-            意外异常记 logger.exception；任务异常永远被取回，杜绝 never-retrieved 噪音
+            None：意外异常记 logger.exception 就地取回，任务异常永远被取回，
+            杜绝 never-retrieved 噪音
+
+        异常：
+            asyncio.CancelledError：取消（如停机 shutdown）记日志后原样抛出，保留取消
+            语义（task.cancelled() 为真）；由 shutdown 的 gather(return_exceptions=True)
+            取回，不刷 never-retrieved 噪音
         """
         try:
             await self._agent.run(period_start, period_end)
         except asyncio.CancelledError:
             logger.info("手动复盘后台任务被取消（period_start=%s）", period_start)
+            raise
         except Exception:
             logger.exception("手动复盘后台任务异常（period_start=%s）", period_start)
         finally:

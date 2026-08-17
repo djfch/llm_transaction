@@ -565,6 +565,7 @@ class BlockingAgent:
         self.llm_configured = True
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.cancelled_cleanup = False
 
     async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
         """记录调用、标记开始并挂起，直到测试释放后返回成功结果。
@@ -575,10 +576,18 @@ class BlockingAgent:
 
         返回：
             dict：固定成功结果
+
+        异常：
+            asyncio.CancelledError：外部取消时镜像真实 agent 的取消收尾契约
+            （此处以标记代副作用）后原样抛出
         """
         self.calls.append({"report_type": report_type, "hours": hours})
         self.started.set()
-        await self.release.wait()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled_cleanup = True  # 镜像真实 agent 的取消收尾契约
+            raise
         return {"ok": True, "report_id": 1, "round_id": "r1"}
 
 
@@ -623,14 +632,14 @@ async def test_start_now_background_survives_caller_cancellation(repo: Repo):
 
 
 async def test_shutdown_cancels_running_manual_task(repo: Repo, caplog: pytest.LogCaptureFixture):
-    """shutdown 取消进行中的后台任务：任务收尾释放锁、异常被取回且无未捕获噪音。
+    """shutdown 取消进行中的后台任务：任务以取消态收尾、释放锁且无未捕获噪音。
 
     参数：
         repo: Repo，隔离仓储
         caplog: pytest.LogCaptureFixture，日志捕获夹具
 
     返回：
-        None：断言任务被取消、锁释放且取消日志留痕
+        None：断言任务呈取消态、取消抵达 agent 且收尾在 shutdown 返回前完成、锁释放
     """
     agent = BlockingAgent()
     scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
@@ -643,7 +652,8 @@ async def test_shutdown_cancels_running_manual_task(repo: Repo, caplog: pytest.L
         await scheduler.shutdown()
 
     assert task.done()
-    assert task.exception() is None  # CancelledError 已被包装协程吞掉并取回
+    assert task.cancelled()  # 取消语义保留：_run_manual 原样传播，shutdown gather 取回
+    assert agent.cancelled_cleanup  # 取消抵达 agent.run，且其收尾在 shutdown 返回前完成
     assert not scheduler._lock.locked()
     assert "手动研报后台任务被取消" in caplog.text
     await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
