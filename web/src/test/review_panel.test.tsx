@@ -2,13 +2,14 @@
  * 复盘报告面板测试：列表渲染（时间/复盘区间/动作徽标/error 红字）、展开详情
  * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」点火提示
  * （点火即返回，review-round-ignite 事件激活状态条，结果经状态条 onFinished 刷新）、
- * 409（成功样式）/503（错误红）的 ApiError.detail 提示、服务端分页、工具调用链内嵌
+ * 409（成功样式 + 广播 review-round-catchup 让状态条补漏激活）/503（错误红）的 ApiError.detail 提示、
+ * 服务端分页、工具调用链内嵌
  * （roundId 非空 lazy 拉取 getRound；空串 = 老报告灰字降级且不拉取）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
-import type { ReviewReport, ReviewReportSummary, RoundDetail, WsMessage } from '../api/types'
+import type { ReviewLiveRound, ReviewReport, ReviewReportSummary, RoundDetail, WsMessage } from '../api/types'
 import ReviewPanel from '../components/console/ReviewPanel'
 
 const iso = (unixSec: number) => new Date(unixSec * 1000).toISOString()
@@ -92,6 +93,20 @@ const ROUND_DETAIL: RoundDetail = {
     },
   ],
   strategyMd5: '',
+}
+
+/** 进行中的复盘轮（/api/review/live 形状）：409 catchup 补漏联动用例用（started_at 贴近当前，避免触发僵尸轮防线）。 */
+const LIVE_ROUND: ReviewLiveRound = {
+  round_id: 'rv-busy',
+  wake_source: 'review',
+  prompt_md5: 'md5',
+  prompt_snapshot: 'prompt',
+  context_snapshot: 'ctx',
+  llm_raw: '',
+  strategy_md5: 's-md5',
+  started_at: Math.floor(Date.now() / 1000) - 10,
+  ended_at: null,
+  error: '',
 }
 
 const holder = vi.hoisted(() => ({
@@ -276,6 +291,22 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(alert).toHaveTextContent('复盘进行中')
     expect(alert.className).toContain('emerald')
     expect(alert.className).not.toContain('rose')
+  })
+
+  it('立即复盘 409 且状态条未激活：广播 catchup 事件让状态条经补漏找回进行中轮', async () => {
+    holder.runReview.mockRejectedValueOnce(new ApiError(409, '复盘进行中'))
+    render(<ReviewPanel />)
+    await screen.findByText(/第 5 份报告/)
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+
+    // 他处（别的标签页/自动调度）已点火：/live 可见进行中轮；本页 WS 断线收不到 start 事件
+    holder.getReviewLive.mockResolvedValue({ round: LIVE_ROUND, tool_calls: [] })
+    fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('复盘进行中')
+    expect(alert.className).toContain('emerald')
+    expect(await screen.findByTestId('review-live-strip')).toBeInTheDocument()
   })
 
   it('立即复盘 503：红字展示 ApiError.detail（LLM 未配置）', async () => {

@@ -226,7 +226,8 @@ export default function ReviewPanel() {
 
   /** 手动触发复盘：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表。
    *  点火成功广播 review-round-ignite：状态条不依赖 WS 也能激活（覆盖 WS 断线窗口内点火）。
-   *  409（进行中）按成功样式提示而非错误红；503 经 ApiError.detail 红字提示。 */
+   *  409（进行中）按成功样式提示而非错误红，并广播 review-round-catchup：任务由他处（别的标签页/自动调度）
+   *  点火而本页 WS 断线时，状态条经补漏找回进行中轮；503 经 ApiError.detail 红字提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
@@ -235,9 +236,11 @@ export default function ReviewPanel() {
       setNotice({ ok: true, text: '复盘已启动，进度见下方状态条' })
       window.dispatchEvent(new CustomEvent('review-round-ignite'))
     } catch (e) {
-      // 409 = 已有复盘在进行中：是状态提示而非失败，避免红色误导
-      if (e instanceof ApiError && e.status === 409) setNotice({ ok: true, text: e.detail })
-      else setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
+      // 409 = 已有复盘在进行中：是状态提示而非失败，避免红色误导；顺手让状态条补漏激活
+      if (e instanceof ApiError && e.status === 409) {
+        setNotice({ ok: true, text: e.detail })
+        window.dispatchEvent(new CustomEvent('review-round-catchup'))
+      } else setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {
       setRunning(false)
     }
