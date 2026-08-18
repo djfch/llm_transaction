@@ -13,10 +13,13 @@
   如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
   成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
   补齐剩余幂等收尾（策略/指标版本关联重放 + 成功闭合审计 + ok=True 轮末事件），
-  取消随后原样抛出、普通异常按成功结果返回；取消可能掐在「成功报告 COMMIT 已执行、
-  保存函数未返回」的窗口（内存 report_id 仍为 None），取消收尾不信内存布尔位，
-  按 round_id 反查数据库定口径（反查失败记日志后回落失败收尾）；审计 JSON 快照
-  写入失败降级为日志（SQLite 主表已是真相），不反转已提交结果；
+  取消随后原样抛出、普通异常按成功结果返回；打断可能掐在「成功报告 COMMIT 已执行、
+  保存函数未返回」的窗口（内存 report_id 仍为 None），取消与普通异常分支同口径
+  不信内存布尔位，按 round_id 反查数据库定口径（反查失败记日志后回落失败收尾）；
+  begin_round 自身也有同类窗口（COMMIT 已执行、await 未返回，局部 round_id 仍为
+  ""）：两个异常分支先按预分配编号反查认领审计轮（查无或反查失败保持 "" 维持原
+  口径），认领后失败收尾正常 end_round 闭合 + 发轮末事件，不留永不闭合的审计轮；
+  审计 JSON 快照写入失败降级为日志（SQLite 主表已是真相），不反转已提交结果；
 - 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
   不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -264,20 +267,17 @@ class ReviewAgent:
         except asyncio.CancelledError:
             # 外部取消（保持 asyncio 取消语义）：成功报告未落库走失败收尾；
             # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾。
-            # 例外：取消掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」窗口时
-            # report_id 仍为 None——内存布尔位不可信，按 round_id 反查数据库再定口径
-            if report_id is None and round_id:
-                existing = None
-                try:
-                    existing = await self._repo.review.find_report_by_round_id(round_id)
-                except Exception:
-                    logger.exception("复盘取消收尾反查成功报告失败（按失败语义收尾）")
-                if existing is not None and existing.error == "":
-                    # 成功报告其实已提交：按成功语义补全收尾（版本关联重放 + 审计闭合）
-                    await self._complete_interrupted(
-                        deps, existing.id, round_id, raw_parts, audit_closed
-                    )
-                    raise
+            # 公共前置覆盖两个提交窗口（begin_round / 成功报告，COMMIT 已执行而调用方
+            # 未收到返回）：内存布尔位均不可信，认领审计轮并反查已提交成功报告再定口径
+            round_id, committed_id = await self._recover_round_and_committed_id(
+                preallocated, round_id, report_id
+            )
+            if committed_id is not None:
+                # 成功报告其实已提交：按成功语义补全收尾（版本关联重放 + 审计闭合）
+                await self._complete_interrupted(
+                    deps, committed_id, round_id, raw_parts, audit_closed
+                )
+                raise
             if report_id is None:
                 await self._fail(
                     round_id,
@@ -291,6 +291,15 @@ class ReviewAgent:
                 await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
             raise
         except Exception as e:
+            round_id, committed_id = await self._recover_round_and_committed_id(
+                preallocated, round_id, report_id
+            )
+            if committed_id is not None:
+                # 成功报告 COMMIT 后、保存函数返回前抛普通异常：与取消同口径按成功
+                # 语义补全并返回成功结果，禁止成功/失败双写
+                return await self._recover_committed_success(
+                    deps, committed_id, round_id, raw_parts, audit_closed
+                )
             if report_id is None:
                 return await self._fail(
                     round_id, raw_parts, period_start, period_end, e, preallocated=preallocated
@@ -376,6 +385,114 @@ class ReviewAgent:
             except Exception:
                 logger.exception("复盘收尾补闭合审计轮失败（成功报告已落库，不反转）")
         await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
+
+    async def _recover_round_and_committed_id(
+        self, preallocated: str, round_id: str, report_id: int | None
+    ) -> tuple[str, int | None]:
+        """异常/取消收尾的公共前置：认领预分配审计轮 + 反查已提交成功报告编号。
+
+        两个提交窗口的内存布尔位均不可信：begin_round「COMMIT 已执行、await 未返回」
+        时局部 round_id 仍为 ""（按预分配编号反查认领）；成功报告「COMMIT 已执行、
+        保存函数未返回」时 report_id 仍为 None（按 round_id 反查已提交成功报告）。
+
+        参数：
+            preallocated: str，调度器手动点火时预分配的审计轮次编号；空串表示无预分配
+            round_id: str，调用方持有的审计轮次编号；空串表示 begin_round 未正常返回
+            report_id: int | None，调用方持有的成功报告编号；None 表示保存函数未正常返回
+
+        返回：
+            tuple[str, int | None]：(认领后的审计轮次编号, 反查确认的已提交成功报告编号)；
+            两个窗口均未命中时分别等于入参 round_id 与 None
+        """
+        if not round_id:
+            round_id = await self._recover_preallocated_round_id(preallocated)
+        committed_id: int | None = None
+        if report_id is None and round_id:
+            committed_id = await self._committed_report_id(round_id)
+        return round_id, committed_id
+
+    async def _recover_preallocated_round_id(self, preallocated: str) -> str:
+        """认领预分配审计轮：begin_round「COMMIT 已执行、await 未返回」窗口被打断时反查确认轮已创建。
+
+        取消/普通异常可能掐在 begin_round 内部 COMMIT 完成后、await 返回前（aiosqlite
+        提交在线程里可能已完成），调用方局部 round_id 仍为 ""——此时按预分配编号反查
+        审计轮：查到即认领（后续失败收尾据非空 round_id 正常 end_round 闭合 + 发轮末
+        事件）；查无或反查自身失败只记日志返回 ""（维持 begin_round 前失败的既有口径，
+        由调度器关机补记负责终态）。
+
+        参数：
+            preallocated: str，调度器手动点火时预分配的审计轮次编号；空串表示无预分配
+
+        返回：
+            str：审计轮确已创建时返回 preallocated；无预分配、查无此轮或反查失败返回 ""
+        """
+        if not preallocated:
+            return ""
+        try:
+            round_row = await self._repo.get_audit_round(preallocated)
+        except Exception:
+            logger.exception("复盘预分配审计轮认领反查失败（按未创建处理）")
+            return ""
+        return preallocated if round_row is not None else ""
+
+    async def _committed_report_id(self, round_id: str) -> int | None:
+        """收尾反查：按 round_id 确认该轮成功复盘报告是否其实已提交（error=''），返回其编号。
+
+        取消/普通异常可能掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」的窗口，
+        调用方内存中的 report_id 仍为 None——此时不信内存布尔位，反查数据库定口径；
+        反查自身失败只记日志并按「未提交」处理（回落失败收尾，不掩盖待传播的取消）。
+
+        参数：
+            round_id: str，本轮审计轮次编号
+
+        返回：
+            int | None：已提交成功复盘报告的编号；查无成功报告或反查失败返回 None
+        """
+        try:
+            existing = await self._repo.review.find_report_by_round_id(round_id)
+        except Exception:
+            logger.exception("复盘收尾反查成功报告失败（按失败语义收尾）")
+            return None
+        if existing is not None and existing.error == "":
+            return existing.id
+        return None
+
+    async def _recover_committed_success(
+        self,
+        deps: ReviewToolDeps,
+        report_id: int,
+        round_id: str,
+        raw_parts: list[str],
+        audit_closed: bool,
+    ) -> dict:
+        """成功报告 COMMIT 后、保存函数返回前抛普通异常的恢复：按成功语义补全收尾并组装成功结果。
+
+        补全与取消窗口同口径（版本关联幂等重放 + 成功闭合审计 + ok=True 事件）；
+        结果中的 report 用反查得到的报告对象替代（该路径没有 save_review_report
+        的返回对象）；结果组装失败只记日志，退回最小成功结果（报告确已落库，
+        不得因组装失败改写失败）。
+
+        参数：
+            deps: ReviewToolDeps，本轮工具依赖（读取其创建的策略/指标版本 id）
+            report_id: int，反查确认的已提交成功复盘报告编号
+            round_id: str，本轮审计轮次编号
+            raw_parts: list[str]，本轮已累计的 LLM 原始输出
+            audit_closed: bool，审计轮是否已正常闭合；未闭合时以成功语义补 end_round
+
+        返回：
+            dict：与正常成功同形状的结果（组装失败时为含 ok/report_id/round_id 的最小结果）
+        """
+        logger.exception("复盘成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
+        await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
+        try:
+            report = await self._repo.review.find_report_by_round_id(round_id)
+            if report is not None:
+                return _success_result(report, round_id)
+        except Exception:
+            logger.exception(
+                "已提交复盘报告的成功结果组装失败（report_id=%s，返回最小成功结果）", report_id
+            )
+        return {"ok": True, "report_id": report_id, "round_id": round_id}
 
     async def _pre_stats(self, period_start: float, period_end: float) -> tuple[str, str]:
         """计算指定复盘区间的成交统计并生成两种表示。
