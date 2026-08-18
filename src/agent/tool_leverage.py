@@ -25,14 +25,15 @@ def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int,
     返回：
         tuple[int, str] | None，(杠杆倍数, 保证金模式)；无有效持仓（真实网关会返回
         size=0 的历史条目，与 mock/paper 口径统一按无持仓处理），或全仓持仓但
-        cross_leverage_limit 缺失（无可信有效杠杆）时返回 None
+        cross_leverage_limit 缺失/非整数（无可信有效杠杆，非整数如 lever=4.35 回退值
+        无法经 int set_leverage 精确回滚）时返回 None
     """
     pos = next((p for p in positions if p.contract == contract and p.size != 0), None)
     if pos is None:
         return None
     if pos.margin_mode == "cross":
         limit = pos.cross_leverage_limit
-        if limit is None or limit <= 0:
+        if limit is None or limit <= 0 or int(limit) != limit:
             return None
         return max(int(limit), 1), "cross"
     return max(int(pos.leverage), 1), "isolated"

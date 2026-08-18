@@ -22,8 +22,11 @@ class PaperPosition(BaseModel):
     contract: str
     size: Decimal = Decimal(0)  # 正=多，负=空
     entry_price: Decimal = Decimal(0)
-    leverage: Decimal = Decimal(1)
+    leverage: Decimal = Decimal(1)  # 有效杠杆（保证金按 notional/leverage 估算，两种模式同式）
     margin: Decimal = Decimal(0)
+    margin_mode: str = (
+        "isolated"  # isolated/cross；cross 时对外映射 leverage=0 + cross_leverage_limit
+    )
 
 
 class FillRecord(BaseModel):

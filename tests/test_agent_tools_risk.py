@@ -1463,6 +1463,62 @@ async def test_place_order_refuses_when_cross_leverage_unknown(tmp_path):
         await env.db.close()
 
 
+async def test_place_order_undeclared_leverage_cross_unknown_denied(tmp_path):
+    """验证省略 leverage 时，全仓杠杆未知的新增敞口同样被拒绝并触发风控锁。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言文本含状态未知与风控锁提示、set_leverage 未被调用、回调被触发
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        pos = _long_position("0").model_copy(update={"cross_leverage_limit": None})
+        env.gateway.positions["BTC_USDT"] = pos  # 全仓但实际杠杆缺失
+        spy: list = []
+        _spy_set_leverage(env, spy)
+        engaged = _wire_engage_spy(env)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},  # 未声明 leverage
+        )
+        assert "杠杆状态未知" in out.text and "风控锁" in out.text
+        assert out.risk_verdict == "deny"
+        assert spy == []  # 未触达交易所
+        assert len(engaged) == 1
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_non_integer_cross_leverage_refused(tmp_path):
+    """验证全仓杠杆为小数（lever=4.35 回退路径）时视为不可回滚，新增敞口 fail closed。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言文本含状态未知与风控锁提示、set_leverage 未被调用、回调被触发
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        pos = _long_position("0", cross_limit="4.35")  # 小数全仓杠杆无法精确回滚
+        env.gateway.positions["BTC_USDT"] = pos
+        spy: list = []
+        _spy_set_leverage(env, spy)
+        engaged = _wire_engage_spy(env)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "杠杆状态未知" in out.text and "风控锁" in out.text
+        assert out.risk_verdict == "deny"
+        assert spy == []  # 未触达交易所
+        assert len(engaged) == 1
+    finally:
+        await env.db.close()
+
+
 async def test_place_order_zero_size_cross_entry_does_not_lock(tmp_path, monkeypatch):
     """验证 size=0 的历史全仓条目（真实 Gate 会返回）不触发杠杆未知风控锁。
 

@@ -319,6 +319,17 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     if declared is not None and declared <= 0:
         raise ToolArgError("leverage 必须为正整数")
     prev_state = _prev_leverage_state(positions, contract)
+    has_position = any(p.contract == contract and p.size != 0 for p in positions)
+    if opens_exposure and has_position and prev_state is None:
+        # 有持仓但读不出可信杠杆（全仓实际杠杆缺失或不可精确回滚）：无论是否声明杠杆，
+        # 新增敞口一律 fail closed；平仓/减仓不修改杠杆，不受此守卫拦截
+        await _engage_kill(deps, f"{contract} 当前杠杆状态未知，无法快照/回滚杠杆状态")
+        return ToolOutcome(
+            "当前杠杆状态未知（全仓实际杠杆缺失或不可精确回滚），"
+            "已开启风控锁，拒绝新增敞口，请人工核对",
+            "deny",
+            "杠杆状态未知",
+        )
     margin_mode = _opt_enum(args, "margin_mode", {"isolated", "cross"}) or (
         prev_state[1] if prev_state is not None else "isolated"
     )
@@ -335,15 +346,6 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    has_position = any(p.contract == contract and p.size != 0 for p in positions)
-    if apply_leverage is not None and has_position and prev_state is None:
-        # 有持仓但读不出可信杠杆（全仓实际杠杆缺失）：修改杠杆将无回滚锚点，fail closed
-        await _engage_kill(deps, f"{contract} 全仓实际杠杆未知，无法快照当前杠杆状态")
-        return ToolOutcome(
-            "当前杠杆状态未知（全仓实际杠杆缺失），已开启风控锁，拒绝修改杠杆下单，请人工核对",
-            "deny",
-            "杠杆状态未知",
-        )
     req = OrderRequest(
         contract=contract,
         size=size,

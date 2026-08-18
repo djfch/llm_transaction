@@ -288,6 +288,7 @@ class PaperGateway(PaperOpenInterestMixin):
             pos.margin = new_margin
         self._leverages[contract] = Decimal(leverage)
         pos.leverage = Decimal(leverage)
+        pos.margin_mode = margin_mode  # 持久化模式，to_position 据此映射 Gate 口径的全仓字段
         return self._position_of(pos)
 
     def place_order(self, req: OrderRequest) -> OrderResult:

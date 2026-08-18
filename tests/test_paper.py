@@ -369,6 +369,26 @@ def test_set_leverage_insufficient_balance_keeps_state():
     assert after.leverage == D("10") and after.margin == before.margin
 
 
+def test_set_leverage_cross_mode_surfaced():
+    """验证 paper 持久化保证金模式：全仓按 Gate 口径映射 leverage=0 + cross_leverage_limit。
+
+    参数：无
+
+    返回：
+        None，断言 cross/isolated 往返后持仓的 margin_mode、leverage、cross_leverage_limit 一致
+    """
+    gw = make_gateway()
+    gw.set_leverage(BTC, 5, "cross")
+    buy(gw, 10)
+    pos = gw.list_positions()[0]
+    assert pos.margin_mode == "cross"
+    assert pos.leverage == D("0") and pos.cross_leverage_limit == D("5")
+    gw.set_leverage(BTC, 3, "isolated")  # 切回逐仓后字段复原
+    pos = gw.list_positions()[0]
+    assert pos.margin_mode == "isolated"
+    assert pos.leverage == D("3") and pos.cross_leverage_limit is None
+
+
 def test_cancel_order():
     """验证撤销挂单成功后订单从挂单列表消失，重复撤同一单抛 OrderNotFound。
 
