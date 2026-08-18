@@ -805,21 +805,54 @@ async def test_place_order_close_string_false_does_not_close_position(tmp_path):
 
 
 async def test_place_order_bool_params_reject_non_bool_types(tmp_path):
-    """验证 close/reduce_only 只接受 JSON 布尔，字符串与整数一律拒绝。
+    """验证 close/reduce_only 只接受 JSON 布尔，显式 null、字符串、整数、数组、对象一律拒绝。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言各畸形取值均返回参数错误且网关未收到任何订单请求
+        None，断言各畸形取值均返回参数错误、网关未收到订单请求且杠杆未被调用
     """
     env = await _make_tools(tmp_path)
     try:
         for name in ("close", "reduce_only"):
-            for bad in ("false", "true", "0", "", 0, 1):
-                args = {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000, name: bad}
+            for bad in ("false", "true", "0", "", 0, 1, None, [], {}):
+                args = {
+                    "contract": "BTC_USDT",
+                    "size": 1,
+                    "stop_loss_price": 58000,
+                    "leverage": 5,
+                    name: bad,
+                }
                 out = await env.registry.execute("place_order", args)
                 assert "参数错误" in out.text and name in out.text, f"{name}={bad!r} 未被拒绝"
-        assert env.gateway.placed == []
+        assert env.gateway.placed == []  # 下单未到达网关
+        assert "BTC_USDT" not in env.gateway.positions  # 调杠杆未到达网关
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_bool_params_accept_explicit_bools(tmp_path):
+    """验证显式 true/false 布尔值行为不变：close=false 正常开仓，close=true 正常全平。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言显式布尔入参下单成功且持仓变化符合预期
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000, "close": False},
+        )
+        assert out.risk_verdict == "allow", out.text
+        assert env.gateway.positions["BTC_USDT"].size == 1
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "close": True, "reduce_only": False}
+        )
+        assert out.risk_verdict == "allow", out.text
+        assert env.gateway.positions["BTC_USDT"].size == 0
     finally:
         await env.db.close()
