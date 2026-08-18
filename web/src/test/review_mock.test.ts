@@ -28,14 +28,25 @@ describe('mock 实时复盘状态', () => {
     expect(round.strategy_md5).toBe(versions[0].md5)
   })
 
-  it('getReviewLive：手动复盘完成后翻转为已结束轮（ended_at 非空、llm_raw 有结论、工具链保留）', async () => {
-    await mockApi.runReview()
-    const live = await mockApi.getReviewLive()
-    const round = live.round!
+  it('getReviewLive：手动复盘后先返进行中轮、再轮询翻转为已结束（演示进度条完整进出循环）', async () => {
+    const result = await mockApi.runReview()
+    const activeLive = await mockApi.getReviewLive()
+    expect(activeLive.round!.ended_at).toBeNull() // 进行中
+    // 点火响应的 roundId 与 /live 进行中轮 round_id 一致（同后端契约）
+    expect(activeLive.round!.round_id).toBe(result.roundId)
+    const doneLive = await mockApi.getReviewLive()
+    const round = doneLive.round!
     expect(round.ended_at).not.toBeNull()
     expect(round.ended_at!).toBeGreaterThan(round.started_at)
     expect(round.llm_raw).not.toBe('')
-    expect(live.tool_calls.length).toBeGreaterThanOrEqual(2)
+    expect(doneLive.tool_calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('getReviewLive：再次手动复盘重新进入进行中轮（每次点火都有完整进出循环）', async () => {
+    await mockApi.runReview()
+    const live = await mockApi.getReviewLive()
+    expect(live.round).not.toBeNull()
+    expect(live.round!.ended_at).toBeNull()
   })
 })
 
@@ -63,15 +74,15 @@ describe('mock 复盘端点', () => {
     expect((err as ApiError).status).toBe(404)
   })
 
-  it('runReview：started/ok 且列表最前新增一条「未调整」报告', async () => {
+  it('runReview：点火返回 started + 区间回显，且列表最前新增一条「未调整」报告', async () => {
     const before = (await mockApi.getReviewReports(0, 1)).total
     const result = await mockApi.runReview()
+    // 点火契约：仅 started + 统计区间回显，不含执行结果
     expect(result.started).toBe(true)
-    expect(result.ok).toBe(true)
+    expect(result.periodEnd!).toBeGreaterThan(result.periodStart!)
     const after = await mockApi.getReviewReports(0, 1)
     expect(after.total).toBe(before + 1)
     expect(after.items[0].strategyAction).toBe('none')
-    expect(after.items[0].id).toBe(result.reportId)
     expect(after.items[0].error).toBe('')
   })
 

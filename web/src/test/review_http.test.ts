@@ -98,26 +98,22 @@ describe('复盘端点适配', () => {
     expect(r.roundId).toBe('rvw-round-7')
   })
 
-  it('runReview：started/ok 保留，snake 键转 camelCase', async () => {
+  it('runReview：点火响应 started + 统计区间回显，snake 键转 camelCase', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch({
         '/api/review/run': {
           started: true,
-          ok: true,
-          report_id: 8,
-          round_id: 'rv-round',
-          strategy_action: 'none',
-          new_version_id: null,
+          period_start: 1784505600,
+          period_end: 1784592000,
         },
       }),
     )
     const r = await httpApi.runReview()
+    // 点火契约：仅 started + 区间回显，不含执行结果
     expect(r.started).toBe(true)
-    expect(r.ok).toBe(true)
-    expect(r.reportId).toBe(8)
-    expect(r.roundId).toBe('rv-round')
-    expect(r.newVersionId).toBeNull()
+    expect(r.periodStart).toBe(1784505600)
+    expect(r.periodEnd).toBe(1784592000)
   })
 
   it('runReview：409 复盘进行中 → ApiError 带 detail（message 同 detail）', async () => {
@@ -321,5 +317,13 @@ describe('getReviewLive 适配', () => {
     const live = await httpApi.getReviewLive()
     expect(live.round).toBeNull()
     expect(live.tool_calls).toEqual([])
+  })
+
+  it('带 roundId 参数：URL 拼 ?round_id= 查询串（pinned 按绑定 ID 直查）', async () => {
+    const fetchMock = stubFetch({ '/api/review/live?round_id=rv-1': { round: null, tool_calls: [] } })
+    vi.stubGlobal('fetch', fetchMock)
+    // stub 按完整路径精确匹配：query 拼错会直接抛「未打桩的路径」
+    await expect(httpApi.getReviewLive('rv-1')).resolves.toEqual({ round: null, tool_calls: [] })
+    expect(String(fetchMock.mock.calls[0][0])).toContain('round_id=rv-1')
   })
 })

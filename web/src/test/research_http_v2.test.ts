@@ -4,7 +4,7 @@ import { httpApi } from '../api/http'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('研报 v2 端点适配', () => {
-  it('适配逐标的摘要、详情与手动响应 asset_count', async () => {
+  it('适配逐标的摘要、详情与手动点火响应', async () => {
     const base = {
       id: 9,
       report_type: 'manual',
@@ -47,7 +47,7 @@ describe('研报 v2 端点适配', () => {
       }
       if (path.endsWith('/research/run')) {
         return new Response(JSON.stringify({
-          started: true, ok: true, report_id: 9, round_id: 'r-v2', asset_count: 1,
+          started: true, report_type: 'manual', hours: 24,
         }))
       }
       throw new Error('未打桩路径: ' + path)
@@ -60,6 +60,8 @@ describe('研报 v2 端点适配', () => {
     expect(detail.globalRisks).toEqual(['宏观波动'])
     expect(detail.assetViews?.[0].evidence).toEqual(['放量增仓（4h）'])
     expect(detail.assetViews?.[0].marketRegime).toBe('上涨趋势')
-    expect((await httpApi.runResearch()).assetCount).toBe(1)
+    // 手动触发为点火契约：仅 started + 回显参数，不含 assetCount 等执行结果
+    const run = await httpApi.runResearch()
+    expect(run).toMatchObject({ started: true, reportType: 'manual', hours: 24 })
   })
 })

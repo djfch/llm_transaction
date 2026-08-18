@@ -213,22 +213,37 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
         return item
 
     @router.get("/research/live")
-    async def get_research_live() -> dict[str, Any]:
-        """实时研报展示：当前模式最新一轮研报审计（wake_source='research'）+ 已落库工具调用。
+    async def get_research_live(round_id: str | None = Query(default=None)) -> dict[str, Any]:
+        """实时研报展示：默认当前模式最新一轮研报审计（wake_source='research'）+ 已落库工具调用。
+
+        可选 ?round_id= 按 ID 直查（前端 pinned 轮询）：无 mode 过滤；查无此轮或命中
+        异类轮（wake_source 非 research）按空态返回（HTTP 仍 200，供前端持续轮询）。
 
         响应键与前端契约冻结：round 键集同 /api/review/live（model_dump 不含 mode，
         进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item，
         args/result 为已解析对象）；mode 口径同 get_review_live（runtime_settings 优先，
         未接线回退配置文件）；无研报轮时 round 为 null、tool_calls 为空。
 
-        参数：无
+        参数：
+            round_id: str | None，可选的审计轮次编号；提供时按 ID 直查替代最新轮口径
 
         返回：
-            dict[str, Any]，实时研报展示：当前模式最新一轮研报审计（wake_source='research'）+ 已落库工具调用。  响应键与前端契约冻结：round 键集同 /api/review/live（model_dump 不含 mode， 进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item， args/result 为已解析对象）；mode 口径同 get_review_live（runtime_settings 优先， 未接线回退配置文件）；无研报轮时 round 为 null、tool_calls 为空
+            dict[str, Any]，实时研报展示：默认当前模式最新一轮研报审计（wake_source='research'）+ 已落库工具调用。
+            可选 ?round_id= 按 ID 直查（前端 pinned 轮询）：无 mode 过滤；查无此轮或命中
+            异类轮（wake_source 非 research）按空态返回（HTTP 仍 200，供前端持续轮询）。
+            响应键与前端契约冻结：round 键集同 /api/review/live（model_dump 不含 mode，
+            进行中的轮 ended_at 为 null）、tool_calls 项同一形状（复用 _tool_call_item，
+            args/result 为已解析对象）；mode 口径同 get_review_live（runtime_settings 优先，
+            未接线回退配置文件）；无研报轮时 round 为 null、tool_calls 为空
 
         """
-        settings = deps.runtime_settings or load_settings(deps.config_path)
-        round_row = await deps.repo.research.latest_research_audit_round(settings.mode)
+        if round_id is None:
+            settings = deps.runtime_settings or load_settings(deps.config_path)
+            round_row = await deps.repo.research.latest_research_audit_round(settings.mode)
+        else:
+            round_row = await deps.repo.get_audit_round(round_id)
+            if round_row is not None and round_row.wake_source != "research":
+                round_row = None  # 异类轮（复盘/交易）按查无处理，不跨台返回
         if round_row is None:
             return {"round": None, "tool_calls": []}
         calls = await deps.repo.list_audit_tool_calls(round_row.round_id)
@@ -239,8 +254,11 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/research/run")
     async def run_research_now(body: _ResearchRunBody | None = Body(None)) -> dict[str, Any]:
-        """手动触发研报：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。
+        """手动触发研报（点火即返回）：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。
 
+        点火成功立即返回 started/report_type/hours/round_id（预分配的审计轮次编号，
+        与 WS research_round_start 事件同一身份，前端据此认轮），不等待生成完成；
+        生成进度与结果经 WS 事件、/research/live 轮询与报告列表呈现（失败报告照常落库入列）。
         回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。
         状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）。
 
@@ -248,11 +266,10 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
             body: _ResearchRunBody | None，可选的手动触发请求体
 
         返回：
-            dict[str, Any]，手动触发研报：无 body 用调度默认值（manual/24h）；有 body 按指定类型与窗口透传。  回调未接线 503；LLM 未配置 503；研报进行中 409；hours 越界 422（pydantic）。 状态码映射走回调返回的结构化 error_code（llm_not_configured/busy）
+            dict[str, Any]：点火结果（started、round_id、report_type、hours 回显），不含执行结果
 
         异常：
             HTTPException，研报未接线或 LLM 未配置时以 503 响应，调度锁占用时以 409 响应
-
         """
         if deps.research_run is None:
             raise HTTPException(status_code=503, detail="研报未接线（agent 未装配研报调度）")

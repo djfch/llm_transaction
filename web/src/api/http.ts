@@ -371,27 +371,25 @@ function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
   }
 }
 
-/** 后端 POST /api/review/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+/** 后端 POST /api/review/run 点火响应（成功回显统计区间 + 预分配审计轮 ID；409/503/422 走 ApiError，不进本适配） */
 interface RawRunReview {
   started: boolean
-  ok?: boolean
-  report_id?: number
+  period_start?: number
+  period_end?: number
   round_id?: string
-  strategy_action?: string
-  new_version_id?: number | null
   error?: string
+  error_code?: string
 }
 
-/** 后端 run 响应 → 前端 RunReviewResult：snake_case 转 camelCase */
+/** 后端 run 点火响应 → 前端 RunReviewResult：snake_case 转 camelCase */
 function adaptRunReview(raw: RawRunReview): RunReviewResult {
   return {
     started: Boolean(raw.started),
-    ok: raw.ok,
-    reportId: raw.report_id,
+    periodStart: raw.period_start,
+    periodEnd: raw.period_end,
     roundId: raw.round_id,
-    strategyAction: raw.strategy_action,
-    newVersionId: raw.new_version_id ?? null,
     error: raw.error ?? '',
+    errorCode: raw.error_code,
   }
 }
 
@@ -571,25 +569,23 @@ function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReport
     causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
   }
 }
-/** 后端 POST /api/research/run 原始响应（成功/失败的键集合不同，全部可选防御） */
+/** 后端 POST /api/research/run 点火响应（成功回显类型与窗口 + 预分配审计轮 ID；409/503/422 走 ApiError，不进本适配） */
 interface RawRunResearch {
   started: boolean
-  ok?: boolean
-  report_id?: number
+  report_type?: string
+  hours?: number
   round_id?: string
-  asset_count?: number
   error?: string
   error_code?: string
 }
 
-/** 后端 run 响应 → 前端 RunResearchResult：snake_case 转 camelCase */
+/** 后端 run 点火响应 → 前端 RunResearchResult：snake_case 转 camelCase */
 function adaptRunResearch(raw: RawRunResearch): RunResearchResult {
   return {
     started: Boolean(raw.started),
-    ok: raw.ok,
-    reportId: raw.report_id,
+    reportType: raw.report_type,
+    hours: raw.hours,
     roundId: raw.round_id,
-    assetCount: raw.asset_count,
     error: raw.error ?? '',
     errorCode: raw.error_code,
   }
@@ -825,8 +821,10 @@ export const httpApi: ApiClient = {
   getReviewReport: async (id): Promise<ReviewReport> =>
     adaptReviewReport(await request<RawReviewReport>(`/review/reports/${id}`)),
   runReview: async () => adaptRunReview(await request<RawRunReview>('/review/run', { method: 'POST' })),
-  // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配
-  getReviewLive: () => request<ReviewLive>('/review/live'),
+  // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配；
+  // 带 roundId 时按该轮直查（查无此轮/他类轮回 round null），不带参返回最新一轮
+  getReviewLive: (roundId?: string) =>
+    request<ReviewLive>(roundId ? `/review/live?round_id=${encodeURIComponent(roundId)}` : '/review/live'),
   getResearchReports: fetchResearchReports,
   getResearchReport: async (id): Promise<ResearchReportDetail> =>
     adaptResearchReportDetail(await request<RawResearchReportDetail>(`/research/reports/${id}`)),
@@ -838,8 +836,9 @@ export const httpApi: ApiClient = {
         body: JSON.stringify({ report_type: reportType, hours }),
       }),
     ),
-  // 与 getReviewLive 同约定：响应契约即最终形态，无需适配
-  getResearchLive: () => request<ResearchLive>('/research/live'),
+  // 与 getReviewLive 同约定：响应契约即最终形态，无需适配；带 roundId 时按该轮直查，不带参返回最新一轮
+  getResearchLive: (roundId?: string) =>
+    request<ResearchLive>(roundId ? `/research/live?round_id=${encodeURIComponent(roundId)}` : '/research/live'),
   getResearchScheduleStatus: () => request<ResearchScheduleStatus>('/research/schedule-status'),
   // 按 agent 转发三端点；返回值类型收窄为 LiveSnapshot（in_round / strategy_md5 等端点私有字段随之丢弃）
   getLiveFor: (agent): Promise<LiveSnapshot> => {

@@ -14,10 +14,12 @@
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
-- GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）
+- GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
+- GET  /api/research/live → round(可为 null)/tool_calls[]（形状同 /api/review/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
 - GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
 - GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
-- POST /api/review/run → started/ok（409 复盘进行中；503 LLM 未配置或未接线）
+- POST /api/review/run → started/period_start/period_end/round_id（409 复盘进行中；503 LLM 未配置或未接线；422 区间非法）
+- POST /api/research/run → started/report_type/hours/round_id（409 研报进行中；503 未接线或 LLM 未配置；422 hours 越界）
 - GET  /api/strategy/versions → items[] 含 id/md5/created_by/reason/report_id/created_at（不含 content，省流量）
 - GET  /api/strategy/versions/{id} → 同列表项键 + content 全文
 - GET  /api/strategy/diff?from=&to= → PlainText unified diff（契约只断状态码）
@@ -133,20 +135,36 @@ async def _reconfigure() -> dict:
 
 
 async def _review_run() -> dict:
-    """假复盘执行回调：恒报启动成功，供 POST /api/review/run 断言响应键。
+    """假复盘执行回调：恒报点火成功，供 POST /api/review/run 断言响应键。
 
     参数：无
 
     返回：
-        dict：固定复盘结果（started/ok/report_id/round_id/strategy_action/new_version_id）
+        dict：固定点火结果（started/period_start/period_end/round_id，
+        与调度器 start_now 成功形状一致，不含执行结果）
     """
     return {
         "started": True,
-        "ok": True,
-        "report_id": 1,
+        "period_start": 1_700_000_000.0,
+        "period_end": 1_700_086_400.0,
         "round_id": "rv-round",
-        "strategy_action": "none",
-        "new_version_id": None,
+    }
+
+
+async def _research_run() -> dict:
+    """假研报执行回调：恒报点火成功，供 POST /api/research/run 断言响应键。
+
+    参数：无
+
+    返回：
+        dict：固定点火结果（started/report_type/hours/round_id，
+        与调度器 start_now 成功形状一致，不含执行结果）
+    """
+    return {
+        "started": True,
+        "report_type": "manual",
+        "hours": 24,
+        "round_id": "rs-round",
     }
 
 
@@ -250,6 +268,11 @@ async def _seed(repo: Repo) -> None:
     await repo.save_audit_tool_call(
         "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
     )
+    # 研报审计轮种子：/api/research/live 契约断言用（started_at 早于 r1，同上不影响交易轮）
+    await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rs1", 1, "get_fact_timeline", '{"hours": 24}', result_json='{"events": []}'
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -316,6 +339,7 @@ async def deps(tmp_path: Path):
         agent_stop=lambda: _set_running(False),
         llm_reconfigure=_reconfigure,
         review_run=_review_run,
+        research_run=_research_run,
         strategy_rollback=_strategy_rollback,
         alerts_provider=lambda: triggers.list(),
         indicators=_indicators_bundle(),
@@ -633,7 +657,10 @@ async def test_review_strategy_contract(client: AsyncClient):
     assert len(detail["report_md"]) > 200  # 详情给全文
 
     run = await _post(client, "/api/review/run")
-    _typed(run, "started:b ok:b", "POST /api/review/run")
+    _typed(run, "started:b period_start:n period_end:n round_id:s", "POST /api/review/run")
+
+    research_run = await _post(client, "/api/research/run")
+    _typed(research_run, "started:b report_type:s hours:i round_id:s", "POST /api/research/run")
 
     versions = await _get(client, "/api/strategy/versions")
     assert versions["items"], "/api/strategy/versions items 应非空"
@@ -681,6 +708,25 @@ async def test_review_strategy_contract(client: AsyncClient):
         "seq:i tool:s args:d result:d risk_verdict:s risk_reason:s duration_ms:i",
         "/api/review/live tool_calls[0]",
     )
+    # 可选 ?round_id= 按 ID 直查：命中返回指定轮；查无/异类轮返回空态（HTTP 仍 200）
+    by_id = await _get(client, "/api/review/live?round_id=rv1")
+    assert by_id["round"]["round_id"] == "rv1"
+    missing = await _get(client, "/api/review/live?round_id=no-such-round")
+    assert missing == {"round": None, "tool_calls": []}
+
+    research_live = await _get(client, "/api/research/live")
+    assert set(research_live) == {"round", "tool_calls"}
+    assert research_live["round"]["round_id"] == "rs1"  # 种子研报轮（最新口径）
+    assert research_live["tool_calls"], "/api/research/live tool_calls 应非空"
+    _typed(
+        research_live["tool_calls"][0],
+        "seq:i tool:s args:d result:d risk_verdict:s risk_reason:s duration_ms:i",
+        "/api/research/live tool_calls[0]",
+    )
+    research_by_id = await _get(client, "/api/research/live?round_id=rs1")
+    assert research_by_id["round"]["round_id"] == "rs1"
+    research_missing = await _get(client, "/api/research/live?round_id=no-such-round")
+    assert research_missing == {"round": None, "tool_calls": []}
 
 
 async def test_indicators_contract(client: AsyncClient):

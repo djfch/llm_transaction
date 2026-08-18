@@ -385,7 +385,7 @@ async def test_research_subsystem_assembled(build_ctx):
     assert ctx.research.scheduler is not None
     deps = ctx.server_deps
     assert deps is not None
-    assert deps.research_run == ctx.research.scheduler.run_now
+    assert deps.research_run == ctx.research.scheduler.start_now
 
 
 async def test_build_research_receives_notify_event(build_ctx, monkeypatch):
@@ -512,7 +512,7 @@ async def test_review_subsystem_assembled(build_ctx):
     assert versions[0].created_by == "human"
     deps = ctx.server_deps
     assert deps is not None
-    assert deps.review_run == ctx.review.scheduler.run_now
+    assert deps.review_run == ctx.review.scheduler.start_now
     assert deps.strategy_save is not None
     assert deps.strategy_rollback is not None
 

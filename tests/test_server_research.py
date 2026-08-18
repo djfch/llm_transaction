@@ -4,8 +4,8 @@
 - GET /api/research/reports(+{id})：分页/最新在前/含失败记录与逐标的摘要；
   详情逐标的 evidence/risks/narrative、404、causal_links 解析与空数组；
 - GET /api/research/live：空库 round=null、进行中轮 tool_calls 组装、交易轮不串台；
-- POST /api/research/run：未接线 503、LLM 未配置 503、进行中 409、成功 200 透传、
-  body 透传 report_type+hours、hours 越界/非数字 422。
+- POST /api/research/run：未接线 503、LLM 未配置 503、进行中 409、成功 200 点火契约
+  （含 started=true，不含执行结果字段）、body 透传 report_type+hours、hours 越界/非数字 422。
 """
 
 from collections.abc import AsyncIterator
@@ -319,6 +319,36 @@ async def test_research_live_returns_in_progress_round(repo: Repo, tmp_path: Pat
         assert body2["round"]["round_id"] == "rs1"
 
 
+async def test_research_live_by_round_id(repo: Repo, tmp_path: Path):
+    """?round_id= 直查：指定轮优先于最新轮；查无或异类轮（wake_source 不符）按空态返回。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言指定轮命中带 tool_calls、查无此轮与异类轮均返回空态
+    """
+    await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rs1", 1, "get_fact_timeline", '{"hours": 24}', result_json='{"events": []}'
+    )
+    await repo.start_audit_round("rs2", "paper", wake_source="research", started_at=2000.0)
+    await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=3000.0)
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        # 指定已存在轮：即使存在更新的研报轮（rs2）也返回指定轮及其 tool_calls
+        body = (await c.get("/api/research/live", params={"round_id": "rs1"})).json()
+        assert body["round"]["round_id"] == "rs1"
+        assert body["round"]["wake_source"] == "research"
+        assert [tc["seq"] for tc in body["tool_calls"]] == [1]
+        # 查无此轮：空态（HTTP 仍 200，供前端 pinned 轮询）
+        missing = (await c.get("/api/research/live", params={"round_id": "no-such"})).json()
+        assert missing == {"round": None, "tool_calls": []}
+        # 异类 wake_source（复盘轮）：同样按空态返回，不跨台
+        other = (await c.get("/api/research/live", params={"round_id": "rv1"})).json()
+        assert other == {"round": None, "tool_calls": []}
+
+
 # ---------- POST /api/research/run ----------
 
 
@@ -361,14 +391,14 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
         }
 
     async def _ok() -> dict:
-        """假研报回调：返回成功结果，验证 200 原样透传。
+        """假研报回调：返回点火结果，验证 200 点火契约（不含执行结果字段）。
 
         参数：无
 
         返回：
-            dict：启动成功的假研报运行结果（含 report_id 与 round_id）
+            dict：点火成功的假结果（started + 预分配 round_id + 回显参数）
         """
-        return {"started": True, "ok": True, "report_id": 7, "round_id": "rs-7"}
+        return {"started": True, "report_type": "manual", "hours": 24, "round_id": "ab" * 16}
 
     async with _client_of(_deps(repo, tmp_path, research_run=_busy)) as c:
         assert (await c.post("/api/research/run")).status_code == 409
@@ -377,11 +407,11 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, research_run=_ok)) as c:
         r = await c.post("/api/research/run")
         assert r.status_code == 200
-        assert r.json() == {  # 成功 200 原样透传回调结果
+        assert r.json() == {  # 点火即返回：started + 预分配 round_id + 回显参数，不含执行结果
             "started": True,
-            "ok": True,
-            "report_id": 7,
-            "round_id": "rs-7",
+            "report_type": "manual",
+            "hours": 24,
+            "round_id": "ab" * 16,
         }
 
 
@@ -398,20 +428,31 @@ async def test_research_run_body_passthrough_and_validation(repo: Repo, tmp_path
     calls: list[dict] = []
 
     async def _run(**kwargs) -> dict:
-        """假研报回调：记录收到的 kwargs，返回带序号的假结果。
+        """假研报回调：记录收到的 kwargs，返回点火结果。
 
         参数：
             kwargs: dict，POST body 透传给研报回调的参数（如 report_type、hours）
 
         返回：
-            dict：启动成功的假研报运行结果，report_id 取累计调用次数
+            dict：点火成功的假结果（started + 回显参数，缺省走调度默认值）
         """
         calls.append(kwargs)
-        return {"started": True, "ok": True, "report_id": len(calls)}
+        return {
+            "started": True,
+            "report_type": kwargs.get("report_type", "manual"),
+            "hours": kwargs.get("hours", 24),
+            "round_id": "cd" * 16,  # 预分配轮次编号（契约键，原样透传）
+        }
 
     async with _client_of(_deps(repo, tmp_path, research_run=_run)) as c:
         r = await c.post("/api/research/run", json={"report_type": "event", "hours": 6})
-        assert r.status_code == 200 and r.json()["report_id"] == 1
+        assert r.status_code == 200
+        assert r.json() == {  # 点火回显：started + 预分配 round_id + 透传参数
+            "started": True,
+            "report_type": "event",
+            "hours": 6,
+            "round_id": "cd" * 16,
+        }
         assert calls == [{"report_type": "event", "hours": 6}]  # 透传
         r = await c.post("/api/research/run")  # 无 body：调度默认值（无参回调）
         assert r.status_code == 200 and calls[-1] == {}

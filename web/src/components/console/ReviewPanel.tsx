@@ -6,10 +6,10 @@
  * statsJson 解析出 总盈亏/胜率/盈亏比 小表格（字段缺失时降级不渲染该行）
  * + reportMd 全文（whitespace-pre-wrap 原样展示，不引 markdown 库）
  * + 关联审计轮的工具调用链（roundId 空串 = 功能上线前的老报告，灰字降级提示）。
- * 409（复盘进行中）/ 503（LLM 未配置或未接线）经 ApiError.detail 提示。
+ * 409（复盘进行中，按成功样式提示而非错误红）/ 503（LLM 未配置或未接线）经 ApiError.detail 提示。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api } from '../../api'
+import { api, ApiError } from '../../api'
 import type { ReviewReport, ReviewReportSummary } from '../../api/types'
 import { useApiData } from '../../hooks/useApiData'
 import { usePageState } from '../../hooks/usePageState'
@@ -191,7 +191,7 @@ function ReportItem({
   )
 }
 
-/** 复盘报告面板：列表分页自管，「立即复盘」成功后回到第一页看最新报告。 */
+/** 复盘报告面板：列表分页自管；「立即复盘」点火即返回，新报告落库后经状态条 onFinished 回第一页刷新。 */
 export default function ReviewPanel() {
   const [total, setTotal] = useState(0)
   const [expandedId, setExpandedId] = useState<number | null>(null)
@@ -216,34 +216,32 @@ export default function ReviewPanel() {
     [goToPage, page],
   )
 
-  /** 新报告出现在最前：收起展开项，回第一页（deps 驱动刷新）；已在第一页则原地刷新。 */
+  /** 新报告出现在最前：收起展开项，回第一页（deps 驱动刷新）；已在第一页则原地刷新。轮结束顺手清掉「已启动」提示，避免绿条滞留。 */
   const refreshToLatest = useCallback(() => {
+    setNotice(null)
     setExpandedId(null)
     if (page !== 0 && totalPages > 0) goToPage(0)
     else reload()
   }, [goToPage, page, reload, totalPages])
 
-  /** 手动触发复盘：后端同步执行完毕才返回；409/503 经 ApiError.detail 提示。 */
+  /** 手动触发复盘：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表。
+   *  点火成功广播 review-round-ignite（detail.roundId 为后端预分配的审计轮 ID，与 WS 轮始事件同一标识）：
+   *  状态条不依赖 WS 也能激活并按 ID 绑定本轮（覆盖 WS 断线窗口内点火）。
+   *  409（进行中）按成功样式提示而非错误红，并广播 review-round-catchup：任务由他处（别的标签页/自动调度）
+   *  点火而本页 WS 断线时，状态条以轮询发现模式找回进行中轮；503 经 ApiError.detail 红字提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
-      const result = await api.runReview()
-      if (!result.started) {
-        setNotice({ ok: false, text: result.error || '复盘未启动' })
-        return
-      }
-      // started=true 不代表执行成功：路由只把「LLM 未配置」「复盘进行中」映 503/409，
-      // 其余失败经 scheduler 以 200 返回 ok=false（失败报告已落库）。
-      // 无论成败都刷新列表；失败必须红提示，不能误报「复盘已完成」。
-      if (result.ok === false) {
-        setNotice({ ok: false, text: `复盘失败：${result.error || '未知原因'}` })
-      } else {
-        setNotice({ ok: true, text: '复盘已完成，最新报告已入列' })
-      }
-      refreshToLatest()
+      const res = await api.runReview()
+      setNotice({ ok: true, text: '复盘已启动，进度见下方状态条' })
+      window.dispatchEvent(new CustomEvent('review-round-ignite', { detail: { roundId: res.roundId } }))
     } catch (e) {
-      setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
+      // 409 = 已有复盘在进行中：是状态提示而非失败，避免红色误导；顺手让状态条补漏激活
+      if (e instanceof ApiError && e.status === 409) {
+        setNotice({ ok: true, text: e.detail })
+        window.dispatchEvent(new CustomEvent('review-round-catchup'))
+      } else setNotice({ ok: false, text: e instanceof Error ? e.message : String(e) })
     } finally {
       setRunning(false)
     }

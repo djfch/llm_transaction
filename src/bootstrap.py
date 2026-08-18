@@ -592,8 +592,8 @@ def _build_server(
         agent_stop=ctx.scheduler.stop,
         llm_reconfigure=_make_llm_reconfigure(ctx, mock_llm),
         alerts_provider=lambda: ctx.triggers.list(),
-        review_run=ctx.review.scheduler.run_now,
-        research_run=ctx.research.scheduler.run_now,
+        review_run=ctx.review.scheduler.start_now,
+        research_run=ctx.research.scheduler.start_now,
         research_schedule_status=ctx.research.scheduler.status,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,
@@ -708,4 +708,7 @@ async def shutdown(
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    # 手动点火的后台研报/复盘：取消后走 agent 既有取消收尾（落失败报告），须在 db.close 前
+    await ctx.review.scheduler.shutdown()
+    await ctx.research.scheduler.shutdown()
     await ctx.db.close()

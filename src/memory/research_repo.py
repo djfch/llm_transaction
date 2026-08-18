@@ -183,6 +183,26 @@ class ResearchRepo(ResearchAssetRepoMixin):
             created_at=ts,
         )
 
+    async def find_report_by_round_id(self, round_id: str) -> ResearchReport | None:
+        """按审计轮次编号反查研报（含失败记录），同轮多份取最新一份；查无返回 None。
+
+        供取消收尾使用：取消可能掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」的
+        窗口，调用方内存中的 report_id 仍为 None——此时不信内存布尔位，按 round_id
+        反查数据库确认成功报告是否其实已提交，避免同轮成功/失败双写。
+
+        参数：
+            round_id: str，审计轮次编号
+
+        返回：
+            ResearchReport | None：该轮最新一份研报；查无此轮记录返回 None
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM research_reports WHERE round_id=? ORDER BY id DESC LIMIT 1",
+            (round_id,),
+        )
+        row = await cur.fetchone()
+        return ResearchReport(**dict(row)) if row else None
+
     async def list_reports(self, days: int = 7) -> list[ResearchReport]:
         """近 days 天研报，按创建时间正序（最旧在前，便于拼接上下文）。
 

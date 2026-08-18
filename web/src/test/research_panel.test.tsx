@@ -1,10 +1,14 @@
-/** 研报面板只展示当前逐标的结构，并覆盖成功、失败、分页和手动触发。 */
+/** 研报面板测试：列表渲染（失败红字/逐标的标签/分页摘要）、展开详情（逐标的+因果链+工具链）、
+ *  失败卡片不可展开、手动触发点火（绿提示、按钮立即恢复、不主动刷新、research-round-ignite 事件激活状态条）、
+ *  409 按成功样式提示并广播 research-round-catchup 让状态条补漏激活、503 红字 ApiError.detail、
+ *  状态条结束后清提示并自动刷新列表、服务端分页。 */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
 import type {
   ResearchAssetDetail,
   ResearchAssetSummary,
+  ResearchLiveRound,
   ResearchReportDetail,
   ResearchReportSummary,
   RoundDetail,
@@ -98,6 +102,19 @@ const ROUND_DETAIL: RoundDetail = {
   strategyMd5: '',
 }
 
+/** 进行中的研报轮（/api/research/live 形状）：409 catchup 补漏联动用例用（started_at 贴近当前，避免触发僵尸轮防线）。 */
+const LIVE_ROUND: ResearchLiveRound = {
+  round_id: 'rs-busy',
+  wake_source: 'research',
+  prompt_md5: 'md5',
+  prompt_snapshot: 'prompt',
+  context_snapshot: 'ctx',
+  llm_raw: '',
+  started_at: Math.floor(Date.now() / 1000) - 10,
+  ended_at: null,
+  error: '',
+}
+
 const holder = vi.hoisted(() => ({
   getResearchReports: vi.fn(),
   getResearchReport: vi.fn(),
@@ -107,15 +124,20 @@ const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
 }))
 
-vi.mock('../api', () => ({
-  api: {
-    getResearchReports: (offset: number, limit: number) => holder.getResearchReports(offset, limit),
-    getResearchReport: (id: number) => holder.getResearchReport(id),
-    getRound: (roundId: string) => holder.getRound(roundId),
-    runResearch: (reportType?: string, hours?: number) => holder.runResearch(reportType, hours),
-    getResearchLive: () => holder.getResearchLive(),
-  },
-}))
+vi.mock('../api', async () => {
+  // 面板 runNow 的 catch 分支做 instanceof ApiError：mock 必须透出真实类，测试经 ../api/http 构造的实例才能命中
+  const { ApiError } = await import('../api/http')
+  return {
+    api: {
+      getResearchReports: (offset: number, limit: number) => holder.getResearchReports(offset, limit),
+      getResearchReport: (id: number) => holder.getResearchReport(id),
+      getRound: (roundId: string) => holder.getRound(roundId),
+      runResearch: (reportType?: string, hours?: number) => holder.runResearch(reportType, hours),
+      getResearchLive: () => holder.getResearchLive(),
+    },
+    ApiError,
+  }
+})
 
 vi.mock('../hooks/useWs', () => ({
   useWs: () => ({ connected: true, lastMessage: holder.lastMessage }),
@@ -155,11 +177,9 @@ beforeEach(() => {
   holder.getRound.mockResolvedValue(ROUND_DETAIL)
   holder.runResearch.mockResolvedValue({
     started: true,
-    ok: true,
-    reportId: 8,
-    roundId: 'rs-8',
-    assetCount: 2,
-    error: '',
+    reportType: 'manual',
+    hours: 24,
+    roundId: 'rs-live', // 预分配审计轮 ID：与下方联动用例的 WS 轮末事件 round_id 一致
   })
 })
 
@@ -194,21 +214,77 @@ describe('ResearchPanel(研报面板)', () => {
     expect(holder.getResearchReport).not.toHaveBeenCalledWith(7)
   })
 
-  it('生成研报成功后刷新第一页', async () => {
+  it('生成研报点火成功：提示已启动、按钮立即恢复且不主动刷新列表，ignite 事件携带预分配 roundId', async () => {
     render(<ResearchPanel />)
     await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
     const before = holder.getResearchReports.mock.calls.length
+    const igniteSpy = vi.fn()
+    window.addEventListener('research-round-ignite', igniteSpy)
     fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
-    expect(await screen.findByText('研报已生成，最新研报已入列')).toBeInTheDocument()
+    expect(await screen.findByText('研报已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runResearch).toHaveBeenCalledWith('manual', 24)
-    await waitFor(() => expect(holder.getResearchReports).toHaveBeenCalledTimes(before + 1))
+    // 点火事件 detail 携带 POST 预分配的审计轮 ID（状态条据此 pinned 绑定本轮）
+    expect(igniteSpy).toHaveBeenCalledTimes(1)
+    expect((igniteSpy.mock.calls[0][0] as CustomEvent).detail).toEqual({ roundId: 'rs-live' })
+    window.removeEventListener('research-round-ignite', igniteSpy)
+    // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
+    expect(screen.getByRole('button', { name: '生成研报' })).toBeEnabled()
+    expect(holder.getResearchReports).toHaveBeenCalledTimes(before)
   })
 
-  it('生成研报错误显示后端 detail', async () => {
+  it('生成研报 409（进行中）：按成功样式提示 ApiError.detail，不用错误红', async () => {
     holder.runResearch.mockRejectedValueOnce(new ApiError(409, '研报生成中'))
     render(<ResearchPanel />)
     fireEvent.click(await screen.findByRole('button', { name: '生成研报' }))
-    expect(await screen.findByText('研报生成中')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('研报生成中')
+    expect(alert.className).toContain('emerald')
+    expect(alert.className).not.toContain('rose')
+  })
+
+  it('生成研报 409 且状态条未激活：广播 catchup 事件让状态条经补漏找回进行中轮', async () => {
+    holder.runResearch.mockRejectedValueOnce(new ApiError(409, '研报生成中'))
+    render(<ResearchPanel />)
+    await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
+    expect(screen.queryByTestId('research-live-strip')).not.toBeInTheDocument()
+
+    // 他处（别的标签页/自动调度）已点火：/live 可见进行中轮；本页 WS 断线收不到 start 事件
+    holder.getResearchLive.mockResolvedValue({ round: LIVE_ROUND, tool_calls: [] })
+    fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('研报生成中')
+    expect(alert.className).toContain('emerald')
+    expect(await screen.findByTestId('research-live-strip')).toBeInTheDocument()
+  })
+
+  it('生成研报 503：红字展示 ApiError.detail（LLM 未配置）', async () => {
+    holder.runResearch.mockRejectedValueOnce(new ApiError(503, 'LLM 未配置'))
+    render(<ResearchPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '生成研报' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('LLM 未配置')
+    expect(alert.className).toContain('rose')
+  })
+
+  it('进度条联动：点火后状态条不经 WS 即激活，WS 轮结束事件后状态条消失、提示清空并自动刷新列表', async () => {
+    const { rerender } = render(<ResearchPanel />)
+    await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
+    expect(screen.queryByTestId('research-live-strip')).not.toBeInTheDocument()
+
+    // 点火：绿提示出现 + 状态条经 research-round-ignite 事件激活（覆盖 WS 断线窗口内点火场景）
+    fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
+    expect(await screen.findByText('研报已启动，进度见下方状态条')).toBeInTheDocument()
+    expect(await screen.findByTestId('research-live-strip')).toBeInTheDocument()
+
+    // WS 注入研报结束事件：状态条消失，onFinished（即 refreshToLatest）清提示并自动刷新研报列表
+    const callsBefore = holder.getResearchReports.mock.calls.length
+    holder.lastMessage = { type: 'research_round', data: { round_id: 'rs-live', ok: true } }
+    rerender(<ResearchPanel />)
+
+    await waitFor(() => expect(screen.queryByTestId('research-live-strip')).not.toBeInTheDocument())
+    await waitFor(() => expect(holder.getResearchReports).toHaveBeenCalledTimes(callsBefore + 1))
+    expect(screen.queryByText('研报已启动，进度见下方状态条')).not.toBeInTheDocument()
   })
 
   it('分页到第二页按 offset=5 拉取', async () => {

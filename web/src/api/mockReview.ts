@@ -2,7 +2,8 @@
  * 复盘/策略版本 mock：独立内存态（复盘报告、策略版本表、实时复盘轮状态）+ 8 个 ApiClient 方法实现，
  * 由 mock.ts 经 createReviewMock 装配进 mockApi，本模块独立维护复盘模拟状态。
  * 与后端契约对齐：报告列表 reportMd 截断 200 字符、版本列表不含 content、
- * 手动复盘立即出一份「未调整」报告（实时复盘轮随之翻转为已结束，演示进度条退出）、
+ * 手动复盘立即出一份「未调整」报告（每次点火实时复盘轮都重新进入进行中，
+ * 再被轮询翻转为已结束，演示进度条「激活→退出→onFinished」完整循环）、
  * 回滚 = 写回历史内容 + 记 rollback 新版本。
  */
 import { ApiError } from './http'
@@ -116,15 +117,20 @@ function seedVersions(currentStrategy: string): void {
   ]
 }
 
-/** 手动复盘：立即出一份「未调整」报告（最新在前），演示成功后列表刷新；实时复盘轮随之翻转为已结束。 */
-function runMockReview(): number {
+/** 手动复盘：立即出一份「未调整」报告（最新在前），演示列表刷新；实时复盘轮重新进入进行中（轮询后翻转已结束）。
+ *  返回新报告 ID、统计区间（Unix 秒）与本轮审计轮 ID（点火响应与 /live 进行中轮共用）。 */
+function runMockReview(): { id: number; periodStart: number; periodEnd: number; roundId: string } {
   const newId = Math.max(0, ...reviewReports.map((r) => r.id)) + 1
-  const end = Date.now()
-  liveRoundActive = false // 复盘完成：getReviewLive 改返已结束轮，进度条轮询发现后退出并触发列表自动刷新
+  const roundId = `rv-mock-${newId}`
+  const periodEnd = Math.floor(Date.now() / 1000)
+  const periodStart = periodEnd - 24 * 3600
+  liveRoundId = roundId // 点火后轮询见到的进行中轮即本轮（与点火响应 roundId 一致，同后端契约）
+  liveRoundActive = true // 每次点火重新进入进行中轮：前轮询返进行中，随后翻转已结束（演示进度条完整进出循环）
+  activePollsLeft = ACTIVE_POLLS_AFTER_IGNITE
   reviewReports.unshift({
     id: newId,
-    periodStart: new Date(end - 24 * 3600_000).toISOString(),
-    periodEnd: new Date(end).toISOString(),
+    periodStart: new Date(periodStart * 1000).toISOString(),
+    periodEnd: new Date(periodEnd * 1000).toISOString(),
     statsJson:
       '{"close_count":3,"total_pnl":"18.40","win_count":2,"win_rate":"0.6667","total_profit":"30.10","total_loss":"-11.70","profit_factor":"2.5726","avg_win":"15.05000000","avg_loss":"-11.70000000","max_loss":"-11.70","per_contract":{"BTC_USDT":{"count":3,"pnl":"18.40"}}}',
     reportMd:
@@ -132,14 +138,20 @@ function runMockReview(): number {
     strategyAction: 'none',
     newVersionId: null,
     error: '',
-    roundId: `rv-mock-${newId}`, // 与下方 runReview 返回的 roundId 自洽，演示新报告内嵌工具链
-    time: new Date(end).toISOString(),
+    roundId, // 非空 roundId：演示新报告内嵌工具链
+    time: new Date(periodEnd * 1000).toISOString(),
   })
-  return newId
+  return { id: newId, periodStart, periodEnd, roundId }
 }
 
-/** 复盘轮进行状态：默认进行中（演示进度条出现）；手动复盘完成后翻转为已结束（演示进度条退出 + 列表自动刷新） */
+/** 点火后进行中轮被轮询的次数预算：首次轮询返进行中，第 2 次起翻转已结束（演示进度条完整进出循环） */
+const ACTIVE_POLLS_AFTER_IGNITE = 2
+
+/** 复盘轮进行状态：默认进行中（演示进度条随挂载补漏出现）；该初始轮不自动翻转，直到首次手动复盘收尾 */
 let liveRoundActive = true
+let activePollsLeft = Number.POSITIVE_INFINITY
+/** 进行中复盘轮 ID：runReview 点火时换成本轮的预分配 ID（与点火响应 roundId 一致） */
+let liveRoundId = 'rv-live-mock'
 
 /**
  * 实时复盘审计轮样例（active=true 进行中 / false 已结束，工具链两种形态下都保留）。
@@ -152,7 +164,7 @@ function buildReviewLive(active: boolean): ReviewLive {
   const startedAt = Math.floor(Date.now() / 1000) - 18
   return {
     round: {
-      round_id: 'rv-live-mock',
+      round_id: liveRoundId,
       wake_source: 'review',
       prompt_md5: '7a1b2c3d4e5f60718293a4b5c6d7e8f9',
       prompt_snapshot: '# 复盘 Agent Prompt（md5: 7a1b…f9）\n\n你是复盘 Agent，只读分析最近交易并产出报告。',
@@ -206,18 +218,19 @@ export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef
       return reply({ ...report })
     },
     runReview: () => {
-      const newId = runMockReview()
-      return reply({
-        started: true,
-        ok: true,
-        reportId: newId,
-        roundId: `rv-mock-${newId}`,
-        strategyAction: 'none',
-        newVersionId: null,
-        error: '',
-      })
+      const { periodStart, periodEnd, roundId } = runMockReview()
+      // 点火契约：立即返回 started + 统计区间回显 + 预分配审计轮 ID（与随后 /live 进行中轮 round_id 一致，同后端契约）
+      return reply({ started: true, periodStart, periodEnd, roundId })
     },
-    getReviewLive: () => reply(buildReviewLive(liveRoundActive)),
+    getReviewLive: (roundId) => {
+      // 按 ID 直查：mock 只有一个实时轮，ID 不符即查无此轮（与后端契约一致：round null + 空工具链）
+      if (roundId !== undefined && roundId !== liveRoundId) return reply({ round: null, tool_calls: [] })
+      if (liveRoundActive) {
+        activePollsLeft -= 1
+        if (activePollsLeft <= 0) liveRoundActive = false
+      }
+      return reply(buildReviewLive(liveRoundActive))
+    },
     getStrategyVersions: () =>
       // 与后端契约一致：列表不含 content 全文（省流量）
       reply(

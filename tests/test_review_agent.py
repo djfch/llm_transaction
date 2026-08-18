@@ -7,6 +7,7 @@
 未配置零事件）、事件回调抛错容错（run 不受影响）。
 """
 
+import asyncio
 import json
 from collections import deque
 from decimal import Decimal
@@ -545,3 +546,656 @@ async def test_watchlist_hot_update_visible_to_review_agent(env, tmp_path):
     calls = await env.repo.list_audit_tool_calls(result["round_id"])
     assert len(calls) == 1 and calls[0].tool == "get_indicators"
     assert "不在 watchlist" not in calls[0].result_json  # 活引用：新合约不再被拦截
+
+
+class HangingProvider:
+    """chat 挂起的 provider 桩（模拟复盘生成进行中，供外部取消回归）。"""
+
+    def __init__(self) -> None:
+        """初始化进入事件。
+
+        参数：无
+
+        返回：
+            None，就地初始化 entered 事件，供测试等待 chat 真正开始
+        """
+        self.entered = asyncio.Event()
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        """标记进入后挂起，直至任务被取消（永不正常返回）。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            LLMResponse，永不返回；挂起只能被外部取消打断
+        """
+        self.entered.set()
+        await asyncio.sleep(60)  # 远超测试等待，仅取消可打断
+
+    def tool_result_message(self, call: ToolCall, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息（本桩不会走到）。
+
+        参数：
+            call: ToolCall，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool、call_id 与结果内容的工具消息
+        """
+        return {"role": "tool", "call_id": call.call_id, "content": result}
+
+
+async def test_run_external_cancel_lands_error_report_and_propagates(env):
+    """外部取消（如停机 shutdown）：失败收尾三件套齐全，取消原样传播。
+
+    断言：①error 报告落库；②审计轮 ended_at 非空且 error 含 CancelledError；
+    ③事件序列以 review_round ok=False 收尾；task 以 CancelledError 结束。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+    provider = HangingProvider()
+    agent = _make_agent(env, provider)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    await asyncio.wait_for(provider.entered.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "CancelledError: 复盘被取消"
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == "CancelledError: 复盘被取消"
+    # 轮始事件已发，尾部 review_round 带 ok=False（与 LLM 失败路径同构）
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}
+
+
+async def test_run_cancel_after_success_report_no_double_write(env, monkeypatch):
+    """成功报告落库后、finalization 阶段被取消：禁止双写失败报告，审计以成功闭合且仅一次。
+
+    在 end_round 处注入一次性取消（版本关联/end_round 窗口）：旧实现会经 _fail 再插
+    失败报告并把审计轮以 error 闭合，同一 round 成功/失败双写。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，替换 AuditTrail.end_round 注入取消
+
+    返回：
+        None，断言仅一份成功报告、审计成功闭合一次、事件以 ok=True 收尾
+    """
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n取消前已落库。", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    state = {"cancelled": False, "closed": 0}
+    real_end_round = AuditTrail.end_round
+
+    async def cancelling_end_round(self, round_id, llm_raw, error=""):
+        """首次调用向当前任务注入取消（真实闭合不发生），其后调用正常闭合。
+
+        参数：
+            self: AuditTrail，审计溯源实例
+            round_id: str，待结束的审计轮次编号
+            llm_raw: str | None，本轮 LLM 原始输出
+            error: str，需要记录的错误文本
+
+        返回：
+            None：首次调用在 sleep 处被 CancelledError 打断，后续调用转真实闭合
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)  # 取消在此送达，真实闭合不发生
+        state["closed"] += 1
+        await real_end_round(self, round_id, llm_raw, error)
+
+    monkeypatch.setattr(AuditTrail, "end_round", cancelling_end_round)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 同一 round 只有成功报告一份，无失败报告双写
+    assert reports[0].error == ""
+    assert reports[0].report_md == "# 复盘结论\n取消前已落库。"
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == ""  # 审计轮以成功语义闭合
+    assert state["closed"] == 1  # 真实闭合仅发生一次（由取消分支补闭合）
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+
+
+async def test_cancel_between_commit_and_return_rechecks_success(env, monkeypatch):
+    """取消掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」窗口：反查库识出已提交，禁止失败双写。
+
+    monkeypatch save_review_report 为一次性 fake：先调真实方法真实落库、再抛
+    CancelledError（模拟底层已提交但调用方收到取消、report_id 仍 None）。修复前
+    该场景会经 _fail 再写一份失败报告；修复后按 round_id 反查库改走成功收尾
+    （若修复正确 _fail 不会再被调用，fake 也不会再被触发）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，替换 save_review_report 注入落库后取消
+
+    返回：
+        None，断言取消传播、仅一份成功报告、审计成功闭合、ok=True 收尾、不告警
+    """
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    real_save = env.repo.review.save_review_report
+    state = {"fired": False}
+
+    async def committed_then_cancelled(*args, **kwargs):
+        """首次调用真实落库成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
+
+        参数：
+            args: tuple，save_review_report 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+
+        返回：
+            ReviewReport：首次调用不返回（抛取消）；其后调用委托真实方法返回落库报告
+
+        异常：
+            asyncio.CancelledError：首次调用真实落库后抛出，模拟取消送达时机
+        """
+        if not state["fired"]:
+            state["fired"] = True
+            await real_save(*args, **kwargs)
+            raise asyncio.CancelledError()
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_cancelled)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 成功报告已提交被反查识别：无失败报告双写
+    assert reports[0].error == ""
+    assert reports[0].report_md == "# 复盘结论\n提交成功但未返回。"
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == ""  # 审计轮以成功语义闭合
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
+
+
+async def test_cancel_recheck_db_failure_falls_back_to_fail(env, monkeypatch, caplog):
+    """取消收尾的反查自身失败（DB 抖动）：回落失败语义收尾，取消原样传播。
+
+    与 test_cancel_between_commit_and_return_rechecks_success 同场景（成功 COMMIT 已执行、
+    调用方收到取消），但 find_report_by_round_id 抛 RuntimeError：记日志后按「未提交」
+    处理，走 _fail 落失败报告——此时库内成功+失败各一份（可接受退化，优于静默丢轮），
+    日志须留下反查失败痕迹。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，注入落库后取消与反查失败
+        caplog: pytest.LogCaptureFixture，捕获反查失败日志
+
+    返回：
+        None，断言取消传播、失败报告落库、反查失败日志留痕
+    """
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    real_save = env.repo.review.save_review_report
+    state = {"fired": False}
+
+    async def committed_then_cancelled(*args, **kwargs):
+        """首次调用真实落库成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
+
+        参数：
+            args: tuple，save_review_report 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+
+        返回：
+            ReviewReport：首次调用不返回（抛取消）；其后调用委托真实方法返回落库报告
+
+        异常：
+            asyncio.CancelledError：首次调用真实落库后抛出，模拟取消送达时机
+        """
+        if not state["fired"]:
+            state["fired"] = True
+            await real_save(*args, **kwargs)
+            raise asyncio.CancelledError()
+        return await real_save(*args, **kwargs)
+
+    async def broken_find(round_id: str):
+        """模拟反查时数据库不可用。
+
+        参数：
+            round_id: str，待反查的审计轮次编号（本桩不使用）
+
+        返回：
+            None，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟反查查询失败
+        """
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_cancelled)
+    monkeypatch.setattr(env.repo.review, "find_report_by_round_id", broken_find)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    with caplog.at_level("ERROR", logger="src.review.agent"), pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    # 成功报告（fake 已提交）+ 失败报告（反查失败回落 _fail）各一份：可接受退化双写
+    assert total == 2
+    errors = {item.error for item in reports}
+    assert "CancelledError: 复盘被取消" in errors  # 失败报告来自 _fail 回落
+    assert "" in errors  # 成功报告仍在（反查失败不会抹掉已提交结果）
+    assert "反查成功报告失败" in caplog.text  # 反查失败留痕
+
+
+async def test_run_prompt_load_failure_lands_error_report(env, monkeypatch):
+    """提示词加载抛错（begin_round 前的初始化步骤）：ok=False 且失败报告落库，不向上抛。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，破坏提示词加载
+
+    返回：
+        None，断言失败报告落库、未开审计轮、零事件
+    """
+    provider = StubProvider([LLMResponse(text="不会用到", raw="raw-1")])
+    agent = _make_agent(env, provider)
+
+    def _broken_prompt(tool_docs: str):
+        """模拟提示词加载失败。
+
+        参数：
+            tool_docs: str，渲染后的工具说明（本桩不使用）
+
+        返回：
+            tuple[str, str]，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟提示词文件损坏
+        """
+        raise RuntimeError("提示词文件损坏")
+
+    monkeypatch.setattr(env.loader, "system_prompt", _broken_prompt)
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is False and "提示词文件损坏" in result["error"]
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "RuntimeError: 提示词文件损坏"
+    assert reports[0].round_id == ""  # begin_round 前失败：无审计轮关联
+    assert await env.repo.latest_audit_round("paper") is None  # 未开审计轮
+    assert env.events == []  # round_id 为空：零事件
+
+
+# ---------- 成功落库后被打断的补全收尾（_complete_interrupted） ----------
+
+
+def _dual_revision_provider() -> StubProvider:
+    """构造「提交策略修订 → 提交指标修订 → 最终文本」的复盘脚本。
+
+    参数：无
+
+    返回：
+        StubProvider，依次回放两个修订工具调用与最终文本的三段式 stub
+    """
+    new_prompt = "新策略书：" + "顺势加仓，严格止损。" * 10
+    return StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_strategy_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "收紧止损"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(
+                text="",
+                raw="raw-2",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_indicator_config",
+                        args={"shortlist": ["ema20"], "reason": "聚焦趋势"},
+                        call_id="c2",
+                    )
+                ],
+            ),
+            LLMResponse(text="双修订完成。", raw="raw-3"),
+        ]
+    )
+
+
+def _indicator_store(env, tmp_path) -> IndicatorConfigStore:
+    """构造只认 ema20/rsi14 的指标短名单存储（供双修订脚本使用）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象（取其 repo 落版本）
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        IndicatorConfigStore，绑定临时配置文件、仓储与合法键集合的存储实例
+    """
+    return IndicatorConfigStore(
+        tmp_path / "indicator_config.yaml", env.repo, valid_keys=frozenset({"ema20", "rsi14"})
+    )
+
+
+async def _assert_interrupted_success_cleanup(
+    env, round_id: str | None = None, *, strategy_linked: bool = True
+) -> None:
+    """断言补全收尾的共同不变量：单份成功报告、版本回填、审计成功闭合、ok=True 收尾。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        round_id: str | None，预期审计轮次编号；None 时不校验编号本身
+        strategy_linked: bool，策略版本是否应已回填 report_id（关联持续失败场景为 False）
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 同一 round 只有成功报告一份，无失败报告双写
+    assert reports[0].error == ""
+    strategy_versions = await env.repo.review.list_strategy_versions()
+    new_strategy = [v for v in strategy_versions if v.created_by == "review_agent"]
+    assert len(new_strategy) == 1
+    if strategy_linked:
+        assert new_strategy[0].report_id == reports[0].id  # 策略版本关联已补回填
+    else:
+        assert new_strategy[0].report_id is None  # 关联持续失败：留空只记日志，不反转结果
+    indicator_versions = await env.repo.indicator_config.list_versions()
+    assert len(indicator_versions) == 1
+    assert indicator_versions[0].report_id == reports[0].id  # 指标版本关联已补回填
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == ""  # 审计轮以成功语义闭合
+    if round_id is not None:
+        assert round_row.round_id == round_id
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+
+
+async def test_cancel_at_strategy_attach_replays_completion(env, tmp_path, monkeypatch):
+    """取消掐在策略版本 attach：补全收尾重放两个版本关联，审计成功闭合，取消原样传播。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，向策略版本 attach 注入一次性取消
+
+    返回：
+        None，断言取消传播且补全收尾副作用齐全
+    """
+    agent = _make_agent(
+        env, _dual_revision_provider(), indicator_config_store=_indicator_store(env, tmp_path)
+    )
+    real_attach = env.repo.review.attach_report_to_version
+    state = {"cancelled": False}
+
+    async def cancelling_attach(version_id, report_id):
+        """首次调用抛取消（真实关联不发生），其后调用转真实关联。
+
+        参数：
+            version_id: int，待关联的策略版本编号
+            report_id: int，已落库成功报告的编号
+
+        返回：
+            None：后续调用委托真实 attach 完成关联
+
+        异常：
+            asyncio.CancelledError：首次调用时模拟外部取消
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            raise asyncio.CancelledError()
+        await real_attach(version_id, report_id)
+
+    monkeypatch.setattr(env.repo.review, "attach_report_to_version", cancelling_attach)
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run(*_PERIOD)
+    await _assert_interrupted_success_cleanup(env)
+
+
+async def test_cancel_at_indicator_attach_replays_completion(env, tmp_path, monkeypatch):
+    """取消掐在指标版本 attach：策略关联已发生，补全收尾重放幂等关联后成功闭合。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，向指标版本 attach 注入一次性取消
+
+    返回：
+        None，断言取消传播且补全收尾副作用齐全
+    """
+    agent = _make_agent(
+        env, _dual_revision_provider(), indicator_config_store=_indicator_store(env, tmp_path)
+    )
+    real_attach = env.repo.indicator_config.attach_report_to_version
+    state = {"cancelled": False}
+
+    async def cancelling_attach(version_id, report_id):
+        """首次调用抛取消（真实关联不发生），其后调用转真实关联。
+
+        参数：
+            version_id: int，待关联的指标配置版本编号
+            report_id: int，已落库成功报告的编号
+
+        返回：
+            None：后续调用委托真实 attach 完成关联
+
+        异常：
+            asyncio.CancelledError：首次调用时模拟外部取消
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            raise asyncio.CancelledError()
+        await real_attach(version_id, report_id)
+
+    monkeypatch.setattr(env.repo.indicator_config, "attach_report_to_version", cancelling_attach)
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run(*_PERIOD)
+    await _assert_interrupted_success_cleanup(env)
+
+
+async def test_attach_runtime_error_returns_success_without_double_write(
+    env, tmp_path, monkeypatch
+):
+    """策略版本 attach 持续抛 RuntimeError：按成功语义补全返回 ok=True，禁止双写失败报告。
+
+    普通异常与取消同口径：补全收尾中重放仍失败只记日志（策略版本 report_id 留空），
+    指标版本关联补回放成功；不发成功告警、不落失败报告。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，向策略版本 attach 注入持续异常
+
+    返回：
+        None，断言成功返回、单份成功报告与审计成功闭合
+    """
+    agent = _make_agent(
+        env, _dual_revision_provider(), indicator_config_store=_indicator_store(env, tmp_path)
+    )
+
+    async def broken_attach(version_id, report_id):
+        """模拟版本关联持续失败。
+
+        参数：
+            version_id: int，待关联的策略版本编号
+            report_id: int，已落库成功报告的编号
+
+        返回：
+            None，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟数据库抖动导致关联失败
+        """
+        raise RuntimeError("关联写入抖动")
+
+    monkeypatch.setattr(env.repo.review, "attach_report_to_version", broken_attach)
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True and result["strategy_action"] == "rewrite"
+    await _assert_interrupted_success_cleanup(env, result["round_id"], strategy_linked=False)
+    assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
+
+
+async def test_snapshot_write_failure_is_non_fatal(env, monkeypatch):
+    """审计 JSON 快照写盘失败（OSError）降级为日志：run 成功、审计轮成功闭合不改写。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，向 AuditTrail._write_snapshot 注入 OSError
+
+    返回：
+        None，断言 run 成功、单份成功报告、审计轮以成功闭合
+    """
+
+    async def broken_snapshot(self, round_id):
+        """模拟快照写盘失败。
+
+        参数：
+            self: AuditTrail，审计溯源实例
+            round_id: str，待写快照的审计轮次编号
+
+        返回：
+            None，永不返回；固定抛错
+
+        异常：
+            OSError：模拟磁盘满或权限不足
+        """
+        raise OSError("磁盘满")
+
+    monkeypatch.setattr(AuditTrail, "_write_snapshot", broken_snapshot)
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n快照失败无妨。", raw="raw-1")])
+    result = await _make_agent(env, provider).run(*_PERIOD)
+    assert result["ok"] is True
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1 and reports[0].error == ""
+    round_row = await env.repo.get_audit_round(result["round_id"])
+    assert round_row.ended_at is not None and round_row.error == ""  # 已提交结果不被反转
+
+
+async def test_cancel_in_begin_round_commit_window_claims_round(env, monkeypatch):
+    """取消掐在 begin_round「COMMIT 已执行、await 未返回」窗口：认领预分配轮，失败收尾正常闭合审计。
+
+    monkeypatch begin_round 为 fake：先调真实方法真实建轮（COMMIT 已执行）、再抛
+    CancelledError（模拟 await 未返回即被取消、局部 round_id 仍 ""）。修复前 _fail
+    因 round_id 为空只落失败报告、不 end_round：审计轮 ended_at 永久为 null 且无
+    轮末事件；修复后按预分配编号反查认领，失败报告 + end_round + ok=False 轮末事件
+    齐全（begin_round 未正常返回，故无轮始事件）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，替换 AuditTrail.begin_round 注入提交后取消
+
+    返回：
+        None，断言取消传播、恰好一份失败报告、审计轮以取消错误闭合、轮末 ok=False 事件与失败告警
+    """
+    provider = StubProvider([LLMResponse(text="不会用到", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    real_begin = AuditTrail.begin_round
+
+    async def committed_then_cancelled_begin(*args, **kwargs):
+        """真实建轮后抛取消（模拟 begin_round 内部 COMMIT 已执行、await 未返回的窗口）。
+
+        参数：
+            args: tuple，begin_round 的位置参数，原样透传真实方法
+            kwargs: dict，begin_round 的关键字参数，原样透传真实方法
+
+        返回：
+            str：永不返回；固定抛取消
+
+        异常：
+            asyncio.CancelledError：真实建轮提交后抛出，模拟取消送达时机
+        """
+        await real_begin(*args, **kwargs)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(AuditTrail, "begin_round", committed_then_cancelled_begin)
+    task = asyncio.create_task(agent.run(*_PERIOD, round_id="pre-review-1"))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 恰好一份失败报告（带预分配轮次编号），无重复落库
+    assert reports[0].error == "CancelledError: 复盘被取消"
+    assert reports[0].round_id == "pre-review-1"
+    round_row = await env.repo.get_audit_round("pre-review-1")
+    assert round_row is not None and round_row.ended_at is not None  # 认领后正常闭合
+    assert round_row.error == "CancelledError: 复盘被取消"
+    # begin_round 未返回故无轮始事件；轮末 ok=False 事件由认领后的 _fail 补发
+    assert [e["type"] for e in env.events] == ["review_round"]
+    assert env.events[0]["data"] == {"round_id": "pre-review-1", "ok": False}
+    assert len(env.alerts) == 1 and "复盘失败" in env.alerts[0]  # 失败告警照常发送
+
+
+async def test_save_post_commit_exception_recovers_success(env, monkeypatch):
+    """成功报告 COMMIT 后、保存函数未返回时抛普通异常：反查识出已提交，按成功语义收尾不双写。
+
+    monkeypatch save_review_report 为一次性 fake：先调真实方法真实落库、再抛
+    RuntimeError（模拟 COMMIT 已执行、返回前失败、report_id 仍 None）。修复前
+    except Exception 分支会经 _fail 再写一份失败报告；修复后与取消同口径反查，
+    按成功语义补全收尾并返回成功结果。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，替换 save_review_report 注入落库后普通异常
+
+    返回：
+        None，断言恰好一份成功报告、审计成功闭合、返回成功语义结果、零告警
+    """
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    real_save = env.repo.review.save_review_report
+    state = {"fired": False}
+
+    async def committed_then_raise(*args, **kwargs):
+        """首次调用真实落库成功后抛普通异常（模拟 COMMIT 已执行、保存函数未返回的窗口）。
+
+        参数：
+            args: tuple，save_review_report 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+
+        返回：
+            ReviewReport：首次调用不返回（抛普通异常）；其后调用委托真实方法返回落库报告
+
+        异常：
+            RuntimeError：首次调用真实落库后抛出，模拟 post-commit 失败
+        """
+        if not state["fired"]:
+            state["fired"] = True
+            await real_save(*args, **kwargs)
+            raise RuntimeError("post-commit failure")
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_raise)
+    result = await agent.run(*_PERIOD)
+
+    assert result["ok"] is True
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 成功报告已提交被反查识别：无失败报告双写
+    assert reports[0].error == ""
+    assert reports[0].report_md == "# 复盘结论\n提交成功但未返回。"
+    assert result["report_id"] == reports[0].id
+    assert result["strategy_action"] == "none"
+    assert result["new_version_id"] is None
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == ""  # 审计轮以成功语义闭合
+    assert result["round_id"] == round_row.round_id
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警

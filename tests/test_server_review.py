@@ -186,6 +186,36 @@ async def test_review_live_returns_latest_review_round(repo: Repo, tmp_path: Pat
         assert body2["round"]["round_id"] == "rv1"
 
 
+async def test_review_live_by_round_id(repo: Repo, tmp_path: Path):
+    """?round_id= 直查：指定轮优先于最新轮；查无或异类轮（wake_source 不符）按空态返回。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言指定轮命中带 tool_calls、查无此轮与异类轮均返回空态
+    """
+    await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
+    )
+    await repo.start_audit_round("rv2", "paper", wake_source="review", started_at=2000.0)
+    await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=3000.0)
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        # 指定已存在轮：即使存在更新的复盘轮（rv2）也返回指定轮及其 tool_calls
+        body = (await c.get("/api/review/live", params={"round_id": "rv1"})).json()
+        assert body["round"]["round_id"] == "rv1"
+        assert body["round"]["wake_source"] == "review"
+        assert [tc["seq"] for tc in body["tool_calls"]] == [1]
+        # 查无此轮：空态（HTTP 仍 200，供前端 pinned 轮询）
+        missing = (await c.get("/api/review/live", params={"round_id": "no-such"})).json()
+        assert missing == {"round": None, "tool_calls": []}
+        # 异类 wake_source（研报轮）：同样按空态返回，不跨台
+        other = (await c.get("/api/review/live", params={"round_id": "rs1"})).json()
+        assert other == {"round": None, "tool_calls": []}
+
+
 # ---------- POST /api/review/run ----------
 
 
@@ -229,14 +259,19 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
         }
 
     async def _ok() -> dict:
-        """模拟复盘成功启动并生成报告。
+        """模拟复盘点火成功（后台执行，响应不含执行结果字段）。
 
         参数：无
 
         返回：
-            dict，包含固定报告编号的成功结果
+            dict，点火成功的假结果（started + 预分配 round_id + 回显区间）
         """
-        return {"started": True, "ok": True, "report_id": 1}
+        return {
+            "started": True,
+            "period_start": 1000.0,
+            "period_end": 2000.0,
+            "round_id": "ef" * 16,
+        }
 
     async with _client_of(_deps(repo, tmp_path, review_run=_busy)) as c:
         assert (await c.post("/api/review/run")).status_code == 409
@@ -245,7 +280,12 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, review_run=_ok)) as c:
         r = await c.post("/api/review/run")
         assert r.status_code == 200
-        assert r.json()["started"] is True and r.json()["ok"] is True
+        assert r.json() == {  # 点火即返回：started + 预分配 round_id + 回显区间，不含执行结果
+            "started": True,
+            "period_start": 1000.0,
+            "period_end": 2000.0,
+            "round_id": "ef" * 16,
+        }
 
 
 async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
@@ -261,16 +301,21 @@ async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
     calls: list[dict] = []
 
     async def _run(**kwargs) -> dict:
-        """记录复盘区间参数并返回递增报告编号。
+        """记录复盘区间参数并返回点火结果。
 
         参数：
             kwargs: dict，路由透传的 period_start(开始时间)与 period_end(结束时间)
 
         返回：
-            dict，表示复盘成功且报告编号等于调用次数
+            dict，点火成功的假结果（started + 回显区间，缺省走调度默认区间）
         """
         calls.append(kwargs)
-        return {"started": True, "ok": True, "report_id": len(calls)}
+        return {
+            "started": True,
+            "period_start": kwargs.get("period_start", 0.0),
+            "period_end": kwargs.get("period_end", 0.0),
+            "round_id": "01" * 16,  # 预分配轮次编号（契约键，原样透传）
+        }
 
     async def _invalid(**kwargs) -> dict:
         """模拟复盘调度器拒绝非法时间区间。
@@ -285,7 +330,13 @@ async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
 
     async with _client_of(_deps(repo, tmp_path, review_run=_run)) as c:
         r = await c.post("/api/review/run", json={"start_ts": 1000.0, "end_ts": 2000.0})
-        assert r.status_code == 200 and r.json()["report_id"] == 1
+        assert r.status_code == 200
+        assert r.json() == {  # 点火回显区间 + 预分配 round_id，不含执行结果
+            "started": True,
+            "period_start": 1000.0,
+            "period_end": 2000.0,
+            "round_id": "01" * 16,
+        }
         assert calls == [{"period_start": 1000.0, "period_end": 2000.0}]  # 区间透传
         r = await c.post("/api/review/run")  # 无 body：维持昨日区间（无参回调）
         assert r.status_code == 200 and calls[-1] == {}

@@ -8,9 +8,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.config import FixedTimeSchedule, ResearchConfig, Settings
+from src.config import AuditConfig, FixedTimeSchedule, ResearchConfig, Settings
+from src.audit.trail import AuditTrail
 from src.memory import Database, Repo
+from src.research.agent import ResearchAgent
 from src.research.calendars import CalendarRefreshResult
+from src.research.prompts import ResearchPromptLoader
+from src.research.providers.base import ResearchDataProvider
 from src.research.scheduler import ResearchScheduler
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -20,7 +24,7 @@ class StubAgent:
     """记录调用并返回固定成功结果的研报 Agent 边界桩。"""
 
     def __init__(self) -> None:
-        """初始化空调用记录。
+        """初始化空调用记录与已配置 LLM 标记。
 
         参数：无
 
@@ -28,18 +32,24 @@ class StubAgent:
             None：就地创建调用列表
         """
         self.calls: list[dict] = []
+        self.round_ids: list[str | None] = []  # 每次 run 收到的预分配 round_id（自动调度为 None）
+        self.llm_configured = True
 
-    async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-        """记录报告类型和回看小时并返回成功结果。
+    async def run(
+        self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
+    ) -> dict:
+        """记录报告类型、回看小时与预分配轮次编号并返回成功结果。
 
         参数：
             report_type: str，研报类型
             hours: int，回看小时数
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
 
         返回：
             dict：固定成功结果
         """
         self.calls.append({"report_type": report_type, "hours": hours})
+        self.round_ids.append(round_id)
         return {"ok": True, "report_id": 1, "round_id": "r1", "direction": "中性"}
 
 
@@ -192,6 +202,7 @@ async def test_market_presets_fire_at_exact_utc8_minute(repo: Repo, stamp: float
     scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
     await scheduler.tick(stamp)
     assert agent.calls == [{"report_type": report_type, "hours": 24}]
+    assert agent.round_ids == [None]  # 自动调度不预分配轮次编号（仅手动点火预分配）
 
 
 async def test_missed_minute_is_not_backfilled(repo: Repo):
@@ -502,44 +513,336 @@ async def test_accidental_same_minute_collision_runs_only_first(repo: Repo):
     assert agent.calls == [{"report_type": "asia_open", "hours": 24}]
 
 
-async def test_run_now_busy_success_and_no_llm(repo: Repo):
-    """手动触发保持忙、成功与 LLM 未配置三种公开结果。
+async def test_start_now_returns_immediately_and_runs_in_background(repo: Repo):
+    """点火即返回：start_now 返回 started=True 时 Agent 尚未执行，后台任务结束后调用发生。
 
     参数：
         repo: Repo，隔离仓储
 
     返回：
-        None：断言手动入口兼容原契约
+        None：断言点火契约与后台任务完成后的 Agent 调用
     """
     agent = StubAgent()
     scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
-    result = await scheduler.run_now(report_type="event", hours=12)
-    assert result["started"] is True
+    result = await scheduler.start_now(report_type="event", hours=12)
+    round_id = result.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
+    assert result == {"started": True, "report_type": "event", "hours": 12}
+    assert agent.calls == []  # 点火返回时后台任务尚未执行
+    assert scheduler._manual_task is not None
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert agent.round_ids == [round_id]  # 后台 agent.run 收到同一轮次身份
+    assert not scheduler._lock.locked()  # 后台任务收尾释放锁
 
+
+async def test_start_now_busy_and_no_llm_are_synchronous(repo: Repo):
+    """锁占用同步返回 busy、未配置 LLM 同步返回 llm_not_configured，均不点火。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言两条同步失败路径不起后台任务
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
     await scheduler._lock.acquire()
     try:
-        assert (await scheduler.run_now())["error_code"] == "busy"
+        busy = await scheduler.start_now()
     finally:
         scheduler._lock.release()
+    assert busy["started"] is False
+    assert busy["error_code"] == "busy"
 
-    class NoLlmAgent:
-        """返回 LLM 未配置结果的边界桩。"""
+    agent.llm_configured = False
+    no_llm = await scheduler.start_now()
+    assert no_llm["started"] is False
+    assert no_llm["error_code"] == "llm_not_configured"
+    assert scheduler._manual_task is None
+    assert agent.calls == []
 
-        async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-            """返回结构化 LLM 未配置失败。
 
-            参数：
-                report_type: str，研报类型
-                hours: int，回看小时数
+class BlockingAgent:
+    """run 挂起直至测试释放的研报 Agent 边界桩（模拟生成进行中）。"""
 
-            返回：
-                dict：llm_not_configured 失败结果
-            """
-            return {"ok": False, "error": "未配置", "error_code": "llm_not_configured"}
+    def __init__(self) -> None:
+        """初始化调用记录、开始与释放事件。
 
-    no_llm = ResearchScheduler(_settings(), NoLlmAgent(), repo, calendar=StubCalendar())
-    assert (await no_llm.run_now())["started"] is False
+        参数：无
+
+        返回：
+            None：就地初始化事件与已配置 LLM 标记
+        """
+        self.calls: list[dict] = []
+        self.round_ids: list[str | None] = []  # 每次 run 收到的预分配 round_id
+        self.llm_configured = True
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled_cleanup = False
+
+    async def run(
+        self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
+    ) -> dict:
+        """记录调用、标记开始并挂起，直到测试释放后返回成功结果。
+
+        参数：
+            report_type: str，研报类型
+            hours: int，回看小时数
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
+
+        返回：
+            dict：固定成功结果
+
+        异常：
+            asyncio.CancelledError：外部取消时镜像真实 agent 的取消收尾契约
+            （此处以标记代副作用）后原样抛出
+        """
+        self.calls.append({"report_type": report_type, "hours": hours})
+        self.round_ids.append(round_id)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled_cleanup = True  # 镜像真实 agent 的取消收尾契约
+            raise
+        return {"ok": True, "report_id": 1, "round_id": "r1"}
+
+
+async def test_start_now_background_survives_caller_cancellation(repo: Repo):
+    """取消不变量（断连回归）：点火后取消调用方任务，后台生成仍跑完。
+
+    模拟 HTTP 断连：调用方协程点火后挂起（如保持连接），被取消时后台任务不受影响。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言调用方被取消而后台研报执行到底
+    """
+    agent = BlockingAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    outcome: dict = {}
+
+    async def http_like_call() -> None:
+        """模拟请求处理：点火后挂起等待连接生命周期结束。
+
+        参数：无
+
+        返回：
+            None：点火结果写入 outcome 后永久挂起，直至被取消
+        """
+        outcome["result"] = await scheduler.start_now(report_type="event", hours=12)
+        await asyncio.Event().wait()  # 模拟响应发送/连接保持：挂起直到断连取消
+
+    request = asyncio.create_task(http_like_call())
+    await agent.started.wait()
+    fired = dict(outcome["result"])
+    round_id = fired.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
+    assert fired == {"started": True, "report_type": "event", "hours": 12}
+    request.cancel()  # 浏览器断连：请求任务被取消
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    assert scheduler._manual_task is not None and not scheduler._manual_task.done()
+    agent.release.set()
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert agent.round_ids == [round_id]  # 断连后后台任务仍持同一轮次身份跑完
+    assert not scheduler._lock.locked()
+
+
+async def test_shutdown_cancels_running_manual_task(repo: Repo, caplog: pytest.LogCaptureFixture):
+    """shutdown 取消进行中的后台任务：任务以取消态收尾、释放锁且无未捕获噪音。
+
+    参数：
+        repo: Repo，隔离仓储
+        caplog: pytest.LogCaptureFixture，日志捕获夹具
+
+    返回：
+        None：断言任务呈取消态、取消抵达 agent 且收尾在 shutdown 返回前完成、锁释放
+    """
+    agent = BlockingAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    fired = await scheduler.start_now()
+    await agent.started.wait()
+    task = scheduler._manual_task
+    assert task is not None
+
+    with caplog.at_level("INFO", logger="src.research.scheduler"):
+        await scheduler.shutdown()
+
+    assert task.done()
+    assert task.cancelled()  # 取消语义保留：_run_manual 原样传播，shutdown gather 取回
+    assert agent.cancelled_cleanup  # 取消抵达 agent.run，且其收尾在 shutdown 返回前完成
+    assert not scheduler._lock.locked()
+    assert "手动研报后台任务被取消" in caplog.text
+    # 补记钉住：BlockingAgent 桩不触库（无审计轮、无报告），shutdown 补记唯一的取消终态；
+    # 生产真实 agent 首个 DB 写即 begin_round，补记的审计轮判重闸会拦截、不会走到这
+    reports, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "手动研报在开始执行前被关机取消"
+    assert reports[0].round_id == fired["round_id"]
+    found = await repo.research.find_report_by_round_id(fired["round_id"])
+    assert found is not None and found.id == reports[0].id
+    await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
+
+
+async def test_shutdown_before_manual_task_first_execution(repo: Repo):
+    """点火后不等待任何执行立即 shutdown：锁从未持有、预留由 done 回调清理，且补记取消终态。
+
+    后台任务在首次执行前被取消时协程体不进入；旧实现锁由调用方任务持有后跨任务转移，
+    该窗口下 finally 不执行 → 锁永久 locked、之后点火永远 busy。此外 begin_round 从未
+    运行、agent 未留痕，shutdown 须为预分配轮次补写一条「关机取消」失败报告；
+    正常执行完的轮 shutdown 早退，不产生额外记录。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言任务取消态、锁未持有、预留清除、补记取消终态、再次点火正常
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    result = await scheduler.start_now()
+    assert result["started"] is True
+    assert scheduler._manual_reserved is True  # 点火即置预留
+    second = await scheduler.start_now()  # 预留期间再点火：同步 busy，不排队
+    assert second["started"] is False and second["error_code"] == "busy"
+
+    await scheduler.shutdown()
+
+    task = scheduler._manual_task
+    assert task is not None and task.cancelled()  # 首次执行前被取消，协程体未进入
+    assert agent.calls == []
+    assert not scheduler._lock.locked()  # 锁从未持有，无泄漏
+    assert scheduler._manual_reserved is False  # done 回调清理预留
+    # 关机补记取消终态：预分配轮次留一条失败报告（begin_round 从未运行，agent 未留痕）
+    reports, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "手动研报在开始执行前被关机取消"
+    assert reports[0].round_id == result["round_id"]
+    assert reports[0].report_type == "manual"
+    again = await scheduler.start_now()  # 预留已清：可再次正常点火
+    assert again["started"] is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "manual", "hours": 24}]
+    assert not scheduler._lock.locked()
+    # 正常执行完的轮（StubAgent 不落库）：任务已 done，shutdown 早退不产生额外记录
+    await scheduler.shutdown()
+    reports, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+
+
+async def test_manual_task_completion_releases_lock_and_reservation(repo: Repo):
+    """点火后等任务真正跑完：锁释放、预留清除。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言后台任务完成后 Agent 调用发生且锁与预留均已释放
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    await scheduler.start_now(report_type="event", hours=12)
+    assert scheduler._manual_reserved is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert not scheduler._lock.locked()
+    assert scheduler._manual_reserved is False
+
+
+class HangingResearchProvider:
+    """chat 挂起的 provider 桩（模拟真实 ResearchAgent 生成进行中，供 shutdown 取消回归）。"""
+
+    def __init__(self) -> None:
+        """初始化进入事件。
+
+        参数：无
+
+        返回：
+            None：就地初始化 entered 事件，供测试等待 chat 真正开始
+        """
+        self.entered = asyncio.Event()
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> dict:
+        """标记进入后挂起，直至任务被取消（永不正常返回）。
+
+        参数：
+            system: str，传给 LLM 的系统提示词
+            messages: list[dict]，传给 LLM 的消息历史
+            tools: list[dict]，传给 LLM 的工具定义
+
+        返回：
+            dict，永不返回；挂起只能被外部取消打断
+        """
+        self.entered.set()
+        await asyncio.sleep(60)  # 远超测试等待，仅取消可打断
+
+    def tool_result_message(self, call: object, result: str) -> dict:
+        """把工具调用结果封装为模拟提供商消息（本桩不会走到）。
+
+        参数：
+            call: object，待封装的工具调用
+            result: str，工具执行结果文本
+
+        返回：
+            dict，包含 role=tool 与结果内容的工具消息
+        """
+        return {"role": "tool", "content": result}
+
+
+async def test_shutdown_cancel_finishes_real_agent_cleanup(repo: Repo, tmp_path: Path):
+    """shutdown 取消进行中手动研报：真实 ResearchAgent 完成取消收尾（预分配轮终态唯一）。
+
+    全链路：start_now 点火 → provider 挂起（LLM 调用进行中）→ shutdown 取消 →
+    断言 ①agent 取消收尾落唯一失败报告（error 含 CancelledError，round_id 为预分配值）、
+    ②审计轮以 error 闭合、③事件序列以 research_round ok=False 收尾；
+    begin_round 已跑，shutdown 补记的审计轮判重闸拦截、不产生第二条记录。
+
+    参数：
+        repo: Repo，隔离仓储
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言取消态与失败收尾副作用同时成立且无补记双写
+    """
+    events: list[dict] = []
+    settings = _settings(False)
+    provider = HangingResearchProvider()
+    agent = ResearchAgent(
+        settings=settings,
+        provider=provider,
+        repo=repo,
+        audit=AuditTrail(repo, AuditConfig(dir=str(tmp_path / "audit"))),
+        prompt_loader=ResearchPromptLoader(tmp_path / "research_prompt.md"),
+        data_provider=ResearchDataProvider(),  # 空装配：预注入优雅降级，chat 前不触网
+        watchlist=("BTC_USDT",),
+        notify_event=events.append,
+        max_turns=10,
+        timeout_seconds=60,
+    )
+    scheduler = ResearchScheduler(settings, agent, repo, calendar=StubCalendar())
+    fired = await scheduler.start_now()
+    await asyncio.wait_for(provider.entered.wait(), timeout=1)
+    task = scheduler._manual_task
+    assert task is not None
+
+    await scheduler.shutdown()
+
+    assert task.cancelled()
+    assert not scheduler._lock.locked()
+    reports, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1  # agent 取消收尾落唯一失败报告；补记被判重闸拦截，无双写
+    assert reports[0].error == "CancelledError: 研报被取消"
+    assert reports[0].round_id == fired["round_id"]
+    round_row = await repo.get_audit_round(fired["round_id"])
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == "CancelledError: 研报被取消"
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}
 
 
 async def test_schedule_status_exposes_next_run_and_calendar(repo: Repo):
@@ -622,7 +925,7 @@ async def test_auto_tick_claims_execution_before_first_await():
     automatic = asyncio.create_task(scheduler.tick(_bj(2026, 8, 17, 7, 30)))
     await history.entered.wait()
 
-    manual = await scheduler.run_now()
+    manual = await scheduler.start_now()
     history.release.set()
     await automatic
 

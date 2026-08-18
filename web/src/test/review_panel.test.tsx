@@ -1,13 +1,15 @@
 /**
  * 复盘报告面板测试：列表渲染（时间/复盘区间/动作徽标/error 红字）、展开详情
- * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」成功刷新
- * 与 409/503 的 ApiError.detail 提示、服务端分页、工具调用链内嵌
+ * （statsJson 统计表格 + reportMd 全文，字段缺失降级）、「立即复盘」点火提示
+ * （点火即返回，review-round-ignite 事件激活状态条，结果经状态条 onFinished 刷新）、
+ * 409（成功样式 + 广播 review-round-catchup 让状态条补漏激活）/503（错误红）的 ApiError.detail 提示、
+ * 服务端分页、工具调用链内嵌
  * （roundId 非空 lazy 拉取 getRound；空串 = 老报告灰字降级且不拉取）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/http'
-import type { ReviewReport, ReviewReportSummary, RoundDetail, WsMessage } from '../api/types'
+import type { ReviewLiveRound, ReviewReport, ReviewReportSummary, RoundDetail, WsMessage } from '../api/types'
 import ReviewPanel from '../components/console/ReviewPanel'
 
 const iso = (unixSec: number) => new Date(unixSec * 1000).toISOString()
@@ -93,6 +95,20 @@ const ROUND_DETAIL: RoundDetail = {
   strategyMd5: '',
 }
 
+/** 进行中的复盘轮（/api/review/live 形状）：409 catchup 补漏联动用例用（started_at 贴近当前，避免触发僵尸轮防线）。 */
+const LIVE_ROUND: ReviewLiveRound = {
+  round_id: 'rv-busy',
+  wake_source: 'review',
+  prompt_md5: 'md5',
+  prompt_snapshot: 'prompt',
+  context_snapshot: 'ctx',
+  llm_raw: '',
+  strategy_md5: 's-md5',
+  started_at: Math.floor(Date.now() / 1000) - 10,
+  ended_at: null,
+  error: '',
+}
+
 const holder = vi.hoisted(() => ({
   getReviewReports: vi.fn(),
   getReviewReport: vi.fn(),
@@ -101,15 +117,20 @@ const holder = vi.hoisted(() => ({
   getReviewLive: vi.fn(),
   lastMessage: null as WsMessage | null,
 }))
-vi.mock('../api', () => ({
-  api: {
-    getReviewReports: (offset: number, limit: number) => holder.getReviewReports(offset, limit),
-    getReviewReport: (id: number) => holder.getReviewReport(id),
-    getRound: (roundId: string) => holder.getRound(roundId),
-    runReview: () => holder.runReview(),
-    getReviewLive: () => holder.getReviewLive(),
-  },
-}))
+vi.mock('../api', async () => {
+  // 面板 runNow 的 catch 分支做 instanceof ApiError：mock 必须透出真实类，测试经 ../api/http 构造的实例才能命中
+  const { ApiError } = await import('../api/http')
+  return {
+    api: {
+      getReviewReports: (offset: number, limit: number) => holder.getReviewReports(offset, limit),
+      getReviewReport: (id: number) => holder.getReviewReport(id),
+      getRound: (roundId: string) => holder.getRound(roundId),
+      runReview: () => holder.runReview(),
+      getReviewLive: () => holder.getReviewLive(),
+    },
+    ApiError,
+  }
+})
 
 // ReviewLiveStrip 经 useWs 订阅复盘事件；lastMessage 经 holder 可控派发（默认 null 无消息，进度条隐藏）
 vi.mock('../hooks/useWs', () => ({
@@ -134,12 +155,9 @@ beforeEach(() => {
   holder.runReview.mockImplementation(() =>
     Promise.resolve({
       started: true,
-      ok: true,
-      reportId: 8,
-      roundId: 'rv-8',
-      strategyAction: 'none',
-      newVersionId: null,
-      error: '',
+      periodStart: 1784505600,
+      periodEnd: 1784592000,
+      roundId: 'rv-ignite', // 预分配审计轮 ID：与下方联动用例的 WS 轮末事件 round_id 一致
     }),
   )
   // 默认给任意 roundId 返回同一份审计详情（id6 展开即触发）
@@ -249,57 +267,85 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(holder.getRound).not.toHaveBeenCalled()
   })
 
-  it('立即复盘成功：提示成功并刷新列表', async () => {
+  it('立即复盘点火成功：提示已启动、按钮立即恢复且不主动刷新列表，ignite 事件携带预分配 roundId', async () => {
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
     const callsBefore = holder.getReviewReports.mock.calls.length
+    const igniteSpy = vi.fn()
+    window.addEventListener('review-round-ignite', igniteSpy)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('复盘已完成，最新报告已入列')).toBeInTheDocument()
+    expect(await screen.findByText('复盘已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runReview).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
+    // 点火事件 detail 携带 POST 预分配的审计轮 ID（状态条据此 pinned 绑定本轮）
+    expect(igniteSpy).toHaveBeenCalledTimes(1)
+    expect((igniteSpy.mock.calls[0][0] as CustomEvent).detail).toEqual({ roundId: 'rv-ignite' })
+    window.removeEventListener('review-round-ignite', igniteSpy)
+    // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
+    expect(screen.getByRole('button', { name: '立即复盘' })).toBeEnabled()
+    expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore)
   })
 
-  it('立即复盘 409：展示 ApiError.detail（复盘进行中）', async () => {
+  it('立即复盘 409（进行中）：按成功样式提示 ApiError.detail，不用错误红', async () => {
     holder.runReview.mockRejectedValueOnce(new ApiError(409, '复盘进行中'))
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('复盘进行中')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('复盘进行中')
+    expect(alert.className).toContain('emerald')
+    expect(alert.className).not.toContain('rose')
   })
 
-  it('立即复盘 503：展示 ApiError.detail（LLM 未配置）', async () => {
+  it('立即复盘 409 且状态条未激活：广播 catchup 事件让状态条经补漏找回进行中轮', async () => {
+    holder.runReview.mockRejectedValueOnce(new ApiError(409, '复盘进行中'))
+    render(<ReviewPanel />)
+    await screen.findByText(/第 5 份报告/)
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+
+    // 他处（别的标签页/自动调度）已点火：/live 可见进行中轮；本页 WS 断线收不到 start 事件
+    holder.getReviewLive.mockResolvedValue({ round: LIVE_ROUND, tool_calls: [] })
+    fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('复盘进行中')
+    expect(alert.className).toContain('emerald')
+    expect(await screen.findByTestId('review-live-strip')).toBeInTheDocument()
+  })
+
+  it('立即复盘 503：红字展示 ApiError.detail（LLM 未配置）', async () => {
     holder.runReview.mockRejectedValueOnce(new ApiError(503, 'LLM 未配置'))
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
-    expect(await screen.findByText('LLM 未配置')).toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('LLM 未配置')
+    expect(alert.className).toContain('rose')
   })
 
-  it('立即复盘返回 started=true 但 ok=false（复盘执行失败）：红色提示失败原因且仍刷新列表', async () => {
-    // 后端路由仅把「LLM 未配置」「复盘进行中」映 503/409，其余失败以 200 返回 ok=false（失败报告已落库）
-    holder.runReview.mockResolvedValueOnce({
-      started: true,
-      ok: false,
-      reportId: 8,
-      roundId: 'rv-8',
-      strategyAction: 'none',
-      newVersionId: null,
-      error: 'LLM 调用异常',
-    })
-    render(<ReviewPanel />)
+  it('点火联动：点火后状态条不经 WS 即激活，WS 轮结束事件后状态条消失、提示清空并自动刷新列表', async () => {
+    const { rerender } = render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
-    const callsBefore = holder.getReviewReports.mock.calls.length
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
 
+    // 点火：绿提示出现 + 状态条经 review-round-ignite 事件激活（覆盖 WS 断线窗口内点火场景）
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
+    expect(await screen.findByText('复盘已启动，进度见下方状态条')).toBeInTheDocument()
+    expect(await screen.findByTestId('review-live-strip')).toBeInTheDocument()
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('复盘失败：LLM 调用异常')
+    // WS 注入复盘结束事件：状态条消失，onFinished（即 refreshToLatest）清提示并自动刷新报告列表
+    const callsBefore = holder.getReviewReports.mock.calls.length
+    holder.lastMessage = { type: 'review_round', data: { round_id: 'rv-ignite', ok: true } }
+    rerender(<ReviewPanel />)
+
+    await waitFor(() => expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument())
     await waitFor(() => expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore + 1))
+    expect(screen.queryByText('复盘已启动，进度见下方状态条')).not.toBeInTheDocument()
   })
 
   it('分页：下一页拉取 offset=5 并渲染第二页内容', async () => {
