@@ -659,6 +659,59 @@ async def test_shutdown_cancels_running_manual_task(repo: Repo, caplog: pytest.L
     await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
 
 
+async def test_shutdown_before_manual_task_first_execution(repo: Repo):
+    """点火后不等待任何执行立即 shutdown：锁从未持有、预留由 done 回调清理（锁泄漏回归）。
+
+    后台任务在首次执行前被取消时协程体不进入；旧实现锁由调用方任务持有后跨任务转移，
+    该窗口下 finally 不执行 → 锁永久 locked、之后点火永远 busy。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言任务取消态、锁未持有、预留清除、再次点火正常
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    result = await scheduler.start_now()
+    assert result["started"] is True
+    assert scheduler._manual_reserved is True  # 点火即置预留
+    second = await scheduler.start_now()  # 预留期间再点火：同步 busy，不排队
+    assert second["started"] is False and second["error_code"] == "busy"
+
+    await scheduler.shutdown()
+
+    task = scheduler._manual_task
+    assert task is not None and task.cancelled()  # 首次执行前被取消，协程体未进入
+    assert agent.calls == []
+    assert not scheduler._lock.locked()  # 锁从未持有，无泄漏
+    assert scheduler._manual_reserved is False  # done 回调清理预留
+    again = await scheduler.start_now()  # 预留已清：可再次正常点火
+    assert again["started"] is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "manual", "hours": 24}]
+    assert not scheduler._lock.locked()
+
+
+async def test_manual_task_completion_releases_lock_and_reservation(repo: Repo):
+    """点火后等任务真正跑完：锁释放、预留清除。
+
+    参数：
+        repo: Repo，隔离仓储
+
+    返回：
+        None：断言后台任务完成后 Agent 调用发生且锁与预留均已释放
+    """
+    agent = StubAgent()
+    scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
+    await scheduler.start_now(report_type="event", hours=12)
+    assert scheduler._manual_reserved is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert not scheduler._lock.locked()
+    assert scheduler._manual_reserved is False
+
+
 async def test_schedule_status_exposes_next_run_and_calendar(repo: Repo):
     """调度状态返回总开关、各项下一次 UTC+8 时间和日历健康状态。
 

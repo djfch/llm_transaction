@@ -1560,3 +1560,144 @@ async def test_v2_round_saves_every_whitelist_asset(
     views = await repo.research.list_asset_views_by_report(report.id)
     assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
     assert json.loads(views[0].market_context_json)["contract"] == "BTC_USDT"
+
+
+async def test_cancel_after_success_persist_no_double_write(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """成功研报落库后、finalization 阶段被取消：禁止双写失败报告，审计以成功闭合且仅一次。
+
+    在 end_round 处注入一次性取消（因果链回填/end_round 窗口）：旧实现会经 _fail 再插
+    失败报告并把审计轮以 error 闭合，同一 round 成功/失败双写。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，替换 AuditTrail.end_round 注入取消
+
+    返回：
+        None，断言仅一份成功研报、审计成功闭合一次、事件以 ok=True 收尾
+    """
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
+    state = {"cancelled": False, "closed": 0}
+    real_end_round = AuditTrail.end_round
+
+    async def cancelling_end_round(self, round_id, llm_raw, error=""):
+        """首次调用向当前任务注入取消（真实闭合不发生），其后调用正常闭合。
+
+        参数：
+            self: AuditTrail，审计溯源实例
+            round_id: str，待结束的审计轮次编号
+            llm_raw: str | None，本轮 LLM 原始输出
+            error: str，需要记录的错误文本
+
+        返回：
+            None：首次调用在 sleep 处被 CancelledError 打断，后续调用转真实闭合
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)  # 取消在此送达，真实闭合不发生
+        state["closed"] += 1
+        await real_end_round(self, round_id, llm_raw, error)
+
+    monkeypatch.setattr(AuditTrail, "end_round", cancelling_end_round)
+    task = asyncio.create_task(agent.run(report_type="us"))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    items, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1  # 同一 round 只有成功研报一份，无失败报告双写
+    assert items[0].error == ""
+    audit_round = await repo.latest_audit_round("paper")
+    assert audit_round is not None and audit_round.ended_at is not None
+    assert audit_round.error == ""  # 审计轮以成功语义闭合
+    assert state["closed"] == 1  # 真实闭合仅发生一次（由取消分支补闭合）
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": True}
+
+
+async def test_prompt_load_failure_lands_failed_report(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """提示词加载抛错（begin_round 前的初始化步骤）：ok=False 且失败报告落库，不向上抛。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，破坏提示词加载
+
+    返回：
+        None，断言失败报告落库、未开审计轮、零事件
+    """
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
+
+    def _broken_prompt(self, tool_docs: str):
+        """模拟提示词加载失败（类级补丁，首参为实例）。
+
+        参数：
+            self: ResearchPromptLoader，提示词加载器实例（本桩不使用）
+            tool_docs: str，渲染后的工具说明文本（本桩不使用）
+
+        返回：
+            tuple[str, str]，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟提示词文件缺失
+        """
+        raise RuntimeError("提示词文件缺失")
+
+    monkeypatch.setattr(ResearchPromptLoader, "system_prompt", _broken_prompt)
+    result = await agent.run()
+    assert result["ok"] is False and "提示词文件缺失" in result["error"]
+    items, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+    assert items[0].error == "RuntimeError: 提示词文件缺失"
+    assert items[0].round_id == ""  # begin_round 前失败：无审计轮关联
+    assert await repo.latest_audit_round("paper") is None  # 未开审计轮
+    assert events == []  # round_id 为空：零事件
+
+
+async def test_deps_construction_failure_lands_failed_report(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """deps 构造抛错（曾在 try 外逃逸仅留日志）：ok=False 且失败报告落库，不向上抛。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，破坏工具依赖装配
+
+    返回：
+        None，断言失败报告落库、未开审计轮、零事件
+    """
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
+
+    def _broken_deps(**kwargs):
+        """模拟工具依赖装配失败。
+
+        参数：
+            kwargs: dict，依赖装配参数（本桩不使用）
+
+        返回：
+            ResearchToolDeps，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟数据源装配失败
+        """
+        raise RuntimeError("数据源装配失败")
+
+    monkeypatch.setattr("src.research.agent.ResearchToolDeps", _broken_deps)
+    result = await agent.run()
+    assert result["ok"] is False and "数据源装配失败" in result["error"]
+    items, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+    assert items[0].error == "RuntimeError: 数据源装配失败"
+    assert await repo.latest_audit_round("paper") is None  # 未开审计轮
+    assert events == []  # round_id 为空：零事件

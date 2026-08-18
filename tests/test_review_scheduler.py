@@ -3,7 +3,8 @@
 覆盖：到点触发（enabled 且 latest None）、间隔内不重复（latest 距今不足 interval_days）、
 disabled 跳过、未到点跳过、锁占用时巡检跳过、巡检持锁时 start_now 同步 busy 不排队、
 start_now 点火即返回（后台任务执行）、锁占用/未配置 LLM/区间非法的同步失败路径、
-断连取消不变量、shutdown 取消（桩级取消语义 + 真实 ReviewAgent 取消收尾副作用）。
+断连取消不变量、shutdown 取消（桩级取消语义 + 真实 ReviewAgent 取消收尾副作用）、
+点火后首次执行前 shutdown 的取消窗口（锁/预留无泄漏）、任务跑完释放锁与预留。
 """
 
 import asyncio
@@ -462,6 +463,60 @@ async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCapt
     assert not scheduler._lock.locked()
     assert "手动复盘后台任务被取消" in caplog.text
     await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
+
+
+async def test_shutdown_before_manual_task_first_execution(repo):
+    """点火后不等待任何执行立即 shutdown：锁从未持有、预留由 done 回调清理（锁泄漏回归）。
+
+    后台任务在首次执行前被取消时协程体不进入；旧实现锁由调用方任务持有后跨任务转移，
+    该窗口下 finally 不执行 → 锁永久 locked、之后点火永远 busy。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言任务取消态、锁未持有、预留清除、再次点火正常
+    """
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    result = await scheduler.start_now()
+    assert result["started"] is True
+    assert scheduler._manual_reserved is True  # 点火即置预留
+    second = await scheduler.start_now()  # 预留期间再点火：同步 busy，不排队
+    assert second["started"] is False and second["error_code"] == "busy"
+
+    await scheduler.shutdown()
+
+    task = scheduler._manual_task
+    assert task is not None and task.cancelled()  # 首次执行前被取消，协程体未进入
+    assert agent.calls == []
+    assert not scheduler._lock.locked()  # 锁从未持有，无泄漏
+    assert scheduler._manual_reserved is False  # done 回调清理预留
+    again = await scheduler.start_now()  # 预留已清：可再次正常点火
+    assert again["started"] is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert len(agent.calls) == 1
+    assert not scheduler._lock.locked()
+
+
+async def test_manual_task_completion_releases_lock_and_reservation(repo):
+    """点火后等任务真正跑完：锁释放、预留清除。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言后台任务完成后 agent 调用发生且锁与预留均已释放
+    """
+    agent = StubAgent()
+    scheduler = ReviewScheduler(_settings(), agent, repo)
+    day_start = local_day_start(time.time())
+    await scheduler.start_now()
+    assert scheduler._manual_reserved is True
+    await asyncio.wait_for(scheduler._manual_task, timeout=1)
+    assert agent.calls == [(day_start - 86400, day_start)]
+    assert not scheduler._lock.locked()
+    assert scheduler._manual_reserved is False
 
 
 async def test_shutdown_cancel_finishes_real_agent_cleanup(repo, tmp_path):

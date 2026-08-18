@@ -11,7 +11,11 @@
 - WS 事件（notify_event 注入时）：begin_round 后 research_round_start、审计轮结束
   research_round（ok 随成败，_fail 路径 ok=False）；事件失败只记日志；provider None 早退零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 返回 {'ok': False}，
-  绝不向上抛，确保研报失败不影响交易决策循环；
+  绝不向上抛，确保研报失败不影响交易决策循环；唯独外部取消（asyncio.CancelledError，
+  如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消走同一失败收尾，
+  成功报告落库后取消禁止双写失败报告，补成功审计闭合与 ok=True 轮末事件后抛出；
+- 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
+  不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
   src.agent.providers.base.LLMProvider 协议一致，生产由 bootstrap 复用同一实例）。
 """
@@ -155,7 +159,8 @@ class ResearchAgent:
             dict：执行一次研报。失败返回 {'ok': False, 'error': ...}，绝不向上抛
 
         异常：
-        asyncio.CancelledError：外部取消研报任务时完成失败收尾后原样抛出
+            asyncio.CancelledError：外部取消研报任务时完成收尾后原样抛出；
+            成功报告已落库时按成功语义收尾（禁止双写失败报告），否则按失败语义收尾
         """
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次研报")
@@ -163,17 +168,22 @@ class ResearchAgent:
         expected_contracts = tuple(self._watchlist)
         if not 1 <= hours <= 48:  # L10：与工具层同口径
             return {"ok": False, "error": f"参数错误：hours 须在 1-48 之间（当前 {hours}）"}
-        deps = ResearchToolDeps(
-            provider=self._data_provider,
-            market_data=self._market_data,
-            watchlist_snapshot=expected_contracts,
-            repo=self._repo,
-            mode=self._settings.mode,
-        )
-        registry = ResearchToolRegistry(deps)
         raw_parts: list[str] = []
         round_id = ""
+        report_id: int | None = None  # 成功报告落库后置位：取消收尾据此禁止双写失败报告
+        audit_closed = False  # end_round 成功后置位：取消收尾据此补成功闭合（幂等）
         try:
+            # 初始化（deps/registry/prompt 加载）入 try：可预见失败落入 _fail 落失败报告，
+            # 不再逃逸为仅日志；begin_round 自身失败（如 DB 不可用）时 round_id 为空，
+            # _fail 跳过审计与事件仅落失败报告——此残余边界只记日志，见 _fail
+            deps = ResearchToolDeps(
+                provider=self._data_provider,
+                market_data=self._market_data,
+                watchlist_snapshot=expected_contracts,
+                repo=self._repo,
+                mode=self._settings.mode,
+            )
+            registry = ResearchToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
             round_id = await self._audit.begin_round(self._settings.mode, "research", full_prompt)
             await self._emit_event({"type": "research_round_start", "data": {"round_id": round_id}})
@@ -183,31 +193,26 @@ class ResearchAgent:
                 full_prompt, briefing, registry, round_id, raw_parts
             )
             # JSON 重试会放大该阶段调用数，与工具循环同受超时保险丝约束
-            payload = await wait_with_raw(
-                self._parse_json_with_retry(
-                    full_prompt,
-                    ask_messages,
-                    registry,
-                    round_id,
-                    deps,
-                    expected_contracts,
-                    raw_parts,
-                    text,
-                ),
-                self._timeout,
-                self._audit,
+            retry = self._parse_json_with_retry(
+                full_prompt,
+                ask_messages,
+                registry,
                 round_id,
+                deps,
+                expected_contracts,
                 raw_parts,
+                text,
             )
+            payload = await wait_with_raw(retry, self._timeout, self._audit, round_id, raw_parts)
             report, asset_count = await persist_payload(
-                self._repo,
-                report_type=report_type,
-                payload=payload,
-                round_id=round_id,
-                deps=deps,
+                self._repo, report_type=report_type, payload=payload, round_id=round_id, deps=deps
             )
+            report_id = report.id
+            # 收尾（因果链回填 + end_round）可被取消打断：report_id 已置位，
+            # 取消分支按成功语义补闭合审计轮（audit_closed 此时仍为 False）
             links_saved = await self._flush_causal_links(deps, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
+            audit_closed = True
             await self._emit_event(
                 {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
             )
@@ -220,8 +225,22 @@ class ResearchAgent:
             )
             return success_result(report, round_id, asset_count)
         except asyncio.CancelledError:
-            # 外部取消：落 error 报告收尾审计后重新抛出（保持 asyncio 取消语义，M6）
-            await self._fail(round_id, raw_parts, report_type, asyncio.CancelledError("研报被取消"))
+            # 外部取消（保持 asyncio 取消语义，M6）：成功报告未落库走失败收尾；
+            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补收尾
+            if report_id is None:
+                await self._fail(
+                    round_id, raw_parts, report_type, asyncio.CancelledError("研报被取消")
+                )
+                raise
+            if not audit_closed:  # end_round 被打断：以成功语义补闭合（幂等）
+                try:
+                    await self._audit.end_round(round_id, "\n".join(raw_parts))
+                except Exception:  # 补闭合自身失败只记日志，不掩盖待传播的取消
+                    logger.exception("研报取消收尾补闭合审计轮失败（继续抛出取消）")
+            # 补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
+            await self._emit_event(
+                {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
+            )
             raise
         except Exception as e:
             return await self._fail(round_id, raw_parts, report_type, e)
@@ -475,9 +494,7 @@ class ResearchAgent:
         logger.exception("研报失败：%s", error)
         try:
             await self._repo.research.save_failed_report(
-                report_type=report_type,
-                error=error,
-                round_id=round_id,
+                report_type=report_type, error=error, round_id=round_id
             )
         except Exception:
             logger.exception("研报失败报告落库失败（继续返回失败结果）")

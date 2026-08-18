@@ -4,8 +4,9 @@
   已满 interval_days 则触发「最近 interval_days 天（对齐当日 00:00）」区间；
   幂等以 review_reports 落库记录（latest_review_period_end）为准，重启不重复；
 - start_now：手动触发（点火即返回，后台任务执行，HTTP 断连不影响生成）；无参维持最近
-  interval_days 天区间，有参（人工补跑历史区间）校验后按指定区间跑；与定时触发共用
-  同一把锁，进行中同步返回忙（server 层映 409），不排队等锁；
+  interval_days 天区间，有参（人工补跑历史区间）校验后按指定区间跑；后台任务与定时触发
+  共用同一把锁（点火到取锁的窗口由预留标志补位），进行中同步返回忙（server 层映 409），
+  不排队等锁；
 - 单次触发异常吞掉记日志，护住巡检循环（复盘失败不影响交易决策循环）。
 """
 
@@ -80,12 +81,15 @@ class ReviewScheduler:
             repo: Repo，持久化仓库（经 review 子仓库读取上次复盘区间，用于落库幂等判定）
 
         返回：
-            None，就地初始化调度器依赖、asyncio 防重入锁与手动后台任务引用
+            None，就地初始化调度器依赖、asyncio 防重入锁、手动点火预留标志与后台任务引用
         """
         self._settings = settings
         self._agent = agent
         self._repo = repo
         self._lock = asyncio.Lock()
+        # 手动点火预留：start_now 同步置位、后台任务 done 回调清位；
+        # 覆盖点火到任务取锁之间的窗口，替代已废弃的调用方持锁跨任务转移
+        self._manual_reserved = False
         self._manual_task: asyncio.Task[None] | None = None
 
     async def run_forever(self) -> None:
@@ -123,8 +127,8 @@ class ReviewScheduler:
         # 隐含无夏令时假设，中国时区成立）
         if latest is not None and day_start - local_day_start(latest) < span:
             return  # 距上次复盘未满间隔天数（落库幂等，重启不重复）
-        if self._lock.locked():
-            return  # 手动触发进行中：跳过本次，下一分钟巡检再试
+        if self._manual_reserved or self._lock.locked():
+            return  # 手动触发进行中（含已点火未取锁的预留窗口）：跳过本次，下一分钟巡检再试
         async with self._lock:
             await self._agent.run(day_start - span, day_start)
 
@@ -136,6 +140,9 @@ class ReviewScheduler:
         无参维持最近 interval_days 天区间；有参（人工补跑历史区间）先校验
         （数字且 start < end），非法同步返回 error_code='invalid_period'（server 层映 422），
         不点火。生成进度与结果经 WS 事件、/live 轮询与报告列表呈现，不在本调用中等待。
+        执行权采用「预留标志 + 任务内自取锁」两段式：本方法只同步校验并置预留标志，
+        自身不做任何 await 锁操作——锁不再由调用方任务持有后转移给后台任务，
+        杜绝点火后、任务首次执行前被取消导致的锁永久占用。
 
         参数：
             period_start: float | None，复盘区间起点
@@ -158,16 +165,35 @@ class ReviewScheduler:
             }
         if not self._agent.llm_configured:
             return {"started": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
-        if self._lock.locked():
+        if self._manual_reserved or self._lock.locked():
             return {"started": False, "error": "复盘进行中", "error_code": "busy"}
-        # asyncio.Lock 在未占用时会同步取得锁；必须在首次让出前占有执行权，
-        # 否则定时巡检可在让出窗口抢锁，本任务随后排队等锁，破坏不排队语义。
-        await self._lock.acquire()
-        self._manual_task = asyncio.create_task(self._run_manual(period_start, period_end))
+        # busy 判定与置预留在同一同步段内完成（同一事件循环内原子，不让出执行权）：
+        # 定时巡检看到预留即跳过，不会在预留与后台任务取锁之间插队，
+        # 不排队语义与原先的持锁模式等价。
+        self._manual_reserved = True
+        task = asyncio.create_task(self._run_manual(period_start, period_end))
+        # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
+        task.add_done_callback(self._release_manual_reservation)
+        self._manual_task = task
         return {"started": True, "period_start": period_start, "period_end": period_end}
 
+    def _release_manual_reservation(self, _task: asyncio.Task[None]) -> None:
+        """手动后台任务完成回调：无条件清除点火预留标志。
+
+        参数：
+            _task: asyncio.Task[None]，已结束（含异常/取消）的手动后台任务，本回调不读取
+
+        返回：
+            None：就地清除预留标志；任务以任何方式结束事件循环都会触发本回调，
+            预留标志永不泄漏
+        """
+        self._manual_reserved = False
+
     async def _run_manual(self, period_start: float, period_end: float) -> None:
-        """后台执行手动复盘：finally 释放锁；取消原样抛出，意外异常记日志就地取回。
+        """后台执行手动复盘：任务内自取锁包住 agent.run；取消原样抛出，意外异常记日志就地取回。
+
+        锁只在协程体内由本任务持有：任务在首次执行前被取消时协程体根本不进入，
+        锁从未持有、无需释放（点火预留标志由 start_now 注册的 done 回调清理）。
 
         参数：
             period_start: float，复盘区间起点
@@ -178,19 +204,19 @@ class ReviewScheduler:
             杜绝 never-retrieved 噪音
 
         异常：
-            asyncio.CancelledError：取消（如停机 shutdown）记日志后原样抛出，保留取消
-            语义（task.cancelled() 为真）；由 shutdown 的 gather(return_exceptions=True)
-            取回，不刷 never-retrieved 噪音
+            asyncio.CancelledError：执行中被取消（如停机 shutdown）记日志后原样抛出，
+            保留取消语义（task.cancelled() 为真）；已持有的锁由 async with 退出释放；
+            取消结果由 shutdown 的 gather(return_exceptions=True) 取回，不刷
+            never-retrieved 噪音
         """
         try:
-            await self._agent.run(period_start, period_end)
+            async with self._lock:
+                await self._agent.run(period_start, period_end)
         except asyncio.CancelledError:
             logger.info("手动复盘后台任务被取消（period_start=%s）", period_start)
             raise
         except Exception:
             logger.exception("手动复盘后台任务异常（period_start=%s）", period_start)
-        finally:
-            self._lock.release()
 
     async def shutdown(self) -> None:
         """取消进行中的手动后台任务并等待其收尾（停机序列调用，须在数据库关闭前）。

@@ -618,3 +618,95 @@ async def test_run_external_cancel_lands_error_report_and_propagates(env):
     # 轮始事件已发，尾部 review_round 带 ok=False（与 LLM 失败路径同构）
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
     assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}
+
+
+async def test_run_cancel_after_success_report_no_double_write(env, monkeypatch):
+    """成功报告落库后、finalization 阶段被取消：禁止双写失败报告，审计以成功闭合且仅一次。
+
+    在 end_round 处注入一次性取消（版本关联/end_round 窗口）：旧实现会经 _fail 再插
+    失败报告并把审计轮以 error 闭合，同一 round 成功/失败双写。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，替换 AuditTrail.end_round 注入取消
+
+    返回：
+        None，断言仅一份成功报告、审计成功闭合一次、事件以 ok=True 收尾
+    """
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n取消前已落库。", raw="raw-1")])
+    agent = _make_agent(env, provider)
+    state = {"cancelled": False, "closed": 0}
+    real_end_round = AuditTrail.end_round
+
+    async def cancelling_end_round(self, round_id, llm_raw, error=""):
+        """首次调用向当前任务注入取消（真实闭合不发生），其后调用正常闭合。
+
+        参数：
+            self: AuditTrail，审计溯源实例
+            round_id: str，待结束的审计轮次编号
+            llm_raw: str | None，本轮 LLM 原始输出
+            error: str，需要记录的错误文本
+
+        返回：
+            None：首次调用在 sleep 处被 CancelledError 打断，后续调用转真实闭合
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)  # 取消在此送达，真实闭合不发生
+        state["closed"] += 1
+        await real_end_round(self, round_id, llm_raw, error)
+
+    monkeypatch.setattr(AuditTrail, "end_round", cancelling_end_round)
+    task = asyncio.create_task(agent.run(*_PERIOD))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 同一 round 只有成功报告一份，无失败报告双写
+    assert reports[0].error == ""
+    assert reports[0].report_md == "# 复盘结论\n取消前已落库。"
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None
+    assert round_row.error == ""  # 审计轮以成功语义闭合
+    assert state["closed"] == 1  # 真实闭合仅发生一次（由取消分支补闭合）
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+
+
+async def test_run_prompt_load_failure_lands_error_report(env, monkeypatch):
+    """提示词加载抛错（begin_round 前的初始化步骤）：ok=False 且失败报告落库，不向上抛。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        monkeypatch: pytest.MonkeyPatch，破坏提示词加载
+
+    返回：
+        None，断言失败报告落库、未开审计轮、零事件
+    """
+    provider = StubProvider([LLMResponse(text="不会用到", raw="raw-1")])
+    agent = _make_agent(env, provider)
+
+    def _broken_prompt(tool_docs: str):
+        """模拟提示词加载失败。
+
+        参数：
+            tool_docs: str，渲染后的工具说明（本桩不使用）
+
+        返回：
+            tuple[str, str]，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟提示词文件损坏
+        """
+        raise RuntimeError("提示词文件损坏")
+
+    monkeypatch.setattr(env.loader, "system_prompt", _broken_prompt)
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is False and "提示词文件损坏" in result["error"]
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "RuntimeError: 提示词文件损坏"
+    assert reports[0].round_id == ""  # begin_round 前失败：无审计轮关联
+    assert await env.repo.latest_audit_round("paper") is None  # 未开审计轮
+    assert env.events == []  # round_id 为空：零事件
