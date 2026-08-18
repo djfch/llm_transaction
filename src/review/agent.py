@@ -10,8 +10,11 @@
   事件失败只记日志绝不影响复盘；provider None 提前返回时零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 失败告警，返回 {'ok': False}，
   绝不向上抛，确保复盘失败不影响交易决策循环；唯独外部取消（asyncio.CancelledError，
-  如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消走同一失败收尾，
-  成功报告落库后取消禁止双写失败报告，补成功审计闭合与 ok=True 轮末事件后抛出；
+  如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
+  成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
+  补齐剩余幂等收尾（策略/指标版本关联重放 + 成功闭合审计 + ok=True 轮末事件），
+  取消随后原样抛出、普通异常按成功结果返回；审计 JSON 快照写入失败降级为日志
+  （SQLite 主表已是真相），不反转已提交结果；
 - 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
   不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -31,6 +34,7 @@ from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
 from src.config import Settings
 from src.market.indicator_service import IndicatorService
+from src.memory.models import ReviewReport
 from src.memory.repo import Repo
 from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader, render_tool_docs
@@ -193,12 +197,16 @@ class ReviewAgent:
         """
         return self._provider is not None
 
-    async def run(self, period_start: float, period_end: float) -> dict:
+    async def run(
+        self, period_start: float, period_end: float, *, round_id: str | None = None
+    ) -> dict:
         """执行一次完整复盘并保存报告、版本关联与审计记录。
 
         参数：
             period_start: float，复盘区间起始 Unix 秒时间戳
             period_end: float，复盘区间结束 Unix 秒时间戳
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
+                （点火响应与 WS 轮始事件同一身份）；None 时由审计层自动生成
 
         返回：
             dict，成功时包含报告、审计轮和策略版本信息；失败时包含错误与失败报告编号
@@ -210,10 +218,11 @@ class ReviewAgent:
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次复盘")
             return {"ok": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
+        preallocated = round_id  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
         raw_parts: list[str] = []
         round_id = ""
-        report_id: int | None = None  # 成功报告落库后置位：取消收尾据此禁止双写失败报告
-        audit_closed = False  # end_round 成功后置位：取消收尾据此补成功闭合（幂等）
+        report_id: int | None = None  # 成功报告落库后置位：收尾据此禁止双写失败报告
+        audit_closed = False  # end_round 成功后置位：打断收尾据此补成功闭合（幂等）
         try:
             # 初始化（deps/registry/prompt 加载）入 try：可预见失败落入 _fail 落失败报告，
             # 不再逃逸为仅日志；begin_round 自身失败（如 DB 不可用）时 round_id 为空，
@@ -228,7 +237,9 @@ class ReviewAgent:
             )
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
-            round_id = await self._audit.begin_round(self._settings.mode, "review", full_prompt)
+            round_id = await self._audit.begin_round(
+                self._settings.mode, "review", full_prompt, round_id=preallocated
+            )
             await self._emit_event({"type": "review_round_start", "data": {"round_id": round_id}})
             stats_text, stats_json = await self._pre_stats(period_start, period_end)
             briefing = self._build_briefing(period_start, period_end, stats_text)
@@ -250,7 +261,7 @@ class ReviewAgent:
             audit_closed = True
         except asyncio.CancelledError:
             # 外部取消（保持 asyncio 取消语义）：成功报告未落库走失败收尾；
-            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补收尾
+            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾
             if report_id is None:
                 await self._fail(
                     round_id,
@@ -260,20 +271,20 @@ class ReviewAgent:
                     asyncio.CancelledError("复盘被取消"),
                 )
             else:
-                await self._close_success_on_cancel(round_id, raw_parts, audit_closed)
+                await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
             raise
         except Exception as e:
-            return await self._fail(round_id, raw_parts, period_start, period_end, e)
+            if report_id is None:
+                return await self._fail(round_id, raw_parts, period_start, period_end, e)
+            # 成功报告落库后的普通异常（如版本关联失败）：与取消同口径按成功语义补全，
+            # 不发成功告警、不写失败报告，返回与正常成功一致的结果
+            logger.exception("复盘成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
+            await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
+            return _success_result(report, round_id)
         await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
         await self._notify(_success_alert(report_md, deps.created_version_id))
         logger.info("复盘完成 report_id=%s action=%s", report.id, report.strategy_action)
-        return {
-            "ok": True,
-            "report_id": report.id,
-            "round_id": round_id,
-            "strategy_action": report.strategy_action,
-            "new_version_id": report.new_version_id,
-        }
+        return _success_result(report, round_id)
 
     async def _finalize_success(
         self, deps: ReviewToolDeps, report_id: int, round_id: str, raw_parts: list[str]
@@ -287,8 +298,8 @@ class ReviewAgent:
             raw_parts: list[str]，本轮已累计的 LLM 原始输出
 
         返回：
-            None：版本关联与审计轮闭合就地完成；此间被取消时由 run 的取消分支
-            以成功语义补闭合审计轮
+            None：版本关联与审计轮闭合就地完成；此间被打断（取消/异常）时由 run 的
+            对应分支经 _complete_interrupted 以成功语义补全剩余收尾
         """
         if deps.created_version_id is not None:
             await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
@@ -298,25 +309,53 @@ class ReviewAgent:
             )
         await self._audit.end_round(round_id, "\n".join(raw_parts))
 
-    async def _close_success_on_cancel(
-        self, round_id: str, raw_parts: list[str], audit_closed: bool
+    async def _complete_interrupted(
+        self,
+        deps: ReviewToolDeps,
+        report_id: int,
+        round_id: str,
+        raw_parts: list[str],
+        audit_closed: bool,
     ) -> None:
-        """成功报告落库后被取消的收尾：禁止写失败报告，补成功审计闭合与 ok=True 轮末事件。
+        """成功报告落库后被打断（取消或普通异常）的补全收尾：重放幂等关联 + 成功闭合审计 + ok=True 事件。
+
+        attach_report_to_version 是幂等 UPDATE，打断点可能落在任一 attach 之前/之中/之后，
+        无法也无须区分，两个版本关联无条件重放；重放失败只记日志（版本 report_id 留空
+        可由下轮复盘重新关联），绝不反写失败报告。
 
         参数：
+            deps: ReviewToolDeps，本轮工具依赖（读取其创建的策略/指标版本 id）
+            report_id: int，已落库成功报告的编号
             round_id: str，本轮审计轮次编号
             raw_parts: list[str]，本轮已累计的 LLM 原始输出
             audit_closed: bool，审计轮是否已正常闭合；未闭合时以成功语义补 end_round
 
         返回：
-            None：审计轮按需以成功语义补闭合（补闭合自身失败只记日志，不掩盖待传播的
-            取消），并补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
+            None：就地补齐版本关联与审计闭合（各自失败只记日志，不掩盖待传播的取消），
+            并补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
         """
+        if deps.created_version_id is not None:
+            try:
+                await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
+            except Exception:
+                logger.exception(
+                    "复盘收尾补关联策略版本失败（version_id=%s）", deps.created_version_id
+                )
+        if deps.indicator_config_version_id is not None:  # 指标短名单版本同模式补关联
+            try:
+                await self._repo.indicator_config.attach_report_to_version(
+                    deps.indicator_config_version_id, report_id
+                )
+            except Exception:
+                logger.exception(
+                    "复盘收尾补关联指标版本失败（version_id=%s）",
+                    deps.indicator_config_version_id,
+                )
         if not audit_closed:
             try:
                 await self._audit.end_round(round_id, "\n".join(raw_parts))
             except Exception:
-                logger.exception("复盘取消收尾补闭合审计轮失败（继续抛出取消）")
+                logger.exception("复盘收尾补闭合审计轮失败（成功报告已落库，不反转）")
         await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
 
     async def _pre_stats(self, period_start: float, period_end: float) -> tuple[str, str]:
@@ -516,6 +555,25 @@ class ReviewAgent:
             await maybe_await(self._notify_event(payload))
         except Exception:
             logger.exception("复盘事件广播失败")
+
+
+def _success_result(report: ReviewReport, round_id: str) -> dict:
+    """组装复盘成功结果（正常成功与落库后打断补全两条路径共用同一形状）。
+
+    参数：
+        report: ReviewReport，已落库的成功复盘报告
+        round_id: str，本轮审计轮次编号
+
+    返回：
+        dict，含 ok/report_id/round_id/strategy_action/new_version_id 的成功结果
+    """
+    return {
+        "ok": True,
+        "report_id": report.id,
+        "round_id": round_id,
+        "strategy_action": report.strategy_action,
+        "new_version_id": report.new_version_id,
+    }
 
 
 def _success_alert(report_md: str, version_id: int | None) -> str:

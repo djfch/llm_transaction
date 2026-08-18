@@ -28,19 +28,24 @@ class StubAgent:
             None：就地创建调用列表
         """
         self.calls: list[dict] = []
+        self.round_ids: list[str | None] = []  # 每次 run 收到的预分配 round_id（自动调度为 None）
         self.llm_configured = True
 
-    async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
-        """记录报告类型和回看小时并返回成功结果。
+    async def run(
+        self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
+    ) -> dict:
+        """记录报告类型、回看小时与预分配轮次编号并返回成功结果。
 
         参数：
             report_type: str，研报类型
             hours: int，回看小时数
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
 
         返回：
             dict：固定成功结果
         """
         self.calls.append({"report_type": report_type, "hours": hours})
+        self.round_ids.append(round_id)
         return {"ok": True, "report_id": 1, "round_id": "r1", "direction": "中性"}
 
 
@@ -193,6 +198,7 @@ async def test_market_presets_fire_at_exact_utc8_minute(repo: Repo, stamp: float
     scheduler = ResearchScheduler(_settings(), agent, repo, calendar=StubCalendar())
     await scheduler.tick(stamp)
     assert agent.calls == [{"report_type": report_type, "hours": 24}]
+    assert agent.round_ids == [None]  # 自动调度不预分配轮次编号（仅手动点火预分配）
 
 
 async def test_missed_minute_is_not_backfilled(repo: Repo):
@@ -515,11 +521,14 @@ async def test_start_now_returns_immediately_and_runs_in_background(repo: Repo):
     agent = StubAgent()
     scheduler = ResearchScheduler(_settings(False), agent, repo, calendar=StubCalendar())
     result = await scheduler.start_now(report_type="event", hours=12)
+    round_id = result.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
     assert result == {"started": True, "report_type": "event", "hours": 12}
     assert agent.calls == []  # 点火返回时后台任务尚未执行
     assert scheduler._manual_task is not None
     await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert agent.round_ids == [round_id]  # 后台 agent.run 收到同一轮次身份
     assert not scheduler._lock.locked()  # 后台任务收尾释放锁
 
 
@@ -562,17 +571,21 @@ class BlockingAgent:
             None：就地初始化事件与已配置 LLM 标记
         """
         self.calls: list[dict] = []
+        self.round_ids: list[str | None] = []  # 每次 run 收到的预分配 round_id
         self.llm_configured = True
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.cancelled_cleanup = False
 
-    async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
+    async def run(
+        self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
+    ) -> dict:
         """记录调用、标记开始并挂起，直到测试释放后返回成功结果。
 
         参数：
             report_type: str，研报类型
             hours: int，回看小时数
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
 
         返回：
             dict：固定成功结果
@@ -582,6 +595,7 @@ class BlockingAgent:
             （此处以标记代副作用）后原样抛出
         """
         self.calls.append({"report_type": report_type, "hours": hours})
+        self.round_ids.append(round_id)
         self.started.set()
         try:
             await self.release.wait()
@@ -619,7 +633,10 @@ async def test_start_now_background_survives_caller_cancellation(repo: Repo):
 
     request = asyncio.create_task(http_like_call())
     await agent.started.wait()
-    assert outcome["result"] == {"started": True, "report_type": "event", "hours": 12}
+    fired = dict(outcome["result"])
+    round_id = fired.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
+    assert fired == {"started": True, "report_type": "event", "hours": 12}
     request.cancel()  # 浏览器断连：请求任务被取消
     with pytest.raises(asyncio.CancelledError):
         await request
@@ -628,6 +645,7 @@ async def test_start_now_background_survives_caller_cancellation(repo: Repo):
     agent.release.set()
     await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [{"report_type": "event", "hours": 12}]
+    assert agent.round_ids == [round_id]  # 断连后后台任务仍持同一轮次身份跑完
     assert not scheduler._lock.locked()
 
 

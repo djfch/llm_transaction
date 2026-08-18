@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 from src.audit.logger import get_logger
 from src.config import Settings
@@ -148,7 +149,9 @@ class ReviewScheduler:
             period_start: float | None，复盘区间起点
             period_end: float | None，复盘区间终点
         返回：
-            dict：点火成功 {"started": True, "period_start": ..., "period_end": ...}；
+            dict：点火成功 {"started": True, "period_start": ..., "period_end": ...,
+            "round_id": 预分配的审计轮次编号（32 位 hex），与后台 WS review_round_start
+            事件同一身份，前端据此认轮}；
             同步失败 {"started": False, "error": ..., "error_code": ...}，error_code 为
             llm_not_configured（未配置 LLM）、busy（进行中，server 层映 409）或
             invalid_period（区间非法，server 层映 422）
@@ -171,11 +174,17 @@ class ReviewScheduler:
         # 定时巡检看到预留即跳过，不会在预留与后台任务取锁之间插队，
         # 不排队语义与原先的持锁模式等价。
         self._manual_reserved = True
-        task = asyncio.create_task(self._run_manual(period_start, period_end))
+        round_id = uuid.uuid4().hex  # 预分配：点火响应与轮始事件携带同一身份
+        task = asyncio.create_task(self._run_manual(period_start, period_end, round_id))
         # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
         task.add_done_callback(self._release_manual_reservation)
         self._manual_task = task
-        return {"started": True, "period_start": period_start, "period_end": period_end}
+        return {
+            "started": True,
+            "period_start": period_start,
+            "period_end": period_end,
+            "round_id": round_id,
+        }
 
     def _release_manual_reservation(self, _task: asyncio.Task[None]) -> None:
         """手动后台任务完成回调：无条件清除点火预留标志。
@@ -189,7 +198,7 @@ class ReviewScheduler:
         """
         self._manual_reserved = False
 
-    async def _run_manual(self, period_start: float, period_end: float) -> None:
+    async def _run_manual(self, period_start: float, period_end: float, round_id: str) -> None:
         """后台执行手动复盘：任务内自取锁包住 agent.run；取消原样抛出，意外异常记日志就地取回。
 
         锁只在协程体内由本任务持有：任务在首次执行前被取消时协程体根本不进入，
@@ -198,6 +207,7 @@ class ReviewScheduler:
         参数：
             period_start: float，复盘区间起点
             period_end: float，复盘区间终点
+            round_id: str，点火时预分配的审计轮次编号，透传给 agent.run
 
         返回：
             None：意外异常记 logger.exception 就地取回，任务异常永远被取回，
@@ -211,7 +221,7 @@ class ReviewScheduler:
         """
         try:
             async with self._lock:
-                await self._agent.run(period_start, period_end)
+                await self._agent.run(period_start, period_end, round_id=round_id)
         except asyncio.CancelledError:
             logger.info("手动复盘后台任务被取消（period_start=%s）", period_start)
             raise

@@ -366,9 +366,9 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
         参数：无
 
         返回：
-            dict：点火成功的假结果（started + 回显参数）
+            dict：点火成功的假结果（started + 预分配 round_id + 回显参数）
         """
-        return {"started": True, "report_type": "manual", "hours": 24}
+        return {"started": True, "report_type": "manual", "hours": 24, "round_id": "ab" * 16}
 
     async with _client_of(_deps(repo, tmp_path, research_run=_busy)) as c:
         assert (await c.post("/api/research/run")).status_code == 409
@@ -377,10 +377,11 @@ async def test_research_run_status_mapping(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, research_run=_ok)) as c:
         r = await c.post("/api/research/run")
         assert r.status_code == 200
-        assert r.json() == {  # 点火即返回：只含 started 与回显参数，不含执行结果
+        assert r.json() == {  # 点火即返回：started + 预分配 round_id + 回显参数，不含执行结果
             "started": True,
             "report_type": "manual",
             "hours": 24,
+            "round_id": "ab" * 16,
         }
 
 
@@ -410,12 +411,18 @@ async def test_research_run_body_passthrough_and_validation(repo: Repo, tmp_path
             "started": True,
             "report_type": kwargs.get("report_type", "manual"),
             "hours": kwargs.get("hours", 24),
+            "round_id": "cd" * 16,  # 预分配轮次编号（契约键，原样透传）
         }
 
     async with _client_of(_deps(repo, tmp_path, research_run=_run)) as c:
         r = await c.post("/api/research/run", json={"report_type": "event", "hours": 6})
         assert r.status_code == 200
-        assert r.json() == {"started": True, "report_type": "event", "hours": 6}  # 点火回显
+        assert r.json() == {  # 点火回显：started + 预分配 round_id + 透传参数
+            "started": True,
+            "report_type": "event",
+            "hours": 6,
+            "round_id": "cd" * 16,
+        }
         assert calls == [{"report_type": "event", "hours": 6}]  # 透传
         r = await c.post("/api/research/run")  # 无 body：调度默认值（无参回调）
         assert r.status_code == 200 and calls[-1] == {}

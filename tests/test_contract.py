@@ -17,7 +17,8 @@
 - GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）
 - GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
 - GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
-- POST /api/review/run → started/ok（409 复盘进行中；503 LLM 未配置或未接线）
+- POST /api/review/run → started/period_start/period_end/round_id（409 复盘进行中；503 LLM 未配置或未接线；422 区间非法）
+- POST /api/research/run → started/report_type/hours/round_id（409 研报进行中；503 未接线或 LLM 未配置；422 hours 越界）
 - GET  /api/strategy/versions → items[] 含 id/md5/created_by/reason/report_id/created_at（不含 content，省流量）
 - GET  /api/strategy/versions/{id} → 同列表项键 + content 全文
 - GET  /api/strategy/diff?from=&to= → PlainText unified diff（契约只断状态码）
@@ -133,20 +134,36 @@ async def _reconfigure() -> dict:
 
 
 async def _review_run() -> dict:
-    """假复盘执行回调：恒报启动成功，供 POST /api/review/run 断言响应键。
+    """假复盘执行回调：恒报点火成功，供 POST /api/review/run 断言响应键。
 
     参数：无
 
     返回：
-        dict：固定复盘结果（started/ok/report_id/round_id/strategy_action/new_version_id）
+        dict：固定点火结果（started/period_start/period_end/round_id，
+        与调度器 start_now 成功形状一致，不含执行结果）
     """
     return {
         "started": True,
-        "ok": True,
-        "report_id": 1,
+        "period_start": 1_700_000_000.0,
+        "period_end": 1_700_086_400.0,
         "round_id": "rv-round",
-        "strategy_action": "none",
-        "new_version_id": None,
+    }
+
+
+async def _research_run() -> dict:
+    """假研报执行回调：恒报点火成功，供 POST /api/research/run 断言响应键。
+
+    参数：无
+
+    返回：
+        dict：固定点火结果（started/report_type/hours/round_id，
+        与调度器 start_now 成功形状一致，不含执行结果）
+    """
+    return {
+        "started": True,
+        "report_type": "manual",
+        "hours": 24,
+        "round_id": "rs-round",
     }
 
 
@@ -316,6 +333,7 @@ async def deps(tmp_path: Path):
         agent_stop=lambda: _set_running(False),
         llm_reconfigure=_reconfigure,
         review_run=_review_run,
+        research_run=_research_run,
         strategy_rollback=_strategy_rollback,
         alerts_provider=lambda: triggers.list(),
         indicators=_indicators_bundle(),
@@ -633,7 +651,10 @@ async def test_review_strategy_contract(client: AsyncClient):
     assert len(detail["report_md"]) > 200  # 详情给全文
 
     run = await _post(client, "/api/review/run")
-    _typed(run, "started:b ok:b", "POST /api/review/run")
+    _typed(run, "started:b period_start:n period_end:n round_id:s", "POST /api/review/run")
+
+    research_run = await _post(client, "/api/research/run")
+    _typed(research_run, "started:b report_type:s hours:i round_id:s", "POST /api/research/run")
 
     versions = await _get(client, "/api/strategy/versions")
     assert versions["items"], "/api/strategy/versions items 应非空"

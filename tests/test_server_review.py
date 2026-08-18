@@ -234,9 +234,14 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
         参数：无
 
         返回：
-            dict，点火成功的假结果（started + 回显区间）
+            dict，点火成功的假结果（started + 预分配 round_id + 回显区间）
         """
-        return {"started": True, "period_start": 1000.0, "period_end": 2000.0}
+        return {
+            "started": True,
+            "period_start": 1000.0,
+            "period_end": 2000.0,
+            "round_id": "ef" * 16,
+        }
 
     async with _client_of(_deps(repo, tmp_path, review_run=_busy)) as c:
         assert (await c.post("/api/review/run")).status_code == 409
@@ -245,10 +250,11 @@ async def test_review_run_status_mapping(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, review_run=_ok)) as c:
         r = await c.post("/api/review/run")
         assert r.status_code == 200
-        assert r.json() == {  # 点火即返回：只含 started 与回显区间，不含执行结果
+        assert r.json() == {  # 点火即返回：started + 预分配 round_id + 回显区间，不含执行结果
             "started": True,
             "period_start": 1000.0,
             "period_end": 2000.0,
+            "round_id": "ef" * 16,
         }
 
 
@@ -278,6 +284,7 @@ async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
             "started": True,
             "period_start": kwargs.get("period_start", 0.0),
             "period_end": kwargs.get("period_end", 0.0),
+            "round_id": "01" * 16,  # 预分配轮次编号（契约键，原样透传）
         }
 
     async def _invalid(**kwargs) -> dict:
@@ -294,10 +301,11 @@ async def test_review_run_with_explicit_period(repo: Repo, tmp_path: Path):
     async with _client_of(_deps(repo, tmp_path, review_run=_run)) as c:
         r = await c.post("/api/review/run", json={"start_ts": 1000.0, "end_ts": 2000.0})
         assert r.status_code == 200
-        assert r.json() == {  # 点火回显区间，不含执行结果
+        assert r.json() == {  # 点火回显区间 + 预分配 round_id，不含执行结果
             "started": True,
             "period_start": 1000.0,
             "period_end": 2000.0,
+            "round_id": "01" * 16,
         }
         assert calls == [{"period_start": 1000.0, "period_end": 2000.0}]  # 区间透传
         r = await c.post("/api/review/run")  # 无 body：维持昨日区间（无参回调）

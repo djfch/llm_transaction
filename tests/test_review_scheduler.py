@@ -33,19 +33,24 @@ class StubAgent:
             None，就地初始化 calls 为空列表，供后续断言调用区间
         """
         self.calls: list[tuple[float, float]] = []
+        self.round_ids: list[str | None] = []  # 每次 run 收到的预分配 round_id（自动巡检为 None）
         self.llm_configured = True
 
-    async def run(self, period_start: float, period_end: float) -> dict:
-        """记录本次调用区间并返回固定的成功结果。
+    async def run(
+        self, period_start: float, period_end: float, *, round_id: str | None = None
+    ) -> dict:
+        """记录本次调用区间与预分配轮次编号并返回固定的成功结果。
 
         参数：
             period_start: float，复盘区间起点（Unix 时间戳）
             period_end: float，复盘区间终点（Unix 时间戳）
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
 
         返回：
             dict：固定为 {"ok": True, "report_id": 1} 的成功结果
         """
         self.calls.append((period_start, period_end))
+        self.round_ids.append(round_id)
         return {"ok": True, "report_id": 1}
 
 
@@ -107,6 +112,7 @@ async def test_tick_fires_after_daily_time(repo):
     day_start, fire = _anchors()
     await scheduler._tick(now=fire + 1)
     assert agent.calls == [(day_start - 86400, day_start)]
+    assert agent.round_ids == [None]  # 自动巡检不预分配轮次编号（仅手动点火预分配）
 
 
 async def test_tick_skips_before_daily_time(repo):
@@ -234,6 +240,8 @@ async def test_start_now_runs_yesterday_period(repo):
     scheduler = ReviewScheduler(_settings(), agent, repo)
     day_start = local_day_start(time.time())
     result = await scheduler.start_now()
+    round_id = result.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
     assert result == {
         "started": True,
         "period_start": day_start - 86400,
@@ -243,6 +251,7 @@ async def test_start_now_runs_yesterday_period(repo):
     assert scheduler._manual_task is not None
     await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [(day_start - 86400, day_start)]
+    assert agent.round_ids == [round_id]  # 后台 agent.run 收到同一轮次身份
     assert not scheduler._lock.locked()  # 后台任务收尾释放锁
 
 
@@ -261,10 +270,13 @@ async def test_start_now_with_explicit_period_passthrough(repo):
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
     result = await scheduler.start_now(period_start=1000.0, period_end=2000.0)
+    round_id = result.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
     assert result == {"started": True, "period_start": 1000.0, "period_end": 2000.0}
     assert scheduler._manual_task is not None
     await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert agent.calls == [(1000.0, 2000.0)]
+    assert agent.round_ids == [round_id]  # 后台 agent.run 收到同一轮次身份
 
 
 async def test_start_now_invalid_period(repo):
@@ -310,12 +322,15 @@ class BlockingAgent:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run(self, period_start: float, period_end: float) -> dict:
+    async def run(
+        self, period_start: float, period_end: float, *, round_id: str | None = None
+    ) -> dict:
         """记录调用区间、标记开始并挂起，直到测试释放后返回成功结果。
 
         参数：
             period_start: float，复盘区间起点（Unix 时间戳）
             period_end: float，复盘区间终点（Unix 时间戳）
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号（本桩不读取）
 
         返回：
             dict：固定成功结果
@@ -422,7 +437,10 @@ async def test_start_now_background_survives_caller_cancellation(repo):
 
     request = asyncio.create_task(http_like_call())
     await agent.started.wait()
-    assert outcome["result"] == {
+    fired = dict(outcome["result"])
+    round_id = fired.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
+    assert fired == {
         "started": True,
         "period_start": 1000.0,
         "period_end": 2000.0,
@@ -551,7 +569,7 @@ async def test_shutdown_cancel_finishes_real_agent_cleanup(repo, tmp_path):
         notify_event=lambda payload: events.append(payload),
     )
     scheduler = ReviewScheduler(settings, agent, repo)
-    await scheduler.start_now(period_start=1000.0, period_end=2000.0)
+    fired = await scheduler.start_now(period_start=1000.0, period_end=2000.0)
     await asyncio.wait_for(provider.entered.wait(), timeout=1)
     task = scheduler._manual_task
     assert task is not None
@@ -566,6 +584,7 @@ async def test_shutdown_cancel_finishes_real_agent_cleanup(repo, tmp_path):
     round_row = await repo.latest_audit_round("paper")
     assert round_row is not None and round_row.ended_at is not None
     assert round_row.error == "CancelledError: 复盘被取消"
+    assert round_row.round_id == fired["round_id"]  # 预分配身份落到真实审计轮
     assert [e["type"] for e in events] == ["review_round_start", "review_round"]
     assert events[-1]["data"] == {"round_id": round_row.round_id, "ok": False}
 
@@ -659,6 +678,8 @@ async def test_start_now_uses_interval_span(repo):
     scheduler = ReviewScheduler(_settings(interval_days=3), agent, repo)
     day_start = local_day_start(time.time())
     result = await scheduler.start_now()
+    round_id = result.pop("round_id")  # 预分配轮次编号：单独断言，余键严格等值
+    assert isinstance(round_id, str) and len(round_id) == 32
     assert result == {
         "started": True,
         "period_start": day_start - 3 * 86400,

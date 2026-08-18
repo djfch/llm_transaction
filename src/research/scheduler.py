@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from datetime import date, datetime, time as clock, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -343,7 +344,9 @@ class ResearchScheduler:
             hours: int，回看小时数
 
         返回：
-            dict：点火成功 {"started": True, "report_type": ..., "hours": ...}；
+            dict：点火成功 {"started": True, "report_type": ..., "hours": ...,
+            "round_id": 预分配的审计轮次编号（32 位 hex），与后台 WS research_round_start
+            事件同一身份，前端据此认轮}；
             同步失败 {"started": False, "error": ..., "error_code": ...}，
             error_code 为 llm_not_configured（未配置 LLM）或 busy（已有生成进行中）
         """
@@ -355,11 +358,17 @@ class ResearchScheduler:
         # 自动调度的 tick 看到预留即跳过，不会在预留与后台任务取锁之间插队，
         # 不排队语义与原先的持锁模式等价。
         self._manual_reserved = True
-        task = asyncio.create_task(self._run_manual(report_type, hours))
+        round_id = uuid.uuid4().hex  # 预分配：点火响应与轮始事件携带同一身份
+        task = asyncio.create_task(self._run_manual(report_type, hours, round_id))
         # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
         task.add_done_callback(self._release_manual_reservation)
         self._manual_task = task
-        return {"started": True, "report_type": report_type, "hours": hours}
+        return {
+            "started": True,
+            "report_type": report_type,
+            "hours": hours,
+            "round_id": round_id,
+        }
 
     def _release_manual_reservation(self, _task: asyncio.Task[None]) -> None:
         """手动后台任务完成回调：无条件清除点火预留标志。
@@ -373,7 +382,7 @@ class ResearchScheduler:
         """
         self._manual_reserved = False
 
-    async def _run_manual(self, report_type: str, hours: int) -> None:
+    async def _run_manual(self, report_type: str, hours: int, round_id: str) -> None:
         """后台执行手动研报：任务内自取锁包住 agent.run；取消原样抛出，意外异常记日志就地取回。
 
         锁只在协程体内由本任务持有：任务在首次执行前被取消时协程体根本不进入，
@@ -382,6 +391,7 @@ class ResearchScheduler:
         参数：
             report_type: str，研报类型
             hours: int，回看小时数
+            round_id: str，点火时预分配的审计轮次编号，透传给 agent.run
 
         返回：
             None：意外异常记 logger.exception 就地取回，任务异常永远被取回，
@@ -395,7 +405,7 @@ class ResearchScheduler:
         """
         try:
             async with self._lock:
-                await self._agent.run(report_type=report_type, hours=hours)
+                await self._agent.run(report_type=report_type, hours=hours, round_id=round_id)
         except asyncio.CancelledError:
             logger.info("手动研报后台任务被取消（report_type=%s）", report_type)
             raise

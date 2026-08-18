@@ -12,8 +12,11 @@
   research_round（ok 随成败，_fail 路径 ok=False）；事件失败只记日志；provider None 早退零事件；
 - chat loop 任何异常：落 error 报告 + 审计轮 error + 返回 {'ok': False}，
   绝不向上抛，确保研报失败不影响交易决策循环；唯独外部取消（asyncio.CancelledError，
-  如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消走同一失败收尾，
-  成功报告落库后取消禁止双写失败报告，补成功审计闭合与 ok=True 轮末事件后抛出；
+  如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
+  成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
+  补齐剩余收尾（剩余因果链断点续传落库 + 成功闭合审计 + ok=True 轮末事件），
+  取消随后原样抛出、普通异常按成功结果返回；审计 JSON 快照写入失败降级为日志
+  （SQLite 主表已是真相），不反转已提交结果；
 - 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
   不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -148,12 +151,16 @@ class ResearchAgent:
         """
         return self._provider is not None
 
-    async def run(self, report_type: str = "manual", hours: int = 24) -> dict:
+    async def run(
+        self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
+    ) -> dict:
         """执行一次研报。失败返回 {'ok': False, 'error': ...}，绝不向上抛。
 
         参数：
             report_type: str，研报盘口类型
             hours: int，向前回溯的小时数
+            round_id: str | None，调度器手动点火时预分配的审计轮次编号
+                （点火响应与 WS 轮始事件同一身份）；None 时由审计层自动生成
 
         返回：
             dict：执行一次研报。失败返回 {'ok': False, 'error': ...}，绝不向上抛
@@ -168,10 +175,12 @@ class ResearchAgent:
         expected_contracts = tuple(self._watchlist)
         if not 1 <= hours <= 48:  # L10：与工具层同口径
             return {"ok": False, "error": f"参数错误：hours 须在 1-48 之间（当前 {hours}）"}
+        preallocated = round_id  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
         raw_parts: list[str] = []
         round_id = ""
-        report_id: int | None = None  # 成功报告落库后置位：取消收尾据此禁止双写失败报告
-        audit_closed = False  # end_round 成功后置位：取消收尾据此补成功闭合（幂等）
+        report_id: int | None = None  # 成功报告落库后置位：收尾据此禁止双写失败报告
+        audit_closed = False  # end_round 成功后置位：打断收尾据此补成功闭合（幂等）
+        remaining_links: list[dict] = []  # 待落库因果链：flush 断点续传的进度载体
         try:
             # 初始化（deps/registry/prompt 加载）入 try：可预见失败落入 _fail 落失败报告，
             # 不再逃逸为仅日志；begin_round 自身失败（如 DB 不可用）时 round_id 为空，
@@ -185,7 +194,9 @@ class ResearchAgent:
             )
             registry = ResearchToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
-            round_id = await self._audit.begin_round(self._settings.mode, "research", full_prompt)
+            round_id = await self._audit.begin_round(
+                self._settings.mode, "research", full_prompt, round_id=preallocated
+            )
             await self._emit_event({"type": "research_round_start", "data": {"round_id": round_id}})
             briefing = await build_preinjection(deps, hours)
             await self._audit.record_context(round_id, briefing)
@@ -208,9 +219,10 @@ class ResearchAgent:
                 self._repo, report_type=report_type, payload=payload, round_id=round_id, deps=deps
             )
             report_id = report.id
-            # 收尾（因果链回填 + end_round）可被取消打断：report_id 已置位，
-            # 取消分支按成功语义补闭合审计轮（audit_closed 此时仍为 False）
-            links_saved = await self._flush_causal_links(deps, report.id)
+            # 收尾（因果链回填 + end_round）可被打断：report_id 已置位，remaining_links
+            # 记录 flush 进度，取消/普通异常分支按成功语义经 _complete_interrupted 补全
+            remaining_links = list(deps.pending_causal_links)
+            links_saved = await self._flush_causal_links(remaining_links, report.id)
             await self._audit.end_round(round_id, "\n".join(raw_parts))
             audit_closed = True
             await self._emit_event(
@@ -226,44 +238,81 @@ class ResearchAgent:
             return success_result(report, round_id, asset_count)
         except asyncio.CancelledError:
             # 外部取消（保持 asyncio 取消语义，M6）：成功报告未落库走失败收尾；
-            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补收尾
+            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾
             if report_id is None:
                 await self._fail(
                     round_id, raw_parts, report_type, asyncio.CancelledError("研报被取消")
                 )
-                raise
-            if not audit_closed:  # end_round 被打断：以成功语义补闭合（幂等）
-                try:
-                    await self._audit.end_round(round_id, "\n".join(raw_parts))
-                except Exception:  # 补闭合自身失败只记日志，不掩盖待传播的取消
-                    logger.exception("研报取消收尾补闭合审计轮失败（继续抛出取消）")
-            # 补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
-            await self._emit_event(
-                {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
-            )
+            else:
+                await self._complete_interrupted(
+                    remaining_links, report_id, round_id, raw_parts, audit_closed
+                )
             raise
         except Exception as e:
-            return await self._fail(round_id, raw_parts, report_type, e)
+            if report_id is None:
+                return await self._fail(round_id, raw_parts, report_type, e)
+            # 成功报告落库后的普通异常：与取消同口径按成功语义补全，返回成功结果
+            logger.exception("研报成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
+            await self._complete_interrupted(
+                remaining_links, report_id, round_id, raw_parts, audit_closed
+            )
+            return success_result(report, round_id, asset_count)
 
-    async def _flush_causal_links(self, deps: ResearchToolDeps, report_id: int) -> int:
-        """把本轮暂存的因果链回填 report_id 批量落库（H1：LLM 无需预知 id）。
-
-        单条落库失败只记日志、不影响研报主产物；返回成功条数。
+    async def _complete_interrupted(
+        self,
+        remaining_links: list[dict],
+        report_id: int,
+        round_id: str,
+        raw_parts: list[str],
+        audit_closed: bool,
+    ) -> None:
+        """成功研报落库后被打断（取消或普通异常）的补全收尾：补落剩余因果链 + 成功闭合审计 + ok=True 事件。
 
         参数：
-            deps: ResearchToolDeps，当前模块所需的运行依赖集合
+            remaining_links: list[dict]，尚未落库的因果链（断点续传，就地清空）
+            report_id: int，已落库成功研报的编号
+            round_id: str，本轮审计轮次编号
+            raw_parts: list[str]，本轮已累计的 LLM 原始输出
+            audit_closed: bool，审计轮是否已正常闭合；未闭合时以成功语义补 end_round
+
+        返回：
+            None：就地补落剩余因果链并按需补闭合审计轮（补闭合失败只记日志，
+            不掩盖待传播的取消），并补发轮末 ok=True 事件（重复发送无害，
+            前端 exitActive 幂等消化）
+        """
+        await self._flush_causal_links(remaining_links, report_id)
+        if not audit_closed:
+            try:
+                await self._audit.end_round(round_id, "\n".join(raw_parts))
+            except Exception:
+                logger.exception("研报收尾补闭合审计轮失败（成功报告已落库，不反转）")
+        await self._emit_event(
+            {"type": "research_round", "data": {"round_id": round_id, "ok": True}}
+        )
+
+    async def _flush_causal_links(self, remaining_links: list[dict], report_id: int) -> int:
+        """把剩余因果链回填 report_id 逐条落库（H1：LLM 无需预知 id），支持断点续传。
+
+        每处理一条（成功或单条失败记日志跳过）即从队首移除；取消掐在 save 的 await
+        上时队首条目保留，由 _complete_interrupted 重放——极端情况下该条在取消前
+        已落库，重放会产生一条重复 INSERT，可接受（优于丢失）。
+
+        参数：
+            remaining_links: list[dict]，待落库因果链队列，就地逐条弹出
             report_id: int，研报记录编号
 
         返回：
-            int：把本轮暂存的因果链回填 report_id 批量落库（H1：LLM 无需预知 id）
+            int：本次调用成功落库的因果链条数
         """
         saved = 0
-        for link in deps.pending_causal_links:
+        while remaining_links:
+            link = remaining_links[0]
             try:
                 await self._repo.research.save_causal_link(report_id=report_id, **link)
                 saved += 1
             except Exception:
                 logger.exception("因果链落库失败（report_id=%s，跳过该条）", report_id)
+            remaining_links.pop(0)
         return saved
 
     async def _chat_with_timeout(

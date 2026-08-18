@@ -57,6 +57,7 @@ class AuditTrail:
         system_prompt: str,
         context: str = "",
         strategy_md5: str = "",
+        round_id: str | None = None,
     ) -> str:
         """开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id。
 
@@ -64,6 +65,8 @@ class AuditTrail:
         上下文构建完成后经 record_context 回填快照。
         strategy_md5 为策略书原文 md5（区别于 prompt_md5 的拼装 md5），
         供复盘按策略版本关联本轮。
+        round_id 支持调用方预分配（手动点火路径：响应与 WS 轮始事件需同一身份），
+        为空时由本方法生成。
 
         参数：
             mode: str，交易运行模式
@@ -71,11 +74,12 @@ class AuditTrail:
             system_prompt: str，本轮系统提示词全文
             context: str，本轮决策上下文全文
             strategy_md5: str，策略书内容摘要；为空时不按版本过滤
+            round_id: str | None，调用方预分配的轮次编号；None 或空串时自动生成
 
         返回：
             str：开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id
         """
-        round_id = uuid.uuid4().hex
+        round_id = round_id or uuid.uuid4().hex
         prompt_md5 = hashlib.md5(system_prompt.encode("utf-8")).hexdigest()
         await self._repo.start_audit_round(
             round_id=round_id,
@@ -162,7 +166,12 @@ class AuditTrail:
             None：结束一轮：补全 LLM 原始输出与异常信息，并写 JSON 全文快照
         """
         await self._repo.finish_audit_round(round_id, llm_raw=llm_raw, error=error)
-        await self._write_snapshot(round_id)
+        try:
+            await self._write_snapshot(round_id)
+        except Exception:
+            # 快照只是调试/回放产物，SQLite 主表才是真相：磁盘满/权限等写失败
+            # 降级为日志，绝不反转上面已提交的审计轮结果
+            logger.exception("审计快照写入失败（round_id=%s，仅影响 JSON 回放文件）", round_id)
         logger.info("审计轮次结束 round_id=%s error=%s", round_id, error or "无")
 
     async def get_round(self, round_id: str) -> dict[str, Any] | None:
