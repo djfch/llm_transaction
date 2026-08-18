@@ -208,7 +208,9 @@ def _to_position(p: gate_api.Position) -> Position:
 
     保证金模式优先取 pos_margin_mode，缺失时按 leverage==0 推断全仓；
     全仓实际杠杆优先取 cross_leverage_limit（用户配置值，回滚锚点必须用它），
-    缺失或为 0 时回退 lever（当前有效杠杆）。
+    缺失或为 0 时回退 lever（当前有效杠杆）。逐仓杠杆同样优先取 lever——
+    Gate 新协议中 lever 是 isolated/cross 通用的当前杠杆字段（逐步替代旧
+    leverage），旧字段在逐仓也可能为 0，只信旧字段会把真实杠杆快照成 1x。
 
     参数：
         p: gate_api.Position，SDK 返回的持仓原始对象
@@ -221,13 +223,14 @@ def _to_position(p: gate_api.Position) -> Position:
     mode = (getattr(p, "pos_margin_mode", None) or "").strip().lower()
     if mode not in ("isolated", "cross"):
         mode = "cross" if lev_raw == 0 else "isolated"
+    lever = _dec_opt(getattr(p, "lever", None))
     cross_limit = None
     if mode == "cross":
         # 回滚锚点须用配置值：cross_leverage_limit 是用户设定的全仓杠杆，
         # lever 为当前有效杠杆（可能非整数），仅作缺失时的回退
-        cross_limit = _dec_opt(getattr(p, "cross_leverage_limit", None)) or _dec_opt(
-            getattr(p, "lever", None)
-        )
+        cross_limit = _dec_opt(getattr(p, "cross_leverage_limit", None)) or lever
+    elif lever is not None and lever > 0:
+        lev_raw = lever
     return Position(
         contract=p.contract,
         size=_dec(p.size),

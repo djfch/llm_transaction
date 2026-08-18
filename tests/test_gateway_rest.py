@@ -311,6 +311,23 @@ def test_to_position_infers_mode_without_pos_margin_mode():
     assert p2.leverage == Decimal(2)
 
 
+def test_to_position_isolated_prefers_lever():
+    """逐仓持仓优先取新协议 lever 字段（旧 leverage 可能为 0），避免真实杠杆被快照成 1x。
+
+    参数：无
+    返回：
+        None，断言 isolated + leverage="0" + lever="30" 映射杠杆为 30、lever 缺失回退旧字段
+    """
+    pos = make_sdk_position()
+    pos.pos_margin_mode = "isolated"
+    pos.leverage = "0"
+    pos.lever = "30"
+    p = _to_position(pos)
+    assert p.margin_mode == "isolated" and p.leverage == Decimal(30)
+    pos.lever = None  # lever 缺失时回退旧 leverage 字段
+    assert _to_position(pos).leverage == Decimal(0)
+
+
 def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):
     """当前 SDK 的 update_contract_position_leverage 不接受 x_gate_exptime。
 

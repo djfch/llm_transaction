@@ -30,7 +30,12 @@ from src.agent.tool_handlers import (
     _opt_enum,
     _opt_int,
 )
-from src.agent.tool_leverage import _apply_leverage_and_place, _engage_kill, _prev_leverage_state
+from src.agent.tool_leverage import (
+    _apply_leverage_and_place,
+    _engage_kill,
+    _prev_leverage_state,
+    _recheck_prev_state,
+)
 from src.audit.logger import get_logger
 from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
 from src.risk.models import AccountSnapshot, TradeIntent
@@ -346,6 +351,12 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
+    # 风控含 await 窗口，期间杠杆可能被并发修改：改杠杆前重读快照核验
+    concurrency_deny = await _recheck_prev_state(
+        deps, contract, prev_state, will_modify=apply_leverage is not None
+    )
+    if concurrency_deny is not None:
+        return concurrency_deny
     req = OrderRequest(
         contract=contract,
         size=size,

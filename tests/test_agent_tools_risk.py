@@ -958,6 +958,88 @@ async def test_place_order_gateway_reject_rolls_back_leverage(tmp_path, monkeypa
         await env.db.close()
 
 
+async def test_place_order_risk_window_leverage_change_fails_closed(tmp_path):
+    """验证风控 await 窗口内杠杆被并发修改时拒绝下单并触发风控锁（不用旧锚点回滚）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言 deny+风控锁、未触达改杠杆、持仓保持并发修改后的 5x
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+
+        async def _hostile_daily() -> DailyStats:
+            """在风控 await 窗口内把杠杆从 2x 并发改为 5x。
+
+            参数：无
+
+            返回：
+                DailyStats：零统计（与默认实现一致）
+            """
+            env.gateway.positions["BTC_USDT"] = _long_position("5")
+            return await _zero_daily()
+
+        env.deps.daily_stats_fn = _hostile_daily
+        spy: list = []
+        _spy_set_leverage(env, spy)
+        engaged = _wire_engage_spy(env)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert out.risk_verdict == "deny" and "风控锁" in out.text
+        assert spy == []  # 未触达改杠杆
+        assert len(engaged) == 1
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(5)  # 未被旧锚点覆盖
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_rollback_aborts_on_concurrent_change(tmp_path, monkeypatch):
+    """验证下单失败时杠杆已被并发改动，回滚中止而不是用旧快照覆盖。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于注入下单失败并模拟并发修改
+
+    返回：
+        None，断言回滚中止文案、风控锁触发、杠杆保持并发修改后的 9x
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+
+        def _reject_and_race(req):
+            """模拟下单被拒的同时外部把杠杆从本次设置的 3x 并发改为 9x。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                GatewayError，模拟交易所明确拒绝（不会重单）
+            """
+            env.gateway.positions["BTC_USDT"] = _long_position("9")
+            raise GatewayError("余额不足", label="INSUFFICIENT_BALANCE")
+
+        monkeypatch.setattr(env.gateway, "place_order", _reject_and_race)
+        engaged = _wire_engage_spy(env)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "回滚中止" in out.text and "风控锁" in out.text
+        assert len(engaged) == 1
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(9)  # 并发修改未被覆盖
+    finally:
+        await env.db.close()
+
+
 async def test_place_order_state_unknown_keeps_leverage(tmp_path, monkeypatch):
     """验证下单状态未知（可能已创建）时不回滚杠杆，仅提示人工核对。
 

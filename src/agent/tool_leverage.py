@@ -39,6 +39,34 @@ def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int,
     return max(int(pos.leverage), 1), "isolated"
 
 
+async def _recheck_prev_state(
+    deps: ToolDeps, contract: str, prev_state: tuple[int, str] | None, *, will_modify: bool
+) -> ToolOutcome | None:
+    """风控 await 窗口后重读杠杆快照：状态被并发修改时触发风控锁并返回拒绝文案。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        contract: str，目标合约
+        prev_state: tuple[int, str] | None，风控前捕获的 (杠杆, 模式) 快照
+        will_modify: bool，本次调用是否将修改杠杆（不修改则无需核验，直接返回 None）
+
+    返回：
+        ToolOutcome | None，不修改杠杆或状态一致返回 None；被并发修改返回拒绝文案（已触发风控锁）
+    """
+    if not will_modify:
+        return None
+    latest = _prev_leverage_state(deps.gateway.list_positions(), contract)
+    if latest == prev_state:
+        return None
+    await _engage_kill(deps, f"{contract} 风控期间杠杆状态变化（{prev_state} → {latest}）")
+    return ToolOutcome(
+        f"风控期间杠杆状态被并发修改（{prev_state} → {latest}），"
+        "已开启风控锁，订单未提交，请人工核对",
+        "deny",
+        "杠杆状态并发变化",
+    )
+
+
 async def _engage_kill(deps: ToolDeps, reason: str) -> None:
     """触发风控锁：优先走注入回调（持久化 + 告警），无回调时退化为内存置位 + 日志。
 
@@ -56,20 +84,40 @@ async def _engage_kill(deps: ToolDeps, reason: str) -> None:
 
 
 async def _rollback_leverage(
-    deps: ToolDeps, contract: str, prev_state: tuple[int, str] | None
+    deps: ToolDeps,
+    contract: str,
+    prev_state: tuple[int, str] | None,
+    expected_current: tuple[int, str] | None,
 ) -> str:
-    """尽力回滚杠杆并重读核验；回滚失败或核验不一致时触发风控锁。
+    """尽力回滚杠杆并重读核验；回滚失败、核验不一致或存在并发修改时触发风控锁。
 
     参数：
         deps: ToolDeps，当前模块所需的依赖集合
         contract: str，目标合约
         prev_state: tuple[int, str] | None，修改前的 (杠杆倍数, 保证金模式)；None 表示无可信状态
+        expected_current: tuple[int, str] | None，本调用设置的目标状态（回滚前 CAS 核验用）；
+            None 表示本调用未修改杠杆，跳过核验
     返回：
-        str，面向操作员的回滚结果描述（成功、无状态可回滚、失败或核验不一致）
+        str，面向操作员的回滚结果描述（成功、无状态可回滚、并发修改中止、失败或核验不一致）
     """
     if prev_state is None:
         logger.warning("下单失败但无可信回滚状态: %s", contract)
         return "杠杆已修改且无可信的修改前状态（无持仓或全仓杠杆未知），请人工核对杠杆设置"
+    if expected_current is not None:
+        # CAS 核验：仅当当前状态仍是本调用设置的目标值时才回滚，
+        # 否则说明存在并发修改，盲写旧快照会覆盖他人改动
+        try:
+            current = _prev_leverage_state(deps.gateway.list_positions(), contract)
+        except Exception:
+            current = None
+        if current != expected_current:
+            await _engage_kill(
+                deps, f"{contract} 回滚前核验异常（预期当前 {expected_current}，实际 {current}）"
+            )
+            return (
+                f"回滚中止：当前杠杆状态 {current} 已不是本次设置的 {expected_current}，"
+                "存在并发修改，已开启风控锁，请人工核对"
+            )
     try:
         deps.gateway.set_leverage(contract, prev_state[0], prev_state[1])
     except Exception as e:  # 回滚自身失败：fail closed
@@ -97,6 +145,7 @@ async def _place_with_rollback(
     prev_state: tuple[int, str] | None,
     *,
     leverage_modified: bool,
+    target_state: tuple[int, str] | None = None,
 ) -> OrderResult | ToolOutcome:
     """杠杆就位后下单；被拒时回滚（仅当改过杠杆），状态未知或不明确异常时触发风控锁。
 
@@ -105,6 +154,7 @@ async def _place_with_rollback(
         req: OrderRequest，订单请求
         prev_state: tuple[int, str] | None，修改前的 (杠杆, 模式) 状态，用于失败后回滚
         leverage_modified: bool，本次调用是否实际修改过杠杆（未修改则失败无需回滚）
+        target_state: tuple[int, str] | None，本调用设置的目标 (杠杆, 模式)，回滚前 CAS 核验用
     返回：
         OrderResult | ToolOutcome，成功返回订单结果；明确拒绝、状态未知或异常不明返回提示文案
     """
@@ -123,7 +173,8 @@ async def _place_with_rollback(
         if not leverage_modified:
             return ToolOutcome(f"下单失败：{e}")
         return ToolOutcome(
-            f"下单失败：{e}；{await _rollback_leverage(deps, req.contract, prev_state)}"
+            f"下单失败：{e}；"
+            f"{await _rollback_leverage(deps, req.contract, prev_state, target_state)}"
         )
     except Exception as e:
         # 非网关异常：订单是否创建不明，与 OrderStateUnknown 同策——不回滚、fail closed。
@@ -166,7 +217,9 @@ async def _reconcile_leverage_unknown(
         state = None
     target = (apply_leverage, margin_mode)
     if state == target:  # 远端实际已生效：继续下单
-        return await _place_with_rollback(deps, req, prev_state, leverage_modified=True)
+        return await _place_with_rollback(
+            deps, req, prev_state, leverage_modified=True, target_state=target
+        )
     if state is None:
         await _engage_kill(deps, f"{req.contract} 调杠杆结果未知且无法读取持仓对账")
         return ToolOutcome(
@@ -218,4 +271,10 @@ async def _apply_leverage_and_place(
             prev_state=prev_state,
             error=e,
         )
-    return await _place_with_rollback(deps, req, prev_state, leverage_modified=True)
+    return await _place_with_rollback(
+        deps,
+        req,
+        prev_state,
+        leverage_modified=True,
+        target_state=(apply_leverage, margin_mode),
+    )
