@@ -255,7 +255,9 @@ export function createResearchMock(reply: <T>(value: T) => Promise<T>) {
       activePollsLeft = ACTIVE_POLLS_AFTER_IGNITE
       return reply({ started: true, reportType, hours, roundId })
     },
-    getResearchLive: () => {
+    getResearchLive: (roundId) => {
+      // 按 ID 直查：mock 只有一个实时轮，ID 不符即查无此轮（与后端契约一致：round null + 空工具链）
+      if (roundId !== undefined && roundId !== liveRoundId) return reply({ round: null, tool_calls: [] })
       if (liveRoundActive === null) return reply({ round: null, tool_calls: [] })
       if (liveRoundActive) {
         activePollsLeft -= 1

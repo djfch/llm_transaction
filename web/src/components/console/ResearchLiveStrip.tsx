@@ -3,8 +3,10 @@
  * 进入进行中态三条通路：
  * ① pinned（可信绑定）：WS research_round_start，或面板点火事件 research-round-ignite
  *   （detail.roundId 为 POST /api/research/run 预分配的审计轮 ID，与 WS 轮始事件同一标识）——
- *   直接绑定该 round_id，只认这一轮：/live 返回的其他进行中轮（含僵尸轮）一律忽略，
- *   不展示其工具链也不换绑；绑定轮 ended_at 非空即退出（本轮快速结束也立即识别，不比 started_at）。
+ *   直接绑定该 round_id，只认这一轮：/live 按绑定 ID 直查（?round_id=），不受其他轮占位影响；
+ *   查无此轮（后台尚未 begin_round 或轮不存在）走 90 秒兜底；绑定轮 ended_at 非空即退出
+ *   （本轮快速结束也立即识别，不比 started_at）；绑定轮超 30 分钟未闭合（进程重启残留的
+ *   永不闭合轮）认定僵尸死亡退出。
  * ② discovery（轮询发现）：仅面板 409 catchup 事件（research-round-catchup，已激活时不降级重建）——
  *   任务已预留但审计轮可能还没开，激活后靠每 3 秒轮询发现：/live 返回的非僵尸进行中轮即当前真相，
  *   见到更新轮次就换绑（修僵尸误绑卡死的关键）；绑定轮 ended_at 非空即退出；绑定轮绑定后变僵尸
@@ -20,7 +22,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
-import type { ResearchLiveRound, ToolCall } from '../../api/types'
+import type { ResearchLive, ResearchLiveRound, ToolCall } from '../../api/types'
 import { useWs } from '../../hooks/useWs'
 
 /** 轮询间隔（毫秒）：进行中每 3 秒拉一次实时研报状态 */
@@ -83,33 +85,44 @@ export default function ResearchLiveStrip({ onFinished }: ResearchLiveStripProps
     if (fallbackExpired(seenRef.current, activatedAtRef.current, Date.now())) exitActive(true)
   }, [exitActive])
 
-  /** 拉一次实时研报状态：pinned 只认绑定 ID（其他轮完全忽略），discovery 见更新的非僵尸轮即换绑；
-   *  确认绑定轮结束才退出；迟到响应按代际丢弃；失败静默 */
+  /** 拉一次实时研报状态：pinned 按绑定 ID 直查（其他轮占位不影响；查无此轮走兜底；绑定轮变僵尸认定死亡退出），
+   *  discovery 取最新一轮、见更新的非僵尸轮即换绑；确认绑定轮结束才退出；迟到响应按代际丢弃；失败静默 */
   const pollOnce = useCallback(async () => {
     const generation = generationRef.current
     try {
-      const live = await api.getResearchLive()
+      let live: ResearchLive
+      if (pinnedRef.current) {
+        // pinned∧未绑定当前不可达：防御未来改动引入该窗口——本轮跳过等绑定，不退化为
+        // 无参查询（无参只返回最新一轮，即「他轮占位卡死」的旧 bug 形态）
+        const boundId = boundIdRef.current
+        if (!boundId) return
+        live = await api.getResearchLive(boundId)
+      } else {
+        live = await api.getResearchLive()
+      }
       // 已退出（WS 结束先到）或代际已换（新周期已激活）：迟到响应直接丢弃
       if (generation !== generationRef.current || !activeRef.current) return
       const round = live.round
       if (round === null) {
-        // 还没有任何轮：保持等待，超兜底期限视为点火失败退出
+        // 查无此轮/还没有任何轮：保持等待，超兜底期限视为点火失败退出
         checkFallback()
         return
       }
       if (pinnedRef.current) {
-        // pinned：只认绑定轮；僵尸轮/其他轮不展示其工具链、不换绑，仅做兜底检查
-        if (round.round_id !== boundIdRef.current) {
-          checkFallback()
+        // pinned 直查绑定 ID：round 非 null 即绑定轮本身（其他轮/僵尸轮已被按 ID 查询过滤）
+        if (round.ended_at !== null) {
+          // 绑定轮已结束：本轮快速结束也立即识别（按 ID 直查，不比较时间）
+          exitActive(true)
           return
         }
-        if (round.ended_at === null) {
-          seenRef.current = true
-          setToolCalls(live.tool_calls)
-        } else {
-          // 绑定轮已结束：本轮快速结束也立即识别（按 ID 相等，不比较时间）
+        if (isZombieRound(round, Date.now())) {
+          // 绑定轮绑定后变僵尸（进程重启残留、永不闭合）认定死亡退出——否则 seen=true 后
+          // 兜底永不触发，状态条永久卡死在「生成中」
           exitActive(true)
+          return
         }
+        seenRef.current = true
+        setToolCalls(live.tool_calls)
         return
       }
       // discovery：/live 返回的更新轮次总是当前真相

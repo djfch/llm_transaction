@@ -222,4 +222,12 @@ describe('getResearchLive 适配', () => {
     vi.stubGlobal('fetch', stubFetch({ '/api/research/live': { round: null, tool_calls: [] } }))
     expect(await httpApi.getResearchLive()).toEqual({ round: null, tool_calls: [] })
   })
+
+  it('带 roundId 参数：URL 拼 ?round_id= 查询串（pinned 按绑定 ID 直查）', async () => {
+    const fetchMock = stubFetch({ '/api/research/live?round_id=rs-1': { round: null, tool_calls: [] } })
+    vi.stubGlobal('fetch', fetchMock)
+    // stub 按完整路径精确匹配：query 拼错会直接抛「未打桩的路径」
+    await expect(httpApi.getResearchLive('rs-1')).resolves.toEqual({ round: null, tool_calls: [] })
+    expect(String(fetchMock.mock.calls[0][0])).toContain('round_id=rs-1')
+  })
 })

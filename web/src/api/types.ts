@@ -708,16 +708,16 @@ export interface ApiClient {
   getReviewReport(id: number): Promise<ReviewReport>
   /** 手动触发复盘（区间为最近 interval_days 天）；409=进行中、503=LLM 未配置/未接线（ApiError.detail 可读）。 */
   runReview(): Promise<RunReviewResult>
-  /** 实时复盘状态：round/tool_calls 形状与 getAgentLive 一致（进行中 ended_at 为 null），无复盘轮时 round 为 null。 */
-  getReviewLive(): Promise<ReviewLive>
+  /** 实时复盘状态：round/tool_calls 形状与 getAgentLive 一致（进行中 ended_at 为 null），无复盘轮时 round 为 null；带 roundId 时按该轮直查（查无此轮/他类轮回 round null）。 */
+  getReviewLive(roundId?: string): Promise<ReviewLive>
   /** 研报分页列表（最新在前）；narrative 截断 200 字符。 */
   getResearchReports(offset: number, limit: number): Promise<ResearchReportsPage>
   /** 研报详情：narrative 全文 + evidence/risks/raw 已解析 + 因果链；404 经 ApiError 抛出。 */
   getResearchReport(id: number): Promise<ResearchReportDetail>
   /** 手动触发研报；409=生成中、503=LLM 未配置、422=hours 越界（ApiError.detail 可读）。 */
   runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
-  /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null。 */
-  getResearchLive(): Promise<ResearchLive>
+  /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null；带 roundId 时按该轮直查（查无此轮/他类轮回 round null）。 */
+  getResearchLive(roundId?: string): Promise<ResearchLive>
   /** 自动研报的下次执行时间与官方日历状态。 */
   getResearchScheduleStatus(): Promise<ResearchScheduleStatus>
   /** 按 agent 取实时轮快照（三端点归一为 LiveSnapshot；进行中以 round.ended_at === null 判定）。 */

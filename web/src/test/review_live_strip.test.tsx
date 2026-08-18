@@ -6,6 +6,8 @@
  * 本轮快速结束按 ID 立即识别（不比较时间，覆盖两端时钟偏差）、WS 轮末事件 round_id 不符不退出、
  * 代际校验（上一激活周期的迟到 /live 响应不关闭新一轮）、90 秒兜底（绑定轮从未出现视为点火失败退出）、
  * 挂载补漏（含 30 分钟僵尸轮防线、补漏绑定后能被更新轮换绑退出、绑定轮变僵尸认定死亡退出）、
+ * pinned 按绑定 ID 直查（?round_id=）：绑定轮已被见后 /live 最新轮被别轮占位仍直查自己 ID 识别结束、
+ * 绑定轮超 30 分钟未闭合（进程重启残留）僵尸判定退出、直查恒查无此轮走 90 秒兜底、
  * 轮询失败静默保留进度条、已激活时 catchup 与 WS 重连补漏不降级 pinned。
  */
 import { act, render, screen } from '@testing-library/react'
@@ -16,11 +18,11 @@ import ReviewLiveStrip from '../components/console/ReviewLiveStrip'
 const holder = vi.hoisted(() => ({
   lastMessage: null as WsMessage | null,
   connected: true,
-  getReviewLive: vi.fn<() => Promise<ReviewLive>>(),
+  getReviewLive: vi.fn<(roundId?: string) => Promise<ReviewLive>>(),
 }))
 
 vi.mock('../api', () => ({
-  api: { getReviewLive: () => holder.getReviewLive() },
+  api: { getReviewLive: (roundId?: string) => holder.getReviewLive(roundId) },
 }))
 
 vi.mock('../hooks/useWs', () => ({
@@ -65,6 +67,14 @@ const ALT_CALLS: ReviewLive['tool_calls'] = [
 function ignite(roundId: string) {
   act(() => {
     window.dispatchEvent(new CustomEvent('review-round-ignite', { detail: { roundId } }))
+  })
+}
+
+/** 按入参分流的 /live mock（贴生产语义）：带参但 id 与 byId 轮次不符即查无此轮（round null），不带参返回 latest。 */
+function mockLiveRouting(byId: ReviewLive, latest: ReviewLive) {
+  holder.getReviewLive.mockImplementation((roundId) => {
+    if (roundId) return Promise.resolve(roundId === byId.round?.round_id ? byId : { round: null, tool_calls: [] })
+    return Promise.resolve(latest)
   })
 }
 
@@ -231,56 +241,56 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
   })
 
-  it('pinned 点火后 /live 先返回上一轮已结束记录 → 保持等待不误退；随后绑定轮进行中 → 展示工具链；其结束 → 退出', async () => {
+  it('pinned 点火后无参 /live 仍返回上一轮已结束记录、直查绑定轮暂查无此轮 → 保持等待不误退；随后绑定轮进行中 → 展示工具链；其结束 → 退出', async () => {
     const onFinished = vi.fn()
     await renderStrip(onFinished)
-    // 上一轮的历史记录（rv-old，点火之前就已结束）：新后台任务还没 begin_round 时 /live 返回的就是它
-    holder.getReviewLive.mockResolvedValue({ round: endedRound(NOW_S - 3600, NOW_S - 3500, 'rv-old'), tool_calls: [] })
+    // 上一轮的历史记录（rv-old，点火之前就已结束）：新后台任务还没 begin_round 时无参 /live 返回的就是它，
+    // 而按 rv-new 直查查无此轮（后端契约：round null）
+    const oldEnded: ReviewLive = { round: endedRound(NOW_S - 3600, NOW_S - 3500, 'rv-old'), tool_calls: [] }
+    mockLiveRouting({ round: null, tool_calls: [] }, oldEnded)
     ignite('rv-new')
-    await act(async () => vi.advanceTimersByTimeAsync(0)) // 激活后立即 pollOnce：返回旧轮已结束（ID 不符，忽略）
+    await act(async () => vi.advanceTimersByTimeAsync(0)) // 激活后立即 pollOnce：直查 rv-new 查无此轮，继续等待
     expect(screen.getByTestId('review-live-strip')).toBeInTheDocument() // 不得误退
     expect(onFinished).not.toHaveBeenCalled()
-    await act(async () => vi.advanceTimersByTimeAsync(3000)) // 再轮询仍是旧轮：继续等待
+    await act(async () => vi.advanceTimersByTimeAsync(3000)) // 再轮询仍查无此轮：继续等待
     expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
 
-    // 新后台任务 begin_round 完成：/live 返回绑定轮进行中 → 展示工具链
-    holder.getReviewLive.mockResolvedValue({ round: liveRound(NOW_S, 'rv-new'), tool_calls: TWO_CALLS })
+    // 新后台任务 begin_round 完成：直查 rv-new 返回进行中轮 → 展示工具链
+    mockLiveRouting({ round: liveRound(NOW_S, 'rv-new'), tool_calls: TWO_CALLS }, oldEnded)
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
 
     // 绑定轮结束 → 退出并通知
-    holder.getReviewLive.mockResolvedValue({ round: endedRound(NOW_S, NOW_S + 30, 'rv-new'), tool_calls: TWO_CALLS })
+    mockLiveRouting({ round: endedRound(NOW_S, NOW_S + 30, 'rv-new'), tool_calls: TWO_CALLS }, oldEnded)
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
     expect(onFinished).toHaveBeenCalledTimes(1)
   })
 
-  it('pinned 点火后 /live 返回僵尸进行中轮 → 不绑定、不展示其工具链、不退出；绑定轮出现后正常走完', async () => {
+  it('pinned 点火后无参 /live 返回僵尸进行中轮、直查绑定轮暂查无此轮 → 不展示僵尸轮工具链、不退出；绑定轮出现后正常走完', async () => {
     const onFinished = vi.fn()
     await renderStrip(onFinished)
-    // 上次强杀残留的未闭合旧轮（started_at 超 30 分钟，ended_at=null）：pinned 模式下必须完全忽略
-    holder.getReviewLive.mockResolvedValue({
-      round: liveRound(NOW_S - 40 * 60, 'rv-zombie'),
-      tool_calls: TWO_CALLS,
-    })
+    // 上次强杀残留的未闭合旧轮（started_at 超 30 分钟，ended_at=null）：pinned 按 ID 直查根本查不到它
+    const zombie: ReviewLive = { round: liveRound(NOW_S - 40 * 60, 'rv-zombie'), tool_calls: TWO_CALLS }
+    mockLiveRouting({ round: null, tool_calls: [] }, zombie)
     ignite('rv-new')
     await act(async () => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
     expect(screen.getByText('复盘进行中 · 等待 LLM 发起调用…')).toBeInTheDocument() // 不展示僵尸轮工具链
     expect(onFinished).not.toHaveBeenCalled()
-    await act(async () => vi.advanceTimersByTimeAsync(3000)) // 僵尸轮持续存在：不换绑不退出
+    await act(async () => vi.advanceTimersByTimeAsync(3000)) // 僵尸轮持续占位：直查绑定轮仍查无此轮，不退出
     expect(screen.getByText('复盘进行中 · 等待 LLM 发起调用…')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
 
-    // 本轮开始：/live 返回 rv-new 进行中 → 展示其工具链
-    holder.getReviewLive.mockResolvedValue({ round: liveRound(NOW_S, 'rv-new'), tool_calls: TWO_CALLS })
+    // 本轮开始：直查 rv-new 返回进行中轮 → 展示其工具链
+    mockLiveRouting({ round: liveRound(NOW_S, 'rv-new'), tool_calls: TWO_CALLS }, zombie)
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
 
-    // 本轮结束 → 退出并通知（不误绑僵尸轮，兜底也不会误伤）
-    holder.getReviewLive.mockResolvedValue({ round: endedRound(NOW_S, NOW_S + 30, 'rv-new'), tool_calls: TWO_CALLS })
+    // 本轮结束 → 退出并通知（僵尸轮占位不干扰，兜底也不会误伤）
+    mockLiveRouting({ round: endedRound(NOW_S, NOW_S + 30, 'rv-new'), tool_calls: TWO_CALLS }, zombie)
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
     expect(onFinished).toHaveBeenCalledTimes(1)
@@ -403,10 +413,10 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     expect(onFinished).toHaveBeenCalledTimes(1) // 未重复触发
   })
 
-  it('pinned 点火后约 90 秒绑定轮从未在 /live 出现（始终只有旧已结束轮）→ 兜底退出并回调 onFinished', async () => {
+  it('pinned 点火后约 90 秒绑定轮从未在 /live 出现（无参 /live 始终只有旧已结束轮、直查恒查无此轮）→ 兜底退出并回调 onFinished', async () => {
     const onFinished = vi.fn()
     await renderStrip(onFinished)
-    holder.getReviewLive.mockResolvedValue({ round: endedRound(NOW_S - 3600, NOW_S - 3500, 'rv-old'), tool_calls: [] })
+    mockLiveRouting({ round: null, tool_calls: [] }, { round: endedRound(NOW_S - 3600, NOW_S - 3500, 'rv-old'), tool_calls: [] })
     ignite('rv-new')
     await act(async () => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
@@ -453,14 +463,22 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
 
-    // /live 出现另一进行中轮：若守卫失守降级为 discovery 会换绑它；pinned 保持只认 rv-new
-    holder.getReviewLive.mockResolvedValue({ round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS })
+    // /live 无参出现另一进行中轮：若守卫失守降级为 discovery 会换绑它；pinned 直查 rv-new 仍只返回本轮
+    mockLiveRouting(
+      { round: liveRound(NOW_S - 10, 'rv-new'), tool_calls: TWO_CALLS },
+      { round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS },
+    )
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
+    // pinned 直查以绑定 ID 发起，未退化为无参查询
+    expect(holder.getReviewLive).toHaveBeenCalledWith('rv-new')
 
     // 绑定轮结束 → 正常退出
-    holder.getReviewLive.mockResolvedValue({ round: endedRound(NOW_S - 10, NOW_S + 20, 'rv-new'), tool_calls: TWO_CALLS })
+    mockLiveRouting(
+      { round: endedRound(NOW_S - 10, NOW_S + 20, 'rv-new'), tool_calls: TWO_CALLS },
+      { round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS },
+    )
     await act(async () => vi.advanceTimersByTimeAsync(3000))
     expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
     expect(onFinished).toHaveBeenCalledTimes(1)
@@ -474,10 +492,13 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     await act(async () => vi.advanceTimersByTimeAsync(0))
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
 
-    // WS 断开→重连：触发一次性补漏；此刻 /live 返回另一轮，守卫失守会被换绑降级
+    // WS 断开→重连：触发一次性补漏；此刻无参 /live 返回另一轮，守卫失守会被换绑降级（直查 rv-new 仍返回本轮）
     holder.connected = false
     rerender(<ReviewLiveStrip onFinished={onFinished} />)
-    holder.getReviewLive.mockResolvedValue({ round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS })
+    mockLiveRouting(
+      { round: liveRound(NOW_S - 10, 'rv-new'), tool_calls: TWO_CALLS },
+      { round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS },
+    )
     holder.connected = true
     rerender(<ReviewLiveStrip onFinished={onFinished} />)
     await act(async () => vi.advanceTimersByTimeAsync(0))
@@ -485,5 +506,72 @@ describe('ReviewLiveStrip(复盘进行中进度条)', () => {
     // 守卫生效：绑定与工具链不被改写
     expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
     expect(onFinished).not.toHaveBeenCalled()
+  })
+
+  it('pinned 绑定轮已被见后结束、无参 /live 最新轮已被别轮占位 → 直查绑定 ID 仍识别结束退出（场景一防回归）', async () => {
+    const onFinished = vi.fn()
+    await renderStrip(onFinished)
+    // 直查 rv-new 返回进行中绑定轮；无参 /live 已被 rv-other 占位（模拟 WS 断线期间别处点火的新轮）
+    mockLiveRouting(
+      { round: liveRound(NOW_S - 20, 'rv-new'), tool_calls: TWO_CALLS },
+      { round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS },
+    )
+    ignite('rv-new')
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument() // seen=true
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(onFinished).not.toHaveBeenCalled()
+
+    // 绑定轮结束：直查 rv-new 返回已结束（最新轮仍被 rv-other 占位）→ 正常退出；
+    // 旧实现 pinned 只看不带参的最新轮，seen=true 后兜底永不触发，会永久卡「进行中」
+    mockLiveRouting(
+      { round: endedRound(NOW_S - 20, NOW_S, 'rv-new'), tool_calls: TWO_CALLS },
+      { round: liveRound(NOW_S - 5, 'rv-other'), tool_calls: ALT_CALLS },
+    )
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+    expect(onFinished).toHaveBeenCalledTimes(1)
+  })
+
+  it('pinned 绑定轮已被见后超 30 分钟未闭合（进程重启残留脏轮）→ 僵尸判定退出并回调 onFinished（场景二防回归）', async () => {
+    const onFinished = vi.fn()
+    await renderStrip(onFinished)
+    // 直查与无参都返回 5 分钟前开始的未闭合绑定轮（轮龄 <30 分钟，非僵尸，seen=true）
+    const bound: ReviewLive = { round: liveRound(NOW_S - 300, 'rv-new'), tool_calls: TWO_CALLS }
+    mockLiveRouting(bound, bound)
+    ignite('rv-new')
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByText('复盘进行中 · 已调用 2 个工具 · 最近：get_decision_detail')).toBeInTheDocument()
+
+    // 26 分钟后轮龄越过 30 分钟僵尸线且始终未闭合（进程重启，ended_at 永远为 null）：
+    // pinned 直查命中僵尸 → 认定死亡退出；旧实现 pinned 分支无僵尸判定，会永久卡「进行中」
+    vi.setSystemTime((NOW_S + 26 * 60) * 1000)
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+    expect(onFinished).toHaveBeenCalledTimes(1)
+  })
+
+  it('pinned 直查恒查无绑定轮（后台从未 begin_round）、无参 /live 另有进行中轮 → 90 秒兜底退出并回调 onFinished', async () => {
+    const onFinished = vi.fn()
+    await renderStrip(onFinished)
+    // 直查 rv-new 恒查无此轮；无参 /live 有另一进行中轮（与纯空 /live 的 90 秒兜底用例区分 mock 行为）
+    mockLiveRouting(
+      { round: null, tool_calls: [] },
+      { round: liveRound(NOW_S - 10, 'rv-other'), tool_calls: ALT_CALLS },
+    )
+    ignite('rv-new')
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
+
+    // 未到兜底期限（60 秒）：持续等待不退出，也不展示他轮工具链
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(screen.getByTestId('review-live-strip')).toBeInTheDocument()
+    expect(screen.getByText('复盘进行中 · 等待 LLM 发起调用…')).toBeInTheDocument()
+    expect(onFinished).not.toHaveBeenCalled()
+
+    // 越过约 90 秒兜底期限 → 退出并通知（列表刷新出失败报告）
+    await act(async () => vi.advanceTimersByTimeAsync(31_000))
+    expect(screen.queryByTestId('review-live-strip')).not.toBeInTheDocument()
+    expect(onFinished).toHaveBeenCalledTimes(1)
   })
 })

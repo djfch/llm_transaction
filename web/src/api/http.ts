@@ -821,8 +821,10 @@ export const httpApi: ApiClient = {
   getReviewReport: async (id): Promise<ReviewReport> =>
     adaptReviewReport(await request<RawReviewReport>(`/review/reports/${id}`)),
   runReview: async () => adaptRunReview(await request<RawRunReview>('/review/run', { method: 'POST' })),
-  // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配
-  getReviewLive: () => request<ReviewLive>('/review/live'),
+  // 与 getAgentLive 同约定：响应契约即最终形态（args/result 已解析、时间为 Unix 秒），无需适配；
+  // 带 roundId 时按该轮直查（查无此轮/他类轮回 round null），不带参返回最新一轮
+  getReviewLive: (roundId?: string) =>
+    request<ReviewLive>(roundId ? `/review/live?round_id=${encodeURIComponent(roundId)}` : '/review/live'),
   getResearchReports: fetchResearchReports,
   getResearchReport: async (id): Promise<ResearchReportDetail> =>
     adaptResearchReportDetail(await request<RawResearchReportDetail>(`/research/reports/${id}`)),
@@ -834,8 +836,9 @@ export const httpApi: ApiClient = {
         body: JSON.stringify({ report_type: reportType, hours }),
       }),
     ),
-  // 与 getReviewLive 同约定：响应契约即最终形态，无需适配
-  getResearchLive: () => request<ResearchLive>('/research/live'),
+  // 与 getReviewLive 同约定：响应契约即最终形态，无需适配；带 roundId 时按该轮直查，不带参返回最新一轮
+  getResearchLive: (roundId?: string) =>
+    request<ResearchLive>(roundId ? `/research/live?round_id=${encodeURIComponent(roundId)}` : '/research/live'),
   getResearchScheduleStatus: () => request<ResearchScheduleStatus>('/research/schedule-status'),
   // 按 agent 转发三端点；返回值类型收窄为 LiveSnapshot（in_round / strategy_md5 等端点私有字段随之丢弃）
   getLiveFor: (agent): Promise<LiveSnapshot> => {

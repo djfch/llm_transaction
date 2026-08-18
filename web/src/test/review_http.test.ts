@@ -318,4 +318,12 @@ describe('getReviewLive 适配', () => {
     expect(live.round).toBeNull()
     expect(live.tool_calls).toEqual([])
   })
+
+  it('带 roundId 参数：URL 拼 ?round_id= 查询串（pinned 按绑定 ID 直查）', async () => {
+    const fetchMock = stubFetch({ '/api/review/live?round_id=rv-1': { round: null, tool_calls: [] } })
+    vi.stubGlobal('fetch', fetchMock)
+    // stub 按完整路径精确匹配：query 拼错会直接抛「未打桩的路径」
+    await expect(httpApi.getReviewLive('rv-1')).resolves.toEqual({ round: null, tool_calls: [] })
+    expect(String(fetchMock.mock.calls[0][0])).toContain('round_id=rv-1')
+  })
 })

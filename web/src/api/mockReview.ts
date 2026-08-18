@@ -222,7 +222,9 @@ export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef
       // 点火契约：立即返回 started + 统计区间回显 + 预分配审计轮 ID（与随后 /live 进行中轮 round_id 一致，同后端契约）
       return reply({ started: true, periodStart, periodEnd, roundId })
     },
-    getReviewLive: () => {
+    getReviewLive: (roundId) => {
+      // 按 ID 直查：mock 只有一个实时轮，ID 不符即查无此轮（与后端契约一致：round null + 空工具链）
+      if (roundId !== undefined && roundId !== liveRoundId) return reply({ round: null, tool_calls: [] })
       if (liveRoundActive) {
         activePollsLeft -= 1
         if (activePollsLeft <= 0) liveRoundActive = false
