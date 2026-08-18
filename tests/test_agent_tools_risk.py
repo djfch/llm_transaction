@@ -1,7 +1,7 @@
 """工具层测试：amend 过风控、声明杠杆真实生效、落库失败禁止重试、
 close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移、
 研报方向闸门（高置信反向开仓拦截与各路降级放行）、
-place_order 布尔参数严格类型校验。"""
+place_order 布尔参数严格类型校验、声明杠杆下单失败的回滚与状态提示。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from src.agent.tool_handlers import ToolDeps
 from src.agent.tools import ToolRegistry
 from src.config import ResearchConfig, RiskConfig
-from src.gateway.base import Contract
+from src.gateway.base import Contract, GatewayError, OrderStateUnknown, Position
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
@@ -854,5 +854,206 @@ async def test_place_order_bool_params_accept_explicit_bools(tmp_path):
         )
         assert out.risk_verdict == "allow", out.text
         assert env.gateway.positions["BTC_USDT"].size == 0
+    finally:
+        await env.db.close()
+
+
+# ---------- 声明杠杆下单失败：回滚与状态提示（issue #70 回归） ----------
+
+
+def _long_position(leverage: str) -> Position:
+    """构造 BTC_USDT 多仓持仓对象（leverage=0 表示全仓模式）。
+
+    参数：
+        leverage: str，持仓杠杆倍数的字符串形式，"0" 表示全仓（cross）
+
+    返回：
+        Position：1 张多仓、固定价格与保证金的持仓对象
+    """
+    return Position(
+        contract="BTC_USDT",
+        size=Decimal(1),
+        entry_price=Decimal(60000),
+        mark_price=Decimal(60000),
+        liq_price=Decimal(30000),
+        leverage=Decimal(leverage),
+        margin=Decimal(100),
+        unrealised_pnl=Decimal(0),
+    )
+
+
+def _spy_set_leverage(env: SimpleNamespace, spy: list) -> None:
+    """把 env 网关的 set_leverage 替换为记录参数后转发原实现的探针。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        spy: list，用于收集 (contract, leverage, margin_mode) 调用记录的列表
+
+    返回：
+        None，就地替换 env.gateway.set_leverage 实例属性
+    """
+    orig = env.gateway.set_leverage
+
+    def _record(contract, leverage, margin_mode="isolated"):
+        """记录调用参数后转发给原 set_leverage。
+
+        参数：
+            contract: str，合约名
+            leverage: int，杠杆倍数
+            margin_mode: str，保证金模式，默认 "isolated"
+
+        返回：
+            原 set_leverage 的返回值
+        """
+        spy.append((contract, leverage, margin_mode))
+        return orig(contract, leverage, margin_mode)
+
+    env.gateway.set_leverage = _record
+
+
+async def test_place_order_gateway_reject_rolls_back_leverage(tmp_path, monkeypatch):
+    """验证声明杠杆后下单被交易所明确拒绝时，杠杆回滚到修改前状态。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于替换网关下单方法注入失败
+
+    返回：
+        None，断言文本含回滚说明、杠杆恢复修改前值且 set_leverage 被调两次
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        spy: list = []
+        _spy_set_leverage(env, spy)
+
+        def _reject(req):
+            """模拟交易所明确拒绝下单。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                GatewayError，模拟交易所明确拒绝（不会重单）
+            """
+            raise GatewayError("余额不足", label="INSUFFICIENT_BALANCE")
+
+        monkeypatch.setattr(env.gateway, "place_order", _reject)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "下单失败" in out.text and "已回滚" in out.text
+        assert spy == [("BTC_USDT", 3, "isolated"), ("BTC_USDT", 2, "isolated")]
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(2)
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_state_unknown_keeps_leverage(tmp_path, monkeypatch):
+    """验证下单状态未知（可能已创建）时不回滚杠杆，仅提示人工核对。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于替换网关下单方法注入超时异常
+
+    返回：
+        None，断言文本禁止盲目重试、杠杆保持本次修改值且 set_leverage 只调一次
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        spy: list = []
+        _spy_set_leverage(env, spy)
+
+        def _timeout(req):
+            """模拟下单超时且回查失败（订单状态未知）。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                OrderStateUnknown，模拟订单可能已创建的不确定状态
+            """
+            raise OrderStateUnknown("下单超时且回查失败，订单状态未知")
+
+        monkeypatch.setattr(env.gateway, "place_order", _timeout)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "状态未知" in out.text and "禁止盲目重试" in out.text
+        assert spy == [("BTC_USDT", 3, "isolated")]  # 不回滚
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(3)
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_margin_mode_follows_current_position(tmp_path):
+    """验证未声明 margin_mode 时跟随当前持仓模式（全仓持仓不再被强带逐仓）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言 set_leverage 收到 cross 模式且下单成功
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("0")  # 全仓持仓
+        spy: list = []
+        _spy_set_leverage(env, spy)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert out.risk_verdict == "allow", out.text
+        assert spy == [("BTC_USDT", 3, "cross")]
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_failure_without_prior_position_keeps_leverage(tmp_path, monkeypatch):
+    """验证下单前无持仓时杠杆修改无法回滚，仅提示人工核对。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于替换网关下单方法注入失败
+
+    返回：
+        None，断言文本提示人工核对、杠杆保持修改值且 set_leverage 只调一次
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        spy: list = []
+        _spy_set_leverage(env, spy)
+
+        def _reject(req):
+            """模拟交易所明确拒绝下单。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                GatewayError，模拟交易所明确拒绝（不会重单）
+            """
+            raise GatewayError("张数低于最小限制", label="SIZE_TOO_SMALL")
+
+        monkeypatch.setattr(env.gateway, "place_order", _reject)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "下单失败" in out.text and "人工核对" in out.text
+        assert spy == [("BTC_USDT", 3, "isolated")]  # 无先验状态，不回滚
     finally:
         await env.db.close()
