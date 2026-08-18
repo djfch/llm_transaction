@@ -157,6 +157,7 @@ beforeEach(() => {
       started: true,
       periodStart: 1784505600,
       periodEnd: 1784592000,
+      roundId: 'rv-ignite', // 预分配审计轮 ID：与下方联动用例的 WS 轮末事件 round_id 一致
     }),
   )
   // 默认给任意 roundId 返回同一份审计详情（id6 展开即触发）
@@ -266,15 +267,21 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(holder.getRound).not.toHaveBeenCalled()
   })
 
-  it('立即复盘点火成功：提示已启动、按钮立即恢复且不主动刷新列表', async () => {
+  it('立即复盘点火成功：提示已启动、按钮立即恢复且不主动刷新列表，ignite 事件携带预分配 roundId', async () => {
     render(<ReviewPanel />)
     await screen.findByText(/第 5 份报告/)
     const callsBefore = holder.getReviewReports.mock.calls.length
+    const igniteSpy = vi.fn()
+    window.addEventListener('review-round-ignite', igniteSpy)
 
     fireEvent.click(screen.getByRole('button', { name: '立即复盘' }))
 
     expect(await screen.findByText('复盘已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runReview).toHaveBeenCalledTimes(1)
+    // 点火事件 detail 携带 POST 预分配的审计轮 ID（状态条据此 pinned 绑定本轮）
+    expect(igniteSpy).toHaveBeenCalledTimes(1)
+    expect((igniteSpy.mock.calls[0][0] as CustomEvent).detail).toEqual({ roundId: 'rv-ignite' })
+    window.removeEventListener('review-round-ignite', igniteSpy)
     // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
     expect(screen.getByRole('button', { name: '立即复盘' })).toBeEnabled()
     expect(holder.getReviewReports).toHaveBeenCalledTimes(callsBefore)

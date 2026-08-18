@@ -29,9 +29,11 @@ describe('mock 实时复盘状态', () => {
   })
 
   it('getReviewLive：手动复盘后先返进行中轮、再轮询翻转为已结束（演示进度条完整进出循环）', async () => {
-    await mockApi.runReview()
+    const result = await mockApi.runReview()
     const activeLive = await mockApi.getReviewLive()
     expect(activeLive.round!.ended_at).toBeNull() // 进行中
+    // 点火响应的 roundId 与 /live 进行中轮 round_id 一致（同后端契约）
+    expect(activeLive.round!.round_id).toBe(result.roundId)
     const doneLive = await mockApi.getReviewLive()
     const round = doneLive.round!
     expect(round.ended_at).not.toBeNull()

@@ -371,11 +371,12 @@ function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
   }
 }
 
-/** 后端 POST /api/review/run 点火响应（成功仅回显统计区间；409/503/422 走 ApiError，不进本适配） */
+/** 后端 POST /api/review/run 点火响应（成功回显统计区间 + 预分配审计轮 ID；409/503/422 走 ApiError，不进本适配） */
 interface RawRunReview {
   started: boolean
   period_start?: number
   period_end?: number
+  round_id?: string
   error?: string
   error_code?: string
 }
@@ -386,6 +387,7 @@ function adaptRunReview(raw: RawRunReview): RunReviewResult {
     started: Boolean(raw.started),
     periodStart: raw.period_start,
     periodEnd: raw.period_end,
+    roundId: raw.round_id,
     error: raw.error ?? '',
     errorCode: raw.error_code,
   }
@@ -567,11 +569,12 @@ function adaptResearchReportDetail(raw: RawResearchReportDetail): ResearchReport
     causalLinks: (raw.causal_links ?? []).map(adaptCausalLink),
   }
 }
-/** 后端 POST /api/research/run 点火响应（成功仅回显类型与窗口；409/503/422 走 ApiError，不进本适配） */
+/** 后端 POST /api/research/run 点火响应（成功回显类型与窗口 + 预分配审计轮 ID；409/503/422 走 ApiError，不进本适配） */
 interface RawRunResearch {
   started: boolean
   report_type?: string
   hours?: number
+  round_id?: string
   error?: string
   error_code?: string
 }
@@ -582,6 +585,7 @@ function adaptRunResearch(raw: RawRunResearch): RunResearchResult {
     started: Boolean(raw.started),
     reportType: raw.report_type,
     hours: raw.hours,
+    roundId: raw.round_id,
     error: raw.error ?? '',
     errorCode: raw.error_code,
   }

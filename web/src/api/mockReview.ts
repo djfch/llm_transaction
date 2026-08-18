@@ -117,11 +117,14 @@ function seedVersions(currentStrategy: string): void {
   ]
 }
 
-/** 手动复盘：立即出一份「未调整」报告（最新在前），演示列表刷新；实时复盘轮重新进入进行中（轮询后翻转已结束）。返回新报告 ID 与统计区间（Unix 秒）。 */
-function runMockReview(): { id: number; periodStart: number; periodEnd: number } {
+/** 手动复盘：立即出一份「未调整」报告（最新在前），演示列表刷新；实时复盘轮重新进入进行中（轮询后翻转已结束）。
+ *  返回新报告 ID、统计区间（Unix 秒）与本轮审计轮 ID（点火响应与 /live 进行中轮共用）。 */
+function runMockReview(): { id: number; periodStart: number; periodEnd: number; roundId: string } {
   const newId = Math.max(0, ...reviewReports.map((r) => r.id)) + 1
+  const roundId = `rv-mock-${newId}`
   const periodEnd = Math.floor(Date.now() / 1000)
   const periodStart = periodEnd - 24 * 3600
+  liveRoundId = roundId // 点火后轮询见到的进行中轮即本轮（与点火响应 roundId 一致，同后端契约）
   liveRoundActive = true // 每次点火重新进入进行中轮：前轮询返进行中，随后翻转已结束（演示进度条完整进出循环）
   activePollsLeft = ACTIVE_POLLS_AFTER_IGNITE
   reviewReports.unshift({
@@ -135,10 +138,10 @@ function runMockReview(): { id: number; periodStart: number; periodEnd: number }
     strategyAction: 'none',
     newVersionId: null,
     error: '',
-    roundId: `rv-mock-${newId}`, // 非空 roundId：演示新报告内嵌工具链
+    roundId, // 非空 roundId：演示新报告内嵌工具链
     time: new Date(periodEnd * 1000).toISOString(),
   })
-  return { id: newId, periodStart, periodEnd }
+  return { id: newId, periodStart, periodEnd, roundId }
 }
 
 /** 点火后进行中轮被轮询的次数预算：首次轮询返进行中，第 2 次起翻转已结束（演示进度条完整进出循环） */
@@ -147,6 +150,8 @@ const ACTIVE_POLLS_AFTER_IGNITE = 2
 /** 复盘轮进行状态：默认进行中（演示进度条随挂载补漏出现）；该初始轮不自动翻转，直到首次手动复盘收尾 */
 let liveRoundActive = true
 let activePollsLeft = Number.POSITIVE_INFINITY
+/** 进行中复盘轮 ID：runReview 点火时换成本轮的预分配 ID（与点火响应 roundId 一致） */
+let liveRoundId = 'rv-live-mock'
 
 /**
  * 实时复盘审计轮样例（active=true 进行中 / false 已结束，工具链两种形态下都保留）。
@@ -159,7 +164,7 @@ function buildReviewLive(active: boolean): ReviewLive {
   const startedAt = Math.floor(Date.now() / 1000) - 18
   return {
     round: {
-      round_id: 'rv-live-mock',
+      round_id: liveRoundId,
       wake_source: 'review',
       prompt_md5: '7a1b2c3d4e5f60718293a4b5c6d7e8f9',
       prompt_snapshot: '# 复盘 Agent Prompt（md5: 7a1b…f9）\n\n你是复盘 Agent，只读分析最近交易并产出报告。',
@@ -213,9 +218,9 @@ export function createReviewMock(reply: <T>(value: T) => Promise<T>, strategyRef
       return reply({ ...report })
     },
     runReview: () => {
-      const { periodStart, periodEnd } = runMockReview()
-      // 点火契约：立即返回 started + 统计区间回显；新报告已同步落库，演示列表刷新后出现新条目
-      return reply({ started: true, periodStart, periodEnd })
+      const { periodStart, periodEnd, roundId } = runMockReview()
+      // 点火契约：立即返回 started + 统计区间回显 + 预分配审计轮 ID（与随后 /live 进行中轮 round_id 一致，同后端契约）
+      return reply({ started: true, periodStart, periodEnd, roundId })
     },
     getReviewLive: () => {
       if (liveRoundActive) {

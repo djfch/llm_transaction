@@ -498,6 +498,7 @@ export interface RunReviewResult {
   started: boolean // 是否已点火启动复盘（成功恒为 true）
   periodStart?: number // 复盘统计区间起（Unix 秒，由 period_start 适配回显）
   periodEnd?: number // 复盘统计区间止（Unix 秒，由 period_end 适配回显）
+  roundId?: string // 点火成功时后端预分配的审计轮 ID（与 WS 轮始事件 review_round_start 同一标识；错误路径不含）
   error?: string // 失败原因（空串/缺省 = 正常）
   errorCode?: string // 错误码（由 error_code 适配）
 }
@@ -577,6 +578,7 @@ export interface RunResearchResult {
   started: boolean // 是否已点火启动研报（成功恒为 true）
   reportType?: string // 研报类型回显（由 report_type 适配）
   hours?: number // 覆盖窗口小时数回显
+  roundId?: string // 点火成功时后端预分配的审计轮 ID（与 WS 轮始事件 research_round_start 同一标识；错误路径不含）
   error?: string // 失败原因（空串/缺省 = 正常）
   errorCode?: string // 错误码（由 error_code 适配）
 }

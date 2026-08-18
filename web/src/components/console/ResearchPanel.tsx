@@ -312,16 +312,17 @@ export default function ResearchPanel() {
   }, [goToPage, page, reload, totalPages])
 
   /** 手动触发研报（manual + 最近 24 小时）：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表。
-   *  点火成功广播 research-round-ignite：状态条不依赖 WS 也能激活（覆盖 WS 断线窗口内点火）。
+   *  点火成功广播 research-round-ignite（detail.roundId 为后端预分配的审计轮 ID，与 WS 轮始事件同一标识）：
+   *  状态条不依赖 WS 也能激活并按 ID 绑定本轮（覆盖 WS 断线窗口内点火）。
    *  409（生成中）按成功样式提示而非错误红，并广播 research-round-catchup：任务由他处（别的标签页/自动调度）
-   *  点火而本页 WS 断线时，状态条经补漏找回进行中轮；503/422 经 ApiError.detail 红字提示。 */
+   *  点火而本页 WS 断线时，状态条以轮询发现模式找回进行中轮；503/422 经 ApiError.detail 红字提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
-      await api.runResearch('manual', 24)
+      const res = await api.runResearch('manual', 24)
       setNotice({ ok: true, text: '研报已启动，进度见下方状态条' })
-      window.dispatchEvent(new CustomEvent('research-round-ignite'))
+      window.dispatchEvent(new CustomEvent('research-round-ignite', { detail: { roundId: res.roundId } }))
     } catch (e) {
       // 409 = 已有研报在生成中：是状态提示而非失败，避免红色误导；顺手让状态条补漏激活
       if (e instanceof ApiError && e.status === 409) {

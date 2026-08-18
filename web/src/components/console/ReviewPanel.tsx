@@ -225,16 +225,17 @@ export default function ReviewPanel() {
   }, [goToPage, page, reload, totalPages])
 
   /** 手动触发复盘：点火即返回，按钮立即恢复；进度经下方状态条呈现，成败报告落库后经 onFinished 刷新列表。
-   *  点火成功广播 review-round-ignite：状态条不依赖 WS 也能激活（覆盖 WS 断线窗口内点火）。
+   *  点火成功广播 review-round-ignite（detail.roundId 为后端预分配的审计轮 ID，与 WS 轮始事件同一标识）：
+   *  状态条不依赖 WS 也能激活并按 ID 绑定本轮（覆盖 WS 断线窗口内点火）。
    *  409（进行中）按成功样式提示而非错误红，并广播 review-round-catchup：任务由他处（别的标签页/自动调度）
-   *  点火而本页 WS 断线时，状态条经补漏找回进行中轮；503 经 ApiError.detail 红字提示。 */
+   *  点火而本页 WS 断线时，状态条以轮询发现模式找回进行中轮；503 经 ApiError.detail 红字提示。 */
   const runNow = async () => {
     setRunning(true)
     setNotice(null)
     try {
-      await api.runReview()
+      const res = await api.runReview()
       setNotice({ ok: true, text: '复盘已启动，进度见下方状态条' })
-      window.dispatchEvent(new CustomEvent('review-round-ignite'))
+      window.dispatchEvent(new CustomEvent('review-round-ignite', { detail: { roundId: res.roundId } }))
     } catch (e) {
       // 409 = 已有复盘在进行中：是状态提示而非失败，避免红色误导；顺手让状态条补漏激活
       if (e instanceof ApiError && e.status === 409) {

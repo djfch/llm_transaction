@@ -179,6 +179,7 @@ beforeEach(() => {
     started: true,
     reportType: 'manual',
     hours: 24,
+    roundId: 'rs-live', // 预分配审计轮 ID：与下方联动用例的 WS 轮末事件 round_id 一致
   })
 })
 
@@ -213,13 +214,19 @@ describe('ResearchPanel(研报面板)', () => {
     expect(holder.getResearchReport).not.toHaveBeenCalledWith(7)
   })
 
-  it('生成研报点火成功：提示已启动、按钮立即恢复且不主动刷新列表', async () => {
+  it('生成研报点火成功：提示已启动、按钮立即恢复且不主动刷新列表，ignite 事件携带预分配 roundId', async () => {
     render(<ResearchPanel />)
     await screen.findByText('亚盘 BTC 获得宏观与技术共振。')
     const before = holder.getResearchReports.mock.calls.length
+    const igniteSpy = vi.fn()
+    window.addEventListener('research-round-ignite', igniteSpy)
     fireEvent.click(screen.getByRole('button', { name: '生成研报' }))
     expect(await screen.findByText('研报已启动，进度见下方状态条')).toBeInTheDocument()
     expect(holder.runResearch).toHaveBeenCalledWith('manual', 24)
+    // 点火事件 detail 携带 POST 预分配的审计轮 ID（状态条据此 pinned 绑定本轮）
+    expect(igniteSpy).toHaveBeenCalledTimes(1)
+    expect((igniteSpy.mock.calls[0][0] as CustomEvent).detail).toEqual({ roundId: 'rs-live' })
+    window.removeEventListener('research-round-ignite', igniteSpy)
     // 点火即返回：按钮立即恢复；列表不随点火刷新（结果经状态条 onFinished 刷新）
     expect(screen.getByRole('button', { name: '生成研报' })).toBeEnabled()
     expect(holder.getResearchReports).toHaveBeenCalledTimes(before)

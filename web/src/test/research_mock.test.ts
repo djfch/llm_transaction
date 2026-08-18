@@ -75,11 +75,13 @@ describe('mock 手动研报与实时状态', () => {
   })
 
   it('点火后先返进行中轮、再轮询翻转为已结束；再次点火重新进入进行中轮', async () => {
-    await mockApi.runResearch('manual', 24)
+    const result = await mockApi.runResearch('manual', 24)
     const activeLive = await mockApi.getResearchLive()
     expect(activeLive.round).not.toBeNull()
     expect(activeLive.round!.wake_source).toBe('research')
     expect(activeLive.round!.ended_at).toBeNull() // 进行中
+    // 点火响应的 roundId 与 /live 进行中轮 round_id 一致（同后端契约）
+    expect(activeLive.round!.round_id).toBe(result.roundId)
     expect(activeLive.tool_calls.length).toBeGreaterThanOrEqual(2)
     // 工具 result 一律 {text} 包装（与后端 research agent 对齐）
     for (const call of activeLive.tool_calls) expect(call.result).toHaveProperty('text')
