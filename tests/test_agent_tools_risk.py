@@ -1,6 +1,7 @@
 """工具层测试：amend 过风控、声明杠杆真实生效、落库失败禁止重试、
 close 单豁免价格偏离、reduce_only 不计入日下单数、orders.is_close 轻量迁移、
-研报方向闸门（高置信反向开仓拦截与各路降级放行）。"""
+研报方向闸门（高置信反向开仓拦截与各路降级放行）、
+place_order 布尔参数严格类型校验。"""
 
 from __future__ import annotations
 
@@ -775,3 +776,83 @@ async def test_research_gate_conflict_or_unavailable_data_allows(tmp_path):
             assert out.risk_verdict == "allow", out.text
         finally:
             await env.db.close()
+
+
+# ---------- place_order 布尔参数严格类型校验（issue #69 回归） ----------
+
+
+async def test_place_order_close_string_false_does_not_close_position(tmp_path):
+    """验证字符串 "false" 不会被真值转换成全平仓动作。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言返回参数错误、持仓未被平掉且网关未收到平仓请求
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        await env.registry.execute("place_order", _OPEN_LONG)  # 先持多仓
+        assert env.gateway.positions["BTC_USDT"].size == 1
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "size": 1, "close": "false"}
+        )
+        assert "参数错误" in out.text and "close" in out.text
+        assert env.gateway.positions["BTC_USDT"].size == 1  # 仓位未被平掉
+        assert len(env.gateway.placed) == 1  # 只有开仓单进入网关
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_bool_params_reject_non_bool_types(tmp_path):
+    """验证 close/reduce_only 只接受 JSON 布尔，显式 null、字符串、整数、数组、对象一律拒绝。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言各畸形取值均返回参数错误、网关未收到订单请求且杠杆未被调用
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        for name in ("close", "reduce_only"):
+            for bad in ("false", "true", "0", "", 0, 1, None, [], {}):
+                args = {
+                    "contract": "BTC_USDT",
+                    "size": 1,
+                    "stop_loss_price": 58000,
+                    "leverage": 5,
+                    name: bad,
+                }
+                out = await env.registry.execute("place_order", args)
+                assert "参数错误" in out.text and name in out.text, f"{name}={bad!r} 未被拒绝"
+        assert env.gateway.placed == []  # 下单未到达网关
+        assert "BTC_USDT" not in env.gateway.positions  # 调杠杆未到达网关
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_bool_params_accept_explicit_bools(tmp_path):
+    """验证显式 true/false 布尔值行为不变：close=false 正常开仓，close=true 正常全平。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言显式布尔入参下单成功且持仓变化符合预期
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000, "close": False},
+        )
+        assert out.risk_verdict == "allow", out.text
+        assert env.gateway.positions["BTC_USDT"].size == 1
+        out = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "close": True, "reduce_only": False}
+        )
+        assert out.risk_verdict == "allow", out.text
+        assert env.gateway.positions["BTC_USDT"].size == 0
+    finally:
+        await env.db.close()

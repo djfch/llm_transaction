@@ -24,6 +24,7 @@ from src.agent.tool_handlers import (
     ToolOutcome,
     _need_decimal,
     _need_str,
+    _opt_bool,
     _opt_decimal,
     _opt_enum,
     _opt_int,
@@ -285,8 +286,8 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         ToolArgError，张数为零、开敞口缺止损、纯平减仓携带止盈止损或杠杆非法时抛出
     """
     contract = _need_str(args, "contract")
-    close = bool(args.get("close", False))
-    reduce_only = bool(args.get("reduce_only", False))
+    close = _opt_bool(args, "close")
+    reduce_only = _opt_bool(args, "reduce_only")
     size = Decimal(0) if close else _need_decimal(args, "size")
     if not close and size == 0:
         raise ToolArgError("size 不能为 0（平仓请用 close=true）")

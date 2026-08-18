@@ -175,6 +175,29 @@ def _opt_int(args: dict, name: str, default: int) -> int:
     return default if args.get(name) is None else _need_int(args, name)
 
 
+def _opt_bool(args: dict, name: str, default: bool = False) -> bool:
+    """从 LLM 工具参数中取出可选布尔值；仅键不存在时用默认值，其余只接受 JSON 布尔。
+
+    参数：
+        args: dict，LLM 传入的工具参数
+        name: str，参数名
+        default: bool，参数键不存在时采用的默认值
+
+    返回：
+        bool：参数值；键不存在时为 default
+
+    异常：
+        ToolArgError：键存在但值不是布尔类型（显式 null、字符串、0/1 整数、
+            数组、对象等均拒绝）时抛出
+    """
+    if name not in args:
+        return default
+    v = args[name]
+    if not isinstance(v, bool):
+        raise ToolArgError(f"参数 {name} 必须是布尔值 true/false")
+    return v
+
+
 def _opt_enum(args: dict, name: str, options: set[str]) -> str | None:
     """从 LLM 工具参数中取出可选枚举并校验取值合法；未传时返回 None。
 
