@@ -3,10 +3,14 @@
 从 tool_trading 拆出以控制单文件体量。核心不变量：
 - 声明杠杆下单前，先快照当前 (杠杆, 保证金模式) 作为回滚锚点；
 - 交易所明确拒绝（订单确定未创建）才回滚，回滚后必须重读核验；
+- 调杠杆结果未知且异常非明确拒绝（超时/断连）时，必须延迟复核确认状态稳定，
+  防止请求在服务端迟到提交后本地误判"未生效"；
 - 回滚失败、核验不一致、订单状态未知、杠杆状态未知，一律触发风控锁（fail closed）。
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.audit.logger import get_logger
@@ -14,6 +18,11 @@ from src.gateway.base import GatewayError, OrderRequest, OrderResult, OrderState
 from src.utils import maybe_await
 
 logger = get_logger(__name__)
+
+# 结果未知（超时/断连）时的延迟复核参数：首次读到旧值不能证明写入未生效
+# （请求可能已在服务端排队、随后迟到提交），须轮询确认状态稳定后才可宣告未生效
+_UNKNOWN_SETTLE_RETRIES = 3
+_UNKNOWN_SETTLE_DELAY_S = 1.0
 
 
 def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int, str] | None:
@@ -189,6 +198,47 @@ async def _place_with_rollback(
         )
 
 
+async def _confirm_not_applied_delayed(
+    deps: ToolDeps,
+    req: OrderRequest,
+    *,
+    prev_state: tuple[int, str],
+    error: Exception,
+) -> ToolOutcome:
+    """结果未知异常下的延迟复核：轮询确认杠杆稳定在修改前状态后才宣告未生效。
+
+    超时/断连时请求可能已在服务端排队，首次读到旧值不等于写入未生效；复核窗口内
+    观察到任何变化（即使恰为目标值，也无法排除并发修改或迟到提交仍在途）一律 fail
+    closed 开启风控锁；只有全程稳定在修改前状态才可安全宣告未生效。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        req: OrderRequest，订单请求
+        prev_state: tuple[int, str]，修改前的 (杠杆, 模式) 状态（已确认首次读取等于该值）
+        error: Exception，调杠杆时捕获的原始异常
+    返回：
+        ToolOutcome，稳定返回未生效提示；状态变化或读取失败返回风控锁文案
+    """
+    for _ in range(_UNKNOWN_SETTLE_RETRIES):
+        await asyncio.sleep(_UNKNOWN_SETTLE_DELAY_S)
+        try:
+            state = _prev_leverage_state(deps.gateway.list_positions(), req.contract)
+        except Exception:
+            state = None
+        if state != prev_state:  # 迟到提交落地/并发修改/读取失败：无法证明未生效，fail closed
+            await _engage_kill(
+                deps, f"{req.contract} 调杠杆结果未知，延迟复核发现状态异常（实际 {state}）"
+            )
+            return ToolOutcome(
+                f"调杠杆结果未知：延迟复核发现杠杆状态变化（{prev_state} → {state}），"
+                "存在迟到提交或并发修改，已开启风控锁，订单未提交，请人工核对杠杆与持仓状态"
+            )
+    return ToolOutcome(
+        f"调杠杆未生效（{type(error).__name__}: {error}），经 {_UNKNOWN_SETTLE_RETRIES} 次延迟复核"
+        "杠杆仍稳定为修改前状态，订单未提交，可人工核对后重试"
+    )
+
+
 async def _reconcile_leverage_unknown(
     deps: ToolDeps,
     req: OrderRequest,
@@ -198,7 +248,10 @@ async def _reconcile_leverage_unknown(
     prev_state: tuple[int, str] | None,
     error: Exception,
 ) -> OrderResult | ToolOutcome:
-    """调杠杆结果未知时读取持仓对账：已达目标继续下单，未生效安全放弃，其余触发风控锁。
+    """调杠杆结果未知时读取持仓对账：已达目标继续下单，其余按异常类别分流。
+
+    交易所明确拒绝（GatewayError，Gate 已回错误响应）且读回旧值时可直接宣告未生效；
+    超时/断连等真正结果未知的异常须进入延迟复核，防止迟到提交后静默改杠杆。
 
     参数：
         deps: ToolDeps，当前模块所需的依赖集合
@@ -226,10 +279,14 @@ async def _reconcile_leverage_unknown(
             "调杠杆结果未知且无法读取持仓对账，已开启风控锁，订单未提交，请人工核对杠杆与持仓状态"
         )
     if prev_state is not None and state == prev_state:
-        return ToolOutcome(
-            f"调杠杆未生效（{type(error).__name__}: {error}），杠杆仍为修改前状态，"
-            "订单未提交，可人工核对后重试"
-        )
+        if isinstance(error, GatewayError):
+            # 交易所已返回错误响应（明确拒绝），写入确定未执行，可安全宣告未生效
+            return ToolOutcome(
+                f"调杠杆未生效（{type(error).__name__}: {error}），杠杆仍为修改前状态，"
+                "订单未提交，可人工核对后重试"
+            )
+        # 超时/断连等结果未知：首次读到旧值不能证明写入未生效（可能迟到提交），须延迟复核
+        return await _confirm_not_applied_delayed(deps, req, prev_state=prev_state, error=error)
     await _engage_kill(
         deps, f"{req.contract} 调杠杆后状态异常（期望 {target} 或 {prev_state}，实际 {state}）"
     )

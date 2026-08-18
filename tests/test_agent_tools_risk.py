@@ -1458,6 +1458,146 @@ async def test_place_order_leverage_unknown_not_applied_aborts(tmp_path, monkeyp
         await env.db.close()
 
 
+async def test_place_order_leverage_unknown_delayed_commit_locks(tmp_path, monkeypatch):
+    """验证结果未知的调杠杆在延迟复核窗口内迟到提交时，必须保持锁定而非误判未生效。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于注入超时异常与模拟远端迟到提交
+
+    返回：
+        None，断言触发风控锁、订单未提交、绝不按"安全未生效"放行
+    """
+    monkeypatch.setattr("src.agent.tool_leverage._UNKNOWN_SETTLE_DELAY_S", 0)
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        engaged = _wire_engage_spy(env)
+        raised = {"v": False}
+        reads_after_raise = {"n": 0}
+        orig_list = env.gateway.list_positions
+
+        def _timeout_set(contract, leverage, margin_mode="isolated"):
+            """模拟请求已发出但客户端读超时（结果未知，远端可能迟到提交）。
+
+            参数：
+                contract: str，合约名
+                leverage: int，杠杆倍数
+                margin_mode: str，保证金模式
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                TimeoutError，模拟读超时（非 GatewayError，属结果未知）
+            """
+            raised["v"] = True
+            raise TimeoutError("read timeout")
+
+        def _list_with_delayed_commit():
+            """异常后的第二次读取起模拟远端迟到提交（杠杆被改成 3x）。
+
+            参数：无
+
+            返回：
+                list[Position]：持仓快照；第二次起返回迟到提交后的状态
+            """
+            if raised["v"]:
+                reads_after_raise["n"] += 1
+                if reads_after_raise["n"] >= 2:
+                    env.gateway.positions["BTC_USDT"].leverage = Decimal(3)
+            return orig_list()
+
+        placed: list = []
+        orig_place = env.gateway.place_order
+
+        def _place_spy(req):
+            """记录下单请求后转发原实现。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                原 place_order 的返回值
+            """
+            placed.append(req)
+            return orig_place(req)
+
+        monkeypatch.setattr(env.gateway, "set_leverage", _timeout_set)
+        monkeypatch.setattr(env.gateway, "list_positions", _list_with_delayed_commit)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "风控锁" in out.text and "未生效" not in out.text, out.text
+        assert placed == []
+        assert len(engaged) == 1
+        assert env.deps.risk_config.kill_switch is True
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_leverage_unknown_stable_not_applied_aborts(tmp_path, monkeypatch):
+    """验证结果未知的调杠杆经延迟复核全程稳定为旧值时，才安全宣告未生效。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于注入超时异常（非 GatewayError）
+
+    返回：
+        None，断言文本提示未生效、不触发风控锁、订单未提交
+    """
+    monkeypatch.setattr("src.agent.tool_leverage._UNKNOWN_SETTLE_DELAY_S", 0)
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+
+        def _timeout_set(contract, leverage, margin_mode="isolated"):
+            """模拟读超时且远端始终未提交（状态全程稳定）。
+
+            参数：
+                contract: str，合约名
+                leverage: int，杠杆倍数
+                margin_mode: str，保证金模式
+
+            返回：
+                None，实际不会返回（总是抛出异常）
+
+            异常：
+                ConnectionError，模拟连接中断（非 GatewayError，属结果未知）
+            """
+            raise ConnectionError("connection reset")
+
+        placed: list = []
+        orig_place = env.gateway.place_order
+
+        def _place_spy(req):
+            """记录下单请求后转发原实现。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                原 place_order 的返回值
+            """
+            placed.append(req)
+            return orig_place(req)
+
+        monkeypatch.setattr(env.gateway, "set_leverage", _timeout_set)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "未生效" in out.text and "订单未提交" in out.text and "风控锁" not in out.text
+        assert placed == []
+        assert env.deps.risk_config.kill_switch is not True
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(2)
+    finally:
+        await env.db.close()
+
+
 async def test_place_order_rollback_verification_mismatch_locks(tmp_path, monkeypatch):
     """验证回滚执行成功但重读核验不一致时触发风控锁。
 
