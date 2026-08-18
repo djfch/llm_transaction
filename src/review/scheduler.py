@@ -92,6 +92,9 @@ class ReviewScheduler:
         # 覆盖点火到任务取锁之间的窗口，替代已废弃的调用方持锁跨任务转移
         self._manual_reserved = False
         self._manual_task: asyncio.Task[None] | None = None
+        # 手动点火的预分配轮次编号与复盘区间：shutdown 补记「首次执行前被取消」终态用
+        self._manual_round_id: str | None = None
+        self._manual_period: tuple[float, float] | None = None
 
     async def run_forever(self) -> None:
         """巡检主循环：每分钟检查是否到点；单次异常吞掉记日志，护住循环。
@@ -175,6 +178,8 @@ class ReviewScheduler:
         # 不排队语义与原先的持锁模式等价。
         self._manual_reserved = True
         round_id = uuid.uuid4().hex  # 预分配：点火响应与轮始事件携带同一身份
+        self._manual_round_id = round_id  # 供 shutdown 补记「首次执行前被取消」终态
+        self._manual_period = (period_start, period_end)
         task = asyncio.create_task(self._run_manual(period_start, period_end, round_id))
         # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
         task.add_done_callback(self._release_manual_reservation)
@@ -231,13 +236,52 @@ class ReviewScheduler:
     async def shutdown(self) -> None:
         """取消进行中的手动后台任务并等待其收尾（停机序列调用，须在数据库关闭前）。
 
+        任务从未首次执行时 begin_round 从未运行、agent 取消收尾也未进入，预分配
+        round_id 查无任何记录——gather 之后由 _record_prestart_cancellation 补写
+        取消终态报告，保证点火过的轮次必留有终态痕迹。
+
         参数：无
 
         返回：
-            None：无进行中任务时立即返回；否则取消任务并 gather 取回结果
+            None：无进行中任务时立即返回；否则取消任务并 gather 取回结果，
+            随后按需补记关机取消终态
         """
         task = self._manual_task
         if task is None or task.done():
             return
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await self._record_prestart_cancellation()
+
+    async def _record_prestart_cancellation(self) -> None:
+        """关机补记：手动任务在首次执行前被取消时，为预分配轮次补写取消终态失败报告。
+
+        判重两道闸：审计轮已存在（begin_round 已跑，agent 取消收尾已负责终态）或
+        该轮已有报告记录（begin_round 前失败已落失败报告，报告行带预分配 round_id）
+        均跳过；两者都无才补写。补记自身异常只记日志不扩散（关机序列不得被打断）。
+
+        参数：无
+
+        返回：
+            None：就地写入取消终态失败报告；无需补记或补记失败时无副作用/仅记日志
+        """
+        round_id = self._manual_round_id
+        period = self._manual_period
+        if not round_id or period is None:
+            return
+        try:
+            if await self._repo.get_audit_round(round_id) is not None:
+                return  # begin_round 已跑：agent 取消收尾已负责终态
+            if await self._repo.review.find_report_by_round_id(round_id) is not None:
+                return  # begin_round 前失败已落失败报告（报告行带预分配 round_id）
+            await self._repo.review.save_review_report(
+                period[0],
+                period[1],
+                "{}",
+                "",
+                "none",
+                error="手动复盘在开始执行前被关机取消",
+                round_id=round_id,
+            )
+        except Exception:
+            logger.exception("关机补记手动复盘取消终态失败（round_id=%s）", round_id)

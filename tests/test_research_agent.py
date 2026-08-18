@@ -1619,6 +1619,138 @@ async def test_cancel_after_success_persist_no_double_write(
     assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": True}
 
 
+async def test_cancel_between_commit_and_return_rechecks_success(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」窗口：反查库识出已提交，禁止失败双写。
+
+    monkeypatch save_report_bundle 为一次性 fake：先调真实方法真实提交、再抛
+    CancelledError（模拟底层已提交但调用方收到取消、report_id 仍 None）。修复前
+    该场景会经 _fail 再写一份失败报告；修复后按 round_id 反查库改走成功收尾。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，替换 save_report_bundle 注入提交后取消
+
+    返回：
+        None，断言取消传播、仅一份成功研报、因果链补落库、审计成功闭合一次、ok=True 收尾
+    """
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _CausalLinkProvider(), tmp_path, events.append)
+    real_save = repo.research.save_report_bundle
+    state = {"fired": False}
+
+    async def committed_then_cancelled(**kwargs):
+        """首次调用真实提交成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
+
+        参数：
+            kwargs: dict，save_report_bundle 的关键字参数，原样透传真实方法
+
+        返回：
+            tuple：首次调用不返回（抛取消）；其后调用委托真实方法返回落库结果
+
+        异常：
+            asyncio.CancelledError：首次调用真实提交后抛出，模拟取消送达时机
+        """
+        if not state["fired"]:
+            state["fired"] = True
+            await real_save(**kwargs)
+            raise asyncio.CancelledError()
+        return await real_save(**kwargs)
+
+    monkeypatch.setattr(repo.research, "save_report_bundle", committed_then_cancelled)
+    task = asyncio.create_task(agent.run(report_type="us"))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    items, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1  # 成功报告已提交被反查识别：无失败报告双写
+    assert items[0].error == ""
+    links = await repo.research.list_causal_links()
+    assert len(links) == 1 and links[0].report_id == items[0].id  # 取消时 flush 未跑，收尾补落库
+    audit_round = await repo.latest_audit_round("paper")
+    assert audit_round is not None and audit_round.ended_at is not None
+    assert audit_round.error == ""  # 审计轮以成功语义闭合
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": True}
+
+
+async def test_cancel_recheck_db_failure_falls_back_to_fail(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """取消收尾的反查自身失败（DB 抖动）：回落失败语义收尾，取消原样传播。
+
+    与 test_cancel_between_commit_and_return_rechecks_success 同场景（成功 COMMIT 已执行、
+    调用方收到取消），但 find_report_by_round_id 抛 RuntimeError：_committed_report_id
+    记日志后按「未提交」处理，走 _fail 落失败报告——此时库内成功+失败各一份（可接受
+    退化，优于静默丢轮），日志须留下反查失败痕迹。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，注入提交后取消与反查失败
+        caplog: pytest.LogCaptureFixture，捕获反查失败日志
+
+    返回：
+        None，断言取消传播、失败报告落库、反查失败日志留痕
+    """
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    real_save = repo.research.save_report_bundle
+    state = {"fired": False}
+
+    async def committed_then_cancelled(**kwargs):
+        """首次调用真实提交成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
+
+        参数：
+            kwargs: dict，save_report_bundle 的关键字参数，原样透传真实方法
+
+        返回：
+            tuple：首次调用不返回（抛取消）；其后调用委托真实方法返回落库结果
+
+        异常：
+            asyncio.CancelledError：首次调用真实提交后抛出，模拟取消送达时机
+        """
+        if not state["fired"]:
+            state["fired"] = True
+            await real_save(**kwargs)
+            raise asyncio.CancelledError()
+        return await real_save(**kwargs)
+
+    async def broken_find(round_id: str):
+        """模拟反查时数据库不可用。
+
+        参数：
+            round_id: str，待反查的审计轮次编号（本桩不使用）
+
+        返回：
+            None，永不返回；固定抛错
+
+        异常：
+            RuntimeError：模拟反查查询失败
+        """
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(repo.research, "save_report_bundle", committed_then_cancelled)
+    monkeypatch.setattr(repo.research, "find_report_by_round_id", broken_find)
+    task = asyncio.create_task(agent.run(report_type="us"))
+    with (
+        caplog.at_level("ERROR", logger="src.research.agent"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await task
+
+    items, total = await repo.research.list_reports_page(10, 0)
+    # 成功报告（fake 已提交）+ 失败报告（反查失败回落 _fail）各一份：可接受退化双写
+    assert total == 2
+    errors = {item.error for item in items}
+    assert "CancelledError: 研报被取消" in errors  # 失败报告来自 _fail 回落
+    assert "" in errors  # 成功报告仍在（反查失败不会抹掉已提交结果）
+    assert "反查成功报告失败" in caplog.text  # 反查失败留痕
+
+
 async def test_end_round_runtime_error_returns_success_no_double_write(
     repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

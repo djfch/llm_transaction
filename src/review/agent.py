@@ -13,8 +13,10 @@
   如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
   成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
   补齐剩余幂等收尾（策略/指标版本关联重放 + 成功闭合审计 + ok=True 轮末事件），
-  取消随后原样抛出、普通异常按成功结果返回；审计 JSON 快照写入失败降级为日志
-  （SQLite 主表已是真相），不反转已提交结果；
+  取消随后原样抛出、普通异常按成功结果返回；取消可能掐在「成功报告 COMMIT 已执行、
+  保存函数未返回」的窗口（内存 report_id 仍为 None），取消收尾不信内存布尔位，
+  按 round_id 反查数据库定口径（反查失败记日志后回落失败收尾）；审计 JSON 快照
+  写入失败降级为日志（SQLite 主表已是真相），不反转已提交结果；
 - 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
   不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -218,7 +220,7 @@ class ReviewAgent:
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次复盘")
             return {"ok": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
-        preallocated = round_id  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
+        preallocated = round_id or ""  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
         raw_parts: list[str] = []
         round_id = ""
         report_id: int | None = None  # 成功报告落库后置位：收尾据此禁止双写失败报告
@@ -261,7 +263,21 @@ class ReviewAgent:
             audit_closed = True
         except asyncio.CancelledError:
             # 外部取消（保持 asyncio 取消语义）：成功报告未落库走失败收尾；
-            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾
+            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾。
+            # 例外：取消掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」窗口时
+            # report_id 仍为 None——内存布尔位不可信，按 round_id 反查数据库再定口径
+            if report_id is None and round_id:
+                existing = None
+                try:
+                    existing = await self._repo.review.find_report_by_round_id(round_id)
+                except Exception:
+                    logger.exception("复盘取消收尾反查成功报告失败（按失败语义收尾）")
+                if existing is not None and existing.error == "":
+                    # 成功报告其实已提交：按成功语义补全收尾（版本关联重放 + 审计闭合）
+                    await self._complete_interrupted(
+                        deps, existing.id, round_id, raw_parts, audit_closed
+                    )
+                    raise
             if report_id is None:
                 await self._fail(
                     round_id,
@@ -269,13 +285,16 @@ class ReviewAgent:
                     period_start,
                     period_end,
                     asyncio.CancelledError("复盘被取消"),
+                    preallocated=preallocated,
                 )
             else:
                 await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
             raise
         except Exception as e:
             if report_id is None:
-                return await self._fail(round_id, raw_parts, period_start, period_end, e)
+                return await self._fail(
+                    round_id, raw_parts, period_start, period_end, e, preallocated=preallocated
+                )
             # 成功报告落库后的普通异常（如版本关联失败）：与取消同口径按成功语义补全，
             # 不发成功告警、不写失败报告，返回与正常成功一致的结果
             logger.exception("复盘成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
@@ -486,11 +505,14 @@ class ReviewAgent:
         period_start: float,
         period_end: float,
         exc: Exception,
+        *,
+        preallocated: str = "",
     ) -> dict:
         """失败收尾：落 error 报告 + 审计轮 error + 失败事件与告警，绝不向上抛。
 
-        round_id 为空（begin_round 前失败或被取消）时跳过审计结束与轮末事件；
-        落库/审计自身失败只记日志，不把失败升级为异常（取消收尾路径必须兜住，
+        round_id 为空（begin_round 前失败或被取消）时跳过审计结束与轮末事件；此时
+        失败报告仍带预分配轮次编号（preallocated，若有），供调度器关机补记时反查
+        判重。落库/审计自身失败只记日志，不把失败升级为异常（取消收尾路径必须兜住，
         不得掩盖待传播的 CancelledError）。
 
         参数：
@@ -499,6 +521,8 @@ class ReviewAgent:
             period_start: float，失败复盘区间起始时间戳
             period_end: float，失败复盘区间结束时间戳
             exc: Exception，触发失败收尾的原始异常
+            preallocated: str，调度器手动点火时预分配的轮次编号；仅用于 begin_round
+                前失败的报告落库（审计与事件仍以真实 round_id 为准）
 
         返回：
             dict，包含 ok=False、错误文本、失败报告编号（落库失败时为 None）和审计轮次编号
@@ -508,7 +532,13 @@ class ReviewAgent:
         report_id: int | None = None
         try:
             report = await self._repo.review.save_review_report(
-                period_start, period_end, "{}", "", "none", error=error, round_id=round_id
+                period_start,
+                period_end,
+                "{}",
+                "",
+                "none",
+                error=error,
+                round_id=round_id or preallocated,
             )
             report_id = report.id
         except Exception:

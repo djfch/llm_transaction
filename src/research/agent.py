@@ -15,8 +15,10 @@
   如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
   成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
   补齐剩余收尾（剩余因果链断点续传落库 + 成功闭合审计 + ok=True 轮末事件），
-  取消随后原样抛出、普通异常按成功结果返回；审计 JSON 快照写入失败降级为日志
-  （SQLite 主表已是真相），不反转已提交结果；
+  取消随后原样抛出、普通异常按成功结果返回；取消可能掐在「成功报告 COMMIT 已执行、
+  保存函数未返回」的窗口（内存 report_id 仍为 None），取消收尾不信内存布尔位，
+  按 round_id 反查数据库定口径（反查失败记日志后回落失败收尾）；审计 JSON 快照
+  写入失败降级为日志（SQLite 主表已是真相），不反转已提交结果；
 - 初始化（deps/registry/prompt 加载）在 try 边界内：可预见失败落入 _fail 落失败报告，
   不逃逸为仅日志；残余边界：begin_round 自身失败（如 DB 不可用）仍只记日志；
 - 本模块不 import src/agent/*：provider 以结构化鸭子类型注入（与
@@ -175,7 +177,7 @@ class ResearchAgent:
         expected_contracts = tuple(self._watchlist)
         if not 1 <= hours <= 48:  # L10：与工具层同口径
             return {"ok": False, "error": f"参数错误：hours 须在 1-48 之间（当前 {hours}）"}
-        preallocated = round_id  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
+        preallocated = round_id or ""  # 先保存入参：下方局部 round_id 以 begin_round 成功为准
         raw_parts: list[str] = []
         round_id = ""
         report_id: int | None = None  # 成功报告落库后置位：收尾据此禁止双写失败报告
@@ -238,10 +240,29 @@ class ResearchAgent:
             return success_result(report, round_id, asset_count)
         except asyncio.CancelledError:
             # 外部取消（保持 asyncio 取消语义，M6）：成功报告未落库走失败收尾；
-            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾
+            # 已落库则禁止再写失败报告（防同轮成功/失败双写），改按成功语义补全收尾。
+            # 例外：取消掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」窗口时
+            # report_id 仍为 None——内存布尔位不可信，按 round_id 反查数据库再定口径
+            if report_id is None and round_id:
+                committed_id = await self._committed_report_id(round_id)
+                if committed_id is not None:
+                    # 成功报告其实已提交：取消发生在 persist 期间时 flush 快照从未执行，
+                    # 重新取 pending 链快照断点续传，然后按成功语义补全收尾
+                    await self._complete_interrupted(
+                        list(deps.pending_causal_links),
+                        committed_id,
+                        round_id,
+                        raw_parts,
+                        audit_closed,
+                    )
+                    raise
             if report_id is None:
                 await self._fail(
-                    round_id, raw_parts, report_type, asyncio.CancelledError("研报被取消")
+                    round_id,
+                    raw_parts,
+                    report_type,
+                    asyncio.CancelledError("研报被取消"),
+                    preallocated=preallocated,
                 )
             else:
                 await self._complete_interrupted(
@@ -250,13 +271,37 @@ class ResearchAgent:
             raise
         except Exception as e:
             if report_id is None:
-                return await self._fail(round_id, raw_parts, report_type, e)
+                return await self._fail(
+                    round_id, raw_parts, report_type, e, preallocated=preallocated
+                )
             # 成功报告落库后的普通异常：与取消同口径按成功语义补全，返回成功结果
             logger.exception("研报成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
             await self._complete_interrupted(
                 remaining_links, report_id, round_id, raw_parts, audit_closed
             )
             return success_result(report, round_id, asset_count)
+
+    async def _committed_report_id(self, round_id: str) -> int | None:
+        """取消收尾反查：按 round_id 确认该轮成功研报是否其实已提交（error=''），返回其编号。
+
+        取消可能掐在「成功 INSERT/COMMIT 已执行、保存函数未返回」的窗口，调用方内存
+        中的 report_id 仍为 None——此时不信内存布尔位，反查数据库定口径；反查自身
+        失败只记日志并按「未提交」处理（回落失败收尾，不掩盖待传播的取消）。
+
+        参数：
+            round_id: str，本轮审计轮次编号
+
+        返回：
+            int | None：已提交成功研报的编号；查无成功报告或反查失败返回 None
+        """
+        try:
+            existing = await self._repo.research.find_report_by_round_id(round_id)
+        except Exception:
+            logger.exception("研报取消收尾反查成功报告失败（按失败语义收尾）")
+            return None
+        if existing is not None and existing.error == "":
+            return existing.id
+        return None
 
     async def _complete_interrupted(
         self,
@@ -523,18 +568,27 @@ class ResearchAgent:
         return resp.text, messages
 
     async def _fail(
-        self, round_id: str, raw_parts: list[str], report_type: str, exc: Exception
+        self,
+        round_id: str,
+        raw_parts: list[str],
+        report_type: str,
+        exc: Exception,
+        *,
+        preallocated: str = "",
     ) -> dict:
         """失败收尾：落 error 报告 + 审计轮 error，绝不向上抛（不变量⑤）。
 
-        round_id 为空（begin_round 前失败）时跳过审计结束；落库/审计自身失败
-        只记日志，不把失败升级为异常。
+        round_id 为空（begin_round 前失败）时跳过审计结束与轮末事件；此时失败报告
+        仍带预分配轮次编号（preallocated，若有），供调度器关机补记时反查判重。
+        落库/审计自身失败只记日志，不把失败升级为异常。
 
         参数：
-            round_id: str，关联的审计轮次编号
+            round_id: str，关联的审计轮次编号；空串表示审计轮尚未开启
             raw_parts: list[str]，累计保存 LLM 原始输出的列表
             report_type: str，研报盘口类型
             exc: Exception，捕获到的原始异常
+            preallocated: str，调度器手动点火时预分配的轮次编号；仅用于 begin_round
+                前失败的报告落库（审计与事件仍以真实 round_id 为准）
 
         返回：
             dict：失败收尾：落 error 报告 + 审计轮 error，绝不向上抛（不变量⑤）
@@ -543,7 +597,7 @@ class ResearchAgent:
         logger.exception("研报失败：%s", error)
         try:
             await self._repo.research.save_failed_report(
-                report_type=report_type, error=error, round_id=round_id
+                report_type=report_type, error=error, round_id=round_id or preallocated
             )
         except Exception:
             logger.exception("研报失败报告落库失败（继续返回失败结果）")

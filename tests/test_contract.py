@@ -14,7 +14,8 @@
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
-- GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）
+- GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
+- GET  /api/research/live → round(可为 null)/tool_calls[]（形状同 /api/review/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
 - GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
 - GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
 - POST /api/review/run → started/period_start/period_end/round_id（409 复盘进行中；503 LLM 未配置或未接线；422 区间非法）
@@ -266,6 +267,11 @@ async def _seed(repo: Repo) -> None:
     await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=1000.0)
     await repo.save_audit_tool_call(
         "rv1", 1, "get_review_stats", '{"start_ts": 1000}', result_json='{"text": "概览"}'
+    )
+    # 研报审计轮种子：/api/research/live 契约断言用（started_at 早于 r1，同上不影响交易轮）
+    await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rs1", 1, "get_fact_timeline", '{"hours": 24}', result_json='{"events": []}'
     )
 
 
@@ -702,6 +708,25 @@ async def test_review_strategy_contract(client: AsyncClient):
         "seq:i tool:s args:d result:d risk_verdict:s risk_reason:s duration_ms:i",
         "/api/review/live tool_calls[0]",
     )
+    # 可选 ?round_id= 按 ID 直查：命中返回指定轮；查无/异类轮返回空态（HTTP 仍 200）
+    by_id = await _get(client, "/api/review/live?round_id=rv1")
+    assert by_id["round"]["round_id"] == "rv1"
+    missing = await _get(client, "/api/review/live?round_id=no-such-round")
+    assert missing == {"round": None, "tool_calls": []}
+
+    research_live = await _get(client, "/api/research/live")
+    assert set(research_live) == {"round", "tool_calls"}
+    assert research_live["round"]["round_id"] == "rs1"  # 种子研报轮（最新口径）
+    assert research_live["tool_calls"], "/api/research/live tool_calls 应非空"
+    _typed(
+        research_live["tool_calls"][0],
+        "seq:i tool:s args:d result:d risk_verdict:s risk_reason:s duration_ms:i",
+        "/api/research/live tool_calls[0]",
+    )
+    research_by_id = await _get(client, "/api/research/live?round_id=rs1")
+    assert research_by_id["round"]["round_id"] == "rs1"
+    research_missing = await _get(client, "/api/research/live?round_id=no-such-round")
+    assert research_missing == {"round": None, "tool_calls": []}
 
 
 async def test_indicators_contract(client: AsyncClient):

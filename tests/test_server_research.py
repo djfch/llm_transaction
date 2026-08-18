@@ -319,6 +319,36 @@ async def test_research_live_returns_in_progress_round(repo: Repo, tmp_path: Pat
         assert body2["round"]["round_id"] == "rs1"
 
 
+async def test_research_live_by_round_id(repo: Repo, tmp_path: Path):
+    """?round_id= 直查：指定轮优先于最新轮；查无或异类轮（wake_source 不符）按空态返回。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言指定轮命中带 tool_calls、查无此轮与异类轮均返回空态
+    """
+    await repo.start_audit_round("rs1", "paper", wake_source="research", started_at=1000.0)
+    await repo.save_audit_tool_call(
+        "rs1", 1, "get_fact_timeline", '{"hours": 24}', result_json='{"events": []}'
+    )
+    await repo.start_audit_round("rs2", "paper", wake_source="research", started_at=2000.0)
+    await repo.start_audit_round("rv1", "paper", wake_source="review", started_at=3000.0)
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        # 指定已存在轮：即使存在更新的研报轮（rs2）也返回指定轮及其 tool_calls
+        body = (await c.get("/api/research/live", params={"round_id": "rs1"})).json()
+        assert body["round"]["round_id"] == "rs1"
+        assert body["round"]["wake_source"] == "research"
+        assert [tc["seq"] for tc in body["tool_calls"]] == [1]
+        # 查无此轮：空态（HTTP 仍 200，供前端 pinned 轮询）
+        missing = (await c.get("/api/research/live", params={"round_id": "no-such"})).json()
+        assert missing == {"round": None, "tool_calls": []}
+        # 异类 wake_source（复盘轮）：同样按空态返回，不跨台
+        other = (await c.get("/api/research/live", params={"round_id": "rv1"})).json()
+        assert other == {"round": None, "tool_calls": []}
+
+
 # ---------- POST /api/research/run ----------
 
 

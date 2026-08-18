@@ -468,7 +468,7 @@ async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCapt
     """
     agent = BlockingAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
-    await scheduler.start_now()
+    fired = await scheduler.start_now()
     await agent.started.wait()
     task = scheduler._manual_task
     assert task is not None
@@ -480,20 +480,30 @@ async def test_shutdown_cancels_running_manual_task(repo, caplog: pytest.LogCapt
     assert task.cancelled()  # 取消语义保留：_run_manual 原样传播，shutdown gather 取回
     assert not scheduler._lock.locked()
     assert "手动复盘后台任务被取消" in caplog.text
+    # 补记钉住：BlockingAgent 桩不触库（无审计轮、无报告），shutdown 补记唯一的取消终态；
+    # 生产真实 agent 首个 DB 写即 begin_round，补记的审计轮判重闸会拦截、不会走到这
+    reports, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "手动复盘在开始执行前被关机取消"
+    assert reports[0].round_id == fired["round_id"]
+    found = await repo.review.find_report_by_round_id(fired["round_id"])
+    assert found is not None and found.id == reports[0].id
     await scheduler.shutdown()  # 幂等：无进行中任务时立即返回
 
 
 async def test_shutdown_before_manual_task_first_execution(repo):
-    """点火后不等待任何执行立即 shutdown：锁从未持有、预留由 done 回调清理（锁泄漏回归）。
+    """点火后不等待任何执行立即 shutdown：锁从未持有、预留由 done 回调清理，且补记取消终态。
 
     后台任务在首次执行前被取消时协程体不进入；旧实现锁由调用方任务持有后跨任务转移，
-    该窗口下 finally 不执行 → 锁永久 locked、之后点火永远 busy。
+    该窗口下 finally 不执行 → 锁永久 locked、之后点火永远 busy。此外 begin_round 从未
+    运行、agent 未留痕，shutdown 须为预分配轮次补写一条「关机取消」失败报告；
+    正常执行完的轮 shutdown 早退，不产生额外记录。
 
     参数：
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None：断言任务取消态、锁未持有、预留清除、再次点火正常
+        None：断言任务取消态、锁未持有、预留清除、补记取消终态、再次点火正常
     """
     agent = StubAgent()
     scheduler = ReviewScheduler(_settings(), agent, repo)
@@ -510,11 +520,24 @@ async def test_shutdown_before_manual_task_first_execution(repo):
     assert agent.calls == []
     assert not scheduler._lock.locked()  # 锁从未持有，无泄漏
     assert scheduler._manual_reserved is False  # done 回调清理预留
+    # 关机补记取消终态：预分配轮次留一条失败报告（begin_round 从未运行，agent 未留痕）
+    reports, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert reports[0].error == "手动复盘在开始执行前被关机取消"
+    assert reports[0].round_id == result["round_id"]
+    assert (reports[0].period_start, reports[0].period_end) == (
+        result["period_start"],
+        result["period_end"],
+    )
     again = await scheduler.start_now()  # 预留已清：可再次正常点火
     assert again["started"] is True
     await asyncio.wait_for(scheduler._manual_task, timeout=1)
     assert len(agent.calls) == 1
     assert not scheduler._lock.locked()
+    # 正常执行完的轮（StubAgent 不落库）：任务已 done，shutdown 早退不产生额外记录
+    await scheduler.shutdown()
+    reports, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1
 
 
 async def test_manual_task_completion_releases_lock_and_reservation(repo):
