@@ -351,6 +351,24 @@ def test_set_leverage_reduces_margin():
     assert pos.leverage == D("5") and pos.margin == D("200")
 
 
+def test_set_leverage_insufficient_balance_keeps_state():
+    """验证调低杠杆需补保证金但余额不足时抛错，且杠杆与保证金保持原值（先校验后写入）。
+
+    参数：无
+
+    返回：
+        None，断言抛 GatewayError 后持仓杠杆仍为 10、保证金不变
+    """
+    gw = make_gateway()
+    gw.set_leverage(BTC, 10)
+    buy(gw, 105)  # 保证金 1050，可用余额不足补足 1 倍杠杆的 10500
+    before = gw.list_positions()[0]
+    with pytest.raises(GatewayError):
+        gw.set_leverage(BTC, 1)
+    after = gw.list_positions()[0]
+    assert after.leverage == D("10") and after.margin == before.margin
+
+
 def test_cancel_order():
     """验证撤销挂单成功后订单从挂单列表消失，重复撤同一单抛 OrderNotFound。
 

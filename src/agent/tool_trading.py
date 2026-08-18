@@ -1,7 +1,8 @@
 """交易类工具（place_order / update_tpsl / amend_order / cancel_order）。
 
 硬规范：任何到达网关的交易动作必须先过 RiskEngine——风控拒绝返回理由文本，绝不放行。
-本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
+本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享，
+杠杆设置/回滚/对账的安全边界在 tool_leverage（下单失败回滚、核验与风控锁联动）。
 
 落库约定：
 - 订单落 orders 表（is_close 置位供 daily_stats 排除平仓单；trade_source 标记下单方，
@@ -29,15 +30,9 @@ from src.agent.tool_handlers import (
     _opt_enum,
     _opt_int,
 )
+from src.agent.tool_leverage import _apply_leverage_and_place, _engage_kill, _prev_leverage_state
 from src.audit.logger import get_logger
-from src.gateway.base import (
-    GatewayError,
-    OrderRequest,
-    OrderResult,
-    OrderStateUnknown,
-    Position,
-    TpslOrder,
-)
+from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
 from src.risk.models import AccountSnapshot, TradeIntent
 
 logger = get_logger(__name__)
@@ -153,7 +148,11 @@ def _resolve_leverage(
     if declared is not None:
         return declared, declared
     if pos is not None:
-        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，按 1 参与判定
+        if pos.margin_mode == "cross":
+            limit = pos.cross_leverage_limit
+            if limit is not None and limit > 0:
+                return max(int(limit), 1), None  # 全仓有效杠杆以 cross_leverage_limit 为准
+        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，缺失时按 1 参与判定
     return 1, None
 
 
@@ -278,87 +277,6 @@ async def _record_order(
     return ""
 
 
-def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int, str] | None:
-    """从持仓快照提取合约当前杠杆与保证金模式，供下单失败后回滚使用。
-
-    参数：
-        positions: list[Position]，当前持仓快照列表
-        contract: str，目标合约
-    返回：
-        tuple[int, str] | None，(杠杆倍数, 保证金模式)；无持仓返回 None（无修改前状态可回滚）。
-        持仓 leverage=0 表示全仓，回滚倍数按 1（同 _resolve_leverage 约定）
-    """
-    pos = next((p for p in positions if p.contract == contract), None)
-    if pos is None:
-        return None
-    if pos.leverage == 0:
-        return 1, "cross"
-    return max(int(pos.leverage), 1), "isolated"
-
-
-def _rollback_leverage(deps: ToolDeps, contract: str, prev_state: tuple[int, str] | None) -> str:
-    """尽力把合约杠杆回滚到修改前状态，返回追加给操作员的提示文案。
-
-    参数：
-        deps: ToolDeps，当前模块所需的依赖集合
-        contract: str，目标合约
-        prev_state: tuple[int, str] | None，修改前的 (杠杆倍数, 保证金模式)；None 表示无可回滚状态
-    返回：
-        str，面向操作员的回滚结果描述（成功、无状态可回滚或回滚失败需人工核对）
-    """
-    if prev_state is None:
-        logger.warning("下单失败但下单前无持仓，杠杆无可回滚状态: %s", contract)
-        return "杠杆已修改且下单前无持仓，无修改前状态可回滚，请人工核对杠杆设置"
-    try:
-        deps.gateway.set_leverage(contract, prev_state[0], prev_state[1])
-    except Exception as e:  # 回滚自身失败只能上报人工
-        logger.exception("杠杆回滚失败: %s", contract)
-        return f"杠杆回滚失败（{type(e).__name__}: {e}），当前杠杆仍为本次修改值，请人工核对"
-    return f"杠杆与保证金模式已回滚至 {prev_state[0]}（{prev_state[1]}）"
-
-
-def _apply_leverage_and_place(
-    deps: ToolDeps,
-    req: OrderRequest,
-    *,
-    apply_leverage: int | None,
-    margin_mode: str,
-    prev_state: tuple[int, str] | None,
-) -> OrderResult | ToolOutcome:
-    """先按需设置杠杆再下单；下单被拒或异常时按订单状态决定是否回滚杠杆。
-
-    参数：
-        deps: ToolDeps，当前模块所需的依赖集合
-        req: OrderRequest，订单请求
-        apply_leverage: int | None，需要设置的杠杆倍数；None 表示不设置直接下单
-        margin_mode: str，设置杠杆时使用的保证金模式
-        prev_state: tuple[int, str] | None，修改前的 (杠杆, 模式) 状态，用于失败后回滚
-    返回：
-        OrderResult | ToolOutcome，成功返回订单结果；明确拒绝或状态未知返回提示文案
-    异常：
-        Exception，非网关异常时尽力回滚杠杆后原样上抛
-    """
-    if apply_leverage is None:
-        return deps.gateway.place_order(req)
-    deps.gateway.set_leverage(req.contract, apply_leverage, margin_mode)
-    try:
-        return deps.gateway.place_order(req)
-    except OrderStateUnknown as e:
-        # 订单可能已创建，此时回滚杠杆会与实际持仓不一致，仅提示人工核对
-        logger.warning("下单状态未知，杠杆保持修改后值: %s err=%s", req.contract, e)
-        return ToolOutcome(
-            f"下单状态未知：{e}；杠杆已改为 {apply_leverage}（{margin_mode} 模式），"
-            "请人工核对持仓与订单状态，禁止盲目重试"
-        )
-    except GatewayError as e:
-        # 交易所明确拒绝，订单确定未创建，可安全回滚
-        return ToolOutcome(f"下单失败：{e}；{_rollback_leverage(deps, req.contract, prev_state)}")
-    except Exception:
-        # 非网关异常（如网关内部未知错误）：尽力回滚后继续上抛
-        _rollback_leverage(deps, req.contract, prev_state)
-        raise
-
-
 # ---------- 工具执行函数 ----------
 
 
@@ -405,6 +323,8 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         prev_state[1] if prev_state is not None else "isolated"
     )
     leverage, apply_leverage = _resolve_leverage(contract, declared, positions)
+    if close or reduce_only:
+        apply_leverage = None  # 平仓/减仓无需调整杠杆，避免无谓的交易所调用与失败面
     deny = await _risk_check(
         deps,
         contract,
@@ -415,6 +335,15 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
+    has_position = any(p.contract == contract and p.size != 0 for p in positions)
+    if apply_leverage is not None and has_position and prev_state is None:
+        # 有持仓但读不出可信杠杆（全仓实际杠杆缺失）：修改杠杆将无回滚锚点，fail closed
+        await _engage_kill(deps, f"{contract} 全仓实际杠杆未知，无法快照当前杠杆状态")
+        return ToolOutcome(
+            "当前杠杆状态未知（全仓实际杠杆缺失），已开启风控锁，拒绝修改杠杆下单，请人工核对",
+            "deny",
+            "杠杆状态未知",
+        )
     req = OrderRequest(
         contract=contract,
         size=size,
@@ -425,7 +354,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         stop_loss_price=stop_loss,
         take_profit_price=take_profit,
     )
-    placed = _apply_leverage_and_place(
+    placed = await _apply_leverage_and_place(
         deps,
         req,
         apply_leverage=apply_leverage,

@@ -383,7 +383,7 @@ def test_candlesticks_limit_and_range_exclusive(gw: MockGateway):
 
 
 def test_set_leverage(gw: MockGateway):
-    """设置杠杆会更新持仓信息，并拒绝非法保证金模式。
+    """设置杠杆按保证金模式更新对应字段，并拒绝非法保证金模式。
 
     参数：
         gw: MockGateway，模拟交易所网关夹具
@@ -392,7 +392,13 @@ def test_set_leverage(gw: MockGateway):
         None：通过断言校验目标场景，无返回值
     """
     pos = gw.set_leverage(BTC, 5, margin_mode="cross")
-    assert pos.leverage == Decimal(5)
+    assert pos.margin_mode == "cross"
+    assert pos.leverage == Decimal(0)  # 全仓：leverage 归 0，实际倍数在 cross_leverage_limit
+    assert pos.cross_leverage_limit == Decimal(5)
+    pos = gw.set_leverage(BTC, 3, margin_mode="isolated")
+    assert pos.margin_mode == "isolated"
+    assert pos.leverage == Decimal(3)
+    assert pos.cross_leverage_limit is None
     with pytest.raises(ValueError, match="margin_mode"):
         gw.set_leverage(BTC, 5, margin_mode="bad")
 

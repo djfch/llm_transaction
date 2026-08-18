@@ -61,6 +61,7 @@ class ToolDeps:
     mode: str = "paper"
     set_next_wake: Callable[[int], int] | None = None  # 返回钳制后实际生效分钟数
     notify_event: Callable[[dict], None] | None = None  # WS 事件广播（如 plan_updated）
+    engage_kill_switch: Callable[[str], Any] | None = None  # 触发风控锁（reason）；同步/异步均可
     round_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
