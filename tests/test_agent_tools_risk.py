@@ -5,12 +5,14 @@ place_order 布尔参数严格类型校验、声明杠杆下单失败的回滚�
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from decimal import Decimal
 from types import SimpleNamespace
 
 from src.agent.tool_handlers import ToolDeps
+from src.agent.tool_leverage import _recheck_prev_state
 from src.agent.tool_trading import _resolve_leverage
 from src.agent.tools import ToolRegistry
 from src.config import ResearchConfig, RiskConfig
@@ -1977,3 +1979,58 @@ def test_resolve_leverage_uses_cross_limit_for_undeclared():
     unknown = _long_position("0").model_copy(update={"cross_leverage_limit": None})
     assert _resolve_leverage("BTC_USDT", None, [unknown]) == (1, None)
     assert _resolve_leverage("BTC_USDT", None, [_long_position("4")]) == (4, None)
+
+
+async def test_recheck_prev_state_slow_gateway_does_not_block_event_loop(tmp_path):
+    """验证杠杆状态重检的网关同步读取经线程卸载，慢响应不阻塞事件循环其他协程。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言慢 list_positions 读取期间心跳协程仍持续推进
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        original = env.gateway.list_positions
+
+        def _slow_list_positions():
+            """模拟 Gate REST 慢响应：同步阻塞 0.3s 后转发原实现。
+
+            参数：无
+
+            返回：
+                list[Position]，原网关 list_positions 返回的持仓快照
+            """
+            time.sleep(0.3)
+            return original()
+
+        env.gateway.list_positions = _slow_list_positions
+        ticks = 0
+        stop = False
+
+        async def _ticker():
+            """每 0.05s 累加一次 tick 的心跳协程，用于探测事件循环是否被阻塞。
+
+            参数：无
+
+            返回：
+                None，stop 置位后退出循环
+            """
+            nonlocal ticks, stop
+            while not stop:
+                ticks += 1
+                await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(_ticker())
+        await asyncio.sleep(0)  # 让心跳协程先起跑
+        before = ticks
+        out = await _recheck_prev_state(env.deps, "BTC_USDT", (2, "isolated"), verify=True)
+        stop = True
+        await task
+        assert out is None  # 杠杆状态一致，无需拒绝
+        # 0.3s 慢读取期间心跳持续推进；若读取同步阻塞事件循环，此增量为 0
+        assert ticks - before >= 2
+    finally:
+        await env.db.close()
