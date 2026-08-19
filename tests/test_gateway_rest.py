@@ -815,13 +815,14 @@ def test_amend_cancel_sdk_raw_exceptions_state_unknown(
 
 
 def test_pool_manager_request_patches_total_deadline():
-    """验证每次请求经 PoolManager 入口补齐整次 wall-clock 上限（连接/读取/整次三者齐备）。
+    """验证 PoolManager 入口被包装为共享 deadline 重试层（连接/读取/整次三者齐备）。
 
     参数：无
 
     返回：
         None，断言 SDK tuple 路径（connect/read）被补 total=30、None 路径构造完整
-        默认组合、显式 int 路径（下单 total=10）不被覆盖（PR #84 评审 P2）
+        默认组合、显式 int 路径（下单 total=10）不被覆盖；网关 PoolManager.request
+        已替换为共享 deadline 包装（PR #84 评审 P2）
     """
     import urllib3
 
@@ -835,5 +836,86 @@ def test_pool_manager_request_patches_total_deadline():
     gateway = make_gateway()
     pool_manager = gateway._api.api_client.rest_client.pool_manager
     assert pool_manager.request.__name__ == "_request_with_total_deadline"
-    retries = pool_manager.connection_pool_kw["retries"]
-    assert retries.total == 2  # 重试预算收敛：重试放大受 total=30s 兜底
+
+
+def test_shared_deadline_retries_succeed_after_two_timeouts():
+    """验证重试共享同一 deadline：两次传输超时后第三次成功仍正常返回。
+
+    参数：无
+
+    返回：
+        None，断言第三次尝试成功返回结果，且每次尝试都带收紧后的
+        connect/read 超时与 retries=False（PR #84 评审 P2）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls: list[dict] = []
+
+    def _flaky(method, url, **kwargs):
+        calls.append(kwargs)
+        if len(calls) < 3:
+            raise ReadTimeoutError(None, url, "read timed out")
+        return "ok"
+
+    result = _call_with_shared_deadline(_flaky, "GET", "https://example.com", {})
+    assert result == "ok"
+    assert len(calls) == 3
+    assert all(c["retries"] is False for c in calls)
+    assert all(isinstance(c["timeout"].connect_timeout, (int, float)) for c in calls)
+    assert all(isinstance(c["timeout"].read_timeout, (int, float)) for c in calls)
+
+
+def test_shared_deadline_clamps_attempt_timeouts_to_remaining_budget():
+    """验证后续尝试的连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。
+
+    参数：无
+
+    返回：
+        None，断言 1s 共享预算下：第二次尝试的 read 被收紧到剩余约 0.2s、
+        第三次尝试因预算耗尽未发起——重试不会像 urllib3 Retry 那样每次
+        重新起表（PR #84 评审 P2）
+    """
+    import time
+
+    import urllib3
+
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    attempts: list[urllib3.Timeout] = []
+
+    def _slow_fail(method, url, **kwargs):
+        attempts.append(kwargs["timeout"])
+        time.sleep(0.6)  # 每次尝试实际耗时 0.6s，快速耗尽共享预算
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(
+            _slow_fail, "GET", "https://example.com", {"timeout": urllib3.Timeout(total=1.0)}
+        )
+    assert len(attempts) == 2  # 第三次尝试因预算耗尽未发起
+    assert 0.9 < attempts[0].read_timeout <= 1.0  # 首次：read 收紧到完整预算
+    assert (
+        0 < attempts[1].read_timeout < 0.45
+    )  # 第二次：只剩约 0.2s 预算（0.6s 尝试 + 0.2s 退避后）
+
+
+def test_shared_deadline_post_never_retried():
+    """验证 POST 下单/改撤单类请求绝不重试（防重单），一次超时即原样上抛。
+
+    参数：无
+
+    返回：
+        None，断言 POST 只发起一次尝试并抛出传输异常（PR #84 评审 P2）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _fail(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(_fail, "POST", "https://example.com", {})
+    assert calls == 1

@@ -44,17 +44,25 @@ _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤�
 _FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
 _CONNECT_TIMEOUT_S = 5  # 默认连接超时：Gate 正常建连亚秒级，5s 已宽裕
 _READ_TIMEOUT_S = 15  # 默认读取超时：正常 REST 响应秒级，15s 覆盖极端慢响应
-_TOTAL_TIMEOUT_S = 30  # 整次请求 wall-clock 上限（含重试）：超出即由 urllib3 中断释放线程
+_TOTAL_TIMEOUT_S = 30  # 整次请求 wall-clock 上限（含全部重试共享同一预算）
 # 未显式指定超时的调用统一使用（连接, 读取）超时：SDK 缺省 None=不限时，
 # 网关线程一旦被悬挂请求占住，所有网关 I/O 会整体停摆（issue #72 建议 2）
 _DEFAULT_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
-# SDK 对 tuple 只构造 Timeout(connect, read)、int 只构造 Timeout(total)，均无
-# 整次上限；且显式传 _request_timeout 的路径也到不了 urllib3 的池默认值。
-# 因此统一在 PoolManager.request 入口补 total（_ensure_total_deadline），
-# 保证"连接、读取、整次请求"三者都有明确超时（issue #72 验收 1，PR #84 评审 P2）。
-# 重试预算同步收敛：默认 Retry(total=2, connect=1, read=1)——urllib3 仅对幂等
-# 方法重试，POST 下单/改撤单天然不在重试范围，不会放大重单风险。
-_DEFAULT_RETRY = urllib3.Retry(total=2, connect=1, read=1, backoff_factor=0.2)
+# SDK 对 tuple 只构造 Timeout(connect, read)、int 只构造 Timeout(total)；且
+# urllib3 的 total 只覆盖单次尝试——每次重试都会 clone 新 Timeout 重新起表，
+# Retry(total=2) 下整次调用最长可达 3×30s（PR #84 评审 P2）。因此禁用 urllib3
+# 自动重试，由 _call_with_shared_deadline 以单调时钟统一控制：全部尝试共享
+# 同一 wall-clock 预算，每次尝试的连接/读取超时按剩余预算收紧。
+_RETRY_ATTEMPTS = 3  # 首试 + 2 次重试（与原 Retry(total=2) 等价）
+_RETRY_BACKOFF_S = 0.2  # 退避基数：第 n 次重试前等待 0.2×2^n 秒（受剩余预算截断）
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
+# 仅幂等方法可重试：POST 下单/改撤单绝不重试（防重单），与原 urllib3 Retry 约定一致
+_RETRYABLE_TRANSPORT_ERRORS = (
+    urllib3.exceptions.ConnectTimeoutError,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.NewConnectionError,
+    urllib3.exceptions.ProtocolError,
+)
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
 
@@ -85,48 +93,101 @@ def _ensure_total_deadline(timeout: object) -> urllib3.Timeout:
     return urllib3.Timeout(total=float(timeout))  # 兼容 int/float 直传
 
 
+def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs: dict):
+    """以单调时钟统一控制重试：全部尝试共享同一 wall-clock 预算后转发真实请求。
+
+    urllib3 的 Timeout.total 只覆盖单次尝试（每次重试 clone 新 Timeout 重新起表），
+    Retry(total=2) 下整次调用最长 3×预算；本层改为：禁用 urllib3 自动重试
+    （retries=False），用 time.monotonic() 建立跨尝试共享的 deadline，每次尝试的
+    连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。POST 等非幂等方法
+    绝不重试（防重单），可重试异常仅限传输层（超时/连接失败/连接中断）；
+    读取超时约束的是相邻字节间隔，慢速分块响应的单次尝试仍受 read 上限约束。
+
+    参数：
+        request_fn: Callable，真实执行请求的函数（PoolManager.request 原实现）
+        method: str，HTTP 方法
+        url: str，请求 URL
+        request_kwargs: dict，转发给 request_fn 的关键字参数；timeout/retries
+            会被本层改写
+
+    返回：
+        与 PoolManager.request 相同：原始 HTTP 响应
+
+    异常：
+        urllib3.exceptions.HTTPError：末次尝试的传输层异常原样上抛；预算在两次
+            尝试之间耗尽而无末次异常时，抛 ConnectTimeoutError（由 call_api
+            归一化为 GatewayTransportError）
+    """
+    base = _ensure_total_deadline(request_kwargs.get("timeout"))
+    budget = base.total if isinstance(base.total, (int, float)) else float(_TOTAL_TIMEOUT_S)
+    # 读构造期原始字段 _connect/_read 而非 connect_timeout/read_timeout 属性：
+    # read_timeout 在 read 缺省且 total 有值时会按"total-已用连接时长"动态计算，
+    # 计时器未启动直接抛 TimeoutStateError（urllib3 Timeout 实现细节）
+    per_connect = base._connect if isinstance(base._connect, (int, float)) else budget
+    per_read = base._read if isinstance(base._read, (int, float)) else budget
+    deadline = time.monotonic() + budget
+    request_kwargs["retries"] = False  # 重试由本层按共享 deadline 控制
+    attempts = _RETRY_ATTEMPTS if method.upper() in _RETRYABLE_METHODS else 1
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break  # 预算耗尽：不再发起新尝试
+        request_kwargs["timeout"] = urllib3.Timeout(
+            connect=min(per_connect, remaining), read=min(per_read, remaining)
+        )
+        try:
+            return request_fn(method, url, **request_kwargs)
+        except _RETRYABLE_TRANSPORT_ERRORS as exc:
+            last_exc = exc
+            backoff = _RETRY_BACKOFF_S * (2**attempt)
+            if deadline - time.monotonic() > backoff:
+                time.sleep(backoff)
+    if last_exc is not None:
+        raise last_exc
+    raise urllib3.exceptions.ConnectTimeoutError(
+        None, f"整次请求超过 {budget:.0f}s wall-clock 上限，未再发起新尝试"
+    )
+
+
 class _TimeoutApiClient(gate_api.ApiClient):
     """为未显式指定 _request_timeout 的调用注入默认（连接, 读取）超时的 ApiClient。
 
     gate_api 生成代码对每次调用都显式传 _request_timeout（缺省 None=不限时），
     故这里对 None 统一替换为默认超时；调用方显式给定的值（如下单 10s）原样优先。
-    构造时另做两件事：①收敛重试预算（configuration.retries 未显式设置时）；
-    ②包装 PoolManager.request 入口，为每次请求补整次 wall-clock total 上限
-    （SDK 的 tuple/int 转换都到不了 total，见 _ensure_total_deadline）。
+    构造时包装 PoolManager.request 入口：每次请求经 _call_with_shared_deadline
+    以单调时钟建立跨重试共享的 wall-clock 上限（SDK 的 tuple/int 转换到不了
+    total，且 urllib3 的 total 每次重试会重新起表，见 _ensure_total_deadline）。
     """
 
     def __init__(self, configuration: gate_api.Configuration, *args, **kwargs) -> None:
-        """初始化客户端：收敛重试预算、补整次超时上限后交父类装配。
+        """初始化客户端：包装 PoolManager.request 为共享 deadline 版本后交父类装配。
 
         参数：
-            configuration: gate_api.Configuration，SDK 客户端配置；retries 为 None
-                时写入默认重试预算（就地修改，仅影响本客户端）
+            configuration: gate_api.Configuration，SDK 客户端配置（原样透传）
             args: tuple，透传父类的位置参数
             kwargs: dict，透传父类的关键字参数
 
         返回：
             None，初始化实例（副作用：包装 rest_client.pool_manager.request）
         """
-        if configuration.retries is None:
-            configuration.retries = _DEFAULT_RETRY
         super().__init__(configuration, *args, **kwargs)
         pool_manager = self.rest_client.pool_manager
         original_request = pool_manager.request
 
         def _request_with_total_deadline(method: str, url: str, **request_kwargs):
-            """补整次 total 超时后转发 PoolManager.request 原实现。
+            """经共享 deadline 重试层转发 PoolManager.request 原实现。
 
             参数：
                 method: str，HTTP 方法
                 url: str，请求 URL
-                request_kwargs: dict，原样转发的关键字参数；timeout 经
-                    _ensure_total_deadline 补齐 total
+                request_kwargs: dict，原样转发的关键字参数；timeout/retries 由
+                    _call_with_shared_deadline 按共享预算改写
 
             返回：
                 与 PoolManager.request 相同：原始 HTTP 响应
             """
-            request_kwargs["timeout"] = _ensure_total_deadline(request_kwargs.get("timeout"))
-            return original_request(method, url, **request_kwargs)
+            return _call_with_shared_deadline(original_request, method, url, request_kwargs)
 
         pool_manager.request = _request_with_total_deadline
 
