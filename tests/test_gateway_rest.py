@@ -812,3 +812,28 @@ def test_amend_cancel_sdk_raw_exceptions_state_unknown(
     with pytest.raises(OrderStateUnknown) as excinfo2:
         gateway.cancel_order(BTC, "12345")
     assert excinfo2.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def test_pool_manager_request_patches_total_deadline():
+    """验证每次请求经 PoolManager 入口补齐整次 wall-clock 上限（连接/读取/整次三者齐备）。
+
+    参数：无
+
+    返回：
+        None，断言 SDK tuple 路径（connect/read）被补 total=30、None 路径构造完整
+        默认组合、显式 int 路径（下单 total=10）不被覆盖（PR #84 评审 P2）
+    """
+    import urllib3
+
+    from src.gateway.gate_rest import _ensure_total_deadline
+
+    assert _ensure_total_deadline(None).total == 30
+    t = _ensure_total_deadline(urllib3.Timeout(connect=5, read=15))
+    assert (t.connect_timeout, t.read_timeout, t.total) == (5, 15, 30)
+    assert _ensure_total_deadline(urllib3.Timeout(total=10)).total == 10
+
+    gateway = make_gateway()
+    pool_manager = gateway._api.api_client.rest_client.pool_manager
+    assert pool_manager.request.__name__ == "_request_with_total_deadline"
+    retries = pool_manager.connection_pool_kw["retries"]
+    assert retries.total == 2  # 重试预算收敛：重试放大受 total=30s 兜底

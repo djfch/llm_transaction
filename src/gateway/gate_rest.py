@@ -14,6 +14,7 @@ import uuid
 from decimal import Decimal
 
 import gate_api
+import urllib3
 from gate_api.exceptions import ApiException, GateApiException
 from urllib3.exceptions import HTTPError as _Urllib3HTTPError
 
@@ -43,11 +44,45 @@ _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤�
 _FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
 _CONNECT_TIMEOUT_S = 5  # 默认连接超时：Gate 正常建连亚秒级，5s 已宽裕
 _READ_TIMEOUT_S = 15  # 默认读取超时：正常 REST 响应秒级，15s 覆盖极端慢响应
+_TOTAL_TIMEOUT_S = 30  # 整次请求 wall-clock 上限（含重试）：超出即由 urllib3 中断释放线程
 # 未显式指定超时的调用统一使用（连接, 读取）超时：SDK 缺省 None=不限时，
 # 网关线程一旦被悬挂请求占住，所有网关 I/O 会整体停摆（issue #72 建议 2）
 _DEFAULT_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
+# SDK 对 tuple 只构造 Timeout(connect, read)、int 只构造 Timeout(total)，均无
+# 整次上限；且显式传 _request_timeout 的路径也到不了 urllib3 的池默认值。
+# 因此统一在 PoolManager.request 入口补 total（_ensure_total_deadline），
+# 保证"连接、读取、整次请求"三者都有明确超时（issue #72 验收 1，PR #84 评审 P2）。
+# 重试预算同步收敛：默认 Retry(total=2, connect=1, read=1)——urllib3 仅对幂等
+# 方法重试，POST 下单/改撤单天然不在重试范围，不会放大重单风险。
+_DEFAULT_RETRY = urllib3.Retry(total=2, connect=1, read=1, backoff_factor=0.2)
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
+
+
+def _ensure_total_deadline(timeout: object) -> urllib3.Timeout:
+    """给 SDK 转换后的 timeout 补整次 wall-clock 上限（total），无 total 时补默认值。
+
+    SDK 只产三种形态：None（调用方未给超时）、Timeout(connect, read)（tuple 路径）、
+    Timeout(total)（int 路径）。已带 total 的原样返回（显式给定的整次上限优先）。
+
+    参数：
+        timeout: object，SDK 传入 PoolManager.request 的 timeout 实参
+
+    返回：
+        urllib3.Timeout：保证携带 total 的超时对象；None 时构造
+        （connect=5, read=15, total=30）默认组合
+    """
+    if timeout is None:
+        return urllib3.Timeout(
+            connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S, total=_TOTAL_TIMEOUT_S
+        )
+    if isinstance(timeout, urllib3.Timeout):
+        if timeout.total is not None:
+            return timeout
+        timeout = timeout.clone()
+        timeout.total = _TOTAL_TIMEOUT_S
+        return timeout
+    return urllib3.Timeout(total=float(timeout))  # 兼容 int/float 直传
 
 
 class _TimeoutApiClient(gate_api.ApiClient):
@@ -55,7 +90,45 @@ class _TimeoutApiClient(gate_api.ApiClient):
 
     gate_api 生成代码对每次调用都显式传 _request_timeout（缺省 None=不限时），
     故这里对 None 统一替换为默认超时；调用方显式给定的值（如下单 10s）原样优先。
+    构造时另做两件事：①收敛重试预算（configuration.retries 未显式设置时）；
+    ②包装 PoolManager.request 入口，为每次请求补整次 wall-clock total 上限
+    （SDK 的 tuple/int 转换都到不了 total，见 _ensure_total_deadline）。
     """
+
+    def __init__(self, configuration: gate_api.Configuration, *args, **kwargs) -> None:
+        """初始化客户端：收敛重试预算、补整次超时上限后交父类装配。
+
+        参数：
+            configuration: gate_api.Configuration，SDK 客户端配置；retries 为 None
+                时写入默认重试预算（就地修改，仅影响本客户端）
+            args: tuple，透传父类的位置参数
+            kwargs: dict，透传父类的关键字参数
+
+        返回：
+            None，初始化实例（副作用：包装 rest_client.pool_manager.request）
+        """
+        if configuration.retries is None:
+            configuration.retries = _DEFAULT_RETRY
+        super().__init__(configuration, *args, **kwargs)
+        pool_manager = self.rest_client.pool_manager
+        original_request = pool_manager.request
+
+        def _request_with_total_deadline(method: str, url: str, **request_kwargs):
+            """补整次 total 超时后转发 PoolManager.request 原实现。
+
+            参数：
+                method: str，HTTP 方法
+                url: str，请求 URL
+                request_kwargs: dict，原样转发的关键字参数；timeout 经
+                    _ensure_total_deadline 补齐 total
+
+            返回：
+                与 PoolManager.request 相同：原始 HTTP 响应
+            """
+            request_kwargs["timeout"] = _ensure_total_deadline(request_kwargs.get("timeout"))
+            return original_request(method, url, **request_kwargs)
+
+        pool_manager.request = _request_with_total_deadline
 
     def call_api(self, *args, **kwargs):
         """注入默认 _request_timeout 后转发父类实现，并归一化传输层异常。
