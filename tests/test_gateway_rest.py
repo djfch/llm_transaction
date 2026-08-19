@@ -919,3 +919,35 @@ def test_shared_deadline_post_never_retried():
     with pytest.raises(ReadTimeoutError):
         _call_with_shared_deadline(_fail, "POST", "https://example.com", {})
     assert calls == 1
+
+
+def test_late_success_after_deadline_treated_as_timeout():
+    """验证预算耗尽后才到达的迟到成功不被返回：按本次尝试超时处理。
+
+    参数：无
+
+    返回：
+        None，断言 request_fn 执行超过 Timeout(total) 预算后返回成功时，整次
+        调用抛 ReadTimeoutError、不返回该响应，也不再发起新尝试（PR #84 评审
+        P2：read 超时只约束相邻字节间隔，持续慢吐字节的响应可在预算耗尽后
+        完成——迟到成功必须按超时处理，不得在超 deadline 后仍被视为成功）
+    """
+    import time
+
+    import urllib3
+
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _slow_success(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.4)  # 相邻字节间隔约束内的持续慢响应：超出整次预算才"成功"
+        return object()
+
+    with pytest.raises(ReadTimeoutError, match="wall-clock"):
+        _call_with_shared_deadline(
+            _slow_success, "GET", "https://example.com", {"timeout": urllib3.Timeout(total=0.2)}
+        )
+    assert calls == 1  # 预算已耗尽：不再发起第二次尝试

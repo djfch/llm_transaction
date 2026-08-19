@@ -35,8 +35,11 @@ from src.agent.tool_leverage import (
 )
 from src.agent.tool_trading import _amend_direction, update_tpsl
 from src.gateway.async_io import (
+    _EXECUTOR,
     PRIORITY_HIGH,
+    PRIORITY_NORMAL,
     _is_inline_call,
+    _scheduler,
     read_positions_with_tpsl,
     run_gateway_io,
 )
@@ -1316,3 +1319,45 @@ async def test_cancelled_dispatched_not_started_mutation_withdraws_cleanly(
     assert held.submitted[0].cancelled()  # cf.cancel() 撤回成功
     assert orphaned == []  # 请求从未到达"交易所"：安全撤回，无需兜底
     assert not ran.is_set()
+
+
+async def test_withdrawn_mutation_drain_keeps_consuming_queued_tasks():
+    """验证撤回成功后消费协程存活：已排队的后续任务无需新提交即完成。
+
+    参数：无
+
+    返回：
+        None，断言：单线程 executor 被 blocker 占住时，mutation A 已 dispatch
+        （concurrent Future 已写入探针）但未执行即被安全撤回（cf.cancel() 成功）；
+        消费协程不因 wrap_future 抛出的 CancelledError 死亡——释放 blocker 后
+        仍排队的 B 正常完成（PR #84 评审 P1：撤回杀死 _drain 会让队列中可能的
+        HIGH 人工平仓永久悬挂）
+    """
+    blocker = threading.Event()
+    a_ran = threading.Event()
+    executor_blocker = _EXECUTOR.submit(blocker.wait)  # 占住唯一 worker 线程
+    try:
+        scheduler = _scheduler()
+
+        def _write_a() -> None:
+            a_ran.set()
+
+        def _read_b() -> str:
+            return "b"
+
+        fut_a, probe_a = scheduler.submit(_write_a, (), {}, PRIORITY_NORMAL)
+        fut_b, _probe_b = scheduler.submit(_read_b, (), {}, PRIORITY_NORMAL)
+        for _ in range(1000):  # 等调度器把 A 提交进 executor 队列（worker 被 blocker 占住）
+            if probe_a.cf is not None:
+                break
+            await asyncio.sleep(0)
+        assert probe_a.cf is not None, "A 应已 dispatch 到 executor"
+        withdrawn = probe_a.cf.cancel()  # 模拟调用方取消分支：worker 未开始，撤回成功
+        fut_a.cancel()
+        assert withdrawn
+        blocker.set()  # 释放 worker
+        assert await asyncio.wait_for(fut_b, 2) == "b"  # _drain 存活并继续消费队列
+        assert not a_ran.is_set()  # A 的写从未执行
+    finally:
+        blocker.set()
+        executor_blocker.result(timeout=5)

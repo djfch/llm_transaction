@@ -100,8 +100,10 @@ def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs
     Retry(total=2) 下整次调用最长 3×预算；本层改为：禁用 urllib3 自动重试
     （retries=False），用 time.monotonic() 建立跨尝试共享的 deadline，每次尝试的
     连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。POST 等非幂等方法
-    绝不重试（防重单），可重试异常仅限传输层（超时/连接失败/连接中断）；
-    读取超时约束的是相邻字节间隔，慢速分块响应的单次尝试仍受 read 上限约束。
+    绝不重试（防重单），可重试异常仅限传输层（超时/连接失败/连接中断）。
+    进行中的响应无法硬中断——read 超时只约束相邻字节间隔，服务端持续慢吐字节
+    可拖延单次响应远超预算；故响应返回后再校验 deadline，超出预算的迟到成功
+    一律按本次尝试超时处理（可重试），保证整次调用不在预算耗尽后返回成功。
 
     参数：
         request_fn: Callable，真实执行请求的函数（PoolManager.request 原实现）
@@ -111,12 +113,12 @@ def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs
             会被本层改写
 
     返回：
-        与 PoolManager.request 相同：原始 HTTP 响应
+        与 PoolManager.request 相同：原始 HTTP 响应（在共享预算内到达）
 
     异常：
-        urllib3.exceptions.HTTPError：末次尝试的传输层异常原样上抛；预算在两次
-            尝试之间耗尽而无末次异常时，抛 ConnectTimeoutError（由 call_api
-            归一化为 GatewayTransportError）
+        urllib3.exceptions.HTTPError：末次尝试的传输层异常原样上抛；响应在预算
+            耗尽后到达时抛 ReadTimeoutError；预算在两次尝试之间耗尽而无末次异常
+            时抛 ConnectTimeoutError（均由 call_api 归一化为 GatewayTransportError）
     """
     base = _ensure_total_deadline(request_kwargs.get("timeout"))
     budget = base.total if isinstance(base.total, (int, float)) else float(_TOTAL_TIMEOUT_S)
@@ -137,12 +139,22 @@ def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs
             connect=min(per_connect, remaining), read=min(per_read, remaining)
         )
         try:
-            return request_fn(method, url, **request_kwargs)
+            response = request_fn(method, url, **request_kwargs)
         except _RETRYABLE_TRANSPORT_ERRORS as exc:
             last_exc = exc
-            backoff = _RETRY_BACKOFF_S * (2**attempt)
-            if deadline - time.monotonic() > backoff:
-                time.sleep(backoff)
+        else:
+            if time.monotonic() <= deadline:
+                return response
+            # 进行中的响应无法硬中断（read 超时只约束相邻字节间隔，服务端持续
+            # 慢吐字节可拖延单次响应远超预算）：响应返回后补验 deadline，超出
+            # 预算的迟到成功按本次尝试超时处理，整次调用不得在预算耗尽后返回
+            # 成功（PR #84 评审 P2）；POST 写路径由此落入"状态未知"契约
+            last_exc = urllib3.exceptions.ReadTimeoutError(
+                None, url, f"响应超过 {budget:.0f}s wall-clock 预算后到达，按超时处理"
+            )
+        backoff = _RETRY_BACKOFF_S * (2**attempt)
+        if deadline - time.monotonic() > backoff:
+            time.sleep(backoff)
     if last_exc is not None:
         raise last_exc
     raise urllib3.exceptions.ConnectTimeoutError(

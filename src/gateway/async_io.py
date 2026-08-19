@@ -131,7 +131,9 @@ class _IoScheduler:
         返回：
             None，队列排空后退出（已取消的 Future 对应任务直接跳过）；退出前清空
             _worker 句柄——Task 强引用其 loop，持有已完成 Task 会让 WeakKeyDictionary
-            的弱键失效、已销毁事件循环无法回收（PR #84 评审 P2）
+            的弱键失效、已销毁事件循环无法回收（PR #84 评审 P2）。调用方撤回成功
+            （cf.cancel()）导致的 CancelledError 只终止当前 await，循环继续消费；
+            仅本协程自身被取消（shutdown）才退出
         """
         try:
             while not self._queue.empty():
@@ -149,6 +151,15 @@ class _IoScheduler:
                 probe.cf = cf
                 try:
                     result = await asyncio.wrap_future(cf)
+                except asyncio.CancelledError:
+                    # 两类取消来源必须区分（PR #84 评审 P1）：
+                    # 调用方安全撤回（cf.cancel() 成功，写从未执行）时，被取消的
+                    # 是本 await 而非消费协程本身——CancelledError 继承 BaseException，
+                    # 下方 except Exception 接不住；若不 continue，消费协程死亡后
+                    # 队列中已排队的任务（可能是 HIGH 人工平仓）永久悬挂
+                    if cf.cancelled() and not asyncio.current_task().cancelling():
+                        continue  # 调用方 fut 已自行 cancel，无需回写，直接消费下一个
+                    raise  # 消费协程自身被取消（shutdown），原样上抛退出
                 except Exception as e:  # 网关异常原样透传给调用方
                     if not fut.done():
                         fut.set_exception(e)
