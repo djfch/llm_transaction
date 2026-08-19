@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable
@@ -63,6 +64,7 @@ class ToolDeps:
     notify_event: Callable[[dict], None] | None = None  # WS 事件广播（如 plan_updated）
     engage_kill_switch: Callable[[str], Any] | None = None  # 触发风控锁（reason）；同步/异步均可
     round_id: str = ""
+    leverage_locks: dict[str, asyncio.Lock] = field(default_factory=dict)  # 合约级杠杆写事务锁
     extra: dict[str, Any] = field(default_factory=dict)
 
 

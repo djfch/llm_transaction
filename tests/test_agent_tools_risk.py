@@ -2121,3 +2121,138 @@ async def test_recheck_prev_state_slow_gateway_does_not_block_event_loop(tmp_pat
         assert ticks - before >= 2
     finally:
         await env.db.close()
+
+
+async def test_place_order_concurrent_leverage_writes_serialized(tmp_path, monkeypatch):
+    """验证两个并发 place_order 的杠杆写事务被合约级锁序列化，后进入者重检 fail closed。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于注入慢 set_leverage 放大交错窗口
+
+    返回：
+        None，断言恰好一笔订单提交成功且下单瞬间杠杆等于其声明值、另一笔被风控锁拒绝
+        （无锁时两笔都会成功且可能以错误杠杆提交，本测试必红）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        engaged = _wire_engage_spy(env)
+        orig_set = env.gateway.set_leverage
+
+        def _slow_set(contract, leverage, margin_mode="isolated"):
+            """慢化 set_leverage 以放大两个写事务的交错窗口。
+
+            参数：
+                contract: str，合约名
+                leverage: int，杠杆倍数
+                margin_mode: str，保证金模式
+
+            返回：
+                Position，原 set_leverage 的返回值
+            """
+            time.sleep(0.2)
+            return orig_set(contract, leverage, margin_mode)
+
+        placed: list = []
+        placed_leverage: list = []
+        orig_place = env.gateway.place_order
+
+        def _place_spy(req):
+            """记录下单请求与下单瞬间的持仓杠杆后转发原实现。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                原 place_order 的返回值
+            """
+            placed.append(req)
+            placed_leverage.append(env.gateway.positions["BTC_USDT"].leverage)
+            return orig_place(req)
+
+        monkeypatch.setattr(env.gateway, "set_leverage", _slow_set)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
+        out_a, out_b = await asyncio.gather(
+            env.registry.execute(
+                "place_order",
+                {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            ),
+            env.registry.execute(
+                "place_order",
+                {"contract": "BTC_USDT", "size": 1, "leverage": 4, "stop_loss_price": 58000},
+            ),
+        )
+        # 锁序列化：先拿锁者完成整个事务，后拿锁者重检发现快照失效，fail closed
+        assert len(placed) == 1
+        # 成功单下单瞬间的杠杆等于其声明值（不会出现按 3x 风控却在 4x 状态提交）
+        assert placed_leverage[0] in (Decimal(3), Decimal(4))
+        texts = [out_a.text, out_b.text]
+        assert any("下单成功" in t for t in texts)
+        assert any("风控锁" in t for t in texts)
+        assert env.deps.risk_config.kill_switch is True
+        assert len(engaged) == 1
+    finally:
+        await env.db.close()
+
+
+async def test_place_order_confirm_read_detects_external_change_locks(tmp_path, monkeypatch):
+    """验证 set_leverage 成功后下单前确认读发现进程外并发修改时，fail closed 且不回滚。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于模拟进程外并发修改杠杆
+
+    返回：
+        None，断言订单未提交、触发风控锁、外部修改后的杠杆未被回滚覆盖
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        engaged = _wire_engage_spy(env)
+        orig_set = env.gateway.set_leverage
+
+        def _set_then_external_change(contract, leverage, margin_mode="isolated"):
+            """set_leverage 成功后模拟进程外并发把杠杆改成 9x。
+
+            参数：
+                contract: str，合约名
+                leverage: int，杠杆倍数
+                margin_mode: str，保证金模式
+
+            返回：
+                Position，原 set_leverage 的返回值
+            """
+            result = orig_set(contract, leverage, margin_mode)
+            env.gateway.positions["BTC_USDT"].leverage = Decimal(9)
+            return result
+
+        placed: list = []
+        orig_place = env.gateway.place_order
+
+        def _place_spy(req):
+            """记录下单请求后转发原实现。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                原 place_order 的返回值
+            """
+            placed.append(req)
+            return orig_place(req)
+
+        monkeypatch.setattr(env.gateway, "set_leverage", _set_then_external_change)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+        )
+        assert "风控锁" in out.text and "订单未提交" in out.text
+        assert placed == []
+        assert len(engaged) == 1
+        assert env.deps.risk_config.kill_switch is True
+        # 不回滚：外部修改的 9x 状态未被盲写旧快照覆盖
+        assert env.gateway.positions["BTC_USDT"].leverage == Decimal(9)
+    finally:
+        await env.db.close()

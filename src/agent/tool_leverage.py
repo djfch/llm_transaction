@@ -6,6 +6,12 @@
 - 调杠杆异常后读回旧值不能证明写入未执行（GatewayError 统一包装超时/5xx，
   请求可能迟到提交），必须延迟复核确认状态全程稳定后才可宣告"未生效"；
 - 回滚失败、核验不一致、订单状态未知、杠杆状态未知，一律触发风控锁（fail closed）。
+- 合约级异步锁（ToolDeps.leverage_locks）覆盖"最终重读 → 调杠杆 → 下单前确认 →
+  下单 → 失败回滚"整个写事务，进程内改杠杆入口一律经 _locked_leverage_transaction
+  复用同一把锁；
+- 锁管不了进程外/人工直接改杠杆：set_leverage 成功后下单前必须再读一次确认目标
+  状态，读不到即 fail closed（不回滚，避免覆盖第三方状态）；运行约束为"本系统是
+  该账户杠杆与保证金状态的单写者"。
 - 网关同步 I/O（持仓读取/调杠杆/下单）一律经 asyncio.to_thread 卸载，
   不得直接阻塞 asyncio 事件循环（关联 issue #72）。
 """
@@ -27,19 +33,77 @@ _UNKNOWN_SETTLE_RETRIES = 3
 _UNKNOWN_SETTLE_DELAY_S = 1.0
 
 
-def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int, str] | None:
+def _contract_lock(deps: ToolDeps, contract: str) -> asyncio.Lock:
+    """取合约级杠杆写事务锁（不存在则创建）；进程内所有改杠杆入口必须复用同一把锁。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合（锁注册表挂在 leverage_locks 字段）
+        contract: str，目标合约
+    返回：
+        asyncio.Lock，该合约的杠杆写事务互斥锁
+    """
+    return deps.leverage_locks.setdefault(contract, asyncio.Lock())
+
+
+async def _locked_leverage_transaction(
+    deps: ToolDeps,
+    req: OrderRequest,
+    *,
+    prev_state: tuple[int, str] | None,
+    verify: bool,
+    apply_leverage: int | None,
+    margin_mode: str,
+) -> OrderResult | ToolOutcome:
+    """合约级锁内执行杠杆写事务：最终重读 → 调杠杆 → 下单前确认 → 下单 → 失败回滚。
+
+    持锁期间进程内其他改杠杆入口被序列化，重检到下单结束之间不会再有本进程并发写；
+    进程外/人工直接改杠杆锁管不了，由锁内重读与下单前确认读兜底（读不到目标态即
+    fail closed）。运行约束：本系统是该账户杠杆与保证金状态的单写者。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        req: OrderRequest，订单请求
+        prev_state: tuple[int, str] | None，风控前捕获的 (杠杆, 模式) 快照
+        verify: bool，是否需要锁内重读核验（改杠杆或继承杠杆新增敞口时传 True）
+        apply_leverage: int | None，需要设置的杠杆倍数；None 表示不设置直接下单
+        margin_mode: str，设置杠杆时使用的保证金模式
+    返回：
+        OrderResult | ToolOutcome，成功返回订单结果；并发变化/明确拒绝/状态未知返回提示文案
+    """
+    async with _contract_lock(deps, req.contract):
+        concurrency_deny = await _recheck_prev_state(deps, req.contract, prev_state, verify=verify)
+        if concurrency_deny is not None:
+            return concurrency_deny
+        return await _apply_leverage_and_place(
+            deps,
+            req,
+            apply_leverage=apply_leverage,
+            margin_mode=margin_mode,
+            prev_state=prev_state,
+        )
+
+
+def _prev_leverage_state(
+    positions: list[Position], contract: str, *, include_zero: bool = False
+) -> tuple[int, str] | None:
     """从持仓快照提取合约当前 (杠杆倍数, 保证金模式)，供失败回滚与对账使用。
 
     参数：
         positions: list[Position]，当前持仓快照列表
         contract: str，目标合约
+        include_zero: bool，是否接受 size=0 的持仓条目；仅"下单前确认 set_leverage
+            写入生效"场景传 True（新合约首次调杠杆后仓位尚为零，仍需读出杠杆状态），
+            回滚锚点/对账场景保持 False（与既有口径一致）
     返回：
         tuple[int, str] | None，(杠杆倍数, 保证金模式)；无有效持仓（真实网关会返回
         size=0 的历史条目，与 mock/paper 口径统一按无持仓处理），或全仓持仓但
         cross_leverage_limit 缺失/非整数（无可信有效杠杆，非整数如 lever=4.35 回退值
         无法经 int set_leverage 精确回滚）时返回 None
     """
-    pos = next((p for p in positions if p.contract == contract and p.size != 0), None)
+    pos = next(
+        (p for p in positions if p.contract == contract and (include_zero or p.size != 0)),
+        None,
+    )
     if pos is None:
         return None
     if pos.margin_mode == "cross":
@@ -302,6 +366,46 @@ async def _reconcile_leverage_unknown(
     )
 
 
+async def _confirm_target_applied(
+    deps: ToolDeps, contract: str, target: tuple[int, str], *, receipt: Position
+) -> ToolOutcome | None:
+    """set_leverage 成功后、下单前重读确认目标状态仍就位；读不到目标态即 fail closed。
+
+    锁只能序列化进程内写入，进程外/人工直接改杠杆可能落在调杠杆与下单之间：确认读
+    读到非目标态（含读取失败）时不回滚（状态可能被第三方占用，盲写旧快照会覆盖他人
+    修改），保持现状并触发风控锁。新合约首次调杠杆后仓位为零，部分网关口径的
+    list_positions 不返回零仓条目，此时回退核验写入回执（set_leverage 返回值）。
+
+    参数：
+        deps: ToolDeps，当前模块所需的依赖集合
+        contract: str，目标合约
+        target: tuple[int, str]，本调用设置的目标 (杠杆, 模式)
+        receipt: Position，set_leverage 的写入回执（持仓快照返回值）
+    返回：
+        ToolOutcome | None，状态为目标态返回 None；否则返回拒绝文案（已触发风控锁）
+    """
+    try:
+        # include_zero=True：新合约首次调杠杆后仓位尚为零，仍需读出刚写入的杠杆状态
+        confirmed = _prev_leverage_state(
+            await asyncio.to_thread(deps.gateway.list_positions), contract, include_zero=True
+        )
+    except Exception:
+        confirmed = None
+    if confirmed is None:  # 零仓条目被网关列表过滤：回退核验写入回执
+        confirmed = _prev_leverage_state([receipt], contract, include_zero=True)
+    if confirmed == target:
+        return None
+    await _engage_kill(
+        deps, f"{contract} 下单前杠杆目标状态核验异常（期望 {target}，实际 {confirmed}）"
+    )
+    return ToolOutcome(
+        f"下单前杠杆状态核验异常：期望 {target[0]}（{target[1]}），实际 {confirmed}，"
+        "存在并发修改，已开启风控锁，订单未提交，请人工核对",
+        "deny",
+        "杠杆状态并发变化",
+    )
+
+
 async def _apply_leverage_and_place(
     deps: ToolDeps,
     req: OrderRequest,
@@ -310,7 +414,7 @@ async def _apply_leverage_and_place(
     margin_mode: str,
     prev_state: tuple[int, str] | None,
 ) -> OrderResult | ToolOutcome:
-    """按需设置杠杆后下单；目标等于现状跳过设置，结果未知时对账，失败按状态回滚。
+    """按需设置杠杆后下单；目标等于现状跳过设置，结果未知时对账，下单前确认目标状态。
 
     参数：
         deps: ToolDeps，当前模块所需的依赖集合
@@ -324,7 +428,7 @@ async def _apply_leverage_and_place(
     if apply_leverage is None or prev_state == (apply_leverage, margin_mode):
         return await _place_with_rollback(deps, req, prev_state, leverage_modified=False)
     try:
-        await asyncio.to_thread(
+        receipt = await asyncio.to_thread(
             deps.gateway.set_leverage, req.contract, apply_leverage, margin_mode
         )
     except Exception as e:  # 调杠杆结果未知：先对账再决定（远端可能已生效）
@@ -336,10 +440,15 @@ async def _apply_leverage_and_place(
             prev_state=prev_state,
             error=e,
         )
+    target = (apply_leverage, margin_mode)
+    # 下单前确认目标状态：锁管不了进程外修改，读不到目标态即 fail closed（不回滚）
+    confirm_deny = await _confirm_target_applied(deps, req.contract, target, receipt=receipt)
+    if confirm_deny is not None:
+        return confirm_deny
     return await _place_with_rollback(
         deps,
         req,
         prev_state,
         leverage_modified=True,
-        target_state=(apply_leverage, margin_mode),
+        target_state=target,
     )

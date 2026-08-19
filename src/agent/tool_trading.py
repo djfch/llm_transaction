@@ -31,10 +31,9 @@ from src.agent.tool_handlers import (
     _opt_int,
 )
 from src.agent.tool_leverage import (
-    _apply_leverage_and_place,
     _engage_kill,
+    _locked_leverage_transaction,
     _prev_leverage_state,
-    _recheck_prev_state,
 )
 from src.audit.logger import get_logger
 from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
@@ -351,13 +350,6 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    # 风控含 await 窗口，期间杠杆可能被并发修改：凡依赖快照（改杠杆或继承杠杆新增敞口）
-    # 都须在下单前重读核验，防止用旧杠杆绕过 max_leverage
-    concurrency_deny = await _recheck_prev_state(
-        deps, contract, prev_state, verify=apply_leverage is not None or opens_exposure
-    )
-    if concurrency_deny is not None:
-        return concurrency_deny
     req = OrderRequest(
         contract=contract,
         size=size,
@@ -368,12 +360,15 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         stop_loss_price=stop_loss,
         take_profit_price=take_profit,
     )
-    placed = await _apply_leverage_and_place(
+    # 合约级锁内完成杠杆写事务（重读核验 → 调杠杆 → 下单前确认 → 下单 → 失败回滚）：
+    # 防止并发调用交错改杠杆、用旧快照绕过 max_leverage，或回滚覆盖他人的有效修改
+    placed = await _locked_leverage_transaction(
         deps,
         req,
+        prev_state=prev_state,
+        verify=apply_leverage is not None or opens_exposure,
         apply_leverage=apply_leverage,
         margin_mode=margin_mode,
-        prev_state=prev_state,
     )
     if isinstance(placed, ToolOutcome):
         return placed
