@@ -275,9 +275,8 @@ class PaperGateway(PaperOpenInterestMixin):
         if leverage < 1:
             raise ValueError("leverage 必须 ≥ 1")
         c = self.get_contract(contract)
-        self._leverages[contract] = Decimal(leverage)
         pos = self.account.ensure_position(contract, Decimal(leverage))
-        pos.leverage = Decimal(leverage)
+        # 先校验后写入：余额不足抛错时不得留下杠杆已改而保证金未划转的不一致账目
         if pos.size != 0:  # 调杠杆重算占用保证金，差额从可用余额划转
             new_margin = (
                 PaperAccount.notional(pos.size, pos.entry_price, c.quanto_multiplier) / leverage
@@ -287,6 +286,9 @@ class PaperGateway(PaperOpenInterestMixin):
                 raise GatewayError("可用余额不足，无法调低杠杆", label="INSUFFICIENT_BALANCE")
             self.account.available -= delta
             pos.margin = new_margin
+        self._leverages[contract] = Decimal(leverage)
+        pos.leverage = Decimal(leverage)
+        pos.margin_mode = margin_mode  # 持久化模式，to_position 据此映射 Gate 口径的全仓字段
         return self._position_of(pos)
 
     def place_order(self, req: OrderRequest) -> OrderResult:

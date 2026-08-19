@@ -16,7 +16,7 @@ from gate_api.exceptions import ApiException, GateApiException
 
 from src.config import GateConfig
 from src.gateway import GatewayError, OrderRequest, OrderStateUnknown
-from src.gateway.gate_rest import GateRestGateway
+from src.gateway.gate_rest import GateRestGateway, _to_position
 
 BTC = "BTC_USDT"
 
@@ -240,6 +240,92 @@ def make_sdk_position() -> SimpleNamespace:
         margin="0",
         unrealised_pnl="0",
     )
+
+
+def test_to_position_cross_prefers_config_limit():
+    """全仓实际杠杆以配置值 cross_leverage_limit 为锚点，不被有效杠杆 lever 覆盖。
+
+    参数：无
+    返回：
+        None，断言模式为 cross、杠杆锚点取 5（而非 lever 的 4.35）、leverage 归 0
+    """
+    pos = make_sdk_position()
+    pos.leverage = "0"
+    pos.pos_margin_mode = "cross"
+    pos.cross_leverage_limit = "5"
+    pos.lever = "4.35"
+    p = _to_position(pos)
+    assert p.margin_mode == "cross"
+    assert p.cross_leverage_limit == Decimal(5)
+    assert p.leverage == Decimal(0)
+
+
+def test_to_position_cross_falls_back_to_lever():
+    """cross_leverage_limit 缺失或为 0 时回退 lever 作为全仓实际杠杆。
+
+    参数：无
+    返回：
+        None，断言空串回退 lever=7、lever 为 "0" 时视为缺失再回退配置值 6
+    """
+    pos = make_sdk_position()
+    pos.leverage = "0"
+    pos.pos_margin_mode = "cross"
+    pos.cross_leverage_limit = ""
+    pos.lever = "7"
+    assert _to_position(pos).cross_leverage_limit == Decimal(7)
+    pos.cross_leverage_limit = "6"
+    pos.lever = "0"
+    assert _to_position(pos).cross_leverage_limit == Decimal(6)
+
+
+def test_to_position_cross_unknown_when_both_missing():
+    """cross_leverage_limit 与 lever 均缺失时全仓实际杠杆为 None（不可信）。
+
+    参数：无
+    返回：
+        None，断言 cross_leverage_limit 为 None
+    """
+    pos = make_sdk_position()
+    pos.leverage = "0"
+    pos.pos_margin_mode = "cross"
+    pos.cross_leverage_limit = None
+    pos.lever = None
+    assert _to_position(pos).cross_leverage_limit is None
+
+
+def test_to_position_infers_mode_without_pos_margin_mode():
+    """旧 SDK 缺 pos_margin_mode 属性时按 leverage==0 推断全仓（getattr 防御）。
+
+    参数：无
+    返回：
+        None，断言 leverage="0" 推断为 cross 并取配置值 6、leverage="2" 为逐仓
+    """
+    pos = make_sdk_position()  # 无 pos_margin_mode/lever 属性
+    pos.leverage = "0"
+    pos.cross_leverage_limit = "6"
+    p = _to_position(pos)
+    assert p.margin_mode == "cross" and p.cross_leverage_limit == Decimal(6)
+    pos2 = make_sdk_position()
+    p2 = _to_position(pos2)
+    assert p2.margin_mode == "isolated" and p2.cross_leverage_limit is None
+    assert p2.leverage == Decimal(2)
+
+
+def test_to_position_isolated_prefers_lever():
+    """逐仓持仓优先取新协议 lever 字段（旧 leverage 可能为 0），避免真实杠杆被快照成 1x。
+
+    参数：无
+    返回：
+        None，断言 isolated + leverage="0" + lever="30" 映射杠杆为 30、lever 缺失回退旧字段
+    """
+    pos = make_sdk_position()
+    pos.pos_margin_mode = "isolated"
+    pos.leverage = "0"
+    pos.lever = "30"
+    p = _to_position(pos)
+    assert p.margin_mode == "isolated" and p.leverage == Decimal(30)
+    pos.lever = None  # lever 缺失时回退旧 leverage 字段
+    assert _to_position(pos).leverage == Decimal(0)
 
 
 def test_set_leverage_no_unsupported_kwargs(monkeypatch: pytest.MonkeyPatch):

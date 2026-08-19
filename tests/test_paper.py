@@ -351,6 +351,44 @@ def test_set_leverage_reduces_margin():
     assert pos.leverage == D("5") and pos.margin == D("200")
 
 
+def test_set_leverage_insufficient_balance_keeps_state():
+    """验证调低杠杆需补保证金但余额不足时抛错，且杠杆与保证金保持原值（先校验后写入）。
+
+    参数：无
+
+    返回：
+        None，断言抛 GatewayError 后持仓杠杆仍为 10、保证金不变
+    """
+    gw = make_gateway()
+    gw.set_leverage(BTC, 10)
+    buy(gw, 105)  # 保证金 1050，可用余额不足补足 1 倍杠杆的 10500
+    before = gw.list_positions()[0]
+    with pytest.raises(GatewayError):
+        gw.set_leverage(BTC, 1)
+    after = gw.list_positions()[0]
+    assert after.leverage == D("10") and after.margin == before.margin
+
+
+def test_set_leverage_cross_mode_surfaced():
+    """验证 paper 持久化保证金模式：全仓按 Gate 口径映射 leverage=0 + cross_leverage_limit。
+
+    参数：无
+
+    返回：
+        None，断言 cross/isolated 往返后持仓的 margin_mode、leverage、cross_leverage_limit 一致
+    """
+    gw = make_gateway()
+    gw.set_leverage(BTC, 5, "cross")
+    buy(gw, 10)
+    pos = gw.list_positions()[0]
+    assert pos.margin_mode == "cross"
+    assert pos.leverage == D("0") and pos.cross_leverage_limit == D("5")
+    gw.set_leverage(BTC, 3, "isolated")  # 切回逐仓后字段复原
+    pos = gw.list_positions()[0]
+    assert pos.margin_mode == "isolated"
+    assert pos.leverage == D("3") and pos.cross_leverage_limit is None
+
+
 def test_cancel_order():
     """验证撤销挂单成功后订单从挂单列表消失，重复撤同一单抛 OrderNotFound。
 

@@ -150,6 +150,20 @@ def _dec(value: str | None) -> Decimal:
     return Decimal(str(value))
 
 
+def _dec_opt(value: str | None) -> Decimal | None:
+    """SDK 字符串字段 -> Decimal；空串/None 保留为 None（区分"字段缺失"与数值 0）。
+
+    参数：
+        value: str | None，待转换的 SDK 原始字段
+
+    返回：
+        Decimal | None：字段存在时返回数值，缺失（None/空串）时返回 None
+    """
+    if value in (None, ""):
+        return None
+    return Decimal(str(value))
+
+
 def _optional_price(value: str | None) -> Decimal | None:
     """Gate 附带保护价的空串与零值都表示未配置。
 
@@ -192,21 +206,42 @@ def _to_contract(c: gate_api.Contract) -> Contract:
 def _to_position(p: gate_api.Position) -> Position:
     """把 Gate SDK 持仓对象转换为系统内共用的持仓模型。
 
+    保证金模式优先取 pos_margin_mode，缺失时按 leverage==0 推断全仓；
+    全仓实际杠杆优先取 cross_leverage_limit（用户配置值，回滚锚点必须用它），
+    缺失或为 0 时回退 lever（当前有效杠杆）。逐仓杠杆同样优先取 lever——
+    Gate 新协议中 lever 是 isolated/cross 通用的当前杠杆字段（逐步替代旧
+    leverage），旧字段在逐仓也可能为 0，只信旧字段会把真实杠杆快照成 1x。
+
     参数：
         p: gate_api.Position，SDK 返回的持仓原始对象
 
     返回：
         Position：共用持仓模型（止盈止损价不在此填充，保持默认 None）
     """
+    lev_raw = _dec(p.leverage)
+    # getattr 防御：旧版 SDK 或精简响应可能缺少 pos_margin_mode/lever 字段
+    mode = (getattr(p, "pos_margin_mode", None) or "").strip().lower()
+    if mode not in ("isolated", "cross"):
+        mode = "cross" if lev_raw == 0 else "isolated"
+    lever = _dec_opt(getattr(p, "lever", None))
+    cross_limit = None
+    if mode == "cross":
+        # 回滚锚点须用配置值：cross_leverage_limit 是用户设定的全仓杠杆，
+        # lever 为当前有效杠杆（可能非整数），仅作缺失时的回退
+        cross_limit = _dec_opt(getattr(p, "cross_leverage_limit", None)) or lever
+    elif lever is not None and lever > 0:
+        lev_raw = lever
     return Position(
         contract=p.contract,
         size=_dec(p.size),
         entry_price=_dec(p.entry_price),
         mark_price=_dec(p.mark_price),
         liq_price=_dec(p.liq_price),
-        leverage=_dec(p.leverage),
+        leverage=lev_raw,
         margin=_dec(p.margin),
         unrealised_pnl=_dec(p.unrealised_pnl),
+        margin_mode=mode,
+        cross_leverage_limit=cross_limit,
     )
 
 

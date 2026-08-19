@@ -551,7 +551,7 @@ class MockGateway:
         return self.open_interest_history.get(contract, [])[-limit:]
 
     def set_leverage(self, contract: str, leverage: int, margin_mode: str = "isolated") -> Position:
-        """设置合约杠杆倍数（仅更新持仓对象上的 leverage 字段）。
+        """设置合约杠杆倍数与保证金模式（逐仓改 leverage，全仓改 cross_leverage_limit）。
 
         参数：
             contract: str，合约名
@@ -569,6 +569,21 @@ class MockGateway:
         pos = self.positions.get(contract) or _default_position(
             contract, self._mark_price(contract)
         )
-        updated = pos.model_copy(update={"leverage": Decimal(leverage)})
+        if margin_mode == "cross":
+            updated = pos.model_copy(
+                update={
+                    "leverage": Decimal(0),
+                    "margin_mode": "cross",
+                    "cross_leverage_limit": Decimal(leverage),
+                }
+            )
+        else:
+            updated = pos.model_copy(
+                update={
+                    "leverage": Decimal(leverage),
+                    "margin_mode": "isolated",
+                    "cross_leverage_limit": None,
+                }
+            )
         self.positions[contract] = updated
         return updated

@@ -1,7 +1,8 @@
 """交易类工具（place_order / update_tpsl / amend_order / cancel_order）。
 
 硬规范：任何到达网关的交易动作必须先过 RiskEngine——风控拒绝返回理由文本，绝不放行。
-本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享。
+本模块独立维护交易工具以控制文件体量；参数校验辅助与 ToolDeps 经 tool_handlers 共享，
+杠杆设置/回滚/对账的安全边界在 tool_leverage（下单失败回滚、核验与风控锁联动）。
 
 落库约定：
 - 订单落 orders 表（is_close 置位供 daily_stats 排除平仓单；trade_source 标记下单方，
@@ -28,6 +29,11 @@ from src.agent.tool_handlers import (
     _opt_decimal,
     _opt_enum,
     _opt_int,
+)
+from src.agent.tool_leverage import (
+    _engage_kill,
+    _locked_leverage_transaction,
+    _prev_leverage_state,
 )
 from src.audit.logger import get_logger
 from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
@@ -146,7 +152,11 @@ def _resolve_leverage(
     if declared is not None:
         return declared, declared
     if pos is not None:
-        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，按 1 参与判定
+        if pos.margin_mode == "cross":
+            limit = pos.cross_leverage_limit
+            if limit is not None and limit > 0:
+                return max(int(limit), 1), None  # 全仓有效杠杆以 cross_leverage_limit 为准
+        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，缺失时按 1 参与判定
     return 1, None
 
 
@@ -312,8 +322,24 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         raise ToolArgError("纯平仓或纯减仓不接受止盈止损参数，请使用 update_tpsl 更新存量仓位")
     if declared is not None and declared <= 0:
         raise ToolArgError("leverage 必须为正整数")
-    margin_mode = _opt_enum(args, "margin_mode", {"isolated", "cross"}) or "isolated"
+    prev_state = _prev_leverage_state(positions, contract)
+    has_position = any(p.contract == contract and p.size != 0 for p in positions)
+    if opens_exposure and has_position and prev_state is None:
+        # 有持仓但读不出可信杠杆（全仓实际杠杆缺失或不可精确回滚）：无论是否声明杠杆，
+        # 新增敞口一律 fail closed；平仓/减仓不修改杠杆，不受此守卫拦截
+        await _engage_kill(deps, f"{contract} 当前杠杆状态未知，无法快照/回滚杠杆状态")
+        return ToolOutcome(
+            "当前杠杆状态未知（全仓实际杠杆缺失或不可精确回滚），"
+            "已开启风控锁，拒绝新增敞口，请人工核对",
+            "deny",
+            "杠杆状态未知",
+        )
+    margin_mode = _opt_enum(args, "margin_mode", {"isolated", "cross"}) or (
+        prev_state[1] if prev_state is not None else "isolated"
+    )
     leverage, apply_leverage = _resolve_leverage(contract, declared, positions)
+    if close or reduce_only:
+        apply_leverage = None  # 平仓/减仓无需调整杠杆，避免无谓的交易所调用与失败面
     deny = await _risk_check(
         deps,
         contract,
@@ -324,8 +350,6 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    if apply_leverage is not None:
-        deps.gateway.set_leverage(contract, apply_leverage, margin_mode)
     req = OrderRequest(
         contract=contract,
         size=size,
@@ -336,7 +360,19 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         stop_loss_price=stop_loss,
         take_profit_price=take_profit,
     )
-    result = deps.gateway.place_order(req)
+    # 合约级锁内完成杠杆写事务（重读核验 → 调杠杆 → 下单前确认 → 下单 → 失败回滚）：
+    # 防止并发调用交错改杠杆、用旧快照绕过 max_leverage，或回滚覆盖他人的有效修改
+    placed = await _locked_leverage_transaction(
+        deps,
+        req,
+        prev_state=prev_state,
+        verify=apply_leverage is not None or opens_exposure,
+        apply_leverage=apply_leverage,
+        margin_mode=margin_mode,
+    )
+    if isinstance(placed, ToolOutcome):
+        return placed
+    result = placed
     warning = await _record_order(deps, result, req)
     kind = "市价" if price is None else f"限价 {price}"
     text = (

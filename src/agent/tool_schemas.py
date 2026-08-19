@@ -72,12 +72,12 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "close": {"type": "boolean", "description": "平掉全部持仓，默认 false"},
                 "leverage": {
                     "type": "integer",
-                    "description": "本单使用的杠杆倍数（风控校验用），默认 1",
+                    "description": "该合约持仓杠杆倍数（声明后下单前对整仓实际生效，下单失败会尽力回滚）；未提供时沿用当前持仓杠杆",
                 },
                 "margin_mode": {
                     "type": "string",
                     "enum": ["isolated", "cross"],
-                    "description": "设置杠杆时的保证金模式，默认 isolated（逐仓）",
+                    "description": "设置杠杆时的保证金模式；未提供时跟随当前持仓模式（无持仓为 isolated 逐仓）",
                 },
                 "stop_loss_price": {
                     "type": "number",

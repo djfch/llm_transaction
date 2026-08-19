@@ -52,15 +52,18 @@ def to_position(
         Position，供网关接口返回的标准持仓快照
     """
     quanto = contract_meta.quanto_multiplier
+    is_cross = pos.margin_mode == "cross"
     return Position(
         contract=pos.contract,
         size=pos.size,
         entry_price=pos.entry_price,
         mark_price=mark,
         liq_price=estimate_liq_price(pos, quanto, maintenance_rate),
-        leverage=pos.leverage,
+        leverage=Decimal(0) if is_cross else pos.leverage,  # 与 Gate 口径一致：0=全仓
         margin=pos.margin,
         unrealised_pnl=account.unrealised(pos.contract, mark, quanto),
+        margin_mode=pos.margin_mode,
+        cross_leverage_limit=pos.leverage if is_cross else None,
     )
 
 

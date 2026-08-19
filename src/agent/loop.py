@@ -170,6 +170,8 @@ class DecisionLoop:
             set_next_wake=set_next_wake,
             notify_event=notify_event,
         )
+        # 工具层（如杠杆回滚失败）经此回调触发同一套风控锁（内存+持久化+告警）
+        self._deps.engage_kill_switch = self._engage_lock
         self._registry = ToolRegistry(self._deps)
         self._context = ContextBuilder(
             gateway,
@@ -450,10 +452,12 @@ class DecisionLoop:
         """
         return await execute_manual_cancel(self._deps, contract, order_id)
 
-    async def _engage_lock(self) -> None:
+    async def _engage_lock(self, reason: str | None = None) -> None:
         """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。
 
-        参数：无
+        参数：
+            reason: str | None，自定义触发原因（如杠杆回滚失败）；None 时用连续失败默认文案
+
         返回：
             None，风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警
         """
@@ -466,7 +470,7 @@ class DecisionLoop:
                 self._persist_kill_switch(True)
             except Exception:
                 logger.exception("kill_switch 写回 config.yaml 失败（内存锁仍生效）")
-        msg = (
+        msg = reason or (
             f"LLM 连续失败 {self._consecutive_failures} 次，"
             "已开启风控锁（kill_switch），暂停开仓，请人工检查"
         )

@@ -76,7 +76,12 @@ class Account(BaseModel):
 
 
 class Position(BaseModel):
-    """持仓。size 正=多，负=空；leverage=0 表示全仓。"""
+    """持仓。size 正=多，负=空；leverage=0 表示全仓。
+
+    margin_mode 为保证金模式（isolated/cross）；cross_leverage_limit 为全仓实际
+    杠杆（逐仓时为 None）。全仓持仓的有效杠杆以 cross_leverage_limit 为准，
+    leverage 字段保持交易所原始语义（0=全仓）。
+    """
 
     contract: str
     size: Decimal
@@ -88,6 +93,8 @@ class Position(BaseModel):
     unrealised_pnl: Decimal
     stop_loss_price: Decimal | None = None
     take_profit_price: Decimal | None = None
+    margin_mode: str = "isolated"  # isolated/cross
+    cross_leverage_limit: Decimal | None = None  # 全仓实际杠杆（逐仓为 None）
 
 
 class OrderRequest(BaseModel):
