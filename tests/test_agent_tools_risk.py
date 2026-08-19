@@ -1598,6 +1598,60 @@ async def test_place_order_leverage_unknown_stable_not_applied_aborts(tmp_path, 
         await env.db.close()
 
 
+async def test_place_order_inherited_leverage_concurrent_change_locks(tmp_path, monkeypatch):
+    """验证省略 leverage 新增敞口时，风控 await 窗口内的外部调杠杆被复核拦截。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，用于在 daily_stats_fn 里模拟外部调杠杆
+
+    返回：
+        None，断言订单绝不触达网关下单、触发风控锁并 deny
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        engaged = _wire_engage_spy(env)
+
+        async def _flip_leverage():
+            """模拟风控 await 窗口内人工/进程外把该合约杠杆改成 20x（超 max_leverage=5）。
+
+            参数：无
+
+            返回：
+                DailyStats：全零当日统计（与默认 _zero_daily 同形状）
+            """
+            env.gateway.positions["BTC_USDT"].leverage = Decimal(20)
+            return await _zero_daily()
+
+        placed: list = []
+        orig_place = env.gateway.place_order
+
+        def _place_spy(req):
+            """记录下单请求后转发原实现。
+
+            参数：
+                req: OrderRequest，下单请求
+
+            返回：
+                原 place_order 的返回值
+            """
+            placed.append(req)
+            return orig_place(req)
+
+        monkeypatch.setattr(env.deps, "daily_stats_fn", _flip_leverage)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
+        out = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+        )
+        assert out.risk_verdict == "deny" and "风控锁" in out.text, out.text
+        assert placed == []
+        assert len(engaged) == 1
+    finally:
+        await env.db.close()
+
+
 async def test_place_order_rollback_verification_mismatch_locks(tmp_path, monkeypatch):
     """验证回滚执行成功但重读核验不一致时触发风控锁。
 

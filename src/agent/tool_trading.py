@@ -351,9 +351,10 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    # 风控含 await 窗口，期间杠杆可能被并发修改：改杠杆前重读快照核验
+    # 风控含 await 窗口，期间杠杆可能被并发修改：凡依赖快照（改杠杆或继承杠杆新增敞口）
+    # 都须在下单前重读核验，防止用旧杠杆绕过 max_leverage
     concurrency_deny = await _recheck_prev_state(
-        deps, contract, prev_state, will_modify=apply_leverage is not None
+        deps, contract, prev_state, verify=apply_leverage is not None or opens_exposure
     )
     if concurrency_deny is not None:
         return concurrency_deny

@@ -49,7 +49,7 @@ def _prev_leverage_state(positions: list[Position], contract: str) -> tuple[int,
 
 
 async def _recheck_prev_state(
-    deps: ToolDeps, contract: str, prev_state: tuple[int, str] | None, *, will_modify: bool
+    deps: ToolDeps, contract: str, prev_state: tuple[int, str] | None, *, verify: bool
 ) -> ToolOutcome | None:
     """风控 await 窗口后重读杠杆快照：状态被并发修改时触发风控锁并返回拒绝文案。
 
@@ -57,12 +57,14 @@ async def _recheck_prev_state(
         deps: ToolDeps，当前模块所需的依赖集合
         contract: str，目标合约
         prev_state: tuple[int, str] | None，风控前捕获的 (杠杆, 模式) 快照
-        will_modify: bool，本次调用是否将修改杠杆（不修改则无需核验，直接返回 None）
+        verify: bool，是否需要核验：本调用将修改杠杆，或省略杠杆按快照继承并新增敞口时
+            必须传 True（快照值直接参与了风控判定，await 窗口内被改即判定失效）；
+            纯平仓/减仓不依赖杠杆快照，传 False 直接跳过
 
     返回：
-        ToolOutcome | None，不修改杠杆或状态一致返回 None；被并发修改返回拒绝文案（已触发风控锁）
+        ToolOutcome | None，不需核验或状态一致返回 None；被并发修改返回拒绝文案（已触发风控锁）
     """
-    if not will_modify:
+    if not verify:
         return None
     latest = _prev_leverage_state(deps.gateway.list_positions(), contract)
     if latest == prev_state:
