@@ -1,0 +1,220 @@
+"""统一卸载层（src.gateway.async_io）单元测试：
+
+结果/异常透传、单线程串行、同优先级 FIFO、高优先级插队、
+超时仅放弃等待不杀线程、排队任务可取消、慢同步调用不阻塞事件循环。"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+
+import pytest
+
+from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
+
+
+async def test_run_gateway_io_returns_result():
+    """验证同步函数的返回值经卸载层原样透传给协程调用方。
+
+    参数：无
+
+    返回：
+        None，断言返回值与位置/关键字参数传递正确
+    """
+
+    def _add(a: int, b: int, extra: int = 0) -> int:
+        return a + b + extra
+
+    assert await run_gateway_io(_add, 1, 2, extra=3) == 6
+
+
+async def test_run_gateway_io_propagates_exception():
+    """验证同步函数抛出的异常经卸载层原样透传，不包装不吞没。
+
+    参数：无
+
+    返回：
+        None，断言抛出的异常类型与消息一致
+    """
+
+    def _boom():
+        raise ValueError("gate exploded")
+
+    with pytest.raises(ValueError, match="gate exploded"):
+        await run_gateway_io(_boom)
+
+
+async def test_run_gateway_io_executes_on_single_thread_serially():
+    """验证所有任务在同一网关线程串行执行（SDK 客户端非线程安全约束）。
+
+    参数：无
+
+    返回：
+        None，断言全部任务线程 ident 相同且无并发重叠
+    """
+    idents: list[int] = []
+    active = False
+    overlap = False
+
+    def _probe():
+        nonlocal active, overlap
+        if active:
+            overlap = True
+        active = True
+        idents.append(threading.get_ident())
+        time.sleep(0.01)
+        active = False
+        return True
+
+    await asyncio.gather(*(run_gateway_io(_probe) for _ in range(8)))
+    assert len(set(idents)) == 1
+    assert overlap is False
+
+
+async def test_run_gateway_io_fifo_within_same_priority():
+    """验证同优先级任务严格按提交顺序 FIFO 执行。
+
+    参数：无
+
+    返回：
+        None，断言完成顺序与提交顺序一致
+    """
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    def _record(name: str):
+        order.append(name)
+
+    first = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)  # 等阻塞任务先占住网关线程
+    tasks = [asyncio.ensure_future(run_gateway_io(_record, f"n{i}")) for i in range(5)]
+    release.set()
+    await first
+    await asyncio.gather(*tasks)
+    assert order == [f"n{i}" for i in range(5)]
+
+
+async def test_run_gateway_io_high_priority_jumps_queue():
+    """验证高优先级任务插队于已排队普通任务之前（手动安全操作不被只读查询饿死）。
+
+    参数：无
+
+    返回：
+        None，断言 HIGH 任务先于先提交的 NORMAL 任务执行
+    """
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    def _record(name: str):
+        order.append(name)
+
+    first = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)
+    normal = asyncio.ensure_future(run_gateway_io(_record, "normal"))
+    high = asyncio.ensure_future(run_gateway_io(_record, "high", priority=PRIORITY_HIGH))
+    release.set()
+    await asyncio.gather(first, normal, high)
+    assert order == ["high", "normal"]
+
+
+async def test_run_gateway_io_timeout_abandons_wait_but_thread_survives():
+    """验证超时仅解除调用方等待：抛出 TimeoutError，线程内请求自行跑完，后续调用不受影响。
+
+    参数：无
+
+    返回：
+        None，断言超时抛出、慢任务线程内完结、卸载层随后仍可用
+    """
+    done = threading.Event()
+
+    def _slow():
+        time.sleep(0.3)
+        done.set()
+        return "late"
+
+    with pytest.raises(asyncio.TimeoutError):
+        await run_gateway_io(_slow, timeout=0.05)
+    assert await run_gateway_io(lambda: "ok") == "ok"
+    await asyncio.to_thread(done.wait, 5)  # 线程内慢请求最终自行完结
+
+
+async def test_run_gateway_io_cancel_queued_task_never_executes():
+    """验证仍在排队的任务被取消后不会进入网关线程执行。
+
+    参数：无
+
+    返回：
+        None，断言被取消的排队任务其同步函数从未运行
+    """
+    started = threading.Event()
+    release = threading.Event()
+    executed = False
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    def _should_not_run():
+        nonlocal executed
+        executed = True
+
+    first = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)
+    cancelled = asyncio.ensure_future(run_gateway_io(_should_not_run))
+    await asyncio.sleep(0)  # 让取消目标任务完成入队
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await first
+    await asyncio.sleep(0.05)  # 给消费协程跳过取消任务的时间
+    assert executed is False
+
+
+async def test_run_gateway_io_slow_call_does_not_block_event_loop():
+    """验证慢同步网关调用经卸载后不冻结事件循环，心跳协程持续推进。
+
+    参数：无
+
+    返回：
+        None，断言 0.3s 慢调用期间 0.05s 心跳至少推进 3 次
+    """
+
+    def _slow():
+        time.sleep(0.3)
+        return "done"
+
+    ticks = 0
+    stop = False
+
+    async def _ticker():
+        """每 0.05s 累加一次 tick 的心跳协程，用于探测事件循环是否被阻塞。
+
+        参数：无
+
+        返回：
+            None，stop 置位后退出循环
+        """
+        nonlocal ticks, stop
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    ticker = asyncio.ensure_future(_ticker())
+    try:
+        assert await run_gateway_io(_slow) == "done"
+    finally:
+        stop = True
+        await ticker
+    assert ticks >= 3
