@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from src.agent.tool_handlers import ToolDeps
 from src.audit.logger import get_logger
-from src.gateway.base import OrderNotFound
+from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
+from src.gateway.base import GatewayError, OrderNotFound
 
 logger = get_logger(__name__)
+
+_MAX_OPEN_ORDER_PAGES = 50  # 分页核对 open 订单的总页数上限（单页 100 条），防分页异常死循环
 
 
 def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
     """分页核对指定订单仍处于未成交（open）状态，避免重复撤销已成交或已取消的订单。
+
+    同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）；
+    分页总页数受 _MAX_OPEN_ORDER_PAGES 约束，防交易所分页异常导致死循环。
 
     参数：
         deps: ToolDeps，工具依赖集合，使用其中的 gateway 分页查询未成交订单
@@ -20,15 +26,21 @@ def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
 
     异常：
         OrderNotFound：订单不在未成交列表中（不存在、已成交或已取消）时抛出
+        GatewayError：分页页数超过 _MAX_OPEN_ORDER_PAGES 上限（label=PAGINATION_OVERFLOW）时抛出
     """
     offset = 0
-    while True:
+    for _ in range(_MAX_OPEN_ORDER_PAGES):
         page = deps.gateway.list_orders(contract, "open", limit=100, offset=offset)
         if any(order.id == order_id for order in page):
             return
         if len(page) < 100:
             break
         offset += len(page)
+    else:
+        raise GatewayError(
+            f"分页核对 open 订单超过 {_MAX_OPEN_ORDER_PAGES} 页上限，疑似分页异常",
+            label="PAGINATION_OVERFLOW",
+        )
     raise OrderNotFound(
         "挂单不存在或已不处于 open 状态",
         label="ORDER_NOT_FOUND",
@@ -48,8 +60,10 @@ async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) ->
         finish_as（结束方式，缺省为 cancelled）、warning（本地同步失败时的警告文案，
         成功时为空字符串）
     """
-    _require_open_order(deps, contract, order_id)
-    result = deps.gateway.cancel_order(contract, order_id)
+    await run_gateway_io(_require_open_order, deps, contract, order_id, priority=PRIORITY_HIGH)
+    result = await run_gateway_io(
+        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH
+    )
     warning = ""
     try:
         await deps.repo.update_order_status(

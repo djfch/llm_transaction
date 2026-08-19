@@ -15,7 +15,8 @@ from decimal import Decimal
 
 from src.audit.logger import get_logger
 from src.config import DEFAULT_INDICATOR_SHORTLIST, ResearchConfig
-from src.gateway.base import Account, Candle, Gateway, GatewayError, Position
+from src.gateway.async_io import run_gateway_io
+from src.gateway.base import Account, Candle, Contract, Gateway, GatewayError, Position, Ticker
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
 from src.market.triggers import MAX_ALERTS, TriggerManager
@@ -165,13 +166,14 @@ class ContextBuilder:
             AgentContext：text 为完整上下文（user 消息与审计快照），
             summary 为一行摘要（落 decisions.context_summary）
         """
-        account = self._gateway.get_account()
-        positions = self._gateway.list_positions()
+        account = await run_gateway_io(self._gateway.get_account)
+        positions = await run_gateway_io(self._gateway.list_positions)
+        tickers, metas = await run_gateway_io(self._read_market_data)
         equity = compute_equity(account, positions)
         sections = [
             self._header(wake_source),
             self._account_section(account, positions, equity),
-            self._market_section(),
+            self._market_section(tickers, metas),
             self._alerts_section(),
             await self._research_section(),
             await self._plans_section(),
@@ -227,19 +229,45 @@ class ContextBuilder:
             )
         return "\n".join(lines)
 
-    def _market_section(self) -> str:
-        """生成行情段落：按白名单逐合约给出 ticker 行、K 线摘要行与指标行。
+    def _read_market_data(self) -> tuple[dict[str, Ticker], dict[str, Contract]]:
+        """一次性读取行情段落的全部网关数据：ticker 全集 + ticker 缺失合约的元数据回退。
+
+        同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）；
+        get_tickers 抛错原样上抛（与重构前行为一致），仅单合约元数据回退读取失败时
+        降级为 None（该合约行情行最终显示"无行情数据"）。
 
         参数：无
+
+        返回：
+            tuple[dict[str, Ticker], dict[str, Contract]]：（合约 -> ticker）与
+            （ticker 缺失合约 -> 元数据）两个字典；元数据读取失败的合约不在后者中
+        """
+        tickers = {t.contract: t for t in self._gateway.get_tickers()}
+        metas: dict[str, Contract] = {}
+        for contract in self._watchlist:
+            if contract in tickers:
+                continue
+            try:  # ticker 缺失时回退合约元数据（仍含标记价/资金费率）
+                metas[contract] = self._gateway.get_contract(contract)
+            except GatewayError:
+                continue
+        return tickers, metas
+
+    def _market_section(self, tickers: dict[str, Ticker], metas: dict[str, Contract]) -> str:
+        """生成行情段落：按白名单逐合约给出 ticker 行、K 线摘要行与指标行。
+
+        参数：
+            tickers: dict[str, Ticker]，_read_market_data 预读的（合约 -> ticker）
+            metas: dict[str, Contract]，ticker 缺失合约的元数据回退（缺失时该合约
+                行情行降级为"无行情数据"）
 
         返回：
             str：行情段落文本（每合约依次为 ticker 摘要、K 线摘要，
             指标服务接入时追加指标短名单行）
         """
-        tickers = {t.contract: t for t in self._gateway.get_tickers()}
         lines = ["## 行情"]
         for contract in self._watchlist:
-            lines.append(self._ticker_line(contract, tickers.get(contract)))
+            lines.append(self._ticker_line(contract, tickers.get(contract), metas.get(contract)))
             candles = self._candles.get_recent(contract, self._interval, self._candle_n)
             lines.append(summarize_candles(contract, self._interval, candles))
             indicator_line = self._indicator_line(contract)
@@ -267,13 +295,13 @@ class ContextBuilder:
             logger.warning("指标短名单行生成失败（%s）：%s", contract, e)
             return f"{contract} 指标({self._interval}): 暂不可用"
 
-    def _ticker_line(self, contract: str, ticker) -> str:
-        """生成单合约 ticker 摘要行；ticker 缺失时降级回退，不让行情行断档。
+    def _ticker_line(self, contract: str, ticker: Ticker | None, meta: Contract | None) -> str:
+        """生成单合约 ticker 摘要行；ticker 缺失时降级回退元数据，不让行情行断档。
 
         参数：
             contract: str，合约名（如 BTC_USDT）
-            ticker: Ticker | None，合约 ticker 摘要；为 None 时回退读取
-                合约元数据中的标记价与资金费率
+            ticker: Ticker | None，合约 ticker 摘要（_read_market_data 预读）
+            meta: Contract | None，ticker 缺失时的元数据回退（含标记价与资金费率）
 
         返回：
             str：单行摘要（标记价、资金费率、24h 涨跌与高低）；
@@ -285,11 +313,9 @@ class ContextBuilder:
                 f"24h涨跌 {ticker.change_percentage}%，24h高/低 "
                 f"{ticker.high_24h}/{ticker.low_24h}"
             )
-        try:  # ticker 缺失时回退合约元数据（仍含标记价/资金费率）
-            meta = self._gateway.get_contract(contract)
+        if meta is not None:
             return f"{contract}: 标记价 {meta.mark_price}，资金费率 {meta.funding_rate}（取自合约元数据）"
-        except GatewayError:
-            return f"{contract}: 无行情数据"
+        return f"{contract}: 无行情数据"
 
     def _alerts_section(self) -> str:
         """未触发价格预警线（内存唯一存储，重启即失效——如实暴露给 LLM，供其决定重设/取消）。

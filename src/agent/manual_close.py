@@ -18,6 +18,7 @@ from src.agent.fill_persist import FillPersister
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.agent.tool_trading import _record_order, _resolve_leverage, _risk_check
 from src.audit.logger import get_logger
+from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
 from src.gateway.base import OrderRequest
 from src.paper.account import FillRecord
 
@@ -58,7 +59,7 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     返回：
         CloseResult，包含风控判定、订单状态与成交价格的平仓结果
     """
-    positions = deps.gateway.list_positions()
+    positions = await run_gateway_io(deps.gateway.list_positions, priority=PRIORITY_HIGH)
     had_position = any(p.contract == contract for p in positions)  # 下单前快照（防文本谎称）
     leverage, _ = _resolve_leverage(contract, None, positions)  # 平仓不调整杠杆
     deny = await _risk_check(
@@ -67,7 +68,7 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     if deny is not None:
         return CloseResult(outcome=deny)
     req = OrderRequest(contract=contract, size=Decimal(0), close=True)
-    result = deps.gateway.place_order(req)
+    result = await run_gateway_io(deps.gateway.place_order, req, priority=PRIORITY_HIGH)
     warning = await _record_order(deps, result, req, trade_source=trade_source)
     if not had_position or result.finish_as == "no_position":
         # 无真实成交（paper 报 no_position；mock/真实网关无持仓 close 为 no-op），不谎称成交均价

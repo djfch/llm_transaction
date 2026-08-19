@@ -12,7 +12,7 @@
 - 锁管不了进程外/人工直接改杠杆：set_leverage 成功后下单前必须再读一次确认目标
   状态，读不到即 fail closed（不回滚，避免覆盖第三方状态）；运行约束为"本系统是
   该账户杠杆与保证金状态的单写者"。
-- 网关同步 I/O（持仓读取/调杠杆/下单）一律经 asyncio.to_thread 卸载，
+- 网关同步 I/O（持仓读取/调杠杆/下单）一律经统一卸载层 run_gateway_io 卸载，
   不得直接阻塞 asyncio 事件循环（关联 issue #72）。
 """
 
@@ -22,6 +22,7 @@ import asyncio
 
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.audit.logger import get_logger
+from src.gateway.async_io import run_gateway_io
 from src.gateway.base import GatewayError, OrderRequest, OrderResult, OrderStateUnknown, Position
 from src.utils import maybe_await
 
@@ -132,7 +133,7 @@ async def _recheck_prev_state(
     """
     if not verify:
         return None
-    latest = _prev_leverage_state(await asyncio.to_thread(deps.gateway.list_positions), contract)
+    latest = _prev_leverage_state(await run_gateway_io(deps.gateway.list_positions), contract)
     if latest == prev_state:
         return None
     await _engage_kill(deps, f"{contract} 风控期间杠杆状态变化（{prev_state} → {latest}）")
@@ -185,7 +186,7 @@ async def _rollback_leverage(
         # 否则说明存在并发修改，盲写旧快照会覆盖他人改动
         try:
             current = _prev_leverage_state(
-                await asyncio.to_thread(deps.gateway.list_positions), contract
+                await run_gateway_io(deps.gateway.list_positions), contract
             )
         except Exception:
             current = None
@@ -198,13 +199,13 @@ async def _rollback_leverage(
                 "存在并发修改，已开启风控锁，请人工核对"
             )
     try:
-        await asyncio.to_thread(deps.gateway.set_leverage, contract, prev_state[0], prev_state[1])
+        await run_gateway_io(deps.gateway.set_leverage, contract, prev_state[0], prev_state[1])
     except Exception as e:  # 回滚自身失败：fail closed
         logger.exception("杠杆回滚失败: %s", contract)
         await _engage_kill(deps, f"{contract} 杠杆回滚失败（{type(e).__name__}: {e}）")
         return f"杠杆回滚失败（{type(e).__name__}: {e}），已开启风控锁，请人工核对"
     try:
-        state = _prev_leverage_state(await asyncio.to_thread(deps.gateway.list_positions), contract)
+        state = _prev_leverage_state(await run_gateway_io(deps.gateway.list_positions), contract)
     except Exception:  # 重读失败视同核验不一致
         state = None
     if state != prev_state:
@@ -238,7 +239,7 @@ async def _place_with_rollback(
         OrderResult | ToolOutcome，成功返回订单结果；明确拒绝、状态未知或异常不明返回提示文案
     """
     try:
-        return await asyncio.to_thread(deps.gateway.place_order, req)
+        return await run_gateway_io(deps.gateway.place_order, req)
     except OrderStateUnknown as e:
         # 订单可能已创建，回滚杠杆会与实际持仓不一致：保持杠杆 + fail closed
         logger.warning("下单状态未知: %s err=%s", req.contract, e)
@@ -293,7 +294,7 @@ async def _confirm_not_applied_delayed(
         await asyncio.sleep(_UNKNOWN_SETTLE_DELAY_S)
         try:
             state = _prev_leverage_state(
-                await asyncio.to_thread(deps.gateway.list_positions), req.contract
+                await run_gateway_io(deps.gateway.list_positions), req.contract
             )
         except Exception:
             state = None
@@ -339,7 +340,7 @@ async def _reconcile_leverage_unknown(
     logger.warning("调杠杆结果未知，读取持仓对账: %s err=%s", req.contract, error)
     try:
         state = _prev_leverage_state(
-            await asyncio.to_thread(deps.gateway.list_positions), req.contract
+            await run_gateway_io(deps.gateway.list_positions), req.contract
         )
     except Exception:
         state = None
@@ -387,7 +388,7 @@ async def _confirm_target_applied(
     try:
         # include_zero=True：新合约首次调杠杆后仓位尚为零，仍需读出刚写入的杠杆状态
         confirmed = _prev_leverage_state(
-            await asyncio.to_thread(deps.gateway.list_positions), contract, include_zero=True
+            await run_gateway_io(deps.gateway.list_positions), contract, include_zero=True
         )
     except Exception:
         confirmed = None
@@ -428,7 +429,7 @@ async def _apply_leverage_and_place(
     if apply_leverage is None or prev_state == (apply_leverage, margin_mode):
         return await _place_with_rollback(deps, req, prev_state, leverage_modified=False)
     try:
-        receipt = await asyncio.to_thread(
+        receipt = await run_gateway_io(
             deps.gateway.set_leverage, req.contract, apply_leverage, margin_mode
         )
     except Exception as e:  # 调杠杆结果未知：先对账再决定（远端可能已生效）

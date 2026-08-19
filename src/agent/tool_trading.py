@@ -36,6 +36,7 @@ from src.agent.tool_leverage import (
     _prev_leverage_state,
 )
 from src.audit.logger import get_logger
+from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
 from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
 from src.risk.models import AccountSnapshot, TradeIntent
 
@@ -100,9 +101,9 @@ async def _risk_check(
     异常：
         ToolArgError，交易意图字段未通过模型校验时抛出
     """
-    meta = deps.gateway.get_contract(contract)
-    account = deps.gateway.get_account()
-    positions = deps.gateway.list_positions()
+    meta = await run_gateway_io(deps.gateway.get_contract, contract)
+    account = await run_gateway_io(deps.gateway.get_account)
+    positions = await run_gateway_io(deps.gateway.list_positions)
     equity = compute_equity(account, positions)
     if equity <= 0:
         return ToolOutcome("风控拒绝：账户权益非正，禁止交易", "deny", "账户权益非正")
@@ -124,7 +125,7 @@ async def _risk_check(
     verdict = deps.risk_engine.check(
         intent,
         snap,
-        position_snapshots(deps.gateway, positions),
+        await run_gateway_io(position_snapshots, deps.gateway, positions),
         daily,
         deps.watchlist,
         deps.risk_config,
@@ -304,7 +305,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     price = _opt_decimal(args, "price")
     tif = _opt_enum(args, "tif", {"gtc", "ioc", "poc", "fok"})
     declared = _opt_int(args, "leverage", None)  # None = 未声明
-    positions = deps.gateway.list_positions()
+    positions = await run_gateway_io(deps.gateway.list_positions)
     opens_exposure = _opens_exposure(positions, contract, size, close, reduce_only)
     stop_loss = _opt_decimal(args, "stop_loss_price")
     take_profit = _opt_decimal(args, "take_profit_price")
@@ -312,9 +313,10 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     if opens_exposure:
         if stop_loss is None:
             raise ToolArgError("开仓、加仓或反手新开仓必须提供 stop_loss_price（止损价）")
+        meta = await run_gateway_io(deps.gateway.get_contract, contract)
         _validate_tpsl(
             direction=1 if after > 0 else -1,
-            mark_price=deps.gateway.get_contract(contract).mark_price,
+            mark_price=meta.mark_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
@@ -400,14 +402,15 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     contract = _need_str(args, "contract")
     stop_loss = _need_decimal(args, "stop_loss_price")
     take_profit = _opt_decimal(args, "take_profit_price")
-    positions = deps.gateway.list_positions()
+    positions = await run_gateway_io(deps.gateway.list_positions)
     pos = next((item for item in positions if item.contract == contract), None)
     if pos is None or pos.size == 0:
         raise ToolArgError("当前无持仓，无法设置整仓止盈止损")
     direction = 1 if pos.size > 0 else -1
+    meta = await run_gateway_io(deps.gateway.get_contract, contract)
     _validate_tpsl(
         direction=direction,
-        mark_price=deps.gateway.get_contract(contract).mark_price,
+        mark_price=meta.mark_price,
         stop_loss=stop_loss,
         take_profit=take_profit,
     )
@@ -422,7 +425,9 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     if deny is not None:
         return deny
     old = [
-        order for order in deps.gateway.list_tpsl_orders(contract) if order.direction == direction
+        order
+        for order in await run_gateway_io(deps.gateway.list_tpsl_orders, contract)
+        if order.direction == direction
     ]
     requested = [
         TpslOrder(
@@ -442,7 +447,7 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     created: list[TpslOrder] = []
     try:
         for item in requested:
-            created.append(deps.gateway.create_tpsl_order(item))
+            created.append(await run_gateway_io(deps.gateway.create_tpsl_order, item))
     except GatewayError as exc:
         if exc.label == "TPSL_STATE_UNKNOWN":
             return ToolOutcome(
@@ -451,7 +456,7 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
         rollback_failed: list[str] = []
         for item in created:
             try:
-                deps.gateway.cancel_tpsl_order(item.id)
+                await run_gateway_io(deps.gateway.cancel_tpsl_order, item.id)
             except GatewayError:
                 logger.exception("止盈止损回滚失败 id=%s", item.id)
                 rollback_failed.append(item.id)
@@ -464,7 +469,7 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     cancelled: list[str] = []
     try:
         for item in old:
-            deps.gateway.cancel_tpsl_order(item.id)
+            await run_gateway_io(deps.gateway.cancel_tpsl_order, item.id)
             cancelled.append(item.id)
     except GatewayError as exc:
         if exc.label == "TPSL_STATE_UNKNOWN":
@@ -498,7 +503,9 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     size = _opt_decimal(args, "size")
     if price is None and size is None:
         raise ToolArgError("price 与 size 至少提供一个")
-    is_close, effective_size = _amend_direction(deps, contract, order_id, size)
+    is_close, effective_size = await run_gateway_io(
+        _amend_direction, deps, contract, order_id, size
+    )
     deny = await _risk_check(
         deps,
         contract,
@@ -509,7 +516,9 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    result = deps.gateway.amend_order(contract, order_id, price=price, size=size)
+    result = await run_gateway_io(
+        deps.gateway.amend_order, contract, order_id, price=price, size=size
+    )
     if not await deps.repo.update_order_after_amend(order_id, price=price, side_size=size):
         await deps.repo.save_order(  # 本地无记录（如改的是手工单）：补一行
             order_id=result.id,
@@ -530,6 +539,9 @@ def _amend_direction(
     deps: ToolDeps, contract: str, order_id: str, size: Decimal | None
 ) -> tuple[bool, Decimal]:
     """推断改后（是否平仓方向, 参与风控的有效张数）。
+
+    同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关持仓/订单读取，
+    不得直接在事件循环线程执行）。
 
     size 给定时按与持仓的方向与数量关系判定：同向改单、以及反向数量超过持仓的
     反手翻仓，都属新敞口，不豁免（必须过全套风控）；仅反向且数量不超过持仓
@@ -570,6 +582,8 @@ async def cancel_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     """
     contract = _need_str(args, "contract")
     order_id = _need_str(args, "order_id")
-    result = deps.gateway.cancel_order(contract, order_id)
+    result = await run_gateway_io(
+        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH
+    )
     await deps.repo.update_order_status(order_id, result.status, result.finish_as or "cancelled")
     return ToolOutcome(f"撤单成功：订单 {order_id}，状态 {result.status}")

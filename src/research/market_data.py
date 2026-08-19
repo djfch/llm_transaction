@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
+from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Candle, Contract
 from src.gateway.market_stats import OpenInterestPoint
 from src.market import indicators
@@ -316,7 +316,7 @@ class ResearchMarketDataService:
             Decimal | None：当前资金费率；网关读取失败时返回 None
         """
         try:
-            meta = await asyncio.to_thread(self._gateway.get_contract, contract)
+            meta = await run_gateway_io(self._gateway.get_contract, contract)
             return meta.funding_rate
         except Exception:
             missing.append("funding_rate: 数据不可用")
@@ -368,7 +368,7 @@ class ResearchMarketDataService:
             list[OpenInterestPoint]：最近 3 个持仓量数据点；网关读取失败时返回空列表
         """
         try:
-            return await asyncio.to_thread(
+            return await run_gateway_io(
                 self._gateway.fetch_open_interest_history, contract, interval, 3
             )
         except Exception:

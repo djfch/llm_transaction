@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.config import Settings, load_settings
+from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Gateway, GatewayError
 from src.memory.models import AuditRound, AuditToolCall
 from src.server.deps import ServerDeps
@@ -103,6 +104,9 @@ def _cents(value: Decimal) -> float:
 
 def _account_equity(deps: ServerDeps) -> Decimal | None:
     """账户当前权益估值（可用 + 持仓保证金 + 未实现盈亏）；未接线或查询失败返回 None。
+
+    同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关读取，
+    不得直接在事件循环线程执行）。
 
     参数：
         deps: ServerDeps，当前服务端运行依赖
@@ -272,8 +276,8 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         返回：
             dict[str, Any]：账户概览：available/unrealised_pnl + equity（前端 AccountInfo 契约要求 equity 必在）
         """
-        account = _require_gateway(deps).get_account().model_dump()
-        equity = _account_equity(deps)
+        account = (await run_gateway_io(_require_gateway(deps).get_account)).model_dump()
+        equity = await run_gateway_io(_account_equity, deps)
         account["equity"] = (
             equity if equity is not None else account["available"] + account["unrealised_pnl"]
         )
@@ -288,7 +292,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         返回：
             list[dict[str, Any]]：持仓字典列表；无持仓时为空列表
         """
-        return [p.model_dump() for p in _require_gateway(deps).list_positions()]
+        return [p.model_dump() for p in await run_gateway_io(_require_gateway(deps).list_positions)]
 
     @router.get("/portfolio")
     async def get_portfolio() -> dict[str, Any]:
@@ -301,8 +305,8 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]：一次读取账户与持仓，返回同一时点的权威组合快照
         """
         gateway = _require_gateway(deps)
-        positions = gateway.list_positions()
-        account = gateway.get_account().model_dump()
+        positions = await run_gateway_io(gateway.list_positions)
+        account = (await run_gateway_io(gateway.get_account)).model_dump()
         margin = sum((position.margin for position in positions), Decimal(0))
         account["equity"] = account["available"] + margin + account["unrealised_pnl"]
         return {
@@ -426,7 +430,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         settings = load_settings(deps.config_path)
         trades = await deps.repo.trades_between(0, time.time() + 1, mode=settings.mode)
         pnl_fee_sum = sum((t.pnl - t.fee for t in trades), Decimal(0))
-        baseline, source = _equity_baseline(deps, settings, pnl_fee_sum)
+        baseline, source = await run_gateway_io(_equity_baseline, deps, settings, pnl_fee_sum)
         equity = baseline
         points = []
         for t in trades:

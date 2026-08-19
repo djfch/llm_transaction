@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from src.audit.logger import get_logger
+from src.gateway.async_io import run_gateway_io
 from src.gateway.base import ExchangeTrade, PositionCloseRecord
 from src.memory.fills_repo import ExchangeFillsRepo
 
@@ -214,7 +215,7 @@ class ExchangeFillSync:
             None，事件驱动补漏（启动/断线重连）：水线重叠窗内逐条走同一落库路径
         """
         try:
-            trades = await asyncio.to_thread(self._rest.list_my_trades, None, 100)
+            trades = await run_gateway_io(self._rest.list_my_trades, None, 100)
         except Exception:
             logger.exception("成交补漏拉取失败（下次重连/启动再试）")
             return
@@ -361,7 +362,7 @@ class ExchangeFillSync:
         for delay in (_FIRST_PNL_DELAY_S, _RETRY_PNL_DELAY_S):
             await asyncio.sleep(delay)
             try:
-                rows = await asyncio.to_thread(
+                rows = await run_gateway_io(
                     self._rest.list_position_close, contract, fill_ts - 120, fill_ts + 5
                 )
             except Exception:

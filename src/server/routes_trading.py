@@ -14,12 +14,43 @@ from pydantic import BaseModel, Field
 
 from src.config import load_watchlist
 from src.config_io import read_settings_raw, write_settings
-from src.gateway.base import GatewayError, OrderNotFound
+from src.gateway.async_io import run_gateway_io
+from src.gateway.base import Gateway, GatewayError, OrderNotFound, OrderResult
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.server.deps import ServerDeps
 
 # K 线周期白名单（单一数据源：Gate 全周期，REST 实时查询天然支持）
 _CANDLE_INTERVALS = frozenset(GATE_CANDLE_INTERVALS)
+
+_MAX_OPEN_ORDER_PAGES = 50  # 分页拉取 open 订单的总页数上限（单页 100 条），防分页异常死循环
+
+
+def _list_all_open_orders(gateway: Gateway) -> list[OrderResult]:
+    """分页拉完全部 open 订单；页数超上限时抛错而非无限循环。
+
+    同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）。
+
+    参数：
+        gateway: Gateway，交易网关
+
+    返回：
+        list[OrderResult]：全部 open 订单快照列表
+
+    异常：
+        GatewayError：分页页数超过 _MAX_OPEN_ORDER_PAGES 上限（label=PAGINATION_OVERFLOW）时抛出
+    """
+    orders: list[OrderResult] = []
+    offset = 0
+    for _ in range(_MAX_OPEN_ORDER_PAGES):
+        page = gateway.list_orders(status="open", limit=100, offset=offset)
+        orders.extend(page)
+        if len(page) < 100:
+            return orders
+        offset += len(page)
+    raise GatewayError(
+        f"分页查询 open 订单超过 {_MAX_OPEN_ORDER_PAGES} 页上限，疑似分页异常",
+        label="PAGINATION_OVERFLOW",
+    )
 
 
 # paper 模式账户重置请求体。
@@ -83,14 +114,7 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
         if deps.gateway is None:
             raise HTTPException(status_code=503, detail="交易网关未就绪")
         try:
-            orders: list[Any] = []
-            offset = 0
-            while True:
-                page = deps.gateway.list_orders(status="open", limit=100, offset=offset)
-                orders.extend(page)
-                if len(page) < 100:
-                    break
-                offset += len(page)
+            orders = await run_gateway_io(_list_all_open_orders, deps.gateway)
             return [order.model_dump() for order in orders]
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -222,7 +246,9 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
         if deps.gateway is None:
             raise HTTPException(status_code=503, detail="交易网关未就绪（agent 未接线）")
         try:
-            candles = deps.gateway.get_candlesticks(contract, interval=interval, limit=limit)
+            candles = await run_gateway_io(
+                deps.gateway.get_candlesticks, contract, interval=interval, limit=limit
+            )
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         items = [
