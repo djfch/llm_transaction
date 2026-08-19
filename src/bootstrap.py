@@ -27,6 +27,7 @@ from src.agent.providers.mock import MockProvider
 from src.agent.ticker_fanout import make_on_ticker
 from src.audit.logger import get_logger
 from src.gateway.async_io import run_gateway_io
+from src.lag_monitor import monitor_event_loop_lag
 from src.audit.trail import AuditTrail
 from src.config import ROOT, CredentialConfig, Settings, Watchlist
 from src.config_io import read_settings_raw, write_settings
@@ -651,6 +652,8 @@ async def run_app(
     # 复盘/研报巡检无论 enabled 与否都创建：scheduler 每 tick 现读各自 enabled 配置（热开关）
     review_task = asyncio.create_task(ctx.review.scheduler.run_forever())
     research_task = asyncio.create_task(ctx.research.scheduler.run_forever())
+    # 事件循环 lag 哨兵：同步阻塞回归（绕过卸载层）时超阈值记 warning（issue #72 建议 5）
+    lag_task = asyncio.create_task(monitor_event_loop_lag())
     logger.info(
         "应用已启动（mode=%s，HTTP=%s:%d）",
         ctx.settings.mode,
@@ -664,7 +667,14 @@ async def run_app(
             await asyncio.Event().wait()  # 长驻，Ctrl+C 退出
     finally:
         await shutdown(
-            ctx, server_task, pusher_task, funding_task, review_task, research_task, safety_task
+            ctx,
+            server_task,
+            pusher_task,
+            funding_task,
+            review_task,
+            research_task,
+            safety_task,
+            lag_task,
         )
 
 
@@ -676,6 +686,7 @@ async def shutdown(
     review_task: asyncio.Task,
     research_task: asyncio.Task,
     safety_task: asyncio.Task | None = None,
+    lag_task: asyncio.Task | None = None,
 ) -> None:
     """优雅退出：停调度与行情，关 HTTP，收尾数据库。
 
@@ -687,6 +698,7 @@ async def shutdown(
         review_task: asyncio.Task，复盘调度任务
         research_task: asyncio.Task，研报调度任务
         safety_task: asyncio.Task | None，可选安全对账任务
+        lag_task: asyncio.Task | None，可选事件循环 lag 监控任务
 
     返回：
         None，优雅退出：停调度与行情，关 HTTP，收尾数据库
@@ -710,6 +722,7 @@ async def shutdown(
         review_task,
         research_task,
         ctx.server_deps.indicators.oi_task,
+        lag_task,
     ):
         if task is not None:
             task.cancel()
