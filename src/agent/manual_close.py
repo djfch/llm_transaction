@@ -63,7 +63,13 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     had_position = any(p.contract == contract for p in positions)  # 下单前快照（防文本谎称）
     leverage, _ = _resolve_leverage(contract, None, positions)  # 平仓不调整杠杆
     deny = await _risk_check(
-        deps, contract, size=Decimal(0), price=None, is_close=True, leverage=leverage
+        deps,
+        contract,
+        size=Decimal(0),
+        price=None,
+        is_close=True,
+        leverage=leverage,
+        priority=PRIORITY_HIGH,  # 人工平仓全程高优先级：风控读取不掉回普通队尾
     )
     if deny is not None:
         return CloseResult(outcome=deny)

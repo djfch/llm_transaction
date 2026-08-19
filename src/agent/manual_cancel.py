@@ -10,11 +10,13 @@ logger = get_logger(__name__)
 _MAX_OPEN_ORDER_PAGES = 50  # 分页核对 open 订单的总页数上限（单页 100 条），防分页异常死循环
 
 
-def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
+async def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
     """分页核对指定订单仍处于未成交（open）状态，避免重复撤销已成交或已取消的订单。
 
-    同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）；
-    分页总页数受 _MAX_OPEN_ORDER_PAGES 约束，防交易所分页异常导致死循环。
+    逐页单独经统一卸载层 await（PRIORITY_HIGH）：既不阻塞事件循环，也让其他高优
+    安全任务能在页与页之间插队，避免整段分页作为单个 executor 任务独占唯一网关
+    线程（PR #84 评审 P1）；分页总页数受 _MAX_OPEN_ORDER_PAGES 约束，防交易所
+    分页异常导致死循环。
 
     参数：
         deps: ToolDeps，工具依赖集合，使用其中的 gateway 分页查询未成交订单
@@ -30,7 +32,14 @@ def _require_open_order(deps: ToolDeps, contract: str, order_id: str) -> None:
     """
     offset = 0
     for _ in range(_MAX_OPEN_ORDER_PAGES):
-        page = deps.gateway.list_orders(contract, "open", limit=100, offset=offset)
+        page = await run_gateway_io(
+            deps.gateway.list_orders,
+            contract,
+            "open",
+            limit=100,
+            offset=offset,
+            priority=PRIORITY_HIGH,
+        )
         if any(order.id == order_id for order in page):
             return
         if len(page) < 100:
@@ -60,7 +69,7 @@ async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) ->
         finish_as（结束方式，缺省为 cancelled）、warning（本地同步失败时的警告文案，
         成功时为空字符串）
     """
-    await run_gateway_io(_require_open_order, deps, contract, order_id, priority=PRIORITY_HIGH)
+    await _require_open_order(deps, contract, order_id)
     result = await run_gateway_io(
         deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH
     )

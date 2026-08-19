@@ -25,10 +25,11 @@ _CANDLE_INTERVALS = frozenset(GATE_CANDLE_INTERVALS)
 _MAX_OPEN_ORDER_PAGES = 50  # 分页拉取 open 订单的总页数上限（单页 100 条），防分页异常死循环
 
 
-def _list_all_open_orders(gateway: Gateway) -> list[OrderResult]:
+async def _list_all_open_orders(gateway: Gateway) -> list[OrderResult]:
     """分页拉完全部 open 订单；页数超上限时抛错而非无限循环。
 
-    同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）。
+    逐页单独经统一卸载层 await：高优先级任务（人工平仓/撤单）可在页与页之间
+    插队，避免整段分页作为单个 executor 任务独占唯一网关线程（PR #84 评审 P1）。
 
     参数：
         gateway: Gateway，交易网关
@@ -42,7 +43,7 @@ def _list_all_open_orders(gateway: Gateway) -> list[OrderResult]:
     orders: list[OrderResult] = []
     offset = 0
     for _ in range(_MAX_OPEN_ORDER_PAGES):
-        page = gateway.list_orders(status="open", limit=100, offset=offset)
+        page = await run_gateway_io(gateway.list_orders, status="open", limit=100, offset=offset)
         orders.extend(page)
         if len(page) < 100:
             return orders
@@ -114,7 +115,7 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
         if deps.gateway is None:
             raise HTTPException(status_code=503, detail="交易网关未就绪")
         try:
-            orders = await run_gateway_io(_list_all_open_orders, deps.gateway)
+            orders = await _list_all_open_orders(deps.gateway)
             return [order.model_dump() for order in orders]
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

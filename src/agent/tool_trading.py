@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -36,8 +37,8 @@ from src.agent.tool_leverage import (
     _prev_leverage_state,
 )
 from src.audit.logger import get_logger
-from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
-from src.gateway.base import GatewayError, OrderRequest, OrderResult, Position, TpslOrder
+from src.gateway.async_io import PRIORITY_HIGH, PRIORITY_NORMAL, run_gateway_io
+from src.gateway.base import Gateway, GatewayError, OrderRequest, OrderResult, Position, TpslOrder
 from src.risk.models import AccountSnapshot, TradeIntent
 
 logger = get_logger(__name__)
@@ -86,6 +87,7 @@ async def _risk_check(
     price: Decimal | None,
     is_close: bool,
     leverage: int,
+    priority: int = PRIORITY_NORMAL,
 ) -> ToolOutcome | None:
     """构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None。
 
@@ -96,14 +98,16 @@ async def _risk_check(
         price: Decimal | None，委托价格；None 表示市价
         is_close: bool，是否为纯平仓或减仓
         leverage: int，请求杠杆倍数
+        priority: int，风控内网关读取的卸载优先级；手动安全操作传 PRIORITY_HIGH，
+            避免人工平仓在风控阶段掉回普通队尾（PR #84 评审 P1）
     返回：
         ToolOutcome | None，构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None
     异常：
         ToolArgError，交易意图字段未通过模型校验时抛出
     """
-    meta = await run_gateway_io(deps.gateway.get_contract, contract)
-    account = await run_gateway_io(deps.gateway.get_account)
-    positions = await run_gateway_io(deps.gateway.list_positions)
+    meta = await run_gateway_io(deps.gateway.get_contract, contract, priority=priority)
+    account = await run_gateway_io(deps.gateway.get_account, priority=priority)
+    positions = await run_gateway_io(deps.gateway.list_positions, priority=priority)
     equity = compute_equity(account, positions)
     if equity <= 0:
         return ToolOutcome("风控拒绝：账户权益非正，禁止交易", "deny", "账户权益非正")
@@ -125,7 +129,7 @@ async def _risk_check(
     verdict = deps.risk_engine.check(
         intent,
         snap,
-        await run_gateway_io(position_snapshots, deps.gateway, positions),
+        await run_gateway_io(position_snapshots, deps.gateway, positions, priority=priority),
         daily,
         deps.watchlist,
         deps.risk_config,
@@ -388,8 +392,70 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     return ToolOutcome(text, "allow")
 
 
+@dataclass
+class _TpslSwapResult:
+    """TPSL 整组替换的执行结果：阶段标识 + 各失败态所需上下文（由 update_tpsl 映射文案）。"""
+
+    stage: str  # ok / create_unknown / create_failed / cancel_unknown / cancel_partial
+    error: str = ""
+    rollback_failed: list[str] = field(default_factory=list)
+    cancelled: list[str] = field(default_factory=list)
+    old_total: int = 0
+
+
+def _swap_tpsl_group(
+    gateway: Gateway, contract: str, direction: int, requested: list[TpslOrder]
+) -> _TpslSwapResult:
+    """TPSL 整组替换事务：列旧组 → 建完整新组（失败回滚）→ 撤旧组，全程不可交错。
+
+    同步函数，仅经统一卸载层 run_gateway_io 作为**单个**任务调用：真实网关由唯一
+    executor 线程串行保证原子；paper 命中 __gateway_io_inline__ 标记在事件循环
+    线程内联执行，协程间同样不可交错。两个并发 update_tpsl 因此按"后写覆盖"语义
+    串行生效，不会留下两套新保护单；高优 manual close 只会排在整个交换之前或之后
+    （PR #84 评审 P1）。
+
+    参数：
+        gateway: Gateway，交易网关
+        contract: str，合约标识
+        direction: int，持仓方向（1 多 / -1 空），仅处理同方向旧组
+        requested: list[TpslOrder]，待创建的完整新保护组
+
+    返回：
+        _TpslSwapResult，阶段标识与失败上下文；不抛 GatewayError（映射为 stage）
+    """
+    old = [order for order in gateway.list_tpsl_orders(contract) if order.direction == direction]
+    created: list[TpslOrder] = []
+    try:
+        for item in requested:
+            created.append(gateway.create_tpsl_order(item))
+    except GatewayError as exc:
+        if exc.label == "TPSL_STATE_UNKNOWN":
+            return _TpslSwapResult("create_unknown", str(exc))
+        rollback_failed: list[str] = []
+        for item in created:
+            try:
+                gateway.cancel_tpsl_order(item.id)
+            except GatewayError:
+                logger.exception("止盈止损回滚失败 id=%s", item.id)
+                rollback_failed.append(item.id)
+        return _TpslSwapResult("create_failed", str(exc), rollback_failed=rollback_failed)
+    cancelled: list[str] = []
+    try:
+        for item in old:
+            gateway.cancel_tpsl_order(item.id)
+            cancelled.append(item.id)
+    except GatewayError as exc:
+        if exc.label == "TPSL_STATE_UNKNOWN":
+            return _TpslSwapResult("cancel_unknown", str(exc))
+        return _TpslSwapResult("cancel_partial", str(exc), cancelled=cancelled, old_total=len(old))
+    return _TpslSwapResult("ok", cancelled=cancelled)
+
+
 async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     """整仓保护替换：完整新组落地后才撤销同方向旧组，避免裸露窗口。
+
+    替换事务（列旧组→建新组→撤旧组）经 _swap_tpsl_group 作为单个卸载任务执行，
+    并发更新与 manual close 均不可交错插入交换中段。
 
     参数：
         deps: ToolDeps，当前模块所需的依赖集合
@@ -424,11 +490,6 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    old = [
-        order
-        for order in await run_gateway_io(deps.gateway.list_tpsl_orders, contract)
-        if order.direction == direction
-    ]
     requested = [
         TpslOrder(
             id="", contract=contract, direction=direction, kind="stop_loss", trigger_price=stop_loss
@@ -444,41 +505,26 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
                 trigger_price=take_profit,
             )
         )
-    created: list[TpslOrder] = []
-    try:
-        for item in requested:
-            created.append(await run_gateway_io(deps.gateway.create_tpsl_order, item))
-    except GatewayError as exc:
-        if exc.label == "TPSL_STATE_UNKNOWN":
-            return ToolOutcome(
-                f"更新止盈止损状态未知；旧保护单未撤销，请人工核对且不要盲目重试：{exc}"
-            )
-        rollback_failed: list[str] = []
-        for item in created:
-            try:
-                await run_gateway_io(deps.gateway.cancel_tpsl_order, item.id)
-            except GatewayError:
-                logger.exception("止盈止损回滚失败 id=%s", item.id)
-                rollback_failed.append(item.id)
-        if rollback_failed:
+    swap = await run_gateway_io(_swap_tpsl_group, deps.gateway, contract, direction, requested)
+    if swap.stage == "create_unknown":
+        return ToolOutcome(
+            f"更新止盈止损状态未知；旧保护单未撤销，请人工核对且不要盲目重试：{swap.error}"
+        )
+    if swap.stage == "create_failed":
+        if swap.rollback_failed:
             return ToolOutcome(
                 "更新止盈止损失败；旧保护单未变更，但以下新保护单回滚失败，"
-                f"可能与旧单并存，请人工核对：{', '.join(rollback_failed)}；原因：{exc}"
+                f"可能与旧单并存，请人工核对：{', '.join(swap.rollback_failed)}；原因：{swap.error}"
             )
-        return ToolOutcome(f"更新止盈止损失败，新保护单已回滚，旧保护单未变更：{exc}")
-    cancelled: list[str] = []
-    try:
-        for item in old:
-            await run_gateway_io(deps.gateway.cancel_tpsl_order, item.id)
-            cancelled.append(item.id)
-    except GatewayError as exc:
-        if exc.label == "TPSL_STATE_UNKNOWN":
-            return ToolOutcome(
-                f"新止盈止损已设置，但撤销旧保护单状态未知，请人工核对且不要盲目重试：{exc}"
-            )
+        return ToolOutcome(f"更新止盈止损失败，新保护单已回滚，旧保护单未变更：{swap.error}")
+    if swap.stage == "cancel_unknown":
+        return ToolOutcome(
+            f"新止盈止损已设置，但撤销旧保护单状态未知，请人工核对且不要盲目重试：{swap.error}"
+        )
+    if swap.stage == "cancel_partial":
         return ToolOutcome(
             "新止盈止损已设置，但旧保护单仅撤销 "
-            f"{len(cancelled)}/{len(old)} 个；其余旧单与新单的实际状态需人工核对：{exc}"
+            f"{len(swap.cancelled)}/{swap.old_total} 个；其余旧单与新单的实际状态需人工核对：{swap.error}"
         )
     text = f"止损已更新为 {stop_loss}" + (
         f"；止盈已更新为 {take_profit}" if take_profit else "；止盈未设置"
