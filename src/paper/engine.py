@@ -46,10 +46,10 @@ class PaperGateway(PaperOpenInterestMixin):
     # 不进 executor——on_price/settle_funding/drain_fills 本就在事件循环线程直接改
     # 账户状态，账户类方法再进线程会把单线程状态机变成跨线程共享可变状态（PR #84
     # 评审 P1）。除网关方法外，还登记以本网关为首参、内部仅调纯内存方法的同步事务
-    # 辅助（position_snapshots / _swap_tpsl_group），保证其事务段同样不被线程交错。
-    # get_candlesticks/get_tickers/fetch_open_interest 等行情委托方法可能转发真实
-    # REST provider，不得加入本集合。
-    __gateway_io_inline__ = frozenset(
+    # 辅助（position_snapshots / _swap_tpsl_group / _amend_direction / _account_equity），
+    # 保证其事务段同样不被线程交错。get_candlesticks/fetch_open_interest 等行情委托
+    # 方法可能转发真实 REST provider，不得加入本集合。
+    _GATEWAY_IO_INLINE_STATIC = frozenset(
         {
             "get_contract",
             "get_account",
@@ -64,8 +64,31 @@ class PaperGateway(PaperOpenInterestMixin):
             "cancel_tpsl_order",
             "position_snapshots",
             "_swap_tpsl_group",
+            "_amend_direction",
+            "_account_equity",
         }
     )
+
+    @property
+    def __gateway_io_inline__(self) -> Callable[[str], bool]:
+        """实例级内联判定：静态集合之外，get_tickers 仅在无真实行情 provider 时内联。
+
+        ticker_provider 为 None 时 get_tickers 由内存行情快照合成（纯内存，须与
+        on_price 同线程）；注入了真实 REST provider 时则必须卸载到 executor，
+        不得内联阻塞事件循环（PR #84 评审 P1：复合调用按实例动态判定）。
+
+        参数：无
+
+        返回：
+            Callable[[str], bool]：函数名 -> 是否应在事件循环线程内联执行
+        """
+
+        def _is_inline(name: str) -> bool:
+            return name in self._GATEWAY_IO_INLINE_STATIC or (
+                name == "get_tickers" and self._ticker_provider is None
+            )
+
+        return _is_inline
 
     def __init__(
         self,

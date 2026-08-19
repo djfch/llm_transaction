@@ -20,15 +20,17 @@ from typing import Any
 import pytest
 
 from src.agent.context import ContextBuilder
+from src.agent import tool_trading
 from src.agent.manual_close import close_position
-from src.agent.tool_trading import update_tpsl
-from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
+from src.agent.tool_trading import _amend_direction, update_tpsl
+from src.gateway.async_io import PRIORITY_HIGH, _is_inline_call, run_gateway_io
 from src.gateway.base import GatewayError, OrderRequest, TpslOrder
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
+from src.server.routes_status import _account_equity
 from src.server.routes_trading import _list_all_open_orders
 from tests.test_agent_tools_risk import _long_position, _make_tools
-from tests.test_paper import make_gateway
+from tests.test_paper import buy, make_gateway
 
 
 def _slow(fn: Callable, delay: float = 0.3) -> Callable:
@@ -466,5 +468,140 @@ async def test_manual_close_does_not_interleave_tpsl_swap(tmp_path):
         cancel_idx = next(i for i, e in enumerate(events) if e.startswith("cancel_tpsl:"))
         close_idx = events.index("place:0")
         assert create_idx < cancel_idx < close_idx
+    finally:
+        await env.db.close()
+
+
+# ---------- PR #84 第二轮评审回归：复合辅助线程亲和 / TPSL 持仓核验 ----------
+
+
+async def test_amend_direction_helper_inline_for_paper_with_concurrent_on_price():
+    """验证 _amend_direction（首参为网关的复合辅助）命中 paper 内联标记，与撮合共线程。
+
+    参数：无
+
+    返回：
+        None，断言 executor 被占住且并发 on_price 注入时，_amend_direction 仍在
+        事件循环线程内联完成（修复前首参是 deps，被误判卸载到 executor，与
+        on_price 跨线程并发读写同一账户）
+    """
+    paper = make_gateway()
+    buy(paper, 1)  # 持有多仓，供 _amend_direction 读取
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    blocker = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)  # 先占住唯一网关线程
+    try:
+
+        async def _feed():
+            for i in range(100):
+                paper.on_price("BTC_USDT", Decimal(100 + i % 5), Decimal("99.9"), Decimal("100.1"))
+                await asyncio.sleep(0)
+
+        feed = asyncio.ensure_future(_feed())
+        try:
+            for _ in range(50):
+                is_close, size = await asyncio.wait_for(
+                    run_gateway_io(_amend_direction, paper, "BTC_USDT", "oid", Decimal(1)),
+                    timeout=1,
+                )
+                assert (is_close, size) == (False, Decimal(1))  # 同向改单：新敞口
+        finally:
+            await feed
+    finally:
+        release.set()
+        await blocker
+
+
+async def test_account_equity_helper_inline_for_paper():
+    """验证 _account_equity（首参为网关的复合辅助）命中 paper 内联标记。
+
+    参数：无
+
+    返回：
+        None，断言 executor 被占住时 _account_equity 仍在事件循环线程内联完成
+        且估值正确（修复前首参是 deps，被误判卸载到 executor）
+    """
+    paper = make_gateway()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    blocker = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)
+    try:
+        equity = await asyncio.wait_for(run_gateway_io(_account_equity, paper), timeout=1)
+        assert equity == Decimal("10000")  # 初始权益，无持仓保证金与浮盈
+    finally:
+        release.set()
+        await blocker
+
+
+async def test_paper_get_tickers_inline_only_without_ticker_provider():
+    """验证 paper 的 get_tickers 按实例动态判定：无真实 provider 时内联，有则卸载。
+
+    参数：无
+
+    返回：
+        None，断言 provider=None 时 executor 被占住仍内联完成；注入 provider 后
+        _is_inline_call 判定为卸载（真实 REST 不得阻塞事件循环）
+    """
+    paper = make_gateway()  # ticker_provider=None：get_tickers 由内存快照合成
+    assert _is_inline_call(paper.get_tickers, ())
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    blocker = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)
+    try:
+        tickers = await asyncio.wait_for(run_gateway_io(paper.get_tickers), timeout=1)
+        assert [t.contract for t in tickers] == ["BTC_USDT"]
+    finally:
+        release.set()
+        await blocker
+    paper._ticker_provider = lambda: []  # paper+真实行情装配形态：转发真实 REST
+    assert not _is_inline_call(paper.get_tickers, ())
+
+
+async def test_update_tpsl_position_closed_before_swap_reports_not_updated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """验证 TPSL 交换前持仓被高优平仓作废时，不建任何新保护单且不报"已更新"。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+        monkeypatch: pytest.MonkeyPatch，拦截 run_gateway_io 模拟平仓插队
+
+    返回：
+        None，断言交换事务开头重读持仓发现已平仓，返回非成功文案且保护单为空
+        （修复前使用风控 await 窗口前的旧快照，在已平仓合约上建单并报"止损已更新"）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        real_run = tool_trading.run_gateway_io
+
+        async def _close_before_swap(fn, /, *args, **kwargs):
+            if getattr(fn, "__name__", "") == "_swap_tpsl_group":
+                env.gateway.positions.pop("BTC_USDT", None)  # 风控 await 窗口内平仓完成
+            return await real_run(fn, *args, **kwargs)
+
+        monkeypatch.setattr(tool_trading, "run_gateway_io", _close_before_swap)
+        out = await update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 58000})
+        assert "止损已更新" not in out.text
+        assert "未更新" in out.text
+        assert env.gateway.list_tpsl_orders("BTC_USDT") == []
     finally:
         await env.db.close()

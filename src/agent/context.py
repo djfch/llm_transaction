@@ -168,7 +168,7 @@ class ContextBuilder:
         """
         account = await run_gateway_io(self._gateway.get_account)
         positions = await run_gateway_io(self._gateway.list_positions)
-        tickers, metas = await run_gateway_io(self._read_market_data)
+        tickers, metas = await self._read_market_data()
         equity = compute_equity(account, positions)
         sections = [
             self._header(wake_source),
@@ -229,12 +229,15 @@ class ContextBuilder:
             )
         return "\n".join(lines)
 
-    def _read_market_data(self) -> tuple[dict[str, Ticker], dict[str, Contract]]:
-        """一次性读取行情段落的全部网关数据：ticker 全集 + ticker 缺失合约的元数据回退。
+    async def _read_market_data(self) -> tuple[dict[str, Ticker], dict[str, Contract]]:
+        """读取行情段落的全部网关数据：ticker 全集 + ticker 缺失合约的元数据回退。
 
-        同步函数，仅经统一卸载层 run_gateway_io 调用（不得直接在事件循环线程执行）；
-        get_tickers 抛错原样上抛（与重构前行为一致），仅单合约元数据回退读取失败时
-        降级为 None（该合约行情行最终显示"无行情数据"）。
+        每次网关调用单独经统一卸载层 run_gateway_io 提交，由网关方法自身的内联
+        标记决定执行线程（paper 无真实行情 provider 时 get_tickers/get_contract
+        内联、与撮合同线程；真实网关或 paper 接 REST provider 时卸载到 executor）。
+        不得把整段作为单个同步函数卸载：owner 是 ContextBuilder 而非网关，会绕过
+        paper 的线程亲和判定（PR #84 评审 P1）。get_tickers 抛错原样上抛，仅单合约
+        元数据回退读取失败时降级为 None（该合约行情行最终显示"无行情数据"）。
 
         参数：无
 
@@ -242,13 +245,13 @@ class ContextBuilder:
             tuple[dict[str, Ticker], dict[str, Contract]]：（合约 -> ticker）与
             （ticker 缺失合约 -> 元数据）两个字典；元数据读取失败的合约不在后者中
         """
-        tickers = {t.contract: t for t in self._gateway.get_tickers()}
+        tickers = {t.contract: t for t in await run_gateway_io(self._gateway.get_tickers)}
         metas: dict[str, Contract] = {}
         for contract in self._watchlist:
             if contract in tickers:
                 continue
             try:  # ticker 缺失时回退合约元数据（仍含标记价/资金费率）
-                metas[contract] = self._gateway.get_contract(contract)
+                metas[contract] = await run_gateway_io(self._gateway.get_contract, contract)
             except GatewayError:
                 continue
         return tickers, metas

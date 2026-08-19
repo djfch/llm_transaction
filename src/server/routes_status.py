@@ -102,23 +102,24 @@ def _cents(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01")))
 
 
-def _account_equity(deps: ServerDeps) -> Decimal | None:
+def _account_equity(gateway: Gateway | None) -> Decimal | None:
     """账户当前权益估值（可用 + 持仓保证金 + 未实现盈亏）；未接线或查询失败返回 None。
 
     同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关读取，
-    不得直接在事件循环线程执行）。
+    不得直接在事件循环线程执行）；首参必须为网关实例——paper 借此命中
+    纯内存内联标记，与撮合同线程读取账户，避免跨线程竞态（PR #84 评审 P1）。
 
     参数：
-        deps: ServerDeps，当前服务端运行依赖
+        gateway: Gateway | None，交易网关；None（未接线）时直接返回 None
 
     返回：
         Decimal | None：账户当前权益估值（可用 + 持仓保证金 + 未实现盈亏）；未接线或查询失败返回 None
     """
-    if deps.gateway is None:
+    if gateway is None:
         return None
     try:
-        account = deps.gateway.get_account()
-        margin = sum((p.margin for p in deps.gateway.list_positions()), Decimal(0))
+        account = gateway.get_account()
+        margin = sum((p.margin for p in gateway.list_positions()), Decimal(0))
     except GatewayError:
         return None
     return account.available + margin + account.unrealised_pnl
@@ -156,7 +157,7 @@ def _equity_baseline(
     """
     if settings.mode == "paper":
         return settings.paper.initial_equity, "paper_config"
-    equity_now = _account_equity(deps)
+    equity_now = _account_equity(deps.gateway)
     if equity_now is None:
         return Decimal(0), "fallback_zero"
     return equity_now - pnl_fee_sum, "account"
@@ -277,7 +278,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]：账户概览：available/unrealised_pnl + equity（前端 AccountInfo 契约要求 equity 必在）
         """
         account = (await run_gateway_io(_require_gateway(deps).get_account)).model_dump()
-        equity = await run_gateway_io(_account_equity, deps)
+        equity = await run_gateway_io(_account_equity, deps.gateway)
         account["equity"] = (
             equity if equity is not None else account["available"] + account["unrealised_pnl"]
         )

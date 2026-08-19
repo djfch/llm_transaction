@@ -396,7 +396,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
 class _TpslSwapResult:
     """TPSL 整组替换的执行结果：阶段标识 + 各失败态所需上下文（由 update_tpsl 映射文案）。"""
 
-    stage: str  # ok / create_unknown / create_failed / cancel_unknown / cancel_partial
+    stage: str  # ok / position_changed / create_unknown / create_failed / cancel_unknown / cancel_partial
     error: str = ""
     rollback_failed: list[str] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
@@ -414,6 +414,11 @@ def _swap_tpsl_group(
     串行生效，不会留下两套新保护单；高优 manual close 只会排在整个交换之前或之后
     （PR #84 评审 P1）。
 
+    事务开头先重读持仓：update_tpsl 的持仓快照是在风控 await 窗口之前读取的，
+    窗口内高优平仓/反手可能已完成；持仓不存在、为零或方向与 direction 不一致时
+    返回 position_changed，不创建任何新保护单（PR #84 评审 P1，防在已平仓
+    合约上建单并报"已更新"）。
+
     参数：
         gateway: Gateway，交易网关
         contract: str，合约标识
@@ -423,6 +428,9 @@ def _swap_tpsl_group(
     返回：
         _TpslSwapResult，阶段标识与失败上下文；不抛 GatewayError（映射为 stage）
     """
+    pos = next((p for p in gateway.list_positions() if p.contract == contract), None)
+    if pos is None or pos.size == 0 or (pos.size > 0) != (direction > 0):
+        return _TpslSwapResult("position_changed")
     old = [order for order in gateway.list_tpsl_orders(contract) if order.direction == direction]
     created: list[TpslOrder] = []
     try:
@@ -506,6 +514,8 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
             )
         )
     swap = await run_gateway_io(_swap_tpsl_group, deps.gateway, contract, direction, requested)
+    if swap.stage == "position_changed":
+        return ToolOutcome("止盈止损未更新：持仓已平仓或方向已变化，请核对后重试")
     if swap.stage == "create_unknown":
         return ToolOutcome(
             f"更新止盈止损状态未知；旧保护单未撤销，请人工核对且不要盲目重试：{swap.error}"
@@ -550,7 +560,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     if price is None and size is None:
         raise ToolArgError("price 与 size 至少提供一个")
     is_close, effective_size = await run_gateway_io(
-        _amend_direction, deps, contract, order_id, size
+        _amend_direction, deps.gateway, contract, order_id, size
     )
     deny = await _risk_check(
         deps,
@@ -582,12 +592,13 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
 
 
 def _amend_direction(
-    deps: ToolDeps, contract: str, order_id: str, size: Decimal | None
+    gateway: Gateway, contract: str, order_id: str, size: Decimal | None
 ) -> tuple[bool, Decimal]:
     """推断改后（是否平仓方向, 参与风控的有效张数）。
 
     同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关持仓/订单读取，
-    不得直接在事件循环线程执行）。
+    不得直接在事件循环线程执行）；首参必须为网关实例——paper 借此命中纯内存
+    内联标记，与撮合同线程读取账户，避免跨线程竞态（PR #84 评审 P1）。
 
     size 给定时按与持仓的方向与数量关系判定：同向改单、以及反向数量超过持仓的
     反手翻仓，都属新敞口，不豁免（必须过全套风控）；仅反向且数量不超过持仓
@@ -595,21 +606,21 @@ def _amend_direction(
     未给 size 时方向不可知，保守按开仓处理（不豁免），张数取挂单剩余量评估占比。
 
     参数：
-        deps: ToolDeps，当前模块所需的依赖集合
+        gateway: Gateway，交易网关
         contract: str，合约标识
         order_id: str，交易所订单标识
         size: Decimal | None，订单张数
     返回：
         tuple[bool, Decimal]，推断改后（是否平仓方向, 参与风控的有效张数）
     """
-    pos = next((p for p in deps.gateway.list_positions() if p.contract == contract), None)
+    pos = next((p for p in gateway.list_positions() if p.contract == contract), None)
     if size is not None:
         if pos is None or pos.size == 0:
             return False, size
         is_close = (pos.size > 0) != (size > 0) and abs(size) <= abs(pos.size)
         return is_close, size
     left = Decimal(0)
-    for order in deps.gateway.list_orders(contract, "open"):
+    for order in gateway.list_orders(contract, "open"):
         if order.id == order_id:
             left = order.left
             break

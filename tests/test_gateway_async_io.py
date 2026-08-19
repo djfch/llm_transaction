@@ -316,3 +316,41 @@ def test_scheduler_entry_released_after_loop_closed():
     del loop
     gc.collect()
     assert ref() is None
+
+
+class _DynamicMarkedGateway:
+    """实例级 callable 内联标记的伪网关：开关开时 ping 内联，关闭后卸载。"""
+
+    def __init__(self) -> None:
+        """初始化内联开关与实例级 callable 标记。
+
+        参数：无
+        返回：
+            None，初始化实例字段（副作用：登记实例级 __gateway_io_inline__ 判定函数）
+        """
+        self.inline_enabled = True
+        self.__gateway_io_inline__ = lambda name: self.inline_enabled and name == "ping"
+
+    def ping(self) -> int:
+        """返回当前执行线程 ident（用于断言执行线程亲和性）。
+
+        参数：无
+        返回：
+            int：执行该方法的操作系统线程 ident
+        """
+        return threading.get_ident()
+
+
+async def test_callable_marker_supports_dynamic_inline_judgement():
+    """验证实例级 callable 标记按实例状态动态判定内联/卸载（paper get_tickers 同款机制）。
+
+    参数：无
+
+    返回：
+        None，断言开关开时 ping 在事件循环线程内联执行、关闭后卸载到 executor 线程
+    """
+    gateway = _DynamicMarkedGateway()
+    loop_ident = threading.get_ident()
+    assert await run_gateway_io(gateway.ping) == loop_ident
+    gateway.inline_enabled = False
+    assert await run_gateway_io(gateway.ping) != loop_ident

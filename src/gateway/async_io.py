@@ -9,10 +9,12 @@ Gate SDK 为同步实现且不做线程安全假设：所有网关 I/O 必须经
 PaperGateway 等纯内存实现无网络 I/O，且其撮合（on_price）、资金费结算与
 drain_fills 均在事件循环线程直接修改同一账户状态：若账户类方法再进 executor
 线程，单线程状态机就退化为跨线程共享可变状态（PR #84 评审）。因此网关类可
-声明 __gateway_io_inline__（frozenset[str]）标记纯内存方法名（含以网关为
-首参、内部仅调纯内存方法的事务辅助函数名）；命中标记的调用不进 executor，
-直接在事件循环线程内联执行，保持单线程语义。行情委托类方法
-（get_candlesticks/get_tickers 可能转发真实 REST provider）不得加入标记。
+声明 __gateway_io_inline__ 标记纯内存方法名（含以网关为首参、内部仅调纯内存
+方法的事务辅助函数名）；命中标记的调用不进 executor，直接在事件循环线程内联
+执行，保持单线程语义。标记支持两种形态：frozenset[str] 静态方法名集合，或
+Callable[[str], bool] 实例级判定函数（按实例状态动态判定，如 paper 的
+get_tickers 仅在无真实 REST provider 时内联）；静态集合中不得加入转发真实
+REST provider 的行情委托类方法（get_candlesticks/fetch_open_interest 等）。
 """
 
 from __future__ import annotations
@@ -130,9 +132,10 @@ def _scheduler() -> _IoScheduler:
 def _is_inline_call(fn: Callable[..., Any], args: tuple) -> bool:
     """判断本次调用是否命中网关的纯内存内联标记，应在事件循环线程直接执行。
 
-    绑定方法取其 __self__，普通同步辅助取首参（约定为网关实例）；对应类型声明了
-    __gateway_io_inline__ 且函数名在集合内即为纯内存操作（如 PaperGateway 的账户
-    方法）。内联执行保持 paper 账户的单线程状态机语义，避免与事件循环线程上的
+    绑定方法取其 __self__，普通同步辅助取首参（约定为网关实例）；从实例读取
+    __gateway_io_inline__ 标记（实例属性优先于类属性，支持按实例状态动态判定）：
+    标记为 frozenset 时按函数名成员判定，为 Callable[[str], bool] 时调用其判定。
+    内联执行保持 paper 账户的单线程状态机语义，避免与事件循环线程上的
     撮合/资金费/drain 并发改同一状态。
 
     参数：
@@ -144,7 +147,11 @@ def _is_inline_call(fn: Callable[..., Any], args: tuple) -> bool:
     owner = getattr(fn, "__self__", None)
     if owner is None and args:
         owner = args[0]
-    marker = getattr(type(owner), "__gateway_io_inline__", None)
+    if owner is None:
+        return False
+    marker = getattr(owner, "__gateway_io_inline__", None)
+    if callable(marker):
+        return bool(marker(getattr(fn, "__name__", "")))
     return bool(marker) and getattr(fn, "__name__", "") in marker
 
 
