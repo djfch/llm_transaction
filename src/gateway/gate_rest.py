@@ -39,8 +39,36 @@ _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
 _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤旧单
 _FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
+_CONNECT_TIMEOUT_S = 5  # 默认连接超时：Gate 正常建连亚秒级，5s 已宽裕
+_READ_TIMEOUT_S = 15  # 默认读取超时：正常 REST 响应秒级，15s 覆盖极端慢响应
+# 未显式指定超时的调用统一使用（连接, 读取）超时：SDK 缺省 None=不限时，
+# 网关线程一旦被悬挂请求占住，所有网关 I/O 会整体停摆（issue #72 建议 2）
+_DEFAULT_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
+
+
+class _TimeoutApiClient(gate_api.ApiClient):
+    """为未显式指定 _request_timeout 的调用注入默认（连接, 读取）超时的 ApiClient。
+
+    gate_api 生成代码对每次调用都显式传 _request_timeout（缺省 None=不限时），
+    故这里对 None 统一替换为默认超时；调用方显式给定的值（如下单 10s）原样优先。
+    """
+
+    def call_api(self, *args, **kwargs):
+        """注入默认 _request_timeout 后转发父类实现。
+
+        参数：
+            args: tuple，原样转发的位置参数
+            kwargs: dict，原样转发的关键字参数；_request_timeout 为 None 或缺失时
+                注入默认（连接, 读取）超时
+
+        返回：
+            与父类 call_api 相同：反序列化后的响应对象
+        """
+        if kwargs.get("_request_timeout") is None:
+            kwargs["_request_timeout"] = _DEFAULT_REQUEST_TIMEOUT
+        return super().call_api(*args, **kwargs)
 
 
 def gen_client_order_id() -> str:
@@ -385,7 +413,7 @@ class GateRestGateway(GateOpenInterestMixin):
         """
         host = gate_config.testnet_host if testnet else gate_config.live_host
         config = gate_api.Configuration(host=host, key=api_key, secret=api_secret)
-        self._api = gate_api.FuturesApi(gate_api.ApiClient(config))
+        self._api = gate_api.FuturesApi(_TimeoutApiClient(config))
         self._settle = gate_config.settle
 
     @staticmethod

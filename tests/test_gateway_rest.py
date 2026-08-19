@@ -14,9 +14,15 @@ from unittest.mock import Mock
 import pytest
 from gate_api.exceptions import ApiException, GateApiException
 
+import gate_api
 from src.config import GateConfig
 from src.gateway import GatewayError, OrderRequest, OrderStateUnknown
-from src.gateway.gate_rest import GateRestGateway, _to_position
+from src.gateway.gate_rest import (
+    _DEFAULT_REQUEST_TIMEOUT,
+    GateRestGateway,
+    _TimeoutApiClient,
+    _to_position,
+)
 
 BTC = "BTC_USDT"
 
@@ -587,3 +593,70 @@ def test_fetch_open_interest_history_wraps_error(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(GatewayError) as excinfo:
         gateway.fetch_open_interest_history(BTC, "4h")
     assert excinfo.value.label == "INVALID_PARAM"
+
+
+def test_gateway_uses_timeout_api_client():
+    """验证真实网关默认装配带超时注入的 ApiClient（读路径不再不限时悬挂）。
+
+    参数：无
+    返回：
+        None，断言网关内部 SDK 客户端为 _TimeoutApiClient 实例
+    """
+    gateway = make_gateway()
+    assert isinstance(gateway._api.api_client, _TimeoutApiClient)
+
+
+def test_timeout_client_injects_default_timeout(monkeypatch: pytest.MonkeyPatch):
+    """验证未显式指定 _request_timeout 的调用被注入默认（连接, 读取）超时。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 以捕获透传参数
+    返回：
+        None，断言缺省与显式 None 两种形态都被替换为默认超时元组
+    """
+    captured: dict = {}
+
+    def fake_call_api(self, *args, **kwargs):
+        """记录透传参数的伪 call_api（不触网）。
+
+        参数：
+            args: tuple，位置参数
+            kwargs: dict，关键字参数
+        返回：
+            None，仅记录参数
+        """
+        captured.update(kwargs)
+
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", fake_call_api)
+    client = _TimeoutApiClient(gate_api.Configuration(host="http://localhost"))
+    client.call_api("/futures/usdt/positions", "GET")
+    assert captured["_request_timeout"] == _DEFAULT_REQUEST_TIMEOUT
+    client.call_api("/futures/usdt/positions", "GET", _request_timeout=None)
+    assert captured["_request_timeout"] == _DEFAULT_REQUEST_TIMEOUT
+
+
+def test_timeout_client_preserves_explicit_timeout(monkeypatch: pytest.MonkeyPatch):
+    """验证调用方显式指定的 _request_timeout（如下单 10s）不被默认值覆盖。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 以捕获透传参数
+    返回：
+        None，断言显式超时值原样透传
+    """
+    captured: dict = {}
+
+    def fake_call_api(self, *args, **kwargs):
+        """记录透传参数的伪 call_api（不触网）。
+
+        参数：
+            args: tuple，位置参数
+            kwargs: dict，关键字参数
+        返回：
+            None，仅记录参数
+        """
+        captured.update(kwargs)
+
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", fake_call_api)
+    client = _TimeoutApiClient(gate_api.Configuration(host="http://localhost"))
+    client.call_api("/futures/usdt/orders", "POST", _request_timeout=10)
+    assert captured["_request_timeout"] == 10
