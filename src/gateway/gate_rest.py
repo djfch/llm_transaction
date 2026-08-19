@@ -14,7 +14,7 @@ import uuid
 from decimal import Decimal
 
 import gate_api
-from gate_api.exceptions import GateApiException
+from gate_api.exceptions import ApiException, GateApiException
 from urllib3.exceptions import HTTPError as _Urllib3HTTPError
 
 from ..config import GateConfig
@@ -74,13 +74,19 @@ class _TimeoutApiClient(gate_api.ApiClient):
             与父类 call_api 相同：反序列化后的响应对象
 
         异常：
-            GatewayTransportError：urllib3 传输层失败（超时/连接失败/重试耗尽）时抛出
+            GatewayTransportError：传输层/网关层失败（超时、连接失败、无 label 的
+                502/504、SSL 失败等）时抛出，请求可能已到达交易所，按"结果未知"处理
         """
         if kwargs.get("_request_timeout") is None:
             kwargs["_request_timeout"] = _DEFAULT_REQUEST_TIMEOUT
         try:
             return super().call_api(*args, **kwargs)
-        except _Urllib3HTTPError as exc:
+        except GateApiException:
+            raise  # 带 label 的服务端明确拒绝：保持原样，由各方法 wrap_gate_exception 分类
+        except (ApiException, _Urllib3HTTPError, AttributeError) as exc:
+            # 原始 ApiException（无 label 的 502/504 代理响应、SSL status=0）、urllib3
+            # 传输异常、SDK 对 body=None 解码产生的 AttributeError：请求可能已到达
+            # 交易所，统一按"结果未知"归一化（PR #84 评审 P1）
             raise wrap_transport_exception(exc) from exc
 
 
@@ -476,26 +482,23 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def list_positions(self) -> list[Position]:
-        """读取全部持仓，并回填各持仓同方向整仓保护单的止损/止盈触发价。
+        """读取全部持仓（单次 REST 裸读，止损/止盈字段不回填）。
+
+        保持单次请求：持仓 + 逐合约保护单查询的 N+1 复合读取会作为一个 executor
+        任务长期占住唯一网关线程，HIGH 人工平仓无法在子请求间插队，且任一保护单
+        查询超时会把安全路径整体拖死（PR #84 评审 P1）。止损/止盈展示补全由
+        async_io.read_positions_with_tpsl 逐合约独立调度、单合约失败降级。
 
         参数：无
 
         返回：
-            list[Position]：共用持仓模型列表；无对应保护单时止损/止盈价为 None
+            list[Position]：共用持仓模型列表；stop_loss_price/take_profit_price 恒为 None
 
         异常：
             GatewayError：交易所请求失败时抛出
         """
         try:
-            positions = [_to_position(p) for p in self._api.list_positions(self._settle)]
-            for pos in positions:
-                tpsl = self.list_tpsl_orders(pos.contract)
-                mine = [o for o in tpsl if o.direction == (1 if pos.size > 0 else -1)]
-                stop = next((o.trigger_price for o in mine if o.kind == "stop_loss"), None)
-                take = next((o.trigger_price for o in mine if o.kind == "take_profit"), None)
-                pos.stop_loss_price = stop
-                pos.take_profit_price = take
-            return positions
+            return [_to_position(p) for p in self._api.list_positions(self._settle)]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 

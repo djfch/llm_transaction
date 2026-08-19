@@ -746,3 +746,69 @@ def test_cancel_order_transport_timeout_state_unknown(monkeypatch: pytest.Monkey
     with pytest.raises(OrderStateUnknown) as excinfo:
         gateway.cancel_order(BTC, "12345")
     assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def _raw_api_exception(status: int, reason: str, body: bytes | None = None) -> ApiException:
+    """构造 SDK 未归一化的原始 ApiException（非 GateApiException 子类路径）。
+
+    参数：
+        status: int，HTTP 状态码（0 表示 SSL/连接层失败）
+        reason: str，错误描述
+        body: bytes | None，响应体；None 模拟 SSL 失败时无响应体
+
+    返回：
+        ApiException：不带 Gate 私有 label 的原始异常实例
+    """
+    exc = ApiException(status=status, reason=reason)
+    exc.body = body
+    return exc
+
+
+_SDK_RAW_EXCEPTIONS = [
+    _raw_api_exception(502, "Bad Gateway", b"<html>Bad Gateway</html>"),
+    _raw_api_exception(0, "SSLError: certificate verify failed"),
+    AttributeError("'NoneType' object has no attribute 'decode'"),
+]
+
+
+@pytest.mark.parametrize("sdk_exc", _SDK_RAW_EXCEPTIONS)
+def test_sdk_raw_exceptions_normalized(sdk_exc: Exception, monkeypatch: pytest.MonkeyPatch):
+    """验证 SDK 三类原始异常（无 label 非 2xx 响应/SSL 失败/空体 decode 崩溃）统一归一化。
+
+    参数：
+        sdk_exc: Exception，参数化的 SDK 原始异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出该异常
+
+    返回：
+        None，断言读操作抛出 label=TRANSPORT_UNKNOWN 的 GatewayTransportError——
+        不向上泄漏 ApiException/AttributeError 等 SDK 内部类型（PR #84 评审 P1）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=sdk_exc))
+    with pytest.raises(GatewayTransportError) as excinfo:
+        gateway.list_positions()
+    assert excinfo.value.label == "TRANSPORT_UNKNOWN"
+
+
+@pytest.mark.parametrize("sdk_exc", _SDK_RAW_EXCEPTIONS)
+def test_amend_cancel_sdk_raw_exceptions_state_unknown(
+    sdk_exc: Exception, monkeypatch: pytest.MonkeyPatch
+):
+    """验证改单/撤单遭遇 SDK 三类原始异常时落 ORDER_STATE_UNKNOWN（禁止盲目重试）。
+
+    参数：
+        sdk_exc: Exception，参数化的 SDK 原始异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出该异常
+
+    返回：
+        None，断言 amend_order/cancel_order 均抛 label=ORDER_STATE_UNKNOWN 的
+        OrderStateUnknown（与传输超时同一 fail-closed 语义）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=sdk_exc))
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.amend_order(BTC, "12345", price=Decimal("59000"))
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+    with pytest.raises(OrderStateUnknown) as excinfo2:
+        gateway.cancel_order(BTC, "12345")
+    assert excinfo2.value.label == "ORDER_STATE_UNKNOWN"
