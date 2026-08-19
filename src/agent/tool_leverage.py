@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.audit.logger import get_logger
@@ -26,6 +27,7 @@ from src.gateway.async_io import run_gateway_io
 from src.gateway.base import (
     Gateway,
     GatewayError,
+    GatewayTransportError,
     OrderRequest,
     OrderResult,
     OrderStateUnknown,
@@ -240,15 +242,32 @@ def _close_and_bump_epoch(
     执行，代际必已 +1，后到的增仓代际检查必然读到新值；paper 内联模式在事件循环
     线程同步执行，协程间同样无交错窗口（PR #84 评审 P1）。
 
+    代际语义是"人工平仓意图已介入"，不只表达"客户端收到成功回执"：状态未知
+    （OrderStateUnknown）、传输层异常（GatewayTransportError，超时/重试耗尽，
+    请求可能已到达交易所）与非网关异常同样上调代际——远端可能已平仓，旧代际的
+    增仓写必须中止；只有交易所带 label 的明确拒绝（其余 GatewayError）可证明
+    平仓未发生，不上调（PR #84 评审 P1：状态未知不递增代际则旧增仓可重开仓）。
+
     参数：
         gateway: Gateway，交易网关
         req: OrderRequest，平仓订单请求
         epochs: dict[str, int]，合约级平仓代际表（ToolDeps.close_epochs）
         contract: str，目标合约
     返回：
-        OrderResult，平仓订单结果；下单异常时不上调代际（平仓未发生），异常原样上抛
+        OrderResult，平仓订单结果
+    异常：
+        GatewayError，下单被明确拒绝或状态未知时原样上抛（状态未知已先上调代际）
     """
-    result = gateway.place_order(req)
+    try:
+        result = gateway.place_order(req)
+    except Exception as e:
+        # 仅交易所明确拒绝（非状态未知/传输未知的 GatewayError）可证明平仓未发生；
+        # 其余一律视为意图已介入：先上调代际再上抛，旧增仓写将被代际比对拦下
+        if not isinstance(e, GatewayError) or isinstance(
+            e, (OrderStateUnknown, GatewayTransportError)
+        ):
+            epochs[contract] = epochs.get(contract, 0) + 1
+        raise
     epochs[contract] = epochs.get(contract, 0) + 1
     return result
 
@@ -274,6 +293,39 @@ def _place_unless_close_intervened(
     if epochs.get(contract, 0) != epoch0:
         return None
     return gateway.place_order(req)
+
+
+def _amend_unless_close_intervened(
+    gateway: Gateway,
+    contract: str,
+    order_id: str,
+    price: Decimal | None,
+    size: Decimal | None,
+    epochs: dict[str, int],
+    epoch0: int,
+) -> OrderResult | None:
+    """线程内比对平仓代际：风控窗口内有人工平仓介入则放弃增仓改单，否则执行改单。
+
+    与 _place_unless_close_intervened 同一不变量：检查与改单同在单线程 executor
+    的一个任务内（或 paper 内联同步段），人工平仓写要么排在检查之前（代际已变，
+    放弃改单）、要么排在本单之后（先改后平，挂单不再成交）；防止高优人工平仓
+    插入风控窗口后，旧增仓改单把挂单改大/改成可成交价再次开仓（PR #84 评审 P1：
+    代际机制只封新建订单，没封把已有订单修改成增仓的同类写路径）。
+
+    参数：
+        gateway: Gateway，交易网关
+        contract: str，合约标识
+        order_id: str，待修改的订单 ID
+        price: Decimal | None，改后价格（None 表示不改）
+        size: Decimal | None，改后张数（None 表示不改）
+        epochs: dict[str, int]，合约级平仓代际表（ToolDeps.close_epochs）
+        epoch0: int，进入改单流程时捕获的平仓代际
+    返回：
+        OrderResult | None，代际一致返回改单结果；代际已变（人工平仓介入）返回 None
+    """
+    if epochs.get(contract, 0) != epoch0:
+        return None
+    return gateway.amend_order(contract, order_id, price=price, size=size)
 
 
 async def _place_with_rollback(

@@ -16,6 +16,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,7 @@ from src.agent import tool_trading
 from src.agent.manual_close import close_position
 from src.agent.tool_handlers import ToolOutcome
 from src.agent.tool_leverage import (
+    _amend_unless_close_intervened,
     _close_and_bump_epoch,
     _place_unless_close_intervened,
     _place_with_rollback,
@@ -38,12 +40,12 @@ from src.gateway.async_io import (
     read_positions_with_tpsl,
     run_gateway_io,
 )
-from src.gateway.base import GatewayError, OrderRequest, Position, TpslOrder
+from src.gateway.base import GatewayError, OrderRequest, OrderStateUnknown, Position, TpslOrder
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
 from src.server.routes_status import _account_equity
 from src.server.routes_trading import _list_all_open_orders
-from tests.test_agent_tools_risk import _long_position, _make_tools
+from tests.test_agent_tools_risk import _long_position, _make_tools, _open_limit_order
 from tests.test_paper import buy, make_gateway
 
 
@@ -1021,14 +1023,15 @@ async def test_cancelled_dispatched_read_does_not_trigger_orphan_handler(
     assert orphaned == []
 
 
-async def test_close_and_bump_epoch_bumps_only_on_success(tmp_path):
-    """验证平仓代际包装：平仓写成功才 +1，下单抛错不上调代际。
+async def test_close_and_bump_epoch_bumps_unless_definite_rejection(tmp_path):
+    """验证平仓代际包装：成功上调代际，仅交易所明确拒绝（GatewayError）不上调。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具
 
     返回：
-        None，断言成功平仓后代际 +1；网关抛错时代际保持不变（平仓未发生）
+        None，断言成功平仓后代际 +1；带 label 的明确拒绝时代际保持不变
+        （平仓确定未发生）
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1039,12 +1042,49 @@ async def test_close_and_bump_epoch_bumps_only_on_success(tmp_path):
         assert result.id
         assert epochs["BTC_USDT"] == 1
 
-        def _fail(_req: OrderRequest) -> None:
-            raise GatewayError("boom")
+        def _reject(_req: OrderRequest) -> None:
+            raise GatewayError("明确拒绝", label="POSITION_NOT_FOUND")
 
         with pytest.raises(GatewayError):
-            _close_and_bump_epoch(SimpleNamespace(place_order=_fail), req, epochs, "BTC_USDT")
+            _close_and_bump_epoch(SimpleNamespace(place_order=_reject), req, epochs, "BTC_USDT")
         assert epochs["BTC_USDT"] == 1
+    finally:
+        await env.db.close()
+
+
+async def test_close_and_bump_epoch_bumps_on_state_unknown(tmp_path):
+    """验证平仓状态未知同样上调代际：远端可能已平仓，持旧代际的增仓必须中止。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言远端已执行平仓副作用但抛 OrderStateUnknown 时：代际 +1，
+        持旧代际的增仓被拦下返回 None，最终仓位为空不重开（PR #84 评审 P1）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        epochs: dict[str, int] = {}
+        req = OrderRequest(contract="BTC_USDT", size=Decimal(0), close=True)
+
+        def _unknown(_req: OrderRequest) -> None:
+            env.gateway.place_order(_req)  # 远端实际已平仓（副作用已发生）
+            raise OrderStateUnknown("超时且回查失败")
+
+        with pytest.raises(OrderStateUnknown):
+            _close_and_bump_epoch(SimpleNamespace(place_order=_unknown), req, epochs, "BTC_USDT")
+        assert epochs["BTC_USDT"] == 1
+        skipped = _place_unless_close_intervened(
+            env.gateway,
+            OrderRequest(contract="BTC_USDT", size=Decimal(1), stop_loss_price=Decimal(58000)),
+            epochs,
+            "BTC_USDT",
+            0,
+        )
+        assert skipped is None
+        remaining = [p for p in env.gateway.list_positions() if p.contract == "BTC_USDT"]
+        assert all(p.size == 0 for p in remaining)
     finally:
         await env.db.close()
 
@@ -1164,3 +1204,115 @@ async def test_place_with_rollback_aborts_when_close_intervened(tmp_path):
         assert all(p.size == 0 for p in remaining)
     finally:
         await env.db.close()
+
+
+async def test_amend_unless_close_intervened_checks_epoch(tmp_path):
+    """验证改单代际检查：代际一致正常改单，代际已变返回 None 且挂单不变。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言代际一致返回改单结果（剩余量变化）；代际 +1 后返回 None
+        且挂单剩余量保持原值（PR #84 评审 P1）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        order_id = await _open_limit_order(env)
+        epochs = {"BTC_USDT": 0}
+        amended = _amend_unless_close_intervened(
+            env.gateway, "BTC_USDT", order_id, None, Decimal(3), epochs, 0
+        )
+        assert amended is not None
+        order = next(o for o in env.gateway.list_orders("BTC_USDT", "open") if o.id == order_id)
+        assert order.left == 3
+        epochs["BTC_USDT"] = 1  # 模拟人工平仓已介入
+        skipped = _amend_unless_close_intervened(
+            env.gateway, "BTC_USDT", order_id, None, Decimal(5), epochs, 0
+        )
+        assert skipped is None
+        order = next(o for o in env.gateway.list_orders("BTC_USDT", "open") if o.id == order_id)
+        assert order.left == 3
+    finally:
+        await env.db.close()
+
+
+async def test_amend_order_aborts_when_close_intervenes(tmp_path):
+    """复刻评审场景：增仓改单风控窗口内高优人工平仓落地，改单必须被代际拦下。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言改单工具返回"人工平仓介入"deny、挂单剩余量不变、
+        仓位保持为空——不会"平完又被旧改单重开"（PR #84 评审 P1）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        order_id = await _open_limit_order(env)
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+        env.gateway.list_positions = _slow(env.gateway.list_positions)  # 0.3s 制造风控窗口
+        amend_task = asyncio.ensure_future(
+            env.registry.execute(
+                "amend_order", {"contract": "BTC_USDT", "order_id": order_id, "size": 3}
+            )
+        )
+        await asyncio.sleep(0.1)  # 改单已捕获代际锚点，正在慢读风控
+        cr = await close_position(env.deps, "BTC_USDT")  # HIGH 平仓插队，代际 +1
+        assert cr.outcome.risk_verdict == "allow", cr.outcome.text
+        out = await amend_task
+        assert out.risk_verdict == "deny"
+        assert "人工平仓" in out.text
+        order = next(o for o in env.gateway.list_orders("BTC_USDT", "open") if o.id == order_id)
+        assert order.left == 1  # 挂单未被改动
+        remaining = [p for p in env.gateway.list_positions() if p.contract == "BTC_USDT"]
+        assert all(p.size == 0 for p in remaining)
+    finally:
+        await env.db.close()
+
+
+async def test_cancelled_dispatched_not_started_mutation_withdraws_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """验证"已提交 executor、worker 未开始执行"窗口内取消：撤回成功不触发兜底。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换模块级孤儿写回调与 executor
+
+    返回：
+        None，断言调度器已 dispatch（concurrent Future 已写入探针）但任务
+        从未开始执行时取消：cf.cancel() 撤回成功——写函数从未运行、不触发
+        孤儿写回调（PR #84 评审 P1：submit→worker-start 竞态）
+    """
+    orphaned: list[str] = []
+    monkeypatch.setattr("src.gateway.async_io._orphan_write_handler", orphaned.append)
+
+    class _HeldExecutor:
+        """只收不跑的 executor：submit 记录任务但永不执行，屏障式模拟"已提交未开始"。"""
+
+        def __init__(self) -> None:
+            self.submitted: list[Future] = []
+
+        def submit(self, fn: Callable) -> Future:
+            fut: Future = Future()
+            self.submitted.append(fut)
+            return fut
+
+    held = _HeldExecutor()
+    monkeypatch.setattr("src.gateway.async_io._EXECUTOR", held)
+    ran = threading.Event()
+
+    def _write() -> None:
+        ran.set()
+
+    stub = SimpleNamespace(place_order=_write)
+    task = asyncio.ensure_future(run_gateway_io(stub.place_order, mutation=True))
+    await asyncio.sleep(0.1)  # 调度器已 pop 并 submit（cf 已写入探针）
+    assert len(held.submitted) == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.05)
+    assert held.submitted[0].cancelled()  # cf.cancel() 撤回成功
+    assert orphaned == []  # 请求从未到达"交易所"：安全撤回，无需兜底
+    assert not ran.is_set()

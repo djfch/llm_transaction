@@ -68,6 +68,7 @@ class PaperGateway(PaperOpenInterestMixin):
             "_swap_tpsl_group",
             "_close_and_bump_epoch",
             "_place_unless_close_intervened",
+            "_amend_unless_close_intervened",
         }
     )
 

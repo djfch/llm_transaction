@@ -32,6 +32,7 @@ from src.agent.tool_handlers import (
     _opt_int,
 )
 from src.agent.tool_leverage import (
+    _amend_unless_close_intervened,
     _engage_kill,
     _locked_leverage_transaction,
     _prev_leverage_state,
@@ -565,6 +566,10 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     size = _opt_decimal(args, "size")
     if price is None and size is None:
         raise ToolArgError("price 与 size 至少提供一个")
+    # 平仓代际锚点：进入即捕获，覆盖方向推断与风控全程；非平仓方向改单最终经
+    # _amend_unless_close_intervened 在 executor 线程内比对，人工平仓介入即放弃
+    # （PR #84 评审 P1）；纯减仓/平仓改单降风险，豁免
+    epoch0 = deps.close_epochs.get(contract, 0)
     is_close, effective_size = await _amend_direction(deps.gateway, contract, order_id, size)
     deny = await _risk_check(
         deps,
@@ -576,9 +581,29 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
     if deny is not None:
         return deny
-    result = await run_gateway_io(
-        deps.gateway.amend_order, contract, order_id, price=price, size=size, mutation=True
-    )
+    if is_close:
+        result = await run_gateway_io(
+            deps.gateway.amend_order, contract, order_id, price=price, size=size, mutation=True
+        )
+    else:
+        amended = await run_gateway_io(
+            _amend_unless_close_intervened,
+            deps.gateway,
+            contract,
+            order_id,
+            price,
+            size,
+            deps.close_epochs,
+            epoch0,
+            mutation=True,
+        )
+        if amended is None:
+            return ToolOutcome(
+                f"已中止：{contract} 在风控校验期间被人工平仓，本次改单未提交，请重新评估",
+                "deny",
+                "人工平仓介入",
+            )
+        result = amended
     if not await deps.repo.update_order_after_amend(order_id, price=price, side_size=size):
         await deps.repo.save_order(  # 本地无记录（如改的是手工单）：补一行
             order_id=result.id,
