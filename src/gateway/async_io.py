@@ -27,6 +27,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
+from .base import Gateway, GatewayError, Position
+
 T = TypeVar("T")
 
 # 优先级：数值小者先执行；手动安全操作（平仓/撤单）用 HIGH，只读查询与普通下单用 NORMAL
@@ -192,3 +194,35 @@ async def run_gateway_io(
     except (asyncio.CancelledError, asyncio.TimeoutError):
         fut.cancel()  # 仍在排队则取消；已执行则结果由消费协程丢弃
         raise
+
+
+async def read_positions_with_tpsl(
+    gateway: Gateway, *, priority: int = PRIORITY_NORMAL
+) -> list[Position]:
+    """展示用持仓读取：裸持仓 + 逐合约 TPSL 触发价补全（独立调度、单合约失败降级）。
+
+    安全路径（人工平仓/风控/杠杆核验）禁止使用本组合读取：它们必须只用单次 REST
+    的裸 list_positions。本函数把每个保护单子请求重新经过调度器——HIGH 安全操作
+    可在子请求之间插队，且单合约查询失败仅使该合约止损/止盈降级为 None（展示为
+    "未设置"），不拖垮整体读取（PR #84 评审 P1：N+1 复合读取阻断人工平仓）。
+
+    参数：
+        gateway: Gateway，交易网关
+        priority: int，卸载优先级（默认 NORMAL）
+
+    返回：
+        list[Position]：持仓列表；补全成功的合约回填 stop_loss_price/take_profit_price，
+        无对应保护单或查询失败的为 None
+    """
+    positions = await run_gateway_io(gateway.list_positions, priority=priority)
+    for pos in positions:
+        try:
+            tpsl = await run_gateway_io(gateway.list_tpsl_orders, pos.contract, priority=priority)
+        except GatewayError:
+            continue  # 单合约保护单查询失败：该合约降级为"未设置"，不拖垮整体
+        mine = [o for o in tpsl if o.direction == (1 if pos.size > 0 else -1)]
+        pos.stop_loss_price = next((o.trigger_price for o in mine if o.kind == "stop_loss"), None)
+        pos.take_profit_price = next(
+            (o.trigger_price for o in mine if o.kind == "take_profit"), None
+        )
+    return positions

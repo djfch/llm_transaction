@@ -46,9 +46,9 @@ class PaperGateway(PaperOpenInterestMixin):
     # 不进 executor——on_price/settle_funding/drain_fills 本就在事件循环线程直接改
     # 账户状态，账户类方法再进线程会把单线程状态机变成跨线程共享可变状态（PR #84
     # 评审 P1）。除网关方法外，还登记以本网关为首参、内部仅调纯内存方法的同步事务
-    # 辅助（position_snapshots / _swap_tpsl_group / _amend_direction / _account_equity），
-    # 保证其事务段同样不被线程交错。get_candlesticks/fetch_open_interest 等行情委托
-    # 方法可能转发真实 REST provider，不得加入本集合。
+    # 辅助（_swap_tpsl_group / _amend_direction / _account_equity），保证其事务段
+    # 同样不被线程交错。get_candlesticks/fetch_open_interest 等行情委托方法可能
+    # 转发真实 REST provider，不得加入本集合。
     _GATEWAY_IO_INLINE_STATIC = frozenset(
         {
             "get_contract",
@@ -62,7 +62,6 @@ class PaperGateway(PaperOpenInterestMixin):
             "list_tpsl_orders",
             "create_tpsl_order",
             "cancel_tpsl_order",
-            "position_snapshots",
             "_swap_tpsl_group",
             "_amend_direction",
             "_account_equity",

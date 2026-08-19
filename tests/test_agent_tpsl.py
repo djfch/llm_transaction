@@ -186,8 +186,9 @@ async def test_open_requires_valid_stop_and_applies_leverage(tmp_path):
         assert "必须提供" in missing.text and "低于标记价" in wrong.text
         assert ok.risk_verdict == "allow"
         assert gateway.placed[-1].stop_loss_price == Decimal(58000)
-        assert gateway.list_positions()[0].stop_loss_price == Decimal(58000)
-        assert gateway.list_positions()[0].take_profit_price == Decimal(64000)
+        tpsl = {o.kind: o.trigger_price for o in gateway.list_tpsl_orders("BTC_USDT")}
+        assert tpsl["stop_loss"] == Decimal(58000)
+        assert tpsl["take_profit"] == Decimal(64000)
         assert gateway.positions["BTC_USDT"].leverage == Decimal(3)
     finally:
         await env.db.close()

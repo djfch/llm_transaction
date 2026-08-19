@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.config import Settings, load_settings
-from src.gateway.async_io import run_gateway_io
+from src.gateway.async_io import read_positions_with_tpsl, run_gateway_io
 from src.gateway.base import Gateway, GatewayError
 from src.memory.models import AuditRound, AuditToolCall
 from src.server.deps import ServerDeps
@@ -293,7 +293,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         返回：
             list[dict[str, Any]]：持仓字典列表；无持仓时为空列表
         """
-        return [p.model_dump() for p in await run_gateway_io(_require_gateway(deps).list_positions)]
+        return [p.model_dump() for p in await read_positions_with_tpsl(_require_gateway(deps))]
 
     @router.get("/portfolio")
     async def get_portfolio() -> dict[str, Any]:
@@ -306,7 +306,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]：一次读取账户与持仓，返回同一时点的权威组合快照
         """
         gateway = _require_gateway(deps)
-        positions = await run_gateway_io(gateway.list_positions)
+        positions = await read_positions_with_tpsl(gateway)  # 展示路径：逐合约补全 TPSL
         account = (await run_gateway_io(gateway.get_account)).model_dump()
         margin = sum((position.margin for position in positions), Decimal(0))
         account["equity"] = account["available"] + margin + account["unrealised_pnl"]

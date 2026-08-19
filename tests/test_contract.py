@@ -97,6 +97,17 @@ class FakeGateway:
             )
         ]
 
+    def list_tpsl_orders(self, contract: str) -> list:
+        """返回空保护单列表（持仓展示路径的 TPSL 补全依赖此接口）。
+
+        参数：
+            contract: str，合约代码（本 fake 忽略）
+
+        返回：
+            list：空列表，表示该合约无止盈止损保护单
+        """
+        return []
+
     def get_candlesticks(self, contract: str, interval: str = "1m", limit: int | None = None):
         """返回一根固定 K 线，保证 /api/candles 响应非空（键断言才有意义）。
 

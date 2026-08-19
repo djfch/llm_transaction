@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from src.audit.logger import get_logger
 from src.config import DEFAULT_INDICATOR_SHORTLIST, ResearchConfig
-from src.gateway.async_io import run_gateway_io
+from src.gateway.async_io import PRIORITY_NORMAL, read_positions_with_tpsl, run_gateway_io
 from src.gateway.base import Account, Candle, Contract, Gateway, GatewayError, Position, Ticker
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
@@ -40,18 +40,25 @@ def compute_equity(account: Account, positions: list[Position]) -> Decimal:
     return account.available + margin + account.unrealised_pnl
 
 
-def position_snapshots(gateway: Gateway, positions: list[Position]) -> list[PositionSnapshot]:
+async def position_snapshots(
+    gateway: Gateway, positions: list[Position], *, priority: int = PRIORITY_NORMAL
+) -> list[PositionSnapshot]:
     """持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）。
+
+    逐合约元数据各自经统一卸载层独立调度（不打包成单个复合任务）：HIGH 人工
+    平仓可在子请求之间插队，不被 N 次 get_contract 串行读取长期阻断（PR #84
+    评审 P1，与 list_positions 裸读同一原则）。
 
     参数：
         gateway: Gateway，交易所网关
         positions: list[Position]，当前持仓列表
+        priority: int，卸载优先级；手动安全操作传 PRIORITY_HIGH
     返回：
         list[PositionSnapshot]，持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）
     """
     snaps = []
     for p in positions:
-        meta = gateway.get_contract(p.contract)
+        meta = await run_gateway_io(gateway.get_contract, p.contract, priority=priority)
         mark = p.mark_price if p.mark_price > 0 else meta.mark_price
         snaps.append(
             PositionSnapshot(
@@ -167,7 +174,7 @@ class ContextBuilder:
             summary 为一行摘要（落 decisions.context_summary）
         """
         account = await run_gateway_io(self._gateway.get_account)
-        positions = await run_gateway_io(self._gateway.list_positions)
+        positions = await read_positions_with_tpsl(self._gateway)  # 展示路径：逐合约补全 TPSL
         tickers, metas = await self._read_market_data()
         equity = compute_equity(account, positions)
         sections = [

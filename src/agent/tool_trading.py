@@ -129,7 +129,7 @@ async def _risk_check(
     verdict = deps.risk_engine.check(
         intent,
         snap,
-        await run_gateway_io(position_snapshots, deps.gateway, positions, priority=priority),
+        await position_snapshots(deps.gateway, positions, priority=priority),
         daily,
         deps.watchlist,
         deps.risk_config,

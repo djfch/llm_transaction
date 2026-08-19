@@ -5,6 +5,9 @@
 PR #84 评审追加：PaperGateway 账户方法线程亲和（内联不进 executor）、手动平仓
 全程高优先级插队、慢分页期间 HIGH 任务页间插入、并发 update_tpsl 原子性
 （不留两套新保护）、manual close 不插入 TPSL 交换中段。
+PR #84 第三轮评审追加：持仓 TPSL 补全与风控快照元数据逐合约独立调度
+（HIGH 安全操作可在合约间隙插队）、TPSL 补全单合约失败降级、安全路径零
+TPSL 依赖（保护单接口故障时人工平仓照常）。
 """
 
 from __future__ import annotations
@@ -19,12 +22,17 @@ from typing import Any
 
 import pytest
 
-from src.agent.context import ContextBuilder
+from src.agent.context import ContextBuilder, position_snapshots
 from src.agent import tool_trading
 from src.agent.manual_close import close_position
 from src.agent.tool_trading import _amend_direction, update_tpsl
-from src.gateway.async_io import PRIORITY_HIGH, _is_inline_call, run_gateway_io
-from src.gateway.base import GatewayError, OrderRequest, TpslOrder
+from src.gateway.async_io import (
+    PRIORITY_HIGH,
+    _is_inline_call,
+    read_positions_with_tpsl,
+    run_gateway_io,
+)
+from src.gateway.base import GatewayError, OrderRequest, Position, TpslOrder
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
 from src.server.routes_status import _account_equity
@@ -605,3 +613,231 @@ async def test_update_tpsl_position_closed_before_swap_reports_not_updated(
         assert env.gateway.list_tpsl_orders("BTC_USDT") == []
     finally:
         await env.db.close()
+
+
+def _pos(contract: str) -> Position:
+    """构造一个最小持仓对象（1 张多仓，固定价格）。
+
+    参数：
+        contract: str，合约名
+
+    返回：
+        Position：仅填模型必填项的持仓对象（无保护单触发价）
+    """
+    return Position(
+        contract=contract,
+        size=Decimal(1),
+        entry_price=Decimal(100),
+        mark_price=Decimal(100),
+        liq_price=Decimal(50),
+        leverage=Decimal(1),
+        margin=Decimal(100),
+        unrealised_pnl=Decimal(0),
+    )
+
+
+class _SlowTpslStubGateway:
+    """两持仓存根：BTC 的保护单查询慢 0.3s，其余调用即刻返回；记录执行顺序。"""
+
+    def __init__(self) -> None:
+        """初始化调用顺序日志。
+
+        参数：无
+
+        返回：
+            None，就地初始化 log 列表
+        """
+        self.log: list[str] = []
+
+    def list_positions(self) -> list[Position]:
+        """返回 BTC/ETH 两条持仓。
+
+        参数：无
+
+        返回：
+            list[Position]：两条伪持仓
+        """
+        self.log.append("list_positions")
+        return [_pos("BTC_USDT"), _pos("ETH_USDT")]
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        """记录保护单查询；BTC 查询阻塞 0.3s（制造 HIGH 插队窗口）。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            list[TpslOrder]：空列表（无保护单）
+        """
+        self.log.append(f"tpsl:{contract}")
+        if contract == "BTC_USDT":
+            time.sleep(0.3)
+        return []
+
+    def place_order(self, req: Any) -> Any:
+        """记录一次下单调用（HIGH 插队顺序断言用）。
+
+        参数：
+            req: Any，订单请求（忽略）
+
+        返回：
+            Any：伪订单结果
+        """
+        self.log.append("place_order")
+        return SimpleNamespace(id="x")
+
+
+async def test_high_priority_interleaves_between_tpsl_enrichment_subrequests():
+    """验证持仓 TPSL 补全的逐合约子请求各自独立调度：HIGH 安全操作可在合约间隙插队。
+
+    参数：无
+
+    返回：
+        None，断言 HIGH 下单在 BTC 慢保护单查询之后、ETH 查询之前执行——补全
+        不再是一个整段复合任务（修复前 list_positions 内部串行 N+1，HIGH 只能
+        等全部合约查完）
+    """
+    stub = _SlowTpslStubGateway()
+    read = asyncio.ensure_future(read_positions_with_tpsl(stub))
+    await asyncio.sleep(0.1)  # BTC 的慢保护单查询已进入 executor
+    high = asyncio.ensure_future(run_gateway_io(stub.place_order, None, priority=PRIORITY_HIGH))
+    await asyncio.gather(read, high)
+    assert stub.log == ["list_positions", "tpsl:BTC_USDT", "place_order", "tpsl:ETH_USDT"]
+
+
+async def test_manual_close_succeeds_when_tpsl_query_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """验证安全路径零 TPSL 依赖：保护单查询接口故障时人工平仓照常放行成交。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+        monkeypatch: pytest.MonkeyPatch，打桩 list_tpsl_orders 抛传输异常
+
+    返回：
+        None，断言平仓风控放行——平仓链路只读裸持仓，不经任何保护单查询
+        （修复前 list_positions 内部复合 TPSL 查询，保护单接口超时直接拖死平仓）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("2")
+
+        def _boom(contract: str) -> list[TpslOrder]:
+            raise GatewayError("保护单查询超时", label="TRANSPORT_UNKNOWN")
+
+        monkeypatch.setattr(env.gateway, "list_tpsl_orders", _boom)
+        result = await close_position(env.deps, "BTC_USDT")
+        assert result.outcome.risk_verdict == "allow", result.outcome.text
+    finally:
+        await env.db.close()
+
+
+class _FailSoftTpslStubGateway:
+    """两持仓存根：BTC 保护单查询抛传输异常，ETH 返回一个止损单。"""
+
+    def list_positions(self) -> list[Position]:
+        """返回 BTC/ETH 两条持仓。
+
+        参数：无
+
+        返回：
+            list[Position]：两条伪持仓
+        """
+        return [_pos("BTC_USDT"), _pos("ETH_USDT")]
+
+    def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+        """按合约返回保护单：BTC 抛传输异常，ETH 返回一个止损单。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            list[TpslOrder]：ETH 合约返回单个止损单
+
+        异常：
+            GatewayError：BTC 合约查询固定抛传输异常
+        """
+        if contract == "BTC_USDT":
+            raise GatewayError("保护单查询超时", label="TRANSPORT_UNKNOWN")
+        return [
+            TpslOrder(
+                id="1",
+                contract=contract,
+                direction=1,
+                kind="stop_loss",
+                trigger_price=Decimal(58000),
+            )
+        ]
+
+
+async def test_read_positions_with_tpsl_fail_soft_per_contract():
+    """验证 TPSL 补全的单合约失败降级：仅该合约止损/止盈为 None，不拖垮整体读取。
+
+    参数：无
+
+    返回：
+        None，断言 BTC 查询异常时其 stop_loss_price 为 None 且整体不抛异常，
+        ETH 的止损价正常回填
+    """
+    positions = await read_positions_with_tpsl(_FailSoftTpslStubGateway())
+    by_contract = {p.contract: p for p in positions}
+    assert by_contract["BTC_USDT"].stop_loss_price is None
+    assert by_contract["ETH_USDT"].stop_loss_price == Decimal(58000)
+
+
+class _SlowContractMetaStubGateway:
+    """合约元数据存根：BTC 元数据查询慢 0.3s；记录执行顺序（HIGH 插队断言用）。"""
+
+    def __init__(self) -> None:
+        """初始化调用顺序日志。
+
+        参数：无
+
+        返回：
+            None，就地初始化 log 列表
+        """
+        self.log: list[str] = []
+
+    def get_contract(self, contract: str) -> SimpleNamespace:
+        """记录元数据查询；BTC 查询阻塞 0.3s（制造 HIGH 插队窗口）。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            SimpleNamespace：含 mark_price/quanto_multiplier 的伪合约元数据
+        """
+        self.log.append(f"get_contract:{contract}")
+        if contract == "BTC_USDT":
+            time.sleep(0.3)
+        return SimpleNamespace(mark_price=Decimal(100), quanto_multiplier=Decimal("0.001"))
+
+    def place_order(self, req: Any) -> Any:
+        """记录一次下单调用（HIGH 插队顺序断言用）。
+
+        参数：
+            req: Any，订单请求（忽略）
+
+        返回：
+            Any：伪订单结果
+        """
+        self.log.append("place_order")
+        return SimpleNamespace(id="x")
+
+
+async def test_high_priority_interleaves_between_snapshot_meta_reads():
+    """验证风控快照的逐合约元数据读取各自独立调度：HIGH 安全操作可在合约间隙插队。
+
+    参数：无
+
+    返回：
+        None，断言 HIGH 下单在 BTC 慢元数据查询之后、ETH 查询之前执行
+        （与 list_positions 裸读同一原则：N 次串行读取不打包成单个复合任务）
+    """
+    stub = _SlowContractMetaStubGateway()
+    positions = [_pos("BTC_USDT"), _pos("ETH_USDT")]
+    read = asyncio.ensure_future(position_snapshots(stub, positions))
+    await asyncio.sleep(0.1)  # BTC 的慢元数据查询已进入 executor
+    high = asyncio.ensure_future(run_gateway_io(stub.place_order, None, priority=PRIORITY_HIGH))
+    await asyncio.gather(read, high)
+    assert stub.log == ["get_contract:BTC_USDT", "place_order", "get_contract:ETH_USDT"]
