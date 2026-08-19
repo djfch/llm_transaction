@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import gate_api
 from gate_api.exceptions import GateApiException
+from urllib3.exceptions import HTTPError as _Urllib3HTTPError
 
 from ..config import GateConfig
 from .base import (
@@ -22,6 +23,7 @@ from .base import (
     Candle,
     Contract,
     GatewayError,
+    GatewayTransportError,
     OrderNotFound,
     ExchangeTrade,
     OrderRequest,
@@ -32,7 +34,7 @@ from .base import (
     TpslOrder,
     Ticker,
 )
-from .errors import wrap_gate_exception
+from .errors import wrap_gate_exception, wrap_transport_exception
 from .gate_market_stats import GateOpenInterestMixin
 
 _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
@@ -56,7 +58,12 @@ class _TimeoutApiClient(gate_api.ApiClient):
     """
 
     def call_api(self, *args, **kwargs):
-        """注入默认 _request_timeout 后转发父类实现。
+        """注入默认 _request_timeout 后转发父类实现，并归一化传输层异常。
+
+        urllib3 的 ReadTimeoutError/ConnectTimeoutError/MaxRetryError 等传输层
+        异常统一包装为 GatewayTransportError（label=TRANSPORT_UNKNOWN）：读路径
+        由此获得稳定的 502/错误契约，写路径可据类型区分"明确拒绝"与"结果未知"
+        （PR #84 评审 P2）。GateApiException 不继承 urllib3.HTTPError，不受影响。
 
         参数：
             args: tuple，原样转发的位置参数
@@ -65,10 +72,16 @@ class _TimeoutApiClient(gate_api.ApiClient):
 
         返回：
             与父类 call_api 相同：反序列化后的响应对象
+
+        异常：
+            GatewayTransportError：urllib3 传输层失败（超时/连接失败/重试耗尽）时抛出
         """
         if kwargs.get("_request_timeout") is None:
             kwargs["_request_timeout"] = _DEFAULT_REQUEST_TIMEOUT
-        return super().call_api(*args, **kwargs)
+        try:
+            return super().call_api(*args, **kwargs)
+        except _Urllib3HTTPError as exc:
+            raise wrap_transport_exception(exc) from exc
 
 
 def gen_client_order_id() -> str:
@@ -569,6 +582,7 @@ class GateRestGateway(GateOpenInterestMixin):
 
         异常：
             GatewayError：交易所请求失败时抛出
+            OrderStateUnknown：改单超时或网络失败、订单状态未知时抛出（禁止盲目重试）
         """
         amendment = gate_api.FuturesOrderAmendment(
             price=_fmt_decimal(price) if price is not None else None,
@@ -581,6 +595,11 @@ class GateRestGateway(GateOpenInterestMixin):
             return _to_order(order)
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+        except GatewayTransportError as exc:  # 超时/网络失败：交易所可能已执行，状态未知
+            raise OrderStateUnknown(
+                f"改单超时或网络失败，订单 {order_id} 状态未知，禁止盲目重试，请人工核对",
+                label="ORDER_STATE_UNKNOWN",
+            ) from exc
 
     def cancel_order(self, contract: str, order_id: str) -> OrderResult:
         """撤销指定挂单。
@@ -594,6 +613,7 @@ class GateRestGateway(GateOpenInterestMixin):
 
         异常：
             GatewayError：交易所请求失败时抛出（订单不存在时为 OrderNotFound）
+            OrderStateUnknown：撤单超时或网络失败、订单状态未知时抛出（禁止盲目重试）
         """
         try:
             order = self._api.cancel_futures_order(
@@ -602,6 +622,11 @@ class GateRestGateway(GateOpenInterestMixin):
             return _to_order(order)
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+        except GatewayTransportError as exc:  # 超时/网络失败：交易所可能已执行，状态未知
+            raise OrderStateUnknown(
+                f"撤单超时或网络失败，订单 {order_id} 状态未知，禁止盲目重试，请人工核对",
+                label="ORDER_STATE_UNKNOWN",
+            ) from exc
 
     def list_orders(
         self,

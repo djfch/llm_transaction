@@ -50,6 +50,14 @@ class OrderStateUnknown(GatewayError):
     """下单请求超时且回查失败：订单可能已创建，禁止盲目重试（防重单）。"""
 
 
+class GatewayTransportError(GatewayError):
+    """传输层异常（连接/读取超时、重试耗尽等）：请求未获交易所确认。
+
+    与 GateApiException 的服务端明确拒绝区分：读操作结果未知、写操作状态未知，
+    统一 label=TRANSPORT_UNKNOWN，调用方按"不可当作明确失败"处理。
+    """
+
+
 class Contract(BaseModel):
     """合约元数据与实时标记信息。"""
 

@@ -13,10 +13,11 @@ from unittest.mock import Mock
 
 import pytest
 from gate_api.exceptions import ApiException, GateApiException
+from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ReadTimeoutError
 
 import gate_api
 from src.config import GateConfig
-from src.gateway import GatewayError, OrderRequest, OrderStateUnknown
+from src.gateway import GatewayError, GatewayTransportError, OrderRequest, OrderStateUnknown
 from src.gateway.gate_rest import (
     _DEFAULT_REQUEST_TIMEOUT,
     GateRestGateway,
@@ -660,3 +661,88 @@ def test_timeout_client_preserves_explicit_timeout(monkeypatch: pytest.MonkeyPat
     client = _TimeoutApiClient(gate_api.Configuration(host="http://localhost"))
     client.call_api("/futures/usdt/orders", "POST", _request_timeout=10)
     assert captured["_request_timeout"] == 10
+
+
+# ---------- PR #84 第二轮评审回归：传输层异常归一化与写操作结果未知 ----------
+
+
+@pytest.mark.parametrize(
+    "transport_exc",
+    [
+        ReadTimeoutError(None, "/", "read timed out"),
+        ConnectTimeoutError(None, "/", "connect timed out"),
+        MaxRetryError(None, "/", "too many errors"),
+    ],
+)
+def test_transport_exceptions_normalized(transport_exc, monkeypatch: pytest.MonkeyPatch):
+    """验证 urllib3 传输层异常（读超时/连接超时/重试耗尽）归一化为 GatewayTransportError。
+
+    参数：
+        transport_exc: Exception，参数化的 urllib3 传输层异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出传输层异常
+    返回：
+        None，断言读接口抛出 label=TRANSPORT_UNKNOWN 的 GatewayTransportError，
+        且为 GatewayError 子类（只读路由自动 502、agent 错误契约稳定）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=transport_exc))
+    with pytest.raises(GatewayTransportError) as excinfo:
+        gateway.list_positions()
+    assert excinfo.value.label == "TRANSPORT_UNKNOWN"
+    assert isinstance(excinfo.value, GatewayError)
+
+
+def test_gate_api_exception_not_wrapped_as_transport(monkeypatch: pytest.MonkeyPatch):
+    """验证 GateApiException（服务端明确拒绝）不被传输层归一化误包。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出 GateApiException
+    返回：
+        None，断言读接口抛出按 label 映射的普通 GatewayError 而非 GatewayTransportError
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient, "call_api", Mock(side_effect=make_gate_exc("SOME_LABEL"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.list_positions()
+    assert not isinstance(excinfo.value, GatewayTransportError)
+    assert excinfo.value.label == "SOME_LABEL"
+
+
+def test_amend_order_transport_timeout_state_unknown(monkeypatch: pytest.MonkeyPatch):
+    """验证改单传输超时映射为 OrderStateUnknown（交易所可能已执行，禁止盲目重试）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出读超时
+    返回：
+        None，断言 amend_order 抛出 label=ORDER_STATE_UNKNOWN 的 OrderStateUnknown
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient,
+        "call_api",
+        Mock(side_effect=ReadTimeoutError(None, "/", "read timed out")),
+    )
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.amend_order(BTC, "12345", price=Decimal("59000"))
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def test_cancel_order_transport_timeout_state_unknown(monkeypatch: pytest.MonkeyPatch):
+    """验证撤单传输超时映射为 OrderStateUnknown（交易所可能已执行，禁止盲目重试）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出连接超时
+    返回：
+        None，断言 cancel_order 抛出 label=ORDER_STATE_UNKNOWN 的 OrderStateUnknown
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient,
+        "call_api",
+        Mock(side_effect=ConnectTimeoutError(None, "/", "connect timed out")),
+    )
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.cancel_order(BTC, "12345")
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
