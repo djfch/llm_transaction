@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import itertools
+import threading
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,25 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gateway-io")
 _SCHEDULERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _IoScheduler] = (
     weakref.WeakKeyDictionary()
 )
+
+# 孤儿写兜底：已 dispatch 到交易所的写请求因调用方取消/超时导致结果无人接收时
+# 触发（参数为写操作名）。由应用组装层（AgentLoop）注册为"记审计日志 + 触发
+# 风控锁"的 fail-closed 处理；未注册时静默（测试环境默认）。
+_orphan_write_handler: Callable[[str], None] | None = None
+
+
+def set_orphan_write_handler(handler: Callable[[str], None] | None) -> None:
+    """注册"已下发写请求被取消"的兜底回调（应用组装期调用一次）。
+
+    参数：
+        handler: Callable[[str], None] | None，孤儿写回调（参数为写操作名）；
+            None 表示注销
+
+    返回：
+        None，就地更新模块级回调
+    """
+    global _orphan_write_handler
+    _orphan_write_handler = handler
 
 
 class _IoScheduler:
@@ -61,8 +81,8 @@ class _IoScheduler:
 
     def submit(
         self, fn: Callable[..., Any], args: tuple, kwargs: dict, priority: int
-    ) -> asyncio.Future:
-        """把一次同步网关调用排入优先级队列，返回可 await 的结果 Future。
+    ) -> tuple[asyncio.Future, threading.Event]:
+        """把一次同步网关调用排入优先级队列，返回可 await 的结果 Future 与执行标志。
 
         参数：
             fn: Callable，待执行的同步网关方法（绑定方法引用）
@@ -70,14 +90,23 @@ class _IoScheduler:
             kwargs: dict，关键字参数
             priority: int，优先级（PRIORITY_HIGH 插队于 PRIORITY_NORMAL 之前）
         返回：
-            asyncio.Future，调用结果的 Future；队列空转时自动启动消费协程
+            tuple[asyncio.Future, threading.Event]：调用结果的 Future，以及
+            "任务已进入 executor 开始执行"的标志事件（取消语义据此区分
+            "仍在队列可安全撤回"与"已 dispatch 结果将无人接收"）；队列空转时
+            自动启动消费协程
         """
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self._queue.put_nowait((priority, next(self._seq), fn, args, kwargs, fut))
+        started = threading.Event()
+
+        def _run() -> Any:
+            started.set()
+            return fn(*args, **kwargs)
+
+        self._queue.put_nowait((priority, next(self._seq), _run, (), {}, fut))
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._drain())
-        return fut
+        return fut, started
 
     async def _drain(self) -> None:
         """消费协程：按优先级逐个取出任务，提交单线程 executor 执行并回写结果。
@@ -163,6 +192,7 @@ async def run_gateway_io(
     *args: Any,
     priority: int = PRIORITY_NORMAL,
     timeout: float | None = None,
+    mutation: bool = False,
     **kwargs: Any,
 ) -> T:
     """经统一卸载层执行一次同步网关调用：优先级排队、单线程执行、协程侧 await。
@@ -171,12 +201,21 @@ async def run_gateway_io(
     不进 executor，直接在事件循环线程内联执行并返回；此时 priority/timeout 无意义
     （无 I/O 可等）。
 
+    mutation=True（交易写路径）时的取消语义：调用方被取消/超时且任务**已进入
+    executor 执行**时，Future.cancel 无法撤回线程内已发出的交易所请求——执行
+    结果将无人接收（消费协程对已取消 Future 直接丢弃结果）。此时触发模块级
+    孤儿写回调（set_orphan_write_handler 注册），由应用层按"状态未知"落审计
+    并触发风控锁；任务仍在队列（未 dispatch）则可安全撤回，不触发（PR #84
+    评审 P1：已下发写请求的结果不得静默丢失）。
+
     参数：
         fn: Callable[..., T]，同步网关方法（绑定方法引用，如 deps.gateway.list_positions）
         args: Any，位置参数
         priority: int，优先级；手动平仓/撤单等安全操作传 PRIORITY_HIGH
         timeout: float | None，整次调用的等待超时秒数；超时仅放弃等待并取消排队任务
             （线程内已开始的请求自行跑完，结果丢弃），None 表示不限时
+        mutation: bool，是否为交易所写操作（下单/改单/撤单/调杠杆/保护单写）；
+            写操作在 dispatch 后被取消时触发孤儿写兜底
         kwargs: Any，关键字参数
     返回：
         T，网关调用的返回值；网关异常原样向上抛
@@ -186,13 +225,17 @@ async def run_gateway_io(
     """
     if _is_inline_call(fn, args):
         return fn(*args, **kwargs)  # 纯内存实现：事件循环线程内联，保持单线程状态机语义
-    fut = _scheduler().submit(fn, args, kwargs, priority)
+    fut, started = _scheduler().submit(fn, args, kwargs, priority)
     try:
         if timeout is None:
             return await fut
         return await asyncio.wait_for(asyncio.shield(fut), timeout)
     except (asyncio.CancelledError, asyncio.TimeoutError):
         fut.cancel()  # 仍在排队则取消；已执行则结果由消费协程丢弃
+        if mutation and started.is_set() and _orphan_write_handler is not None:
+            # 已 dispatch 的写请求：交易所可能已执行，结果无人接收——按状态未知
+            # fail-closed（审计 + 风控锁），不得静默继续
+            _orphan_write_handler(getattr(fn, "__name__", repr(fn)))
         raise
 
 

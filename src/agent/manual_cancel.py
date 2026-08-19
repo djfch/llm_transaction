@@ -71,7 +71,7 @@ async def execute_manual_cancel(deps: ToolDeps, contract: str, order_id: str) ->
     """
     await _require_open_order(deps, contract, order_id)
     result = await run_gateway_io(
-        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH
+        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH, mutation=True
     )
     warning = ""
     try:

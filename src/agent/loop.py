@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,7 @@ from src.agent.tools import ToolRegistry
 from src.audit.logger import get_logger
 from src.audit.trail import AuditTrail
 from src.config import Settings
+from src.gateway.async_io import set_orphan_write_handler
 from src.gateway.base import Gateway
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
@@ -172,6 +174,8 @@ class DecisionLoop:
         )
         # 工具层（如杠杆回滚失败）经此回调触发同一套风控锁（内存+持久化+告警）
         self._deps.engage_kill_switch = self._engage_lock
+        # 已 dispatch 到交易所的写请求被取消（结果无人接收）时的兜底：审计 + 风控锁
+        set_orphan_write_handler(self._on_orphan_write)
         self._registry = ToolRegistry(self._deps)
         self._context = ContextBuilder(
             gateway,
@@ -451,6 +455,31 @@ class DecisionLoop:
             warning 非空表示网关已撤单但本地记录同步失败，提示勿重试撤单）
         """
         return await execute_manual_cancel(self._deps, contract, order_id)
+
+    def _on_orphan_write(self, op_name: str) -> None:
+        """已 dispatch 到交易所的写请求因调用方取消/超时导致结果无人接收时的兜底。
+
+        审计记 critical 日志，并异步触发风控锁（fail-closed：交易所可能已执行，
+        本地状态未知，禁止继续自动交易，待人工对账）。由 async_io 取消分支同步
+        调用（不能 await，独立任务调度加锁）。
+
+        参数：
+            op_name: str，被取消的写操作名（如 place_order）
+
+        返回：
+            None，记审计日志并调度风控锁任务
+        """
+        logger.critical(
+            "写请求 %s 已下发交易所但调用方被取消/超时，结果无人接收："
+            "按状态未知处理并触发风控锁，请人工对账",
+            op_name,
+        )
+        try:
+            asyncio.get_running_loop().create_task(
+                self._engage_lock(f"写请求 {op_name} 已下发但结果被取消，状态未知，请人工对账")
+            )
+        except RuntimeError:  # 事件循环已关闭：日志留痕即可，重启后人工介入
+            pass
 
     async def _engage_lock(self, reason: str | None = None) -> None:
         """风控锁：内存置位 + 写回 config.yaml（经注入回调，保持分层）；仅加锁瞬间告警。

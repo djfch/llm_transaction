@@ -45,9 +45,12 @@ class PaperGateway(PaperOpenInterestMixin):
     # 纯内存方法标记（统一卸载层 async_io 识别）：命中方法在事件循环线程内联执行，
     # 不进 executor——on_price/settle_funding/drain_fills 本就在事件循环线程直接改
     # 账户状态，账户类方法再进线程会把单线程状态机变成跨线程共享可变状态（PR #84
-    # 评审 P1）。除网关方法外，还登记以本网关为首参、内部仅调纯内存方法的同步事务
-    # 辅助（_swap_tpsl_group / _amend_direction / _account_equity），保证其事务段
-    # 同样不被线程交错。get_candlesticks/fetch_open_interest 等行情委托方法可能
+    # 评审 P1）。另登记以本网关为首参、内部仅调纯内存方法的同步事务辅助
+    # （_swap_tpsl_group），保证其事务段同样不被线程交错；平仓代际包装
+    # （_close_and_bump_epoch/_place_unless_close_intervened）同理——检查与下单
+    # 必须在同一线程段内完成；已改 async 的组合辅助
+    # （_amend_direction/_account_equity 等）不在此列——其内部逐次读取按各方法
+    # 自身标记判定。get_candlesticks/fetch_open_interest 等行情委托方法可能
     # 转发真实 REST provider，不得加入本集合。
     _GATEWAY_IO_INLINE_STATIC = frozenset(
         {
@@ -63,8 +66,8 @@ class PaperGateway(PaperOpenInterestMixin):
             "create_tpsl_order",
             "cancel_tpsl_order",
             "_swap_tpsl_group",
-            "_amend_direction",
-            "_account_equity",
+            "_close_and_bump_epoch",
+            "_place_unless_close_intervened",
         }
     )
 

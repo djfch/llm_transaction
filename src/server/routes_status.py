@@ -10,8 +10,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.config import Settings, load_settings
-from src.gateway.async_io import read_positions_with_tpsl, run_gateway_io
-from src.gateway.base import Gateway, GatewayError
+from src.gateway.async_io import PRIORITY_NORMAL, read_positions_with_tpsl, run_gateway_io
+from src.gateway.base import Account, Gateway, GatewayError
 from src.memory.models import AuditRound, AuditToolCall
 from src.server.deps import ServerDeps
 
@@ -102,15 +102,23 @@ def _cents(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01")))
 
 
-def _account_equity(gateway: Gateway | None) -> Decimal | None:
+async def _account_equity(
+    gateway: Gateway | None,
+    *,
+    priority: int = PRIORITY_NORMAL,
+    account: Account | None = None,
+) -> Decimal | None:
     """账户当前权益估值（可用 + 持仓保证金 + 未实现盈亏）；未接线或查询失败返回 None。
 
-    同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关读取，
-    不得直接在事件循环线程执行）；首参必须为网关实例——paper 借此命中
-    纯内存内联标记，与撮合同线程读取账户，避免跨线程竞态（PR #84 评审 P1）。
+    账户与持仓两次真实网关读取各自经统一卸载层独立调度（不打包成单个复合
+    任务）：HIGH 人工平仓可在两次读取之间插队，不被慢读取整段阻断（PR #84
+    评审 P1）。paper 的纯内存方法命中内联标记不进 executor，保持单线程语义。
 
     参数：
         gateway: Gateway | None，交易网关；None（未接线）时直接返回 None
+        priority: int，卸载优先级（默认 NORMAL）
+        account: Account | None，调用方已取得的账户快照；提供时跳过账户
+            读取只补读持仓（/api/account 复用，避免重复查账户）
 
     返回：
         Decimal | None：账户当前权益估值（可用 + 持仓保证金 + 未实现盈亏）；未接线或查询失败返回 None
@@ -118,10 +126,12 @@ def _account_equity(gateway: Gateway | None) -> Decimal | None:
     if gateway is None:
         return None
     try:
-        account = gateway.get_account()
-        margin = sum((p.margin for p in gateway.list_positions()), Decimal(0))
+        if account is None:
+            account = await run_gateway_io(gateway.get_account, priority=priority)
+        positions = await run_gateway_io(gateway.list_positions, priority=priority)
     except GatewayError:
         return None
+    margin = sum((p.margin for p in positions), Decimal(0))
     return account.available + margin + account.unrealised_pnl
 
 
@@ -138,7 +148,7 @@ def _day_start_ts() -> float:
     return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
-def _equity_baseline(
+async def _equity_baseline(
     deps: ServerDeps, settings: Settings, pnl_fee_sum: Decimal
 ) -> tuple[Decimal, str]:
     """权益曲线基准与来源标注。
@@ -157,7 +167,7 @@ def _equity_baseline(
     """
     if settings.mode == "paper":
         return settings.paper.initial_equity, "paper_config"
-    equity_now = _account_equity(deps.gateway)
+    equity_now = await _account_equity(deps.gateway)
     if equity_now is None:
         return Decimal(0), "fallback_zero"
     return equity_now - pnl_fee_sum, "account"
@@ -277,8 +287,9 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         返回：
             dict[str, Any]：账户概览：available/unrealised_pnl + equity（前端 AccountInfo 契约要求 equity 必在）
         """
-        account = (await run_gateway_io(_require_gateway(deps).get_account)).model_dump()
-        equity = await run_gateway_io(_account_equity, deps.gateway)
+        account_obj = await run_gateway_io(_require_gateway(deps).get_account)
+        account = account_obj.model_dump()
+        equity = await _account_equity(deps.gateway, account=account_obj)
         account["equity"] = (
             equity if equity is not None else account["available"] + account["unrealised_pnl"]
         )
@@ -431,7 +442,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         settings = load_settings(deps.config_path)
         trades = await deps.repo.trades_between(0, time.time() + 1, mode=settings.mode)
         pnl_fee_sum = sum((t.pnl - t.fee for t in trades), Decimal(0))
-        baseline, source = await run_gateway_io(_equity_baseline, deps, settings, pnl_fee_sum)
+        baseline, source = await _equity_baseline(deps, settings, pnl_fee_sum)
         equity = baseline
         points = []
         for t in trades:

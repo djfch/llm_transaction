@@ -311,6 +311,9 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     declared = _opt_int(args, "leverage", None)  # None = 未声明
     positions = await run_gateway_io(deps.gateway.list_positions)
     opens_exposure = _opens_exposure(positions, contract, size, close, reduce_only)
+    # 平仓代际锚点：增仓单在风控 await 窗口前捕获，最终下单于 executor 线程内比对，
+    # 窗口内高优人工平仓介入则放弃下单（PR #84 评审 P1）；平仓/减仓降风险不校验
+    close_epoch = deps.close_epochs.get(contract, 0) if opens_exposure else None
     stop_loss = _opt_decimal(args, "stop_loss_price")
     take_profit = _opt_decimal(args, "take_profit_price")
     after = _position_after(positions, contract, size)
@@ -375,6 +378,7 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         verify=apply_leverage is not None or opens_exposure,
         apply_leverage=apply_leverage,
         margin_mode=margin_mode,
+        close_epoch=close_epoch,
     )
     if isinstance(placed, ToolOutcome):
         return placed
@@ -513,7 +517,9 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
                 trigger_price=take_profit,
             )
         )
-    swap = await run_gateway_io(_swap_tpsl_group, deps.gateway, contract, direction, requested)
+    swap = await run_gateway_io(
+        _swap_tpsl_group, deps.gateway, contract, direction, requested, mutation=True
+    )
     if swap.stage == "position_changed":
         return ToolOutcome("止盈止损未更新：持仓已平仓或方向已变化，请核对后重试")
     if swap.stage == "create_unknown":
@@ -559,9 +565,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     size = _opt_decimal(args, "size")
     if price is None and size is None:
         raise ToolArgError("price 与 size 至少提供一个")
-    is_close, effective_size = await run_gateway_io(
-        _amend_direction, deps.gateway, contract, order_id, size
-    )
+    is_close, effective_size = await _amend_direction(deps.gateway, contract, order_id, size)
     deny = await _risk_check(
         deps,
         contract,
@@ -573,7 +577,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     if deny is not None:
         return deny
     result = await run_gateway_io(
-        deps.gateway.amend_order, contract, order_id, price=price, size=size
+        deps.gateway.amend_order, contract, order_id, price=price, size=size, mutation=True
     )
     if not await deps.repo.update_order_after_amend(order_id, price=price, side_size=size):
         await deps.repo.save_order(  # 本地无记录（如改的是手工单）：补一行
@@ -591,14 +595,14 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     )
 
 
-def _amend_direction(
+async def _amend_direction(
     gateway: Gateway, contract: str, order_id: str, size: Decimal | None
 ) -> tuple[bool, Decimal]:
     """推断改后（是否平仓方向, 参与风控的有效张数）。
 
-    同步函数，仅经统一卸载层 run_gateway_io 调用（内部含网关持仓/订单读取，
-    不得直接在事件循环线程执行）；首参必须为网关实例——paper 借此命中纯内存
-    内联标记，与撮合同线程读取账户，避免跨线程竞态（PR #84 评审 P1）。
+    持仓与挂单两次真实网关读取各自经统一卸载层独立调度（不打包成单个
+    复合任务）：HIGH 人工平仓可在两次读取之间插队（PR #84 评审 P1）。
+    paper 的纯内存方法命中内联标记不进 executor，保持单线程语义。
 
     size 给定时按与持仓的方向与数量关系判定：同向改单、以及反向数量超过持仓的
     反手翻仓，都属新敞口，不豁免（必须过全套风控）；仅反向且数量不超过持仓
@@ -613,14 +617,15 @@ def _amend_direction(
     返回：
         tuple[bool, Decimal]，推断改后（是否平仓方向, 参与风控的有效张数）
     """
-    pos = next((p for p in gateway.list_positions() if p.contract == contract), None)
+    positions = await run_gateway_io(gateway.list_positions)
+    pos = next((p for p in positions if p.contract == contract), None)
     if size is not None:
         if pos is None or pos.size == 0:
             return False, size
         is_close = (pos.size > 0) != (size > 0) and abs(size) <= abs(pos.size)
         return is_close, size
     left = Decimal(0)
-    for order in gateway.list_orders(contract, "open"):
+    for order in await run_gateway_io(gateway.list_orders, contract, "open"):
         if order.id == order_id:
             left = order.left
             break
@@ -640,7 +645,7 @@ async def cancel_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     contract = _need_str(args, "contract")
     order_id = _need_str(args, "order_id")
     result = await run_gateway_io(
-        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH
+        deps.gateway.cancel_order, contract, order_id, priority=PRIORITY_HIGH, mutation=True
     )
     await deps.repo.update_order_status(order_id, result.status, result.finish_as or "cancelled")
     return ToolOutcome(f"撤单成功：订单 {order_id}，状态 {result.status}")

@@ -23,7 +23,14 @@ import asyncio
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
 from src.audit.logger import get_logger
 from src.gateway.async_io import run_gateway_io
-from src.gateway.base import GatewayError, OrderRequest, OrderResult, OrderStateUnknown, Position
+from src.gateway.base import (
+    Gateway,
+    GatewayError,
+    OrderRequest,
+    OrderResult,
+    OrderStateUnknown,
+    Position,
+)
 from src.utils import maybe_await
 
 logger = get_logger(__name__)
@@ -54,6 +61,7 @@ async def _locked_leverage_transaction(
     verify: bool,
     apply_leverage: int | None,
     margin_mode: str,
+    close_epoch: int | None = None,
 ) -> OrderResult | ToolOutcome:
     """合约级锁内执行杠杆写事务：最终重读 → 调杠杆 → 下单前确认 → 下单 → 失败回滚。
 
@@ -68,6 +76,7 @@ async def _locked_leverage_transaction(
         verify: bool，是否需要锁内重读核验（改杠杆或继承杠杆新增敞口时传 True）
         apply_leverage: int | None，需要设置的杠杆倍数；None 表示不设置直接下单
         margin_mode: str，设置杠杆时使用的保证金模式
+        close_epoch: int | None，进入风控流程前捕获的平仓代际（仅增仓单传入）
     返回：
         OrderResult | ToolOutcome，成功返回订单结果；并发变化/明确拒绝/状态未知返回提示文案
     """
@@ -81,6 +90,7 @@ async def _locked_leverage_transaction(
             apply_leverage=apply_leverage,
             margin_mode=margin_mode,
             prev_state=prev_state,
+            close_epoch=close_epoch,
         )
 
 
@@ -199,7 +209,9 @@ async def _rollback_leverage(
                 "存在并发修改，已开启风控锁，请人工核对"
             )
     try:
-        await run_gateway_io(deps.gateway.set_leverage, contract, prev_state[0], prev_state[1])
+        await run_gateway_io(
+            deps.gateway.set_leverage, contract, prev_state[0], prev_state[1], mutation=True
+        )
     except Exception as e:  # 回滚自身失败：fail closed
         logger.exception("杠杆回滚失败: %s", contract)
         await _engage_kill(deps, f"{contract} 杠杆回滚失败（{type(e).__name__}: {e}）")
@@ -219,6 +231,51 @@ async def _rollback_leverage(
     return f"杠杆与保证金模式已回滚至 {prev_state[0]}（{prev_state[1]}）"
 
 
+def _close_and_bump_epoch(
+    gateway: Gateway, req: OrderRequest, epochs: dict[str, int], contract: str
+) -> OrderResult:
+    """线程内执行平仓并把该合约平仓代际 +1（人工平仓专用，与增仓代际检查构成原子对）。
+
+    真实网关全部写操作在单线程 executor 串行执行，本函数体内无 await：平仓写一旦
+    执行，代际必已 +1，后到的增仓代际检查必然读到新值；paper 内联模式在事件循环
+    线程同步执行，协程间同样无交错窗口（PR #84 评审 P1）。
+
+    参数：
+        gateway: Gateway，交易网关
+        req: OrderRequest，平仓订单请求
+        epochs: dict[str, int]，合约级平仓代际表（ToolDeps.close_epochs）
+        contract: str，目标合约
+    返回：
+        OrderResult，平仓订单结果；下单异常时不上调代际（平仓未发生），异常原样上抛
+    """
+    result = gateway.place_order(req)
+    epochs[contract] = epochs.get(contract, 0) + 1
+    return result
+
+
+def _place_unless_close_intervened(
+    gateway: Gateway, req: OrderRequest, epochs: dict[str, int], contract: str, epoch0: int
+) -> OrderResult | None:
+    """线程内比对平仓代际：风控窗口内有人工平仓介入则放弃本次增仓，否则下单。
+
+    检查与下单同在单线程 executor 的一个任务内（或 paper 内联模式的同步段内），
+    人工平仓写要么排在检查之前（代际已变，放弃下单）、要么排在本单之后
+    （先开后平，最终仍为空仓），不存在"平完又被旧写重开"的乱序。
+
+    参数：
+        gateway: Gateway，交易网关
+        req: OrderRequest，增仓订单请求
+        epochs: dict[str, int]，合约级平仓代际表（ToolDeps.close_epochs）
+        contract: str，目标合约
+        epoch0: int，进入风控流程前捕获的平仓代际
+    返回：
+        OrderResult | None，代际一致返回下单结果；代际已变（人工平仓介入）返回 None
+    """
+    if epochs.get(contract, 0) != epoch0:
+        return None
+    return gateway.place_order(req)
+
+
 async def _place_with_rollback(
     deps: ToolDeps,
     req: OrderRequest,
@@ -226,6 +283,7 @@ async def _place_with_rollback(
     *,
     leverage_modified: bool,
     target_state: tuple[int, str] | None = None,
+    close_epoch: int | None = None,
 ) -> OrderResult | ToolOutcome:
     """杠杆就位后下单；被拒时回滚（仅当改过杠杆），状态未知或不明确异常时触发风控锁。
 
@@ -235,11 +293,31 @@ async def _place_with_rollback(
         prev_state: tuple[int, str] | None，修改前的 (杠杆, 模式) 状态，用于失败后回滚
         leverage_modified: bool，本次调用是否实际修改过杠杆（未修改则失败无需回滚）
         target_state: tuple[int, str] | None，本调用设置的目标 (杠杆, 模式)，回滚前 CAS 核验用
+        close_epoch: int | None，进入风控流程前捕获的平仓代际；仅增仓单传入，
+            executor 线程内发现人工平仓介入即放弃下单（中止不做杠杆回滚：
+            仓位已被人工处置，盲写旧杠杆快照反而会干扰人工后续操作）
     返回：
         OrderResult | ToolOutcome，成功返回订单结果；明确拒绝、状态未知或异常不明返回提示文案
     """
     try:
-        return await run_gateway_io(deps.gateway.place_order, req)
+        if close_epoch is None:
+            return await run_gateway_io(deps.gateway.place_order, req, mutation=True)
+        placed = await run_gateway_io(
+            _place_unless_close_intervened,
+            deps.gateway,
+            req,
+            deps.close_epochs,
+            req.contract,
+            close_epoch,
+            mutation=True,
+        )
+        if placed is None:
+            return ToolOutcome(
+                f"已中止：{req.contract} 在风控校验期间被人工平仓，本次增仓订单未提交，请重新评估",
+                "deny",
+                "人工平仓介入",
+            )
+        return placed
     except OrderStateUnknown as e:
         # 订单可能已创建，回滚杠杆会与实际持仓不一致：保持杠杆 + fail closed
         logger.warning("下单状态未知: %s err=%s", req.contract, e)
@@ -320,6 +398,7 @@ async def _reconcile_leverage_unknown(
     margin_mode: str,
     prev_state: tuple[int, str] | None,
     error: Exception,
+    close_epoch: int | None = None,
 ) -> OrderResult | ToolOutcome:
     """调杠杆结果未知时读取持仓对账：已达目标继续下单，其余按异常类别分流。
 
@@ -334,6 +413,7 @@ async def _reconcile_leverage_unknown(
         margin_mode: str，本次尝试设置的保证金模式
         prev_state: tuple[int, str] | None，修改前的 (杠杆, 模式) 状态
         error: Exception，调杠杆时捕获的原始异常
+        close_epoch: int | None，进入风控流程前捕获的平仓代际（仅增仓单传入）
     返回：
         OrderResult | ToolOutcome，对账通过返回下单结果；否则返回提示文案
     """
@@ -347,7 +427,12 @@ async def _reconcile_leverage_unknown(
     target = (apply_leverage, margin_mode)
     if state == target:  # 远端实际已生效：继续下单
         return await _place_with_rollback(
-            deps, req, prev_state, leverage_modified=True, target_state=target
+            deps,
+            req,
+            prev_state,
+            leverage_modified=True,
+            target_state=target,
+            close_epoch=close_epoch,
         )
     if state is None:
         await _engage_kill(deps, f"{req.contract} 调杠杆结果未知且无法读取持仓对账")
@@ -414,6 +499,7 @@ async def _apply_leverage_and_place(
     apply_leverage: int | None,
     margin_mode: str,
     prev_state: tuple[int, str] | None,
+    close_epoch: int | None = None,
 ) -> OrderResult | ToolOutcome:
     """按需设置杠杆后下单；目标等于现状跳过设置，结果未知时对账，下单前确认目标状态。
 
@@ -423,14 +509,17 @@ async def _apply_leverage_and_place(
         apply_leverage: int | None，需要设置的杠杆倍数；None 表示不设置直接下单
         margin_mode: str，设置杠杆时使用的保证金模式
         prev_state: tuple[int, str] | None，修改前的 (杠杆, 模式) 状态，用于失败后回滚
+        close_epoch: int | None，进入风控流程前捕获的平仓代际（仅增仓单传入）
     返回：
         OrderResult | ToolOutcome，成功返回订单结果；明确拒绝、状态未知或异常不明返回提示文案
     """
     if apply_leverage is None or prev_state == (apply_leverage, margin_mode):
-        return await _place_with_rollback(deps, req, prev_state, leverage_modified=False)
+        return await _place_with_rollback(
+            deps, req, prev_state, leverage_modified=False, close_epoch=close_epoch
+        )
     try:
         receipt = await run_gateway_io(
-            deps.gateway.set_leverage, req.contract, apply_leverage, margin_mode
+            deps.gateway.set_leverage, req.contract, apply_leverage, margin_mode, mutation=True
         )
     except Exception as e:  # 调杠杆结果未知：先对账再决定（远端可能已生效）
         return await _reconcile_leverage_unknown(
@@ -440,6 +529,7 @@ async def _apply_leverage_and_place(
             margin_mode=margin_mode,
             prev_state=prev_state,
             error=e,
+            close_epoch=close_epoch,
         )
     target = (apply_leverage, margin_mode)
     # 下单前确认目标状态：锁管不了进程外修改，读不到目标态即 fail closed（不回滚）
@@ -452,4 +542,5 @@ async def _apply_leverage_and_place(
         prev_state,
         leverage_modified=True,
         target_state=target,
+        close_epoch=close_epoch,
     )
