@@ -218,3 +218,101 @@ async def test_run_gateway_io_slow_call_does_not_block_event_loop():
         stop = True
         await ticker
     assert ticks >= 3
+
+
+class _InlineMarkedGateway:
+    """声明纯内存内联标记的伪网关：ping 命中标记，fetch 未命中。"""
+
+    __gateway_io_inline__ = frozenset({"ping"})
+
+    def ping(self) -> int:
+        """返回当前执行线程 ident（用于断言执行线程亲和性）。
+
+        参数：无
+        返回：
+            int：执行该方法的操作系统线程 ident
+        """
+        return threading.get_ident()
+
+    def fetch(self) -> int:
+        """返回当前执行线程 ident（未在内联标记集合中，应被卸载到 executor）。
+
+        参数：无
+        返回：
+            int：执行该方法的操作系统线程 ident
+        """
+        return threading.get_ident()
+
+
+async def test_inline_marked_call_skips_executor():
+    """验证命中 __gateway_io_inline__ 标记的调用在事件循环线程内联执行、不经 executor 排队。
+
+    参数：无
+
+    返回：
+        None，断言 executor 被占住时内联调用立即完成且运行在事件循环线程
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocker():
+        started.set()
+        release.wait(timeout=5)
+
+    blocker = asyncio.ensure_future(run_gateway_io(_blocker))
+    await asyncio.to_thread(started.wait, 5)  # 先占住唯一网关线程
+    try:
+        gateway = _InlineMarkedGateway()
+        # executor 被占住期间，内联调用不排队、立即完成
+        ident = await asyncio.wait_for(run_gateway_io(gateway.ping), timeout=1)
+        assert ident == threading.get_ident()  # 事件循环线程（测试主线程）
+    finally:
+        release.set()
+        await blocker
+
+
+async def test_unmarked_gateway_method_still_offloaded():
+    """验证未命中内联标记的同名网关方法与未登记辅助函数仍卸载到 executor 线程。
+
+    参数：无
+
+    返回：
+        None，断言未标记方法与未登记辅助的执行线程不是事件循环线程
+    """
+    loop_ident = threading.get_ident()
+    gateway = _InlineMarkedGateway()
+    # fetch 不在标记集合：卸载
+    assert await run_gateway_io(gateway.fetch) != loop_ident
+
+    def _unregistered_helper(gw: _InlineMarkedGateway) -> int:
+        return threading.get_ident()
+
+    # 以网关为首参但函数名未登记：同样卸载（防止任意辅助绕过 executor）
+    assert await run_gateway_io(_unregistered_helper, gateway) != loop_ident
+
+
+def test_scheduler_entry_released_after_loop_closed():
+    """验证事件循环销毁后调度器条目可被回收（_worker 句柄不再回链引用 loop）。
+
+    参数：无
+
+    返回：
+        None，断言新事件循环关闭并 gc 后弱引用失效（修复前因 _worker 持有已完成
+        Task 强引用 loop，弱键永不失效）
+    """
+    import gc
+    import weakref
+
+    from src.gateway import async_io
+
+    loop = asyncio.new_event_loop()
+
+    async def _once() -> int:
+        return await async_io.run_gateway_io(lambda: 1)
+
+    assert loop.run_until_complete(_once()) == 1
+    ref = weakref.ref(loop)
+    loop.close()
+    del loop
+    gc.collect()
+    assert ref() is None

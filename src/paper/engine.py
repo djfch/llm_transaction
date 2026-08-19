@@ -42,6 +42,31 @@ from .market_stats import PaperOpenInterestMixin
 class PaperGateway(PaperOpenInterestMixin):
     """模拟撮合网关。paper 模式下替代真实网关，供 agent / 风控无差别调用。"""
 
+    # 纯内存方法标记（统一卸载层 async_io 识别）：命中方法在事件循环线程内联执行，
+    # 不进 executor——on_price/settle_funding/drain_fills 本就在事件循环线程直接改
+    # 账户状态，账户类方法再进线程会把单线程状态机变成跨线程共享可变状态（PR #84
+    # 评审 P1）。除网关方法外，还登记以本网关为首参、内部仅调纯内存方法的同步事务
+    # 辅助（position_snapshots / _swap_tpsl_group），保证其事务段同样不被线程交错。
+    # get_candlesticks/get_tickers/fetch_open_interest 等行情委托方法可能转发真实
+    # REST provider，不得加入本集合。
+    __gateway_io_inline__ = frozenset(
+        {
+            "get_contract",
+            "get_account",
+            "list_positions",
+            "set_leverage",
+            "place_order",
+            "amend_order",
+            "cancel_order",
+            "list_orders",
+            "list_tpsl_orders",
+            "create_tpsl_order",
+            "cancel_tpsl_order",
+            "position_snapshots",
+            "_swap_tpsl_group",
+        }
+    )
+
     def __init__(
         self,
         config: PaperConfig,

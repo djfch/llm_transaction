@@ -6,7 +6,13 @@ Gate SDK 为同步实现且不做线程安全假设：所有网关 I/O 必须经
 慢查询排队饿死。运行约束：网关客户端只允许本层的单线程访问，禁止在 async
 路径中直接调用同步网关方法（由架构守护测试兜底）。
 
-PaperGateway 等纯内存实现无网络 I/O，按 issue #72 决议不强制经本层。
+PaperGateway 等纯内存实现无网络 I/O，且其撮合（on_price）、资金费结算与
+drain_fills 均在事件循环线程直接修改同一账户状态：若账户类方法再进 executor
+线程，单线程状态机就退化为跨线程共享可变状态（PR #84 评审）。因此网关类可
+声明 __gateway_io_inline__（frozenset[str]）标记纯内存方法名（含以网关为
+首参、内部仅调纯内存方法的事务辅助函数名）；命中标记的调用不进 executor，
+直接在事件循环线程内联执行，保持单线程语义。行情委托类方法
+（get_candlesticks/get_tickers 可能转发真实 REST provider）不得加入标记。
 """
 
 from __future__ import annotations
@@ -74,23 +80,36 @@ class _IoScheduler:
 
         参数：无
         返回：
-            None，队列排空后退出（已取消的 Future 对应任务直接跳过）
+            None，队列排空后退出（已取消的 Future 对应任务直接跳过）；退出前清空
+            _worker 句柄——Task 强引用其 loop，持有已完成 Task 会让 WeakKeyDictionary
+            的弱键失效、已销毁事件循环无法回收（PR #84 评审 P2）
         """
         loop = asyncio.get_running_loop()
-        while not self._queue.empty():
-            _, _, fn, args, kwargs, fut = await self._queue.get()
-            if fut.cancelled():
-                continue
-            try:
-                result = await loop.run_in_executor(
-                    _EXECUTOR, functools.partial(fn, *args, **kwargs)
-                )
-            except Exception as e:  # 网关异常原样透传给调用方
-                if not fut.done():
-                    fut.set_exception(e)
-            else:
-                if not fut.done():
-                    fut.set_result(result)
+        try:
+            while not self._queue.empty():
+                # 每取一个任务前让出一次循环：刚完成任务的调用方协程得以恢复并把后续
+                # 高优调用入队——否则消费协程 set_result 后同步续跑、在调用方提交下
+                # 一个 HIGH 调用前就先取走已排队 NORMAL，优先级在串行调用链上失效
+                # （PR #84 评审 P1：manual close 的风控读取被普通 backlog 穿插）
+                await asyncio.sleep(0)
+                _, _, fn, args, kwargs, fut = await self._queue.get()
+                if fut.cancelled():
+                    continue
+                try:
+                    result = await loop.run_in_executor(
+                        _EXECUTOR, functools.partial(fn, *args, **kwargs)
+                    )
+                except Exception as e:  # 网关异常原样透传给调用方
+                    if not fut.done():
+                        fut.set_exception(e)
+                else:
+                    if not fut.done():
+                        fut.set_result(result)
+        finally:
+            # 与 submit 同在事件循环线程、且循环退出到此处无 await 点，无竞态：
+            # 清空后新提交会看到 _worker is None 并启动新的消费协程继续排空队列
+            if self._worker is asyncio.current_task():
+                self._worker = None
 
 
 def _scheduler() -> _IoScheduler:
@@ -108,6 +127,27 @@ def _scheduler() -> _IoScheduler:
     return scheduler
 
 
+def _is_inline_call(fn: Callable[..., Any], args: tuple) -> bool:
+    """判断本次调用是否命中网关的纯内存内联标记，应在事件循环线程直接执行。
+
+    绑定方法取其 __self__，普通同步辅助取首参（约定为网关实例）；对应类型声明了
+    __gateway_io_inline__ 且函数名在集合内即为纯内存操作（如 PaperGateway 的账户
+    方法）。内联执行保持 paper 账户的单线程状态机语义，避免与事件循环线程上的
+    撮合/资金费/drain 并发改同一状态。
+
+    参数：
+        fn: Callable，待执行的同步函数（绑定方法或以网关为首参的辅助函数）
+        args: tuple，位置参数
+    返回：
+        bool，命中内联标记返回 True，否则 False（应提交 executor 执行）
+    """
+    owner = getattr(fn, "__self__", None)
+    if owner is None and args:
+        owner = args[0]
+    marker = getattr(type(owner), "__gateway_io_inline__", None)
+    return bool(marker) and getattr(fn, "__name__", "") in marker
+
+
 async def run_gateway_io(
     fn: Callable[..., T],
     /,
@@ -117,6 +157,10 @@ async def run_gateway_io(
     **kwargs: Any,
 ) -> T:
     """经统一卸载层执行一次同步网关调用：优先级排队、单线程执行、协程侧 await。
+
+    命中网关 __gateway_io_inline__ 标记的纯内存调用（如 PaperGateway 账户方法）
+    不进 executor，直接在事件循环线程内联执行并返回；此时 priority/timeout 无意义
+    （无 I/O 可等）。
 
     参数：
         fn: Callable[..., T]，同步网关方法（绑定方法引用，如 deps.gateway.list_positions）
@@ -131,6 +175,8 @@ async def run_gateway_io(
         asyncio.TimeoutError：超过 timeout 仍未完成时抛出
         asyncio.CancelledError：调用方协程被取消时抛出（排队任务一并取消）
     """
+    if _is_inline_call(fn, args):
+        return fn(*args, **kwargs)  # 纯内存实现：事件循环线程内联，保持单线程状态机语义
     fut = _scheduler().submit(fn, args, kwargs, priority)
     try:
         if timeout is None:
