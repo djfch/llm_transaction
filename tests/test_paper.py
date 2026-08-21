@@ -318,6 +318,7 @@ def test_liquidation_cancels_resting_orders_and_tpsl():
     assert len(gw.liquidations) == 1
     assert gw._open == {}  # 残留挂单已清
     assert gw.list_tpsl_orders(BTC) == []  # 残留 TPSL 已清
+    assert gw.list_orders(BTC, "open") == []  # 订单结果同步置 cancelled，无幽灵挂单
     gw.on_price(BTC, D("50"), D("49.9"), D("50.1"))  # 旧挂单价位：不得重新开仓
     assert gw.list_positions() == []
     assert [f for f in gw.drain_fills() if f.order_id == resting.id] == []
