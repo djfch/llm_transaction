@@ -921,6 +921,32 @@ def test_shared_deadline_post_never_retried():
     assert calls == 1
 
 
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_shared_deadline_write_methods_never_retried(method: str):
+    """验证 PUT 改单/DELETE 撤单类交易写绝不重试，传输异常后只执行一次。
+
+    参数：
+        method: str，HTTP 方法（PUT/DELETE）
+
+    返回：
+        None，断言写方法只发起一次尝试并原样上抛传输异常（PR #84 评审 P1：
+        HTTP 幂等不等于交易安全，改单/撤单在传输结果未知时重试会把首次尝试
+        的未知结果洗成第二次的明确业务错误，绕过 OrderStateUnknown 契约）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _fail(method_arg, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(_fail, method, "https://example.com", {})
+    assert calls == 1
+
+
 def test_late_success_after_deadline_treated_as_timeout():
     """验证预算耗尽后才到达的迟到成功不被返回：按本次尝试超时处理。
 

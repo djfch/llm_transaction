@@ -55,8 +55,13 @@ _DEFAULT_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
 # 同一 wall-clock 预算，每次尝试的连接/读取超时按剩余预算收紧。
 _RETRY_ATTEMPTS = 3  # 首试 + 2 次重试（与原 Retry(total=2) 等价）
 _RETRY_BACKOFF_S = 0.2  # 退避基数：第 n 次重试前等待 0.2×2^n 秒（受剩余预算截断）
-_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
-# 仅幂等方法可重试：POST 下单/改撤单绝不重试（防重单），与原 urllib3 Retry 约定一致
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# 仅明确只读方法可重试。HTTP 幂等 ≠ 交易安全：PUT 改单/DELETE 撤单在传输结果
+# 未知时重试，会把首次尝试的未知结果"洗成"第二次尝试的明确业务错误（如订单
+# 已成交后重试返回 ORDER_NOT_FOUND），绕过 OrderStateUnknown fail-closed 契约
+# （PR #84 评审 P1）。所有交易写（POST/PUT/DELETE）传输异常后只执行一次，
+# 原样上抛由 call_api 归一化为 GatewayTransportError，再由业务层转状态未知；
+# 个别确可安全重试的写接口须由业务方法在对账后显式决定。
 _RETRYABLE_TRANSPORT_ERRORS = (
     urllib3.exceptions.ConnectTimeoutError,
     urllib3.exceptions.ReadTimeoutError,
@@ -99,8 +104,10 @@ def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs
     urllib3 的 Timeout.total 只覆盖单次尝试（每次重试 clone 新 Timeout 重新起表），
     Retry(total=2) 下整次调用最长 3×预算；本层改为：禁用 urllib3 自动重试
     （retries=False），用 time.monotonic() 建立跨尝试共享的 deadline，每次尝试的
-    连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。POST 等非幂等方法
-    绝不重试（防重单），可重试异常仅限传输层（超时/连接失败/连接中断）。
+    连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。仅明确只读方法
+    （GET/HEAD/OPTIONS）可重试，交易写（POST/PUT/DELETE）绝不重试（传输结果
+    未知时重试会掩盖首次尝试的未知结果，见 _RETRYABLE_METHODS），可重试异常
+    仅限传输层（超时/连接失败/连接中断）。
     进行中的响应无法硬中断——read 超时只约束相邻字节间隔，服务端持续慢吐字节
     可拖延单次响应远超预算；故响应返回后再校验 deadline，超出预算的迟到成功
     一律按本次尝试超时处理（可重试），保证整次调用不在预算耗尽后返回成功。
