@@ -313,8 +313,10 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     positions = await run_gateway_io(deps.gateway.list_positions)
     opens_exposure = _opens_exposure(positions, contract, size, close, reduce_only)
     # 平仓代际锚点：增仓单在风控 await 窗口前捕获，最终下单于 executor 线程内比对，
-    # 窗口内高优人工平仓介入则放弃下单（PR #84 评审 P1）；平仓/减仓降风险不校验
+    # 窗口内高优人工平仓介入则放弃下单（PR #84 评审 P1）；平仓/减仓降风险不校验。
+    # 重置代际同点捕获一并比对：窗口内账户被重置则迟到增仓不得写新账户（issue #81）
     close_epoch = deps.close_epochs.get(contract, 0) if opens_exposure else None
+    reset0 = deps.reset_epoch[0] if opens_exposure else None
     stop_loss = _opt_decimal(args, "stop_loss_price")
     take_profit = _opt_decimal(args, "take_profit_price")
     after = _position_after(positions, contract, size)
@@ -380,6 +382,8 @@ async def place_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         apply_leverage=apply_leverage,
         margin_mode=margin_mode,
         close_epoch=close_epoch,
+        reset_epoch=deps.reset_epoch if opens_exposure else None,
+        reset0=reset0,
     )
     if isinstance(placed, ToolOutcome):
         return placed
@@ -568,8 +572,9 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         raise ToolArgError("price 与 size 至少提供一个")
     # 平仓代际锚点：进入即捕获，覆盖方向推断与风控全程；非平仓方向改单最终经
     # _amend_unless_close_intervened 在 executor 线程内比对，人工平仓介入即放弃
-    # （PR #84 评审 P1）；纯减仓/平仓改单降风险，豁免
+    # （PR #84 评审 P1）；纯减仓/平仓改单降风险，豁免。重置代际同点捕获一并比对
     epoch0 = deps.close_epochs.get(contract, 0)
+    reset0 = deps.reset_epoch[0]
     is_close, effective_size = await _amend_direction(deps.gateway, contract, order_id, size)
     deny = await _risk_check(
         deps,
@@ -595,11 +600,13 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
             size,
             deps.close_epochs,
             epoch0,
+            resets=deps.reset_epoch,
+            reset0=reset0,
             mutation=True,
         )
         if amended is None:
             return ToolOutcome(
-                f"已中止：{contract} 在风控校验期间被人工平仓，本次改单未提交，请重新评估",
+                f"已中止：{contract} 在风控校验期间被人工平仓或账户重置，本次改单未提交，请重新评估",
                 "deny",
                 "人工平仓介入",
             )

@@ -564,6 +564,9 @@ def _build_server(
     def paper_reset(equity: Decimal) -> None:
         """模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）。
 
+        重置后上调决策循环的重置代际：旧 Agent 轮已过风控、尚未落单的增仓写
+        会在落单前比对代际失效而中止，不得在新账户上重新开仓（issue #81）。
+
         参数：
             equity: Decimal，重置后的模拟账户权益
 
@@ -571,6 +574,7 @@ def _build_server(
             None，模拟账户重置适配：调用时解析 gateway.reset_account（清空模拟仓位/挂单）
         """
         ctx.gateway.reset_account(equity)  # type: ignore[attr-defined]
+        ctx.loop.notify_paper_reset()
 
     async def agent_start() -> None:
         """手动启动 agent：启动调度器并立即抢醒第一轮（用户点击"启动"的合理预期是

@@ -456,6 +456,20 @@ class DecisionLoop:
         """
         return await execute_manual_cancel(self._deps, contract, order_id)
 
+    def notify_paper_reset(self) -> None:
+        """模拟账户重置后上调重置代际：使在途增仓写的代际比对失效而中止（issue #81）。
+
+        重置清空账户后，旧 Agent 轮已通过风控、尚未落单的增仓写若照常提交，会在
+        新账户上重新开仓；本方法由 bootstrap 的 paper_reset 适配在重置后调用，
+        与下单/改单路径捕获的 reset0 锚点构成原子对（paper 内联同线程，无交错窗口）。
+
+        参数：无
+
+        返回：
+            None，就地上调 ToolDeps.reset_epoch 计数
+        """
+        self._deps.reset_epoch[0] += 1
+
     def _on_orphan_write(self, op_name: str) -> None:
         """已 dispatch 到交易所的写请求因调用方取消/超时导致结果无人接收时的兜底。
 

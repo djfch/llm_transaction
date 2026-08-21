@@ -1209,6 +1209,78 @@ async def test_place_with_rollback_aborts_when_close_intervened(tmp_path):
         await env.db.close()
 
 
+async def test_place_unless_reset_intervened_skips(tmp_path):
+    """验证重置代际比对：账户重置介入（计数变化）时增仓写返回 None 且不下单。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言捕获锚点后 reset_epoch 上调，包装器返回 None、持仓不变（issue #81）
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        resets = env.deps.reset_epoch
+        req = OrderRequest(contract="BTC_USDT", size=Decimal(1), stop_loss_price=Decimal(58000))
+        placed = _place_unless_close_intervened(
+            env.gateway,
+            req,
+            {"BTC_USDT": 0},
+            "BTC_USDT",
+            0,
+            resets=resets,
+            reset0=resets[0],
+        )
+        assert placed is not None
+        resets[0] += 1  # 模拟账户在风控窗口内被重置
+        skipped = _place_unless_close_intervened(
+            env.gateway,
+            req,
+            {"BTC_USDT": 0},
+            "BTC_USDT",
+            0,
+            resets=resets,
+            reset0=resets[0] - 1,
+        )
+        assert skipped is None
+        size_after = sum(p.size for p in env.gateway.list_positions() if p.contract == "BTC_USDT")
+        assert size_after == 1  # 迟到的旧增仓未在新账户上重复开仓
+    finally:
+        await env.db.close()
+
+
+async def test_place_with_rollback_aborts_when_reset_intervened(tmp_path):
+    """复刻 issue #81 场景：增仓过风控窗口内账户被重置，下单必须中止且不写新账户。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言 _place_with_rollback 返回中止 deny 文案，仓位保持为空
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        reset0 = env.deps.reset_epoch[0]
+        close_epoch = env.deps.close_epochs.get("BTC_USDT", 0)
+        env.deps.reset_epoch[0] += 1  # 模拟 paper 重置发生在风控窗口内
+        req = OrderRequest(contract="BTC_USDT", size=Decimal(1), stop_loss_price=Decimal(58000))
+        placed = await _place_with_rollback(
+            env.deps,
+            req,
+            None,
+            leverage_modified=False,
+            close_epoch=close_epoch,
+            reset_epoch=env.deps.reset_epoch,
+            reset0=reset0,
+        )
+        assert isinstance(placed, ToolOutcome)
+        assert placed.risk_verdict == "deny"
+        remaining = [p for p in env.gateway.list_positions() if p.contract == "BTC_USDT"]
+        assert all(p.size == 0 for p in remaining)
+    finally:
+        await env.db.close()
+
+
 async def test_amend_unless_close_intervened_checks_epoch(tmp_path):
     """验证改单代际检查：代际一致正常改单，代际已变返回 None 且挂单不变。
 
