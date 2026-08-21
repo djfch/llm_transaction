@@ -163,6 +163,7 @@ class PaperGateway(PaperOpenInterestMixin):
         mark_price: Decimal,
         best_bid: Decimal | None = None,
         best_ask: Decimal | None = None,
+        funding_rate: Decimal | None = None,
     ) -> None:
         """行情注入入口：由外部行情源推送，驱动挂单撮合与强平检查。
 
@@ -171,6 +172,8 @@ class PaperGateway(PaperOpenInterestMixin):
             mark_price: Decimal，当前标记价格
             best_bid: Decimal | None，当前最优买价；缺失时使用标记价
             best_ask: Decimal | None，当前最优卖价；缺失时使用标记价
+            funding_rate: Decimal | None，当前资金费率；提供时同步更新合约费率，
+                使资金费结算使用实时值而非启动快照（issue #75）
 
         返回：
             None：行情注入入口：由外部行情源推送，驱动挂单撮合与强平检查
@@ -180,9 +183,10 @@ class PaperGateway(PaperOpenInterestMixin):
         ask = Decimal(str(best_ask)) if best_ask is not None else mark
         self._snaps[contract] = PriceSnap(mark=mark, bid=bid, ask=ask)
         if contract in self._contracts:
-            self._contracts[contract] = self._contracts[contract].model_copy(
-                update={"mark_price": mark}
-            )
+            update: dict[str, Decimal] = {"mark_price": mark}
+            if funding_rate is not None:
+                update["funding_rate"] = Decimal(str(funding_rate))
+            self._contracts[contract] = self._contracts[contract].model_copy(update=update)
         self._match_resting(contract)
         self._trigger_tpsl(contract)
         self._check_liquidation(contract)

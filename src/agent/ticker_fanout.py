@@ -56,7 +56,13 @@ def make_on_ticker(
         """
         if isinstance(gateway, PaperGateway):
             try:
-                gateway.on_price(ticker.contract, ticker.mark_price, ticker.last, ticker.last)
+                gateway.on_price(
+                    ticker.contract,
+                    ticker.mark_price,
+                    ticker.last,
+                    ticker.last,
+                    funding_rate=ticker.funding_rate,
+                )
             except Exception:
                 logger.exception("paper 撮合异常（%s）", ticker.contract)
             if fill_persister is not None and gateway.account.fills:
