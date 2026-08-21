@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 from typing import Protocol
 
 from ..audit.logger import get_logger
+from ..gateway.async_io import run_gateway_io
 
 logger = get_logger(__name__)
 
@@ -53,8 +53,8 @@ class OpenInterestCache:
         """
         for contract in self._watchlist:
             try:
-                # 网关是同步 SDK 调用，移出事件循环线程执行（同 fill_sync 先例）
-                value = await asyncio.to_thread(self._gateway.fetch_open_interest, contract)
+                # 网关是同步 SDK 调用，经统一卸载层移出事件循环线程执行
+                value = await run_gateway_io(self._gateway.fetch_open_interest, contract)
             except Exception:
                 logger.warning("持仓量拉取失败（%s），保留旧值", contract, exc_info=True)
                 continue

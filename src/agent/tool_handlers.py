@@ -65,6 +65,9 @@ class ToolDeps:
     engage_kill_switch: Callable[[str], Any] | None = None  # 触发风控锁（reason）；同步/异步均可
     round_id: str = ""
     leverage_locks: dict[str, asyncio.Lock] = field(default_factory=dict)  # 合约级杠杆写事务锁
+    # 合约级平仓代际：人工平仓每执行成功一次 +1；增仓下单前在 executor 线程内比对，
+    # 防止高优人工平仓插入风控窗口后、旧增仓写把仓位重开（PR #84 评审 P1）
+    close_epochs: dict[str, int] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

@@ -458,7 +458,14 @@ async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkey
         await asyncio.sleep(0)
 
     async def _fake_shutdown(
-        _ctx, server_task, pusher_task, funding_task, review_task, research_task, safety_task=None
+        _ctx,
+        server_task,
+        pusher_task,
+        funding_task,
+        review_task,
+        research_task,
+        safety_task=None,
+        lag_task=None,
     ) -> None:
         """替代 run_app 的 shutdown：记录研报任务并取消各后台任务。
 
@@ -470,16 +477,22 @@ async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkey
             review_task: 复盘巡检任务，被取消
             research_task: 研报巡检任务，记录到 captured 供断言其已被取消
             safety_task: 安全巡检任务（本桩不处理）
+            lag_task: 事件循环 lag 监控任务，被取消
 
         返回：
-            None，副作用是取消 server/funding/review/research 四个任务并等待其收尾
+            None，副作用是取消 server/funding/review/research/lag 五个任务并等待其收尾
         """
         captured.append(research_task)
-        for task in (server_task, funding_task, review_task, research_task):
+        for task in (server_task, funding_task, review_task, research_task, lag_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            server_task, funding_task, review_task, research_task, return_exceptions=True
+            server_task,
+            funding_task,
+            review_task,
+            research_task,
+            lag_task,
+            return_exceptions=True,
         )
 
     monkeypatch.setattr(ctx.research.scheduler, "run_forever", _fake_forever)

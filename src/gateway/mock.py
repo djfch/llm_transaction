@@ -112,33 +112,19 @@ class MockGateway:
         return self.account
 
     def list_positions(self) -> list[Position]:
-        """列出全部非零持仓，并回填当前生效的止盈止损触发价。
+        """列出全部非零持仓（单次裸读，不回填止盈止损触发价）。
+
+        与 GateRestGateway 裸读语义保持一致：止盈止损触发价由展示路径经
+        read_positions_with_tpsl 逐合约补全，安全路径（人工平仓/风控）只依赖
+        本裸读，不经任何保护单查询（PR #84 评审 P1）。
 
         参数：无
 
         返回：
-            list[Position]：非零持仓列表，stop_loss_price/take_profit_price
-            从同方向止盈止损单中回填；无对应保护单时为 None
+            list[Position]：非零持仓列表；stop_loss_price/take_profit_price
+            保持持仓对象原值（通常为 None），不做保护单回填
         """
-        result = []
-        for pos in self.positions.values():
-            if pos.size == 0:
-                continue
-            direction = 1 if pos.size > 0 else -1
-            mine = [o for o in self.list_tpsl_orders(pos.contract) if o.direction == direction]
-            result.append(
-                pos.model_copy(
-                    update={
-                        "stop_loss_price": next(
-                            (o.trigger_price for o in mine if o.kind == "stop_loss"), None
-                        ),
-                        "take_profit_price": next(
-                            (o.trigger_price for o in mine if o.kind == "take_profit"), None
-                        ),
-                    }
-                )
-            )
-        return result
+        return [pos.model_copy() for pos in self.positions.values() if pos.size != 0]
 
     def place_order(self, req: OrderRequest) -> OrderResult:
         """下单：市价单立即按标记价格成交，限价单挂为 open 等待改单/撤单。

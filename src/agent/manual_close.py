@@ -16,8 +16,10 @@ from decimal import Decimal
 
 from src.agent.fill_persist import FillPersister
 from src.agent.tool_handlers import ToolDeps, ToolOutcome
+from src.agent.tool_leverage import _close_and_bump_epoch
 from src.agent.tool_trading import _record_order, _resolve_leverage, _risk_check
 from src.audit.logger import get_logger
+from src.gateway.async_io import PRIORITY_HIGH, run_gateway_io
 from src.gateway.base import OrderRequest
 from src.paper.account import FillRecord
 
@@ -58,16 +60,32 @@ async def close_position(deps: ToolDeps, contract: str, *, trade_source: str = "
     返回：
         CloseResult，包含风控判定、订单状态与成交价格的平仓结果
     """
-    positions = deps.gateway.list_positions()
+    positions = await run_gateway_io(deps.gateway.list_positions, priority=PRIORITY_HIGH)
     had_position = any(p.contract == contract for p in positions)  # 下单前快照（防文本谎称）
     leverage, _ = _resolve_leverage(contract, None, positions)  # 平仓不调整杠杆
     deny = await _risk_check(
-        deps, contract, size=Decimal(0), price=None, is_close=True, leverage=leverage
+        deps,
+        contract,
+        size=Decimal(0),
+        price=None,
+        is_close=True,
+        leverage=leverage,
+        priority=PRIORITY_HIGH,  # 人工平仓全程高优先级：风控读取不掉回普通队尾
     )
     if deny is not None:
         return CloseResult(outcome=deny)
     req = OrderRequest(contract=contract, size=Decimal(0), close=True)
-    result = deps.gateway.place_order(req)
+    # 平仓写与代际 +1 在同一个卸载任务内完成：增仓方的代际检查与之构成原子对，
+    # 高优平仓插入风控窗口后，旧增仓写会在 executor 线程内被代际比对拦下
+    result = await run_gateway_io(
+        _close_and_bump_epoch,
+        deps.gateway,
+        req,
+        deps.close_epochs,
+        contract,
+        priority=PRIORITY_HIGH,
+        mutation=True,
+    )
     warning = await _record_order(deps, result, req, trade_source=trade_source)
     if not had_position or result.finish_as == "no_position":
         # 无真实成交（paper 报 no_position；mock/真实网关无持仓 close 为 no-op），不谎称成交均价

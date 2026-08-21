@@ -72,6 +72,16 @@ class FakeGateway:
             )
         ]
 
+    def list_tpsl_orders(self, contract: str) -> list:
+        """返回空保护单列表（网关协议要求的展示补全读取）。
+
+        参数：
+            contract: str，合约名
+        返回：
+            list：空列表（本假网关不模拟止盈止损保护单）
+        """
+        return []
+
 
 @pytest.fixture
 async def deps(tmp_path: Path):

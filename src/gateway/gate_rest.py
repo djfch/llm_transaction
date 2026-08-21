@@ -14,7 +14,9 @@ import uuid
 from decimal import Decimal
 
 import gate_api
-from gate_api.exceptions import GateApiException
+import urllib3
+from gate_api.exceptions import ApiException, GateApiException
+from urllib3.exceptions import HTTPError as _Urllib3HTTPError
 
 from ..config import GateConfig
 from .base import (
@@ -22,6 +24,7 @@ from .base import (
     Candle,
     Contract,
     GatewayError,
+    GatewayTransportError,
     OrderNotFound,
     ExchangeTrade,
     OrderRequest,
@@ -32,15 +35,212 @@ from .base import (
     TpslOrder,
     Ticker,
 )
-from .errors import wrap_gate_exception
+from .errors import wrap_gate_exception, wrap_transport_exception
 from .gate_market_stats import GateOpenInterestMixin
 
 _EXPTIME_AHEAD_MS = 30_000  # X-Gate-Exptime：当前毫秒 + 30 秒
 _ORDER_TIMEOUT_S = 10  # 下单请求超时；超时后必须回查防重单
 _TPSL_TIMEOUT_S = 10  # 保护单请求超时；状态未知时绝不继续撤旧单
 _FILLS_TIMEOUT_S = 10  # 成交对账读请求超时；悬挂比失败更糟（会卡死启动/泄漏回填任务）
+_CONNECT_TIMEOUT_S = 5  # 默认连接超时：Gate 正常建连亚秒级，5s 已宽裕
+_READ_TIMEOUT_S = 15  # 默认读取超时：正常 REST 响应秒级，15s 覆盖极端慢响应
+_TOTAL_TIMEOUT_S = 30  # 整次请求 wall-clock 上限（含全部重试共享同一预算）
+# 未显式指定超时的调用统一使用（连接, 读取）超时：SDK 缺省 None=不限时，
+# 网关线程一旦被悬挂请求占住，所有网关 I/O 会整体停摆（issue #72 建议 2）
+_DEFAULT_REQUEST_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
+# SDK 对 tuple 只构造 Timeout(connect, read)、int 只构造 Timeout(total)；且
+# urllib3 的 total 只覆盖单次尝试——每次重试都会 clone 新 Timeout 重新起表，
+# Retry(total=2) 下整次调用最长可达 3×30s（PR #84 评审 P2）。因此禁用 urllib3
+# 自动重试，由 _call_with_shared_deadline 以单调时钟统一控制：全部尝试共享
+# 同一 wall-clock 预算，每次尝试的连接/读取超时按剩余预算收紧。
+_RETRY_ATTEMPTS = 3  # 首试 + 2 次重试（与原 Retry(total=2) 等价）
+_RETRY_BACKOFF_S = 0.2  # 退避基数：第 n 次重试前等待 0.2×2^n 秒（受剩余预算截断）
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# 仅明确只读方法可重试。HTTP 幂等 ≠ 交易安全：PUT 改单/DELETE 撤单在传输结果
+# 未知时重试，会把首次尝试的未知结果"洗成"第二次尝试的明确业务错误（如订单
+# 已成交后重试返回 ORDER_NOT_FOUND），绕过 OrderStateUnknown fail-closed 契约
+# （PR #84 评审 P1）。所有交易写（POST/PUT/DELETE）传输异常后只执行一次，
+# 原样上抛由 call_api 归一化为 GatewayTransportError，再由业务层转状态未知；
+# 个别确可安全重试的写接口须由业务方法在对账后显式决定。
+_RETRYABLE_TRANSPORT_ERRORS = (
+    urllib3.exceptions.ConnectTimeoutError,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.NewConnectionError,
+    urllib3.exceptions.ProtocolError,
+)
 _TEXT_MAX_BYTES = 28  # Gate 自定义订单 ID 总长上限（字节）
 _TEXT_RE = re.compile(r"[0-9A-Za-z_-]+")  # Gate 自定义订单 ID 合法字符集
+
+
+def _ensure_total_deadline(timeout: object) -> urllib3.Timeout:
+    """给 SDK 转换后的 timeout 补整次 wall-clock 上限（total），无 total 时补默认值。
+
+    SDK 只产三种形态：None（调用方未给超时）、Timeout(connect, read)（tuple 路径）、
+    Timeout(total)（int 路径）。已带 total 的原样返回（显式给定的整次上限优先）。
+
+    参数：
+        timeout: object，SDK 传入 PoolManager.request 的 timeout 实参
+
+    返回：
+        urllib3.Timeout：保证携带 total 的超时对象；None 时构造
+        （connect=5, read=15, total=30）默认组合
+    """
+    if timeout is None:
+        return urllib3.Timeout(
+            connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S, total=_TOTAL_TIMEOUT_S
+        )
+    if isinstance(timeout, urllib3.Timeout):
+        if timeout.total is not None:
+            return timeout
+        timeout = timeout.clone()
+        timeout.total = _TOTAL_TIMEOUT_S
+        return timeout
+    return urllib3.Timeout(total=float(timeout))  # 兼容 int/float 直传
+
+
+def _call_with_shared_deadline(request_fn, method: str, url: str, request_kwargs: dict):
+    """以单调时钟统一控制重试：全部尝试共享同一 wall-clock 预算后转发真实请求。
+
+    urllib3 的 Timeout.total 只覆盖单次尝试（每次重试 clone 新 Timeout 重新起表），
+    Retry(total=2) 下整次调用最长 3×预算；本层改为：禁用 urllib3 自动重试
+    （retries=False），用 time.monotonic() 建立跨尝试共享的 deadline，每次尝试的
+    连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。仅明确只读方法
+    （GET/HEAD/OPTIONS）可重试，交易写（POST/PUT/DELETE）绝不重试（传输结果
+    未知时重试会掩盖首次尝试的未知结果，见 _RETRYABLE_METHODS），可重试异常
+    仅限传输层（超时/连接失败/连接中断）。
+    进行中的响应无法硬中断——read 超时只约束相邻字节间隔，服务端持续慢吐字节
+    可拖延单次响应远超预算；故响应返回后再校验 deadline，超出预算的迟到成功
+    一律按本次尝试超时处理（可重试），保证整次调用不在预算耗尽后返回成功。
+
+    参数：
+        request_fn: Callable，真实执行请求的函数（PoolManager.request 原实现）
+        method: str，HTTP 方法
+        url: str，请求 URL
+        request_kwargs: dict，转发给 request_fn 的关键字参数；timeout/retries
+            会被本层改写
+
+    返回：
+        与 PoolManager.request 相同：原始 HTTP 响应（在共享预算内到达）
+
+    异常：
+        urllib3.exceptions.HTTPError：末次尝试的传输层异常原样上抛；响应在预算
+            耗尽后到达时抛 ReadTimeoutError；预算在两次尝试之间耗尽而无末次异常
+            时抛 ConnectTimeoutError（均由 call_api 归一化为 GatewayTransportError）
+    """
+    base = _ensure_total_deadline(request_kwargs.get("timeout"))
+    budget = base.total if isinstance(base.total, (int, float)) else float(_TOTAL_TIMEOUT_S)
+    # 读构造期原始字段 _connect/_read 而非 connect_timeout/read_timeout 属性：
+    # read_timeout 在 read 缺省且 total 有值时会按"total-已用连接时长"动态计算，
+    # 计时器未启动直接抛 TimeoutStateError（urllib3 Timeout 实现细节）
+    per_connect = base._connect if isinstance(base._connect, (int, float)) else budget
+    per_read = base._read if isinstance(base._read, (int, float)) else budget
+    deadline = time.monotonic() + budget
+    request_kwargs["retries"] = False  # 重试由本层按共享 deadline 控制
+    attempts = _RETRY_ATTEMPTS if method.upper() in _RETRYABLE_METHODS else 1
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break  # 预算耗尽：不再发起新尝试
+        request_kwargs["timeout"] = urllib3.Timeout(
+            connect=min(per_connect, remaining), read=min(per_read, remaining)
+        )
+        try:
+            response = request_fn(method, url, **request_kwargs)
+        except _RETRYABLE_TRANSPORT_ERRORS as exc:
+            last_exc = exc
+        else:
+            if time.monotonic() <= deadline:
+                return response
+            # 进行中的响应无法硬中断（read 超时只约束相邻字节间隔，服务端持续
+            # 慢吐字节可拖延单次响应远超预算）：响应返回后补验 deadline，超出
+            # 预算的迟到成功按本次尝试超时处理，整次调用不得在预算耗尽后返回
+            # 成功（PR #84 评审 P2）；POST 写路径由此落入"状态未知"契约
+            last_exc = urllib3.exceptions.ReadTimeoutError(
+                None, url, f"响应超过 {budget:.0f}s wall-clock 预算后到达，按超时处理"
+            )
+        backoff = _RETRY_BACKOFF_S * (2**attempt)
+        if deadline - time.monotonic() > backoff:
+            time.sleep(backoff)
+    if last_exc is not None:
+        raise last_exc
+    raise urllib3.exceptions.ConnectTimeoutError(
+        None, f"整次请求超过 {budget:.0f}s wall-clock 上限，未再发起新尝试"
+    )
+
+
+class _TimeoutApiClient(gate_api.ApiClient):
+    """为未显式指定 _request_timeout 的调用注入默认（连接, 读取）超时的 ApiClient。
+
+    gate_api 生成代码对每次调用都显式传 _request_timeout（缺省 None=不限时），
+    故这里对 None 统一替换为默认超时；调用方显式给定的值（如下单 10s）原样优先。
+    构造时包装 PoolManager.request 入口：每次请求经 _call_with_shared_deadline
+    以单调时钟建立跨重试共享的 wall-clock 上限（SDK 的 tuple/int 转换到不了
+    total，且 urllib3 的 total 每次重试会重新起表，见 _ensure_total_deadline）。
+    """
+
+    def __init__(self, configuration: gate_api.Configuration, *args, **kwargs) -> None:
+        """初始化客户端：包装 PoolManager.request 为共享 deadline 版本后交父类装配。
+
+        参数：
+            configuration: gate_api.Configuration，SDK 客户端配置（原样透传）
+            args: tuple，透传父类的位置参数
+            kwargs: dict，透传父类的关键字参数
+
+        返回：
+            None，初始化实例（副作用：包装 rest_client.pool_manager.request）
+        """
+        super().__init__(configuration, *args, **kwargs)
+        pool_manager = self.rest_client.pool_manager
+        original_request = pool_manager.request
+
+        def _request_with_total_deadline(method: str, url: str, **request_kwargs):
+            """经共享 deadline 重试层转发 PoolManager.request 原实现。
+
+            参数：
+                method: str，HTTP 方法
+                url: str，请求 URL
+                request_kwargs: dict，原样转发的关键字参数；timeout/retries 由
+                    _call_with_shared_deadline 按共享预算改写
+
+            返回：
+                与 PoolManager.request 相同：原始 HTTP 响应
+            """
+            return _call_with_shared_deadline(original_request, method, url, request_kwargs)
+
+        pool_manager.request = _request_with_total_deadline
+
+    def call_api(self, *args, **kwargs):
+        """注入默认 _request_timeout 后转发父类实现，并归一化传输层异常。
+
+        urllib3 的 ReadTimeoutError/ConnectTimeoutError/MaxRetryError 等传输层
+        异常统一包装为 GatewayTransportError（label=TRANSPORT_UNKNOWN）：读路径
+        由此获得稳定的 502/错误契约，写路径可据类型区分"明确拒绝"与"结果未知"
+        （PR #84 评审 P2）。GateApiException 不继承 urllib3.HTTPError，不受影响。
+
+        参数：
+            args: tuple，原样转发的位置参数
+            kwargs: dict，原样转发的关键字参数；_request_timeout 为 None 或缺失时
+                注入默认（连接, 读取）超时
+
+        返回：
+            与父类 call_api 相同：反序列化后的响应对象
+
+        异常：
+            GatewayTransportError：传输层/网关层失败（超时、连接失败、无 label 的
+                502/504、SSL 失败等）时抛出，请求可能已到达交易所，按"结果未知"处理
+        """
+        if kwargs.get("_request_timeout") is None:
+            kwargs["_request_timeout"] = _DEFAULT_REQUEST_TIMEOUT
+        try:
+            return super().call_api(*args, **kwargs)
+        except GateApiException:
+            raise  # 带 label 的服务端明确拒绝：保持原样，由各方法 wrap_gate_exception 分类
+        except (ApiException, _Urllib3HTTPError, AttributeError) as exc:
+            # 原始 ApiException（无 label 的 502/504 代理响应、SSL status=0）、urllib3
+            # 传输异常、SDK 对 body=None 解码产生的 AttributeError：请求可能已到达
+            # 交易所，统一按"结果未知"归一化（PR #84 评审 P1）
+            raise wrap_transport_exception(exc) from exc
 
 
 def gen_client_order_id() -> str:
@@ -385,7 +585,7 @@ class GateRestGateway(GateOpenInterestMixin):
         """
         host = gate_config.testnet_host if testnet else gate_config.live_host
         config = gate_api.Configuration(host=host, key=api_key, secret=api_secret)
-        self._api = gate_api.FuturesApi(gate_api.ApiClient(config))
+        self._api = gate_api.FuturesApi(_TimeoutApiClient(config))
         self._settle = gate_config.settle
 
     @staticmethod
@@ -435,26 +635,23 @@ class GateRestGateway(GateOpenInterestMixin):
             raise wrap_gate_exception(exc) from exc
 
     def list_positions(self) -> list[Position]:
-        """读取全部持仓，并回填各持仓同方向整仓保护单的止损/止盈触发价。
+        """读取全部持仓（单次 REST 裸读，止损/止盈字段不回填）。
+
+        保持单次请求：持仓 + 逐合约保护单查询的 N+1 复合读取会作为一个 executor
+        任务长期占住唯一网关线程，HIGH 人工平仓无法在子请求间插队，且任一保护单
+        查询超时会把安全路径整体拖死（PR #84 评审 P1）。止损/止盈展示补全由
+        async_io.read_positions_with_tpsl 逐合约独立调度、单合约失败降级。
 
         参数：无
 
         返回：
-            list[Position]：共用持仓模型列表；无对应保护单时止损/止盈价为 None
+            list[Position]：共用持仓模型列表；stop_loss_price/take_profit_price 恒为 None
 
         异常：
             GatewayError：交易所请求失败时抛出
         """
         try:
-            positions = [_to_position(p) for p in self._api.list_positions(self._settle)]
-            for pos in positions:
-                tpsl = self.list_tpsl_orders(pos.contract)
-                mine = [o for o in tpsl if o.direction == (1 if pos.size > 0 else -1)]
-                stop = next((o.trigger_price for o in mine if o.kind == "stop_loss"), None)
-                take = next((o.trigger_price for o in mine if o.kind == "take_profit"), None)
-                pos.stop_loss_price = stop
-                pos.take_profit_price = take
-            return positions
+            return [_to_position(p) for p in self._api.list_positions(self._settle)]
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
 
@@ -541,6 +738,7 @@ class GateRestGateway(GateOpenInterestMixin):
 
         异常：
             GatewayError：交易所请求失败时抛出
+            OrderStateUnknown：改单超时或网络失败、订单状态未知时抛出（禁止盲目重试）
         """
         amendment = gate_api.FuturesOrderAmendment(
             price=_fmt_decimal(price) if price is not None else None,
@@ -553,6 +751,11 @@ class GateRestGateway(GateOpenInterestMixin):
             return _to_order(order)
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+        except GatewayTransportError as exc:  # 超时/网络失败：交易所可能已执行，状态未知
+            raise OrderStateUnknown(
+                f"改单超时或网络失败，订单 {order_id} 状态未知，禁止盲目重试，请人工核对",
+                label="ORDER_STATE_UNKNOWN",
+            ) from exc
 
     def cancel_order(self, contract: str, order_id: str) -> OrderResult:
         """撤销指定挂单。
@@ -566,6 +769,7 @@ class GateRestGateway(GateOpenInterestMixin):
 
         异常：
             GatewayError：交易所请求失败时抛出（订单不存在时为 OrderNotFound）
+            OrderStateUnknown：撤单超时或网络失败、订单状态未知时抛出（禁止盲目重试）
         """
         try:
             order = self._api.cancel_futures_order(
@@ -574,6 +778,11 @@ class GateRestGateway(GateOpenInterestMixin):
             return _to_order(order)
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+        except GatewayTransportError as exc:  # 超时/网络失败：交易所可能已执行，状态未知
+            raise OrderStateUnknown(
+                f"撤单超时或网络失败，订单 {order_id} 状态未知，禁止盲目重试，请人工核对",
+                label="ORDER_STATE_UNKNOWN",
+            ) from exc
 
     def list_orders(
         self,

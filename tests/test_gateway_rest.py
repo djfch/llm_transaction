@@ -13,10 +13,17 @@ from unittest.mock import Mock
 
 import pytest
 from gate_api.exceptions import ApiException, GateApiException
+from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ReadTimeoutError
 
+import gate_api
 from src.config import GateConfig
-from src.gateway import GatewayError, OrderRequest, OrderStateUnknown
-from src.gateway.gate_rest import GateRestGateway, _to_position
+from src.gateway import GatewayError, GatewayTransportError, OrderRequest, OrderStateUnknown
+from src.gateway.gate_rest import (
+    _DEFAULT_REQUEST_TIMEOUT,
+    GateRestGateway,
+    _TimeoutApiClient,
+    _to_position,
+)
 
 BTC = "BTC_USDT"
 
@@ -587,3 +594,386 @@ def test_fetch_open_interest_history_wraps_error(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(GatewayError) as excinfo:
         gateway.fetch_open_interest_history(BTC, "4h")
     assert excinfo.value.label == "INVALID_PARAM"
+
+
+def test_gateway_uses_timeout_api_client():
+    """验证真实网关默认装配带超时注入的 ApiClient（读路径不再不限时悬挂）。
+
+    参数：无
+    返回：
+        None，断言网关内部 SDK 客户端为 _TimeoutApiClient 实例
+    """
+    gateway = make_gateway()
+    assert isinstance(gateway._api.api_client, _TimeoutApiClient)
+
+
+def test_timeout_client_injects_default_timeout(monkeypatch: pytest.MonkeyPatch):
+    """验证未显式指定 _request_timeout 的调用被注入默认（连接, 读取）超时。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 以捕获透传参数
+    返回：
+        None，断言缺省与显式 None 两种形态都被替换为默认超时元组
+    """
+    captured: dict = {}
+
+    def fake_call_api(self, *args, **kwargs):
+        """记录透传参数的伪 call_api（不触网）。
+
+        参数：
+            args: tuple，位置参数
+            kwargs: dict，关键字参数
+        返回：
+            None，仅记录参数
+        """
+        captured.update(kwargs)
+
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", fake_call_api)
+    client = _TimeoutApiClient(gate_api.Configuration(host="http://localhost"))
+    client.call_api("/futures/usdt/positions", "GET")
+    assert captured["_request_timeout"] == _DEFAULT_REQUEST_TIMEOUT
+    client.call_api("/futures/usdt/positions", "GET", _request_timeout=None)
+    assert captured["_request_timeout"] == _DEFAULT_REQUEST_TIMEOUT
+
+
+def test_timeout_client_preserves_explicit_timeout(monkeypatch: pytest.MonkeyPatch):
+    """验证调用方显式指定的 _request_timeout（如下单 10s）不被默认值覆盖。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 以捕获透传参数
+    返回：
+        None，断言显式超时值原样透传
+    """
+    captured: dict = {}
+
+    def fake_call_api(self, *args, **kwargs):
+        """记录透传参数的伪 call_api（不触网）。
+
+        参数：
+            args: tuple，位置参数
+            kwargs: dict，关键字参数
+        返回：
+            None，仅记录参数
+        """
+        captured.update(kwargs)
+
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", fake_call_api)
+    client = _TimeoutApiClient(gate_api.Configuration(host="http://localhost"))
+    client.call_api("/futures/usdt/orders", "POST", _request_timeout=10)
+    assert captured["_request_timeout"] == 10
+
+
+# ---------- PR #84 第二轮评审回归：传输层异常归一化与写操作结果未知 ----------
+
+
+@pytest.mark.parametrize(
+    "transport_exc",
+    [
+        ReadTimeoutError(None, "/", "read timed out"),
+        ConnectTimeoutError(None, "/", "connect timed out"),
+        MaxRetryError(None, "/", "too many errors"),
+    ],
+)
+def test_transport_exceptions_normalized(transport_exc, monkeypatch: pytest.MonkeyPatch):
+    """验证 urllib3 传输层异常（读超时/连接超时/重试耗尽）归一化为 GatewayTransportError。
+
+    参数：
+        transport_exc: Exception，参数化的 urllib3 传输层异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出传输层异常
+    返回：
+        None，断言读接口抛出 label=TRANSPORT_UNKNOWN 的 GatewayTransportError，
+        且为 GatewayError 子类（只读路由自动 502、agent 错误契约稳定）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=transport_exc))
+    with pytest.raises(GatewayTransportError) as excinfo:
+        gateway.list_positions()
+    assert excinfo.value.label == "TRANSPORT_UNKNOWN"
+    assert isinstance(excinfo.value, GatewayError)
+
+
+def test_gate_api_exception_not_wrapped_as_transport(monkeypatch: pytest.MonkeyPatch):
+    """验证 GateApiException（服务端明确拒绝）不被传输层归一化误包。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出 GateApiException
+    返回：
+        None，断言读接口抛出按 label 映射的普通 GatewayError 而非 GatewayTransportError
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient, "call_api", Mock(side_effect=make_gate_exc("SOME_LABEL"))
+    )
+    with pytest.raises(GatewayError) as excinfo:
+        gateway.list_positions()
+    assert not isinstance(excinfo.value, GatewayTransportError)
+    assert excinfo.value.label == "SOME_LABEL"
+
+
+def test_amend_order_transport_timeout_state_unknown(monkeypatch: pytest.MonkeyPatch):
+    """验证改单传输超时映射为 OrderStateUnknown（交易所可能已执行，禁止盲目重试）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出读超时
+    返回：
+        None，断言 amend_order 抛出 label=ORDER_STATE_UNKNOWN 的 OrderStateUnknown
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient,
+        "call_api",
+        Mock(side_effect=ReadTimeoutError(None, "/", "read timed out")),
+    )
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.amend_order(BTC, "12345", price=Decimal("59000"))
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def test_cancel_order_transport_timeout_state_unknown(monkeypatch: pytest.MonkeyPatch):
+    """验证撤单传输超时映射为 OrderStateUnknown（交易所可能已执行，禁止盲目重试）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出连接超时
+    返回：
+        None，断言 cancel_order 抛出 label=ORDER_STATE_UNKNOWN 的 OrderStateUnknown
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(
+        gate_api.ApiClient,
+        "call_api",
+        Mock(side_effect=ConnectTimeoutError(None, "/", "connect timed out")),
+    )
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.cancel_order(BTC, "12345")
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def _raw_api_exception(status: int, reason: str, body: bytes | None = None) -> ApiException:
+    """构造 SDK 未归一化的原始 ApiException（非 GateApiException 子类路径）。
+
+    参数：
+        status: int，HTTP 状态码（0 表示 SSL/连接层失败）
+        reason: str，错误描述
+        body: bytes | None，响应体；None 模拟 SSL 失败时无响应体
+
+    返回：
+        ApiException：不带 Gate 私有 label 的原始异常实例
+    """
+    exc = ApiException(status=status, reason=reason)
+    exc.body = body
+    return exc
+
+
+_SDK_RAW_EXCEPTIONS = [
+    _raw_api_exception(502, "Bad Gateway", b"<html>Bad Gateway</html>"),
+    _raw_api_exception(0, "SSLError: certificate verify failed"),
+    AttributeError("'NoneType' object has no attribute 'decode'"),
+]
+
+
+@pytest.mark.parametrize("sdk_exc", _SDK_RAW_EXCEPTIONS)
+def test_sdk_raw_exceptions_normalized(sdk_exc: Exception, monkeypatch: pytest.MonkeyPatch):
+    """验证 SDK 三类原始异常（无 label 非 2xx 响应/SSL 失败/空体 decode 崩溃）统一归一化。
+
+    参数：
+        sdk_exc: Exception，参数化的 SDK 原始异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出该异常
+
+    返回：
+        None，断言读操作抛出 label=TRANSPORT_UNKNOWN 的 GatewayTransportError——
+        不向上泄漏 ApiException/AttributeError 等 SDK 内部类型（PR #84 评审 P1）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=sdk_exc))
+    with pytest.raises(GatewayTransportError) as excinfo:
+        gateway.list_positions()
+    assert excinfo.value.label == "TRANSPORT_UNKNOWN"
+
+
+@pytest.mark.parametrize("sdk_exc", _SDK_RAW_EXCEPTIONS)
+def test_amend_cancel_sdk_raw_exceptions_state_unknown(
+    sdk_exc: Exception, monkeypatch: pytest.MonkeyPatch
+):
+    """验证改单/撤单遭遇 SDK 三类原始异常时落 ORDER_STATE_UNKNOWN（禁止盲目重试）。
+
+    参数：
+        sdk_exc: Exception，参数化的 SDK 原始异常实例
+        monkeypatch: pytest.MonkeyPatch，替换父类 call_api 抛出该异常
+
+    返回：
+        None，断言 amend_order/cancel_order 均抛 label=ORDER_STATE_UNKNOWN 的
+        OrderStateUnknown（与传输超时同一 fail-closed 语义）
+    """
+    gateway = make_gateway()
+    monkeypatch.setattr(gate_api.ApiClient, "call_api", Mock(side_effect=sdk_exc))
+    with pytest.raises(OrderStateUnknown) as excinfo:
+        gateway.amend_order(BTC, "12345", price=Decimal("59000"))
+    assert excinfo.value.label == "ORDER_STATE_UNKNOWN"
+    with pytest.raises(OrderStateUnknown) as excinfo2:
+        gateway.cancel_order(BTC, "12345")
+    assert excinfo2.value.label == "ORDER_STATE_UNKNOWN"
+
+
+def test_pool_manager_request_patches_total_deadline():
+    """验证 PoolManager 入口被包装为共享 deadline 重试层（连接/读取/整次三者齐备）。
+
+    参数：无
+
+    返回：
+        None，断言 SDK tuple 路径（connect/read）被补 total=30、None 路径构造完整
+        默认组合、显式 int 路径（下单 total=10）不被覆盖；网关 PoolManager.request
+        已替换为共享 deadline 包装（PR #84 评审 P2）
+    """
+    import urllib3
+
+    from src.gateway.gate_rest import _ensure_total_deadline
+
+    assert _ensure_total_deadline(None).total == 30
+    t = _ensure_total_deadline(urllib3.Timeout(connect=5, read=15))
+    assert (t.connect_timeout, t.read_timeout, t.total) == (5, 15, 30)
+    assert _ensure_total_deadline(urllib3.Timeout(total=10)).total == 10
+
+    gateway = make_gateway()
+    pool_manager = gateway._api.api_client.rest_client.pool_manager
+    assert pool_manager.request.__name__ == "_request_with_total_deadline"
+
+
+def test_shared_deadline_retries_succeed_after_two_timeouts():
+    """验证重试共享同一 deadline：两次传输超时后第三次成功仍正常返回。
+
+    参数：无
+
+    返回：
+        None，断言第三次尝试成功返回结果，且每次尝试都带收紧后的
+        connect/read 超时与 retries=False（PR #84 评审 P2）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls: list[dict] = []
+
+    def _flaky(method, url, **kwargs):
+        calls.append(kwargs)
+        if len(calls) < 3:
+            raise ReadTimeoutError(None, url, "read timed out")
+        return "ok"
+
+    result = _call_with_shared_deadline(_flaky, "GET", "https://example.com", {})
+    assert result == "ok"
+    assert len(calls) == 3
+    assert all(c["retries"] is False for c in calls)
+    assert all(isinstance(c["timeout"].connect_timeout, (int, float)) for c in calls)
+    assert all(isinstance(c["timeout"].read_timeout, (int, float)) for c in calls)
+
+
+def test_shared_deadline_clamps_attempt_timeouts_to_remaining_budget():
+    """验证后续尝试的连接/读取超时按剩余预算收紧，预算耗尽不再发起新尝试。
+
+    参数：无
+
+    返回：
+        None，断言 1s 共享预算下：第二次尝试的 read 被收紧到剩余约 0.2s、
+        第三次尝试因预算耗尽未发起——重试不会像 urllib3 Retry 那样每次
+        重新起表（PR #84 评审 P2）
+    """
+    import time
+
+    import urllib3
+
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    attempts: list[urllib3.Timeout] = []
+
+    def _slow_fail(method, url, **kwargs):
+        attempts.append(kwargs["timeout"])
+        time.sleep(0.6)  # 每次尝试实际耗时 0.6s，快速耗尽共享预算
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(
+            _slow_fail, "GET", "https://example.com", {"timeout": urllib3.Timeout(total=1.0)}
+        )
+    assert len(attempts) == 2  # 第三次尝试因预算耗尽未发起
+    assert 0.9 < attempts[0].read_timeout <= 1.0  # 首次：read 收紧到完整预算
+    assert (
+        0 < attempts[1].read_timeout < 0.45
+    )  # 第二次：只剩约 0.2s 预算（0.6s 尝试 + 0.2s 退避后）
+
+
+def test_shared_deadline_post_never_retried():
+    """验证 POST 下单/改撤单类请求绝不重试（防重单），一次超时即原样上抛。
+
+    参数：无
+
+    返回：
+        None，断言 POST 只发起一次尝试并抛出传输异常（PR #84 评审 P2）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _fail(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(_fail, "POST", "https://example.com", {})
+    assert calls == 1
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_shared_deadline_write_methods_never_retried(method: str):
+    """验证 PUT 改单/DELETE 撤单类交易写绝不重试，传输异常后只执行一次。
+
+    参数：
+        method: str，HTTP 方法（PUT/DELETE）
+
+    返回：
+        None，断言写方法只发起一次尝试并原样上抛传输异常（PR #84 评审 P1：
+        HTTP 幂等不等于交易安全，改单/撤单在传输结果未知时重试会把首次尝试
+        的未知结果洗成第二次的明确业务错误，绕过 OrderStateUnknown 契约）
+    """
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _fail(method_arg, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ReadTimeoutError(None, url, "read timed out")
+
+    with pytest.raises(ReadTimeoutError):
+        _call_with_shared_deadline(_fail, method, "https://example.com", {})
+    assert calls == 1
+
+
+def test_late_success_after_deadline_treated_as_timeout():
+    """验证预算耗尽后才到达的迟到成功不被返回：按本次尝试超时处理。
+
+    参数：无
+
+    返回：
+        None，断言 request_fn 执行超过 Timeout(total) 预算后返回成功时，整次
+        调用抛 ReadTimeoutError、不返回该响应，也不再发起新尝试（PR #84 评审
+        P2：read 超时只约束相邻字节间隔，持续慢吐字节的响应可在预算耗尽后
+        完成——迟到成功必须按超时处理，不得在超 deadline 后仍被视为成功）
+    """
+    import time
+
+    import urllib3
+
+    from src.gateway.gate_rest import _call_with_shared_deadline
+
+    calls = 0
+
+    def _slow_success(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.4)  # 相邻字节间隔约束内的持续慢响应：超出整次预算才"成功"
+        return object()
+
+    with pytest.raises(ReadTimeoutError, match="wall-clock"):
+        _call_with_shared_deadline(
+            _slow_success, "GET", "https://example.com", {"timeout": urllib3.Timeout(total=0.2)}
+        )
+    assert calls == 1  # 预算已耗尽：不再发起第二次尝试

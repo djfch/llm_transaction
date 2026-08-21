@@ -42,6 +42,57 @@ from .market_stats import PaperOpenInterestMixin
 class PaperGateway(PaperOpenInterestMixin):
     """模拟撮合网关。paper 模式下替代真实网关，供 agent / 风控无差别调用。"""
 
+    # 纯内存方法标记（统一卸载层 async_io 识别）：命中方法在事件循环线程内联执行，
+    # 不进 executor——on_price/settle_funding/drain_fills 本就在事件循环线程直接改
+    # 账户状态，账户类方法再进线程会把单线程状态机变成跨线程共享可变状态（PR #84
+    # 评审 P1）。另登记以本网关为首参、内部仅调纯内存方法的同步事务辅助
+    # （_swap_tpsl_group），保证其事务段同样不被线程交错；平仓代际包装
+    # （_close_and_bump_epoch/_place_unless_close_intervened）同理——检查与下单
+    # 必须在同一线程段内完成；已改 async 的组合辅助
+    # （_amend_direction/_account_equity 等）不在此列——其内部逐次读取按各方法
+    # 自身标记判定。get_candlesticks/fetch_open_interest 等行情委托方法可能
+    # 转发真实 REST provider，不得加入本集合。
+    _GATEWAY_IO_INLINE_STATIC = frozenset(
+        {
+            "get_contract",
+            "get_account",
+            "list_positions",
+            "set_leverage",
+            "place_order",
+            "amend_order",
+            "cancel_order",
+            "list_orders",
+            "list_tpsl_orders",
+            "create_tpsl_order",
+            "cancel_tpsl_order",
+            "_swap_tpsl_group",
+            "_close_and_bump_epoch",
+            "_place_unless_close_intervened",
+            "_amend_unless_close_intervened",
+        }
+    )
+
+    @property
+    def __gateway_io_inline__(self) -> Callable[[str], bool]:
+        """实例级内联判定：静态集合之外，get_tickers 仅在无真实行情 provider 时内联。
+
+        ticker_provider 为 None 时 get_tickers 由内存行情快照合成（纯内存，须与
+        on_price 同线程）；注入了真实 REST provider 时则必须卸载到 executor，
+        不得内联阻塞事件循环（PR #84 评审 P1：复合调用按实例动态判定）。
+
+        参数：无
+
+        返回：
+            Callable[[str], bool]：函数名 -> 是否应在事件循环线程内联执行
+        """
+
+        def _is_inline(name: str) -> bool:
+            return name in self._GATEWAY_IO_INLINE_STATIC or (
+                name == "get_tickers" and self._ticker_provider is None
+            )
+
+        return _is_inline
+
     def __init__(
         self,
         config: PaperConfig,
