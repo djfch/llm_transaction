@@ -481,6 +481,7 @@ async def test_research_task_created_and_cancelled_on_shutdown(build_ctx, monkey
         research_task,
         safety_task=None,
         lag_task=None,
+        watchdog_task=None,
     ) -> None:
         """替代 run_app 的 shutdown：记录研报任务并取消各后台任务。
 

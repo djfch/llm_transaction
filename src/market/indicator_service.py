@@ -13,6 +13,7 @@ from typing import Protocol
 
 from ..gateway.base import Candle
 from . import indicators as ind
+from .candles import stale_text
 
 # 一次取用的历史根数（缓存有多少用多少），覆盖注册表最大 min_candles（ema50=50）
 HISTORY_LIMIT = 200
@@ -236,6 +237,10 @@ class IndicatorService:
         candles = self._candle_cache.get_recent(contract, interval, HISTORY_LIMIT)
         if not candles:
             return f"{contract} 指标({interval}): 无K线数据"
+        stale = stale_text(candles, interval)
+        if stale is not None:
+            # 停更即报错：不给 LLM 旧指标值，防其基于过时行情幻觉决策（issue #74）
+            return f"{contract} 指标({interval}): 指标不可用——{stale}"
         parts = [self._short_item(key, contract, candles) for key in keys]
         return f"{contract} 指标({interval}): " + ", ".join(parts)
 

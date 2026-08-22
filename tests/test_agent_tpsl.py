@@ -1,6 +1,7 @@
 """止盈止损工具测试：开仓不变量、保护替换顺序与 paper 触发。"""
 
 import time
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -93,9 +94,15 @@ async def test_market_data_returns_beijing_ohlcv_table(tmp_path):
         None：通过断言校验目标场景，无返回值
     """
     gateway = MockGateway(contracts={"BTC_USDT": _contract()})
+    recent = int(time.time()) - 1800  # 半小时前开盘的 1h K 线：新鲜数据（issue #74 停更判定）
     gateway.candles = [
         Candle(
-            t=0, o=Decimal("1"), h=Decimal("3"), l=Decimal("0.5"), c=Decimal("2"), v=Decimal("8")
+            t=recent,
+            o=Decimal("1"),
+            h=Decimal("3"),
+            l=Decimal("0.5"),
+            c=Decimal("2"),
+            v=Decimal("8"),
         )
     ]
     env = await _registry(tmp_path, gateway)
@@ -106,7 +113,13 @@ async def test_market_data_returns_beijing_ohlcv_table(tmp_path):
         )
         assert "交易对：BTC_USDT；时间尺度：1h；时间：北京时间（UTC+8）" in out.text
         assert "时间（年月日时分） | 开盘价 | 收盘价 | 最高价格 | 最低价格 | 交易量" in out.text
-        assert "1970-01-01 08:00 | 1 | 2 | 3 | 0.5 | 8" in out.text
+        assert "1970-01-01 08:00 | 1 | 2 | 3 | 0.5 | 8" not in out.text
+        from datetime import timedelta, timezone
+
+        beijing = datetime.fromtimestamp(recent, tz=timezone(timedelta(hours=8)))
+        assert (
+            f"{beijing:%Y-%m-%d %H:%M} | 1 | 2" in out.text
+        )  # 北京时间行（尾部可能带未收盘标注，CI 时区无关）
     finally:
         await env.db.close()
 

@@ -324,3 +324,35 @@ async def test_snapshot_rejects_limit_outside_contract(limit: int) -> None:
 
     with pytest.raises(ValueError, match="limit 必须在 1-100"):
         await service.snapshot("BTC_USDT", limit=limit)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_stale_candles_degrade_status() -> None:
+    """K 线停更（最后一根收盘超 2×周期）时状态降级，不得判「完整」（issue #74）。
+
+    参数：无
+
+    返回：
+        None：断言仅 4h 停更时整体为「部分缺失」且 missing 含停更说明；
+        双周期均停更时为「不可用」
+    """
+    base = _candles(14_400)  # 正常数据（相对 now=8_000_001 新鲜）
+    daily = _candles(86_400)
+    gateway = _Gateway({"4h": _oi(14_400, "100", "110"), "1d": _oi(86_400, "200", "220")})
+
+    # 仅 4h 停更：最后收盘时刻约 8_000_000，now 推到 3 个 4h 之后
+    stale_4h = ResearchMarketDataService(
+        _CandleCache({"4h": base, "1d": daily}), gateway, now_fn=lambda: 8_000_001 + 3 * 14_400
+    )
+    result = await stale_4h.snapshot("BTC_USDT", limit=5)
+    assert result["data_status"] == "部分缺失"
+    assert any("4h: K线已停更" in m for m in result["missing"])
+
+    # 双周期均停更 → 不可用（硬闸门失效）
+    all_stale = ResearchMarketDataService(
+        _CandleCache({"4h": base, "1d": daily}),
+        gateway,
+        now_fn=lambda: 8_000_001 + 10 * 86_400,
+    )
+    result_all = await all_stale.snapshot("BTC_USDT", limit=5)
+    assert result_all["data_status"] == "不可用"

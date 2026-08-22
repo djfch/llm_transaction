@@ -1,5 +1,6 @@
 """IndicatorService 测试：假 K 线缓存 + 假 OI 缓存装配，不触网不依赖真实网关。"""
 
+import time
 from decimal import Decimal
 
 import pytest
@@ -65,15 +66,20 @@ class FakeOiCache:
         return self._values.get(contract)
 
 
-def make_candles(n: int, start: int = 1_700_000_000) -> list[Candle]:
+def make_candles(n: int, start: int | None = None) -> list[Candle]:
     """n 根 1h K 线：收盘价单调上行（100 起），时间升序。
+
+    start 缺省时取"当前整点往前 n 根"，保证数据新鲜（issue #74 停更判定
+    会把旧时间戳的 K 线判为停更，指标文本出口返回不可用）。
 
     参数：
         n: int，请求数量
-        start: int，起始时间戳
+        start: int | None，起始时间戳；None 时取当前整点前推 n 小时
     返回：
         list[Candle]，返回该测试辅助函数构造或记录的结果
     """
+    if start is None:
+        start = int(time.time()) // 3600 * 3600 - n * 3600
     return [
         Candle(
             t=start + i * 3600,
@@ -321,3 +327,19 @@ def test_series_fetches_deep_enough_for_large_limit():
     points = out["series"]["ema50"]["fields"]["ema50"]
     assert len(points) == 700  # 与最后 700 根 K 线时间对齐
     assert points[0]["value"] is not None  # 暖机余量覆盖 ema50，窗口首根即有值
+
+
+def test_shortlist_line_stale_marks_unavailable():
+    """K 线停更时短名单整行替换为不可用文案，不输出旧指标值（issue #74）。
+
+    参数：无
+    返回：
+        None，断言旧时间戳 K 线下返回「指标不可用」且不含 EMA 值
+    """
+    old_start = int(time.time()) // 3600 * 3600 - 65 * 3600  # 最后一根收盘在 ~5h 前
+    line_old = IndicatorService(
+        FakeCandleCache({(BTC, INTERVAL): make_candles(60, start=old_start)}),
+        FakeOiCache({BTC: Decimal("1")}),
+    ).shortlist_line(BTC, INTERVAL, ["ema20"])
+    assert "指标不可用" in line_old and "停更" in line_old
+    assert "EMA20=" not in line_old

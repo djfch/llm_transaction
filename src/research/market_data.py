@@ -11,6 +11,7 @@ from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Candle, Contract
 from src.gateway.market_stats import OpenInterestPoint
 from src.market import indicators
+from src.market.candles import STALE_MULTIPLIER
 from src.market.intervals import interval_seconds
 
 INTERVALS = ("4h", "1d")
@@ -292,9 +293,12 @@ class ResearchMarketDataService:
         missing: list[str] = []
         funding = await self._funding_rate(contract, missing)
         frames: dict[str, dict] = {}
+        stale_map: dict[str, bool] = {}
         for interval in INTERVALS:
-            frames[interval] = await self._timeframe(contract, interval, limit, now, missing)
-        status = self._status(frames, funding)
+            frames[interval] = await self._timeframe(
+                contract, interval, limit, now, missing, stale_map
+            )
+        status = self._status(frames, funding, stale_map)
         return {
             "contract": contract,
             "requested_limit": limit,
@@ -323,7 +327,13 @@ class ResearchMarketDataService:
             return None
 
     async def _timeframe(
-        self, contract: str, interval: str, limit: int, now: float, missing: list[str]
+        self,
+        contract: str,
+        interval: str,
+        limit: int,
+        now: float,
+        missing: list[str],
+        stale_map: dict[str, bool],
     ) -> dict:
         """组装单个周期（4h 或 1d）的市场数据帧。
 
@@ -333,6 +343,7 @@ class ResearchMarketDataService:
             limit: int，返回的 K 线根数上限
             now: float，当前时间戳（秒），用于划分已收盘 K 线
             missing: list[str]，缺失项说明列表，数据缺失时追加说明
+            stale_map: dict[str, bool]，各周期停更标记（就地写入，issue #74）
 
         返回：
             dict：该周期的数据帧，含 K 线明细、技术指标、持仓量与背离信号
@@ -342,6 +353,13 @@ class ResearchMarketDataService:
             self._candles.get_recent(contract, interval, HISTORY_LIMIT), key=lambda candle: candle.t
         )
         closed = [candle for candle in history if candle.t + span <= now]
+        # 停更判定（issue #74）：最后一根收盘 K 线的收盘时刻距今超过 2×周期，
+        # 说明 WS 已断联且看门狗回补未生效——旧指标不得作为新鲜数据使用
+        stale = bool(closed) and now - (closed[-1].t + span) > STALE_MULTIPLIER * span
+        if stale:
+            age_h = (now - (closed[-1].t + span)) / 3600
+            missing.append(f"{interval}: K线已停更（最后收盘在 {age_h:.1f}h 前）")
+        stale_map[interval] = stale
         raw = history[-limit:]
         oi_points = await self._oi_points(contract, interval, missing)
         end_ts = closed[-1].t + span if closed else int(now)
@@ -439,21 +457,33 @@ class ResearchMarketDataService:
             missing.append(f"{interval}: OI变化率不可用(统计点不足或前值为0)")
 
     @staticmethod
-    def _status(frames: dict[str, dict], funding: Decimal | None) -> str:
+    def _status(
+        frames: dict[str, dict], funding: Decimal | None, stale_map: dict[str, bool]
+    ) -> str:
         """汇总两个周期与资金费率的完整性，给出整体数据状态。
+
+        停更（issue #74）：任一周期 K 线已停更即不得判"完整"；全部周期停更或
+        均无已收盘 K 线判"不可用"——硬闸门据此拒绝该结论参与方向约束。
 
         参数：
             frames: dict[str, dict]，各周期（4h/1d）的数据帧
             funding: Decimal | None，当前资金费率
+            stale_map: dict[str, bool]，各周期停更标记
 
         返回：
-            str：所有周期都无已收盘 K 线为「不可用」；资金费率齐备且各周期关键字段
-            齐全为「完整」；其余为「部分缺失」
+            str：全部周期停更或无已收盘 K 线为「不可用」；资金费率齐备、各周期
+            关键字段齐全且无停更为「完整」；其余为「部分缺失」
         """
-        if all(frame["closed_candle_count"] == 0 for frame in frames.values()):
+        stale_any = any(stale_map.get(k, False) for k in frames)
+        stale_all = all(stale_map.get(k, False) for k in frames)
+        if stale_all or all(frame["closed_candle_count"] == 0 for frame in frames.values()):
             return "不可用"
-        complete = funding is not None and all(
-            all(frame[field] is not None for field in COMPLETE_FRAME_FIELDS)
-            for frame in frames.values()
+        complete = (
+            funding is not None
+            and not stale_any
+            and all(
+                all(frame[field] is not None for field in COMPLETE_FRAME_FIELDS)
+                for frame in frames.values()
+            )
         )
         return "完整" if complete else "部分缺失"

@@ -44,6 +44,7 @@ from src.memory.repo import Repo
 from src.notify.telegram import build_notifier
 from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import funding_loop
+from src.market.candles import stale_watchdog
 from src.paper.setup import build_paper_gateway
 from src.review.setup import ReviewComponents, build_review
 from src.research.setup import ResearchComponents, build_research
@@ -649,6 +650,8 @@ async def run_app(
     server_task = asyncio.create_task(ctx.server.serve())
     pusher_task = asyncio.create_task(price_pusher(ctx)) if price_pusher else None
     funding_task = asyncio.create_task(funding_loop(ctx.gateway))
+    # K 线停更看门狗：WS 断联后缓存冻结，超阈值自动 REST 回补（issue #74 第一层自愈）
+    watchdog_task = asyncio.create_task(stale_watchdog(ctx.candles))
     # 成交补漏低频安全网（gatews 静默重连绕过 on_reconnected，秒级断线窗口靠它兜底）
     safety_task = (
         asyncio.create_task(ctx.trade_sync.run_safety_net()) if ctx.trade_sync is not None else None
@@ -679,6 +682,7 @@ async def run_app(
             research_task,
             safety_task,
             lag_task,
+            watchdog_task,
         )
 
 
@@ -691,6 +695,7 @@ async def shutdown(
     research_task: asyncio.Task,
     safety_task: asyncio.Task | None = None,
     lag_task: asyncio.Task | None = None,
+    watchdog_task: asyncio.Task | None = None,
 ) -> None:
     """优雅退出：停调度与行情，关 HTTP，收尾数据库。
 
