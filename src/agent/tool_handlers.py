@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from src.config import ResearchConfig, RiskConfig
-from src.gateway.base import Gateway
+from src.gateway.base import Gateway, MAX_DECIMAL_DIGITS, MAX_DECIMAL_EXPONENT
 from src.market.candles import CandleCache
 from src.market.indicator_service import IndicatorService
 from src.market.intervals import GATE_CANDLE_INTERVALS, interval_seconds
@@ -97,24 +97,33 @@ def _need_str(args: dict, name: str) -> str:
 
 
 def _to_decimal(v: Any, name: str) -> Decimal:
-    """把单个参数值转换为 Decimal，布尔值与非数字类型一律拒绝。
+    """把单个参数值转换为 Decimal，布尔值与非数字类型、非有限值与超范围值一律拒绝。
 
     参数：
         v: Any，待转换的值（接受 int/float/str/Decimal，拒绝 bool）
         name: str，参数名（用于错误提示文案）
 
     返回：
-        Decimal：转换后的数值
+        Decimal：转换后的数值（有限且有效数字 ≤ 18 位、指数绝对值 ≤ 30）
 
     异常：
-        ToolArgError：值类型不支持或无法解析为数字时抛出
+        ToolArgError：值类型不支持、无法解析为数字，或为 NaN/Infinity、
+            有效数字与指数超出上限（防极端指数在交易所参数格式化时展开为
+            超长字符串耗尽内存，issue #80）时抛出
     """
     if isinstance(v, bool) or not isinstance(v, (int, float, str, Decimal)):
         raise ToolArgError(f"参数 {name} 必须是数字")
     try:
-        return Decimal(str(v))
+        value = Decimal(str(v))
     except InvalidOperation as e:
         raise ToolArgError(f"参数 {name} 必须是数字") from e
+    if not value.is_finite() or len(value.as_tuple().digits) > MAX_DECIMAL_DIGITS:
+        raise ToolArgError(
+            f"参数 {name} 数值无效或精度超限（最多 {MAX_DECIMAL_DIGITS} 位有效数字）"
+        )
+    if abs(value.adjusted()) > MAX_DECIMAL_EXPONENT:
+        raise ToolArgError(f"参数 {name} 数量级超限（指数绝对值 ≤ {MAX_DECIMAL_EXPONENT}）")
+    return value
 
 
 def _need_decimal(args: dict, name: str) -> Decimal:
