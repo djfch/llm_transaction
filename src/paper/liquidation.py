@@ -120,6 +120,7 @@ def liquidate(
         loss=pos.margin - returned,
         returned_margin=returned,
     )
+    account.fill_seq += 1
     account.available += returned
     account.total_realized += realized
     account.fills.append(
@@ -132,6 +133,7 @@ def liquidate(
             realized_pnl=realized,
             maker=False,
             is_close=True,  # 强平属平仓成交
+            trade_id=f"liquidation:{account.fill_seq}",
         )
     )
     pos.size = Decimal(0)

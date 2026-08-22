@@ -6,8 +6,9 @@
 - 双计防护：drain（同步取空网关缓冲）与落库处于同一把 asyncio.Lock 临界区，
   三方互斥——同一批成交只被 drain 走一次、只落库一次；手动平仓持锁覆盖
   「下单→drain→落库」全程，行情即时 drain 抢不走其成交（user_close 标注不丢失）
-- 失败语义：单笔失败记日志继续，不重试（成交已在网关账本，重试可能双计）；
-  批次成功 ≥1 笔发一次 trades_updated 失效信号（契约见 src/server/ws.py）
+- 失败语义：单笔失败记日志并进入待重试队列，下轮 drain 先重试（幂等键
+  trade_id 配合 trades 唯一索引防双计，issue #67）；批次成功 ≥1 笔发一次
+  trades_updated 失效信号（契约见 src/server/ws.py）
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ class FillPersister:
         self._mode = mode
         self._notify_event = notify_event
         self._lock = asyncio.Lock()
+        self._pending: list[FillRecord] = []  # 落库失败笔待重试队列（issue #67）
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -78,7 +80,7 @@ class FillPersister:
         参数：
             drain_fills: Callable[[], list[FillRecord]]，取空成交缓冲区的回调
         返回：
-            int，锁内 drain（取空网关缓冲）+ 落库：轮末 drain 与行情即时 drain 用
+            int，本批仍失败的笔数（0 表示全部落库成功）
         """
         async with self._lock:
             return await self.persist_locked(drain_fills())
@@ -86,18 +88,25 @@ class FillPersister:
     async def persist_locked(self, fills: list[FillRecord], *, source_override: str = "") -> int:
         """逐笔继承归属并落 trades 表；调用方须已持 self.lock（或经 drain_persist 进入）。
 
-        单笔失败不中断：剩余成交继续落，失败记日志（成交已在网关账本，重试可能双计）。
-        返回失败笔数；批次成功 ≥1 笔发一次 trades_updated（contracts 去重，count=成功笔数）。
+        先重试上轮失败笔再处理新成交；单笔失败不中断，失败笔进入 _pending
+        待重试队列（幂等键配合唯一索引防双计，issue #67）。重试笔不套用本次
+        调用的 source_override——其来源归属与本次调用无关。
+        返回失败笔数（含重试仍失败）；成功 ≥1 笔发一次 trades_updated
+        （contracts 去重，count=成功笔数）。
 
         参数：
             fills: list[FillRecord]，待持久化的成交批次
-            source_override: str，调用方指定的成交来源覆盖值
+            source_override: str，调用方指定的成交来源覆盖值（仅作用于本批新成交）
         返回：
-            int，逐笔继承归属并落 trades 表；调用方须已持 self.lock（或经 drain_persist 进入）
+            int，仍失败（含重试仍失败）的笔数；0 表示全部落库成功
         """
-        failures = 0
+        pending = self._pending
+        self._pending = []
         saved_contracts: set[str] = set()
-        for fill in fills:
+        saved_count = 0
+        failures = 0
+        # 重试笔沿用各自推导的 source，不套用本次调用的覆盖值（评审 N1）
+        for fill, override in [(f, "") for f in pending] + [(f, source_override) for f in fills]:
             try:
                 round_id = await self._repo.order_round_id(fill.order_id) or ""
             except Exception:
@@ -113,17 +122,20 @@ class FillPersister:
                     price=fill.price,
                     fee=fill.fee,
                     pnl=fill.realized_pnl,
-                    source=source_override or trade_source_of(fill),
+                    source=override or trade_source_of(fill),
+                    exchange_trade_id=fill.trade_id or None,
                 )
                 saved_contracts.add(fill.contract)
+                saved_count += 1
             except Exception:
                 failures += 1
+                self._pending.append(fill)  # 留缓冲下轮重试（幂等键防双计，issue #67）
                 logger.exception("成交落库失败 round=%s order=%s", round_id[:8], fill.order_id)
         if saved_contracts and self._notify_event is not None:
             self._notify_event(
                 {
                     "type": "trades_updated",
-                    "data": {"contracts": sorted(saved_contracts), "count": len(fills) - failures},
+                    "data": {"contracts": sorted(saved_contracts), "count": saved_count},
                 }
             )
         return failures
@@ -134,8 +146,8 @@ async def _drain_safely(
 ) -> None:
     """即时 drain 的任务体：异常仅记日志（护住行情任务）。
 
-    drain 已取空缓冲，失败笔不可重试——落库/归属失败已在 persist_locked 内逐笔记日志，
-    成交仍在网关账本，可事后对账。
+    drain 已取空缓冲，失败笔进入 FillPersister 待重试队列下轮重试
+    （幂等键防双计，issue #67）——落库/归属失败已在 persist_locked 内逐笔记日志。
 
     参数：
         persister: FillPersister，成交持久化协调器

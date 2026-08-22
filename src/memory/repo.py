@@ -370,6 +370,7 @@ class Repo:
         pnl: Decimal,
         source: str = "",
         created_at: float | None = None,
+        exchange_trade_id: str | None = None,
     ) -> Trade:
         """落库一笔成交。source 取值见 models.Trade（llm_open/llm_close/user_close/
         liquidation/tpsl_close/''），默认 '' 表示历史/未知。
@@ -384,6 +385,8 @@ class Repo:
             pnl: Decimal，成交已实现盈亏
             source: str，成交来源
             created_at: float | None，可选成交时间戳
+            exchange_trade_id: str | None，稳定幂等键；paper 路径传 trade_id，
+                配合唯一索引防重试双计（issue #67）
 
         返回：
             Trade，新写入并读回的成交记录
@@ -391,9 +394,20 @@ class Repo:
         """
         ts = created_at if created_at is not None else _now()
         cur = await self._conn.execute(
-            "INSERT INTO trades(round_id,mode,contract,size,price,fee,pnl,source,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (round_id, mode, contract, str(size), str(price), str(fee), str(pnl), source, ts),
+            "INSERT INTO trades(round_id,mode,contract,size,price,fee,pnl,source,created_at,exchange_trade_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                round_id,
+                mode,
+                contract,
+                str(size),
+                str(price),
+                str(fee),
+                str(pnl),
+                source,
+                ts,
+                exchange_trade_id,
+            ),
         )
         await self._conn.commit()
         return Trade(
