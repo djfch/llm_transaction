@@ -598,6 +598,22 @@ async def test_paper_reset_409_when_reset_not_wired(client: AsyncClient, deps: S
     assert r.status_code == 409
 
 
+async def test_paper_reset_409_when_agent_running(client: AsyncClient, deps: ServerDeps):
+    """验证 agent 运行中重置模拟账户被拒绝且不调用重置回调（issue #81 互斥防线一）。
+
+    参数：
+        client: AsyncClient，进程内异步测试客户端
+        deps: ServerDeps，可切换运行态的服务器依赖
+
+    返回：
+        None，通过断言验证 status_provider 报告运行中时返回 409 且重置未触发
+    """
+    deps.status_provider = lambda: {"agent_running": True}
+    r = await client.post("/api/paper/reset", json={"equity": 20000})
+    assert r.status_code == 409
+    assert deps.resets == []  # 未触发重置
+
+
 async def test_paper_reset_422_on_non_positive_equity(client: AsyncClient, deps: ServerDeps):
     """验证模拟账户重置拒绝零值和负数初始权益。
 

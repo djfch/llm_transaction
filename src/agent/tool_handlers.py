@@ -68,6 +68,9 @@ class ToolDeps:
     # 合约级平仓代际：人工平仓每执行成功一次 +1；增仓下单前在 executor 线程内比对，
     # 防止高优人工平仓插入风控窗口后、旧增仓写把仓位重开（PR #84 评审 P1）
     close_epochs: dict[str, int] = field(default_factory=dict)
+    # 账户重置代际（单元素列表作可变计数器）：paper 重置账户时 +1；增仓下单前与
+    # 平仓代际一并比对，防止重置后旧 Agent 轮的迟到增仓写在新账户上开仓（issue #81）
+    reset_epoch: list[int] = field(default_factory=lambda: [0])
     extra: dict[str, Any] = field(default_factory=dict)
 
 

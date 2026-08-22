@@ -174,11 +174,18 @@ def create_trading_router(deps: ServerDeps) -> APIRouter:
         返回：
             dict[str, Any]，重置模拟账户：清空模拟仓位/挂单并重设初始权益（写回 config.yaml）
         异常：
-            HTTPException，非 paper 模式或账户未接线时返回 409，配置写入失败时返回 422
+            HTTPException，非 paper 模式或账户未接线时返回 409，Agent 运行中返回
+            409（与在途决策互斥），配置写入失败时返回 422
         """
         settings = deps.runtime_settings
         if settings is None or settings.mode != "paper" or deps.paper_reset is None:
             raise HTTPException(status_code=409, detail="仅 paper 模式且已接线模拟账户时可重置")
+        if _agent_running(deps):
+            # 与在途决策互斥（issue #81）：agent 运行中重置账户，已过风控的在途
+            # 增仓写会在新账户上重新开仓；先停 agent 再重置
+            raise HTTPException(
+                status_code=409, detail="Agent 运行中，请先停止 Agent 再重置模拟账户"
+            )
         raw = read_settings_raw(deps.config_path)
         raw.setdefault("paper", {})["initial_equity"] = body.equity
         try:
