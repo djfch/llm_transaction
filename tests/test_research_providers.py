@@ -622,6 +622,39 @@ async def test_fred_no_key_returns_guidance(monkeypatch) -> None:
     assert "FRED_API_KEY" in text and "免费注册" in text
 
 
+async def test_fred_http_error_message_redacts_api_key(monkeypatch) -> None:
+    """HTTP 失败的异常消息只含状态码，不泄漏带 API key 的请求 URL（issue #68）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，用于隔离并替换依赖或环境变量的 pytest 夹具
+
+    返回：
+        None，断言 ResearchSourceError 文本不含 key/URL，仅含 HTTP 状态码
+    """
+    import httpx
+
+    monkeypatch.setenv("FRED_API_KEY", "secret-key-123")
+    request = httpx.Request("GET", "https://api.stlouisfed.org/fred/series?api_key=secret-key-123")
+    response = httpx.Response(403, request=request)
+
+    async def fake_get(self, url, **kwargs):
+        """模拟 FRED 4xx 响应（httpx 异常字符串携带完整请求 URL）。"""
+        raise httpx.HTTPStatusError(
+            f"Client error '403 Forbidden' for url '{url}'", request=request, response=response
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    src = fred.FredSource()
+    try:
+        await src.get_macro_series("cpi")
+        assert False, "应抛 ResearchSourceError"
+    except fred.ResearchSourceError as exc:
+        text = str(exc)
+        assert "secret-key-123" not in text
+        assert "api.stlouisfed.org" not in text
+        assert "HTTP 403" in text
+
+
 async def test_fred_render(monkeypatch) -> None:
     """有 key：渲染最新值 + 窗口变化 + 表格（mock 内部请求）。
 

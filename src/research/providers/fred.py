@@ -45,6 +45,22 @@ MACRO_SERIES: dict[str, str] = {
 }
 
 
+def _describe_http_error(exc: httpx.HTTPError) -> str:
+    """把 httpx 异常转成不含请求 URL 的简短描述。
+
+    FRED 请求把 API key 放在 URL 查询参数里，httpx 异常字符串含完整请求 URL，
+    直接拼接会把 key 泄漏进 LLM 上下文、审计库与实时接口（issue #68）。
+
+    参数：
+        exc: httpx.HTTPError，捕获的 httpx 网络异常
+
+    返回：
+        str：有响应时返回 "HTTP <状态码>"；无响应（连接失败/超时等）返回异常类名
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return f"HTTP {status}" if status is not None else type(exc).__name__
+
+
 class FredSource:
     """FRED 宏观序列源。key 未配置时 get_macro_series 返回中文提示。"""
 
@@ -99,7 +115,8 @@ class FredSource:
                 meta = await self._series_meta(client, series_id)
                 observations = await self._observations(client, series_id, look_back)
         except httpx.HTTPError as exc:
-            raise ResearchSourceError(f"FRED 请求失败：{exc}") from exc
+            # 只透出状态码/异常类名：异常字符串含带 API key 的完整 URL，禁止外泄
+            raise ResearchSourceError(f"FRED 请求失败：{_describe_http_error(exc)}") from exc
         if not observations:
             return f"## FRED: {series_id}\n窗口内无观测值（可能是低频序列，可增大 look_back）。"
         title = meta.get("title", series_id)
