@@ -324,6 +324,83 @@ def test_liquidation_cancels_resting_orders_and_tpsl():
     assert [f for f in gw.drain_fills() if f.order_id == resting.id] == []
 
 
+def _long_with_distant_buy(gw: PaperGateway):
+    """构造持多仓 + 一张远低于市价的买单挂单的公共场景。
+
+    参数：
+        gw: PaperGateway，已初始化的模拟网关
+
+    返回：
+        OrderResult：远价买单的订单结果（保持 open 状态）
+    """
+    gw.set_leverage(BTC, 10)
+    buy(gw, 10)
+    return buy(gw, 5, price=D("50"))  # 限价单不成交，保持挂单
+
+
+def test_tpsl_full_close_cancels_resting_orders():
+    """验证止损触发全平后清场：残留挂单被撤且不会自动重新开仓（issue #86）。
+
+    参数：无
+
+    返回：
+        None，断言 TPSL 全平后挂单清空、后续价格到达旧买价也不产生新仓位
+    """
+    from src.gateway.base import TpslOrder
+
+    gw = make_gateway(taker="0")
+    resting = _long_with_distant_buy(gw)
+    gw.create_tpsl_order(
+        TpslOrder(id="tpsl-1", contract=BTC, direction=1, kind="stop_loss", trigger_price=D("90"))
+    )
+    gw.on_price(BTC, D("89"), D("88.9"), D("89.1"))  # 触发止损全平
+    assert gw.list_positions() == []
+    assert resting.id not in gw._open  # 残留挂单已清
+    assert gw.list_orders(BTC, "open") == []  # 无幽灵 open 订单
+    gw.on_price(BTC, D("50"), D("49.9"), D("50.1"))  # 价格到达旧买价：不得重开仓
+    assert gw.list_positions() == []
+
+
+def test_reduce_only_full_close_cancels_resting_orders():
+    """验证 reduce_only 等仓限价成交打平仓位后清场（issue #95，第四条全平路径）。
+
+    参数：无
+
+    返回：
+        None，断言该笔挂单成交后其余挂单被撤、无幽灵 open 订单、价格不再重开仓
+    """
+    gw = make_gateway(taker="0")
+    gw.set_leverage(BTC, 10)
+    buy(gw, 10)  # 持多 10
+    other = buy(gw, 5, price=D("50"))  # 另一张远价买单（残留风险）
+    closer = gw.place_order(
+        OrderRequest(contract=BTC, size=D(-10), price=D("99.9"), reduce_only=True)
+    )  # reduce_only 等仓平仓限价单，挂在买一价立即穿透
+    assert gw.list_positions() == []
+    assert other.id not in gw._open and closer.id not in gw._open
+    assert gw.list_orders(BTC, "open") == []
+    gw.on_price(BTC, D("50"), D("49.9"), D("50.1"))  # 价格到达旧买价：不得重开仓
+    assert all(p.size == 0 for p in gw.list_positions())
+
+
+def test_manual_close_cancels_resting_orders():
+    """验证手动一键平仓后清场：残留挂单被撤且不会自动重新开仓（issue #86）。
+
+    参数：无
+
+    返回：
+        None，断言 close=True 全平后挂单清空、后续价格到达旧买价也不产生新仓位
+    """
+    gw = make_gateway(taker="0")
+    resting = _long_with_distant_buy(gw)
+    close_all(gw)  # 市价全平
+    assert gw.list_positions() == []
+    assert resting.id not in gw._open
+    assert gw.list_orders(BTC, "open") == []
+    gw.on_price(BTC, D("50"), D("49.9"), D("50.1"))
+    assert gw.list_positions() == []
+
+
 def test_average_entry_on_add():
     """验证同方向加仓后持仓张数与保证金累加、开仓均价按加权平均更新。
 

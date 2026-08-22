@@ -87,3 +87,21 @@ def synth_ticker(name: str, snap: PriceSnap, contract_meta: Contract | None) -> 
         low_24h=snap.mark,
         change_percentage=Decimal(0),
     )
+
+
+def position_of(gw, pos) -> Position:
+    """把内部持仓记录转换为对外 Position（按最新标记价估值）。
+
+    自 engine.py 拆出（文件体量门禁）：估值依赖合约元数据、标记价与维持
+    保证金率，均经网关实例读取。
+
+    参数：
+        gw: PaperGateway，模拟网关实例
+        pos: PaperAccount 内部持仓记录
+
+    返回：
+        Position：对外持仓对象
+    """
+    c = gw.get_contract(pos.contract)
+    mark = gw._mark(pos.contract, pos.entry_price)
+    return to_position(pos, c, mark, gw._maint(pos.contract), gw.account)
