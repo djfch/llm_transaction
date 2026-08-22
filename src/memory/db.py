@@ -408,6 +408,9 @@ class Database:
                 await self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN strategy_md5 TEXT NOT NULL DEFAULT ''"
                 )
+        # 版本状态列（issue #62/#73）：复盘改写先落 draft 草稿、报告成功才置 applied
+        # 生效；失败/取消置 discarded。历史行默认 applied 与既有语义一致。
+        await self._ensure_version_status_columns()
         cur = await self._conn.execute("PRAGMA table_info(review_reports)")
         if "round_id" not in {row["name"] for row in await cur.fetchall()}:
             await self._conn.execute(
@@ -441,3 +444,18 @@ class Database:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+
+    async def _ensure_version_status_columns(self) -> None:
+        """为两个版本表补 status 列（幂等）：复盘草稿模式的状态机依赖（issue #62/#73）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐，历史行默认 'applied' 与既有语义一致
+        """
+        for table in ("strategy_versions", "indicator_config_versions"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")
+            if "status" not in {row["name"] for row in await cur.fetchall()}:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'applied'"
+                )

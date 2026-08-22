@@ -118,6 +118,7 @@ class StrategyVersion(BaseModel):
     reason: str
     report_id: int | None = None
     created_at: float
+    status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
 
 
 class IndicatorConfigVersion(BaseModel):
@@ -134,6 +135,7 @@ class IndicatorConfigVersion(BaseModel):
     reason: str
     report_id: int | None = None
     created_at: float
+    status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
 
 
 class ReviewReport(BaseModel):

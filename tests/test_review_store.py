@@ -118,12 +118,16 @@ async def test_revise_success(store, repo, prompt_path):
         current() 返回新内容、report_id 落库且版本列表按最新在前排列
     """
     v = await store.revise(_NEW, "复盘改进", created_by="review_agent")
-    assert prompt_path.read_text(encoding="utf-8") == _NEW  # 文件已原子替换
-    assert v.md5 == content_md5(_NEW)
-    assert v.created_by == "review_agent" and v.reason == "复盘改进"
+    # 草稿语义（issue #62/#73）：revise 只落 draft，文件与 current() 不变
+    assert prompt_path.read_text(encoding="utf-8") != _NEW
+    assert v.status == "draft" and v.md5 == content_md5(_NEW)
+    applied = await store.apply_version(v.id)
+    assert applied.status == "applied"
+    assert prompt_path.read_text(encoding="utf-8") == _NEW  # 生效后文件已替换
     assert store.current() == _NEW
     v2 = await store.revise(_NEW + "补充条款。" * 20, "再改", "human", report_id=7)
-    assert v2.report_id == 7  # report_id 透传落库
+    assert v2.report_id == 7 and v2.status == "draft"  # report_id 透传落库
+    await store.apply_version(v2.id)
     assert [x.id for x in await repo.review.list_strategy_versions()] == [v2.id, v.id]  # 倒序
 
 
@@ -215,6 +219,7 @@ async def test_revise_normalizes_crlf_content(store, repo, prompt_path):
     """
     content = "新策略书：\r\n" + "顺势加仓，严格止损。\r\n" * 10
     v = await store.revise(content, "Windows 编辑器提交", created_by="human")
+    await store.apply_version(v.id)  # 草稿生效后才写文件（issue #62/#73）
     assert b"\r" not in prompt_path.read_bytes()  # 文件字节无 \r
     normalized = content.replace("\r\n", "\n")
     assert v.md5 == hashlib.md5(normalized.encode("utf-8")).hexdigest()
@@ -338,7 +343,9 @@ async def test_on_change_fired_on_revise_and_rollback(prompt_path, repo):
     store = StrategyStore(prompt_path, repo, on_change=lambda: calls.append(1))
     v1 = await store.seed_if_empty()
     assert calls == []  # 播种不算变更（启动时无前端需要通知）
-    await store.revise(_NEW, "改进", "review_agent")
+    draft = await store.revise(_NEW, "改进", "review_agent")
+    assert calls == []  # 草稿落库不算变更（文件未动）
+    await store.apply_version(draft.id)
     assert len(calls) == 1
     await store.rollback(v1.id)
     assert len(calls) == 2

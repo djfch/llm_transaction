@@ -171,6 +171,7 @@ async def test_revise_dedupes_keys(store, repo, config_path):
         None，执行断言验证目标行为
     """
     v = await store.revise(["rsi14", "ema20", "rsi14"], "review_agent", "带重复键")
+    await store.apply_version(v.id)  # 草稿生效后才写文件（issue #62/#73）
     assert _file_shortlist(config_path) == ["rsi14", "ema20"]
     assert store.load_current().shortlist == ["rsi14", "ema20"]
     assert v.md5 == content_md5(config_path.read_text(encoding="utf-8"))
@@ -191,6 +192,7 @@ async def test_revise_success_atomic_persist_and_notify(config_path, repo):
     calls: list[int] = []
     store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
     v = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", report_id=7)
+    await store.apply_version(v.id)  # 草稿生效后才写文件（issue #62/#73）
     content = config_path.read_text(encoding="utf-8")
     assert v.content == content  # 版本行 content 与落盘文本同源
     assert v.md5 == hashlib.md5(config_path.read_bytes()).hexdigest()  # md5 与文件一致
@@ -307,6 +309,7 @@ async def test_store_accepts_sub_repo_directly(config_path, repo):
     """
     store = IndicatorConfigStore(config_path, repo.indicator_config, VALID_KEYS)
     v = await store.revise(_NEW_SHORTLIST, "human", "直连子仓库")
+    await store.apply_version(v.id)  # 草稿生效后才写文件（issue #62/#73）
     assert v.md5 == content_md5(config_path.read_text(encoding="utf-8"))
 
 
@@ -326,7 +329,9 @@ async def test_on_change_not_fired_on_validation_failure(config_path, repo):
     store = IndicatorConfigStore(config_path, repo, VALID_KEYS, on_change=lambda: calls.append(1))
     v1 = await store.seed_if_empty()
     assert calls == []  # 播种不算变更
-    await store.revise(_NEW_SHORTLIST, "review_agent", "改进")
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "改进")
+    assert calls == []  # 草稿落库不算变更（文件未动）
+    await store.apply_version(draft.id)
     assert len(calls) == 1
     await store.rollback(v1.id)
     assert len(calls) == 2

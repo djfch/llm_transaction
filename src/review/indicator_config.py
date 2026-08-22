@@ -16,6 +16,7 @@ human（人工修改/初始播种）/ review_agent（复盘 agent 改写）/ rol
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +29,8 @@ from src.memory.indicator_config_repo import IndicatorConfigRepo
 from src.memory.models import IndicatorConfigVersion
 from src.memory.repo import Repo
 from src.review.strategy import content_md5
+
+logger = logging.getLogger(__name__)
 
 _NO_DIFF_REASON = "与当前指标短名单无差异"
 
@@ -143,7 +146,7 @@ class IndicatorConfigStore:
         reason: str,
         report_id: int | None = None,
     ) -> IndicatorConfigVersion:
-        """校验并原子替换指标短名单文件，保存新版本后通知配置变更。
+        """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
         参数：
             shortlist: list[str]，期望启用的指标键列表
@@ -152,16 +155,67 @@ class IndicatorConfigStore:
             report_id: int | None，触发修订的复盘报告编号
 
         返回：
-            IndicatorConfigVersion，已保存的新指标短名单版本
+            IndicatorConfigVersion，已落库的 draft 版本（短名单文件未改动，
+            issue #62/#73：先记账后生效）
         """
         cfg = self._validated(shortlist, reason)
         content = _serialize(cfg)  # yaml.safe_dump 产出纯 LF，无需换行归一化
-        self._atomic_write(content)
-        version = await self._versions.save_version(
-            content, content_md5(content), created_by, reason.strip(), report_id
+        return await self._versions.save_version(
+            content, content_md5(content), created_by, reason.strip(), report_id, status="draft"
         )
+
+    async def apply_version(self, version_id: int) -> IndicatorConfigVersion:
+        """把草稿（或历史）版本原子写入短名单文件并置为 applied——统一生效入口。
+
+        参数：
+            version_id: int，待生效的版本编号
+
+        返回：
+            IndicatorConfigVersion：已生效（applied）的版本对象
+
+        异常：
+            IndicatorConfigValidationError，目标版本不存在时抛出
+        """
+        version = await self._versions.get_version(version_id)
+        if version is None:
+            raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法生效"])
+        self._atomic_write(version.content)
+        await self._versions.set_version_status(version_id, "applied")
         self._notify_change()
-        return version
+        return await self._versions.get_version(version_id)
+
+    async def discard_draft(self, version_id: int) -> None:
+        """把草稿版本置为 discarded（报告失败/取消时调用，issue #73）。
+
+        参数：
+            version_id: int，待废弃的草稿版本编号
+
+        返回：
+            None，就地更新数据库状态
+        """
+        await self._versions.set_version_status(version_id, "discarded")
+
+    async def reconcile(self) -> None:
+        """启动对账：短名单文件与最新 applied 版本不一致时以数据库为准恢复文件。
+
+        堵"文件已替换、数据库落库失败/进程中断"留下的不一致窗口（issue #62）；
+        无 applied 版本或内容一致时不做任何事。
+
+        参数：无
+
+        返回：
+            None，不一致时恢复文件并触发变更通知；一致时静默
+        """
+        latest = await self._versions.latest_applied_version()
+        try:
+            current = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current = ""
+        if latest is None or latest.md5 == content_md5(current):
+            return
+        logger.warning("指标短名单与最新生效版本不一致（v%d），以数据库为准恢复", latest.id)
+        self._atomic_write(latest.content)
+        self._notify_change()
 
     async def rollback(self, version_id: int) -> IndicatorConfigVersion:
         """把历史指标短名单内容写回运行时文件并创建一条新的回滚版本。

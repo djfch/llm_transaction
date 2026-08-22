@@ -1199,3 +1199,93 @@ async def test_save_post_commit_exception_recovers_success(env, monkeypatch):
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
     assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
     assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
+
+
+async def test_strategy_revision_is_draft_until_success(env):
+    """草稿模式：工具调用不动文件，报告成功才生效；失败路径文件不变且草稿废弃（issue #62/#73）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言成功轮文件最终更新且版本 applied；工具调用后立即读文件仍为旧内容
+    """
+    await _seed_trades(env.repo)
+    new_prompt = "草稿策略书：" + "顺势加仓，严格止损。" * 10
+    old_content = env.store.current()
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_strategy_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "测试草稿"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(env, provider)
+    # 工具执行后、报告落库前：文件必须仍是旧内容（先记账后生效）
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    assert env.store.current() == new_prompt  # 成功提交后文件更新
+    version = await env.repo.review.get_strategy_version(2)  # v1 为种子，v2 为本轮草稿
+    assert version is not None and version.status == "applied"
+    assert old_content != new_prompt
+
+
+async def test_failed_round_discards_draft(env):
+    """复盘失败时本轮草稿被废弃：文件不变、版本状态 discarded（issue #73）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言 provider 抛错后文件保持旧内容、草稿状态为 discarded
+    """
+    new_prompt = "不会生效的策略书：" + "顺势加仓，严格止损。" * 10
+
+    def boom(*args, **kwargs):
+        """模拟报告生成前 LLM 崩溃。"""
+        raise RuntimeError("llm crashed")
+
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_strategy_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "注定失败"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+        ]
+    )
+    agent = _make_agent(env, provider)
+    original_chat = provider.chat
+    calls = {"n": 0}
+
+    async def chat_boom_late(system, messages, tools):
+        """首轮正常返回工具调用，次轮直接崩溃（模拟报告前 LLM 故障）。"""
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("llm crashed")
+        return await original_chat(system, messages, tools)
+
+    agent._provider.chat = chat_boom_late
+    old_content = env.store.current()
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is False
+    assert env.store.current() == old_content  # 文件从未被动过
+    drafts = [
+        v for v in await env.repo.review.list_strategy_versions() if v.created_by == "review_agent"
+    ]
+    assert drafts and all(v.status == "discarded" for v in drafts)

@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
 
 from src.memory.models import StrategyVersion
 from src.memory.repo import Repo
+
+logger = logging.getLogger(__name__)
 
 _MIN_CHARS = 100  # strip 后最少字符数
 _MAX_BYTES = 32 * 1024  # UTF-8 体积上限 32KB
@@ -65,6 +68,8 @@ class StrategyStore:
     （write→save 同步临界区，保证最新版本==当前文件）；
     提交内容入口一律把 \r\n 归一化为 \n（Windows 编辑器兼容），保证版本行 md5
     与 PromptLoader.body_md5（读回文本）一致，版本↔决策 join 不断裂。
+    复盘改写走草稿模式（issue #62/#73）：revise 只落 draft 版本不动文件，
+    报告成功后经 apply_version 统一生效；人工 rollback 仍即时生效。
     """
 
     def __init__(
@@ -130,7 +135,7 @@ class StrategyStore:
     async def revise(
         self, content: str, reason: str, created_by: str, report_id: int | None = None
     ) -> StrategyVersion:
-        """校验通过后原子替换策略书并落新版本；校验失败抛 StrategyValidationError。
+        """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
         参数：
             content: str，待保存的完整文本
@@ -138,16 +143,87 @@ class StrategyStore:
             created_by: str，版本创建来源
             report_id: int | None，关联报告标识
         返回：
-            StrategyVersion，校验通过后原子替换策略书并落新版本；校验失败抛 StrategyValidationError
+            StrategyVersion，校验通过后落库的 draft 版本（策略书文件未改动，
+            issue #62/#73：先记账后生效）；校验失败抛 StrategyValidationError
         """
         content = content.replace("\r\n", "\n")  # 归一化后校验/md5/写盘/落库用同一份内容
         self._validate(content)
-        self._atomic_write(content)
-        version = await self._repo.review.save_strategy_version(
-            content, content_md5(content), created_by, reason, report_id
+        return await self._repo.review.save_strategy_version(
+            content,
+            content_md5(content),
+            created_by,
+            reason,
+            report_id,
+            status="draft",
         )
+
+    async def revise_applied(
+        self, content: str, reason: str, created_by: str = "human"
+    ) -> StrategyVersion:
+        """校验后落库并立即生效（写文件 + applied）——人工/服务端即时修改专用。
+
+        复盘 agent 走 revise（draft）+ 报告成功后 apply_version；本方法是
+        监控接口等"人按下按钮即刻生效"场景的合并入口（issue #62/#73 语义分界）。
+
+        参数：
+            content: str，待保存的完整文本
+            reason: str，变更原因
+            created_by: str，版本创建来源，默认 human
+
+        返回：
+            StrategyVersion：已生效（applied）的版本对象
+        """
+        version = await self.revise(content, reason, created_by)
+        return await self.apply_version(version.id)
+
+    async def apply_version(self, version_id: int) -> StrategyVersion:
+        """把草稿（或历史）版本原子写入策略书文件并置为 applied——统一生效入口。
+
+        参数：
+            version_id: int，待生效的版本编号
+
+        返回：
+            StrategyVersion：已生效（applied）的版本对象
+
+        异常：
+            StrategyValidationError，目标版本不存在时抛出
+        """
+        version = await self._repo.review.get_strategy_version(version_id)
+        if version is None:
+            raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法生效"])
+        self._atomic_write(version.content)
+        await self._repo.review.set_version_status(version_id, "applied")
         self._notify_change()
-        return version
+        return await self._repo.review.get_strategy_version(version_id)
+
+    async def discard_draft(self, version_id: int) -> None:
+        """把草稿版本置为 discarded（报告失败/取消时调用，issue #73）。
+
+        参数：
+            version_id: int，待废弃的草稿版本编号
+
+        返回：
+            None，就地更新数据库状态
+        """
+        await self._repo.review.set_version_status(version_id, "discarded")
+
+    async def reconcile(self) -> None:
+        """启动对账：策略书文件与最新 applied 版本不一致时以数据库为准恢复文件。
+
+        堵"文件已替换、数据库落库失败/进程中断"留下的不一致窗口（issue #62）；
+        无 applied 版本或内容一致时不做任何事。
+
+        参数：无
+
+        返回：
+            None，不一致时恢复文件并触发变更通知；一致时静默
+        """
+        latest = await self._repo.review.latest_applied_strategy_version()
+        if latest is None or latest.md5 == content_md5(self.current()):
+            return
+        logger.warning("策略书与最新生效版本不一致（v%d），以数据库为准恢复", latest.id)
+        self._atomic_write(latest.content)
+        self._notify_change()
 
     async def rollback(self, version_id: int) -> StrategyVersion:
         """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。

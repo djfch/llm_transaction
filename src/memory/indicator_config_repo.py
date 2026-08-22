@@ -70,6 +70,7 @@ class IndicatorConfigRepo:
         created_by: str,
         reason: str,
         report_id: int | None = None,
+        status: str = "applied",
     ) -> IndicatorConfigVersion:
         """保存一个指标短名单版本并立即提交，返回包含新编号的完整版本对象。
 
@@ -79,6 +80,8 @@ class IndicatorConfigRepo:
             created_by: str，版本创建者分类
             reason: str，本次修订原因
             report_id: int | None，触发本次版本的复盘报告编号
+            status: str，版本状态：applied 已生效 / draft 草稿（issue #62/#73）/
+                discarded 已废弃
 
         返回：
             IndicatorConfigVersion，包含数据库编号与创建时间的新版本对象
@@ -86,8 +89,8 @@ class IndicatorConfigRepo:
         ts = _now()
         cur = await self._conn.execute(
             "INSERT INTO indicator_config_versions(content,md5,created_by,reason,report_id,"
-            "created_at) VALUES(?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts),
+            "created_at,status) VALUES(?,?,?,?,?,?,?)",
+            (content, md5, created_by, reason, report_id, ts, status),
         )
         await self._conn.commit()
         return IndicatorConfigVersion(
@@ -169,3 +172,34 @@ class IndicatorConfigRepo:
             "UPDATE indicator_config_versions SET report_id=? WHERE id=?", (report_id, version_id)
         )
         await self._conn.commit()
+
+    async def set_version_status(self, version_id: int, status: str) -> None:
+        """更新指标短名单版本状态（draft→applied 生效、draft→discarded 废弃）。
+
+        参数：
+            version_id: int，指标配置版本编号
+            status: str，目标状态（applied/discarded）
+
+        返回：
+            None，就地更新数据库并提交
+        """
+        await self._conn.execute(
+            "UPDATE indicator_config_versions SET status=? WHERE id=?", (status, version_id)
+        )
+        await self._conn.commit()
+
+    async def latest_applied_version(self) -> IndicatorConfigVersion | None:
+        """读取最新一个 applied 状态的指标配置版本；无则返回 None。
+
+        供启动对账：文件内容与最新生效版本不一致时以数据库为准恢复（issue #62/#73）。
+
+        参数：无
+
+        返回：
+            IndicatorConfigVersion | None：最新生效版本；无 applied 记录时 None
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM indicator_config_versions WHERE status='applied' ORDER BY id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return await self.get_version(row["id"]) if row is not None else None

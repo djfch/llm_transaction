@@ -105,6 +105,7 @@ class ReviewRepo:
         created_by: str,
         reason: str,
         report_id: int | None = None,
+        status: str = "applied",
     ) -> StrategyVersion:
         """落库一个策略书版本（content 为完整原文，md5 为关联键）。
 
@@ -114,15 +115,17 @@ class ReviewRepo:
             created_by: str，版本创建来源
             reason: str，操作原因或失败说明
             report_id: int | None，研报记录编号
+            status: str，版本状态：applied 已生效 / draft 草稿（报告成功才生效，
+                issue #62/#73）/ discarded 已废弃
 
         返回：
             StrategyVersion：落库一个策略书版本（content 为完整原文，md5 为关联键）
         """
         ts = _now()
         cur = await self._conn.execute(
-            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts),
+            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,status)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (content, md5, created_by, reason, report_id, ts, status),
         )
         await self._conn.commit()
         return StrategyVersion(
@@ -133,6 +136,7 @@ class ReviewRepo:
             reason=reason,
             report_id=report_id,
             created_at=ts,
+            status=status,
         )
 
     async def list_strategy_versions(self) -> list[StrategyVersion]:
@@ -159,6 +163,37 @@ class ReviewRepo:
         cur = await self._conn.execute("SELECT * FROM strategy_versions WHERE id=?", (version_id,))
         row = await cur.fetchone()
         return StrategyVersion(**dict(row)) if row else None
+
+    async def set_version_status(self, version_id: int, status: str) -> None:
+        """更新策略书版本状态（draft→applied 生效、draft→discarded 废弃，issue #62/#73）。
+
+        参数：
+            version_id: int，策略书版本编号
+            status: str，目标状态（applied/discarded）
+
+        返回：
+            None，就地更新数据库并提交
+        """
+        await self._conn.execute(
+            "UPDATE strategy_versions SET status=? WHERE id=?", (status, version_id)
+        )
+        await self._conn.commit()
+
+    async def latest_applied_strategy_version(self) -> StrategyVersion | None:
+        """读取最新一个 applied 状态的策略书版本；无则返回 None。
+
+        供启动对账：文件 md5 与最新生效版本不一致时以数据库为准恢复文件。
+
+        参数：无
+
+        返回：
+            StrategyVersion | None：最新生效版本；版本表无 applied 记录时 None
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM strategy_versions WHERE status='applied' ORDER BY id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return StrategyVersion(**dict(row)) if row is not None else None
 
     async def attach_report_to_version(self, version_id: int, report_id: int) -> None:
         """回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）。

@@ -189,8 +189,10 @@ async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     except IndicatorConfigValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原短名单未改动，修正后可重新提交）"
     deps.indicator_config_version_id = version.id
-    effective = deps.indicator_config_store.load_current().shortlist
+    deps.indicator_draft_ids.append(version.id)
+    # 展示去重保序后的名单（与 _validated 的生效口径一致）
+    deduped = list(dict.fromkeys(shortlist))
     return (
-        f"校验通过，指标短名单已更新至 v{version.id}（{len(effective)} 个）："
-        f"{', '.join(effective)}；下一轮决策生效"
+        f"校验通过，指标短名单修订已存为草稿 v{version.id}（{len(deduped)} 个："
+        f"{', '.join(deduped)}）；本轮复盘报告提交成功后统一生效，报告失败则自动废弃"
     )
