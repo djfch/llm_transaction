@@ -286,6 +286,7 @@ class ReviewAgent:
                     period_end,
                     asyncio.CancelledError("复盘被取消"),
                     preallocated=preallocated,
+                    deps=deps,
                 )
             else:
                 await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
@@ -302,7 +303,13 @@ class ReviewAgent:
                 )
             if report_id is None:
                 return await self._fail(
-                    round_id, raw_parts, period_start, period_end, e, preallocated=preallocated
+                    round_id,
+                    raw_parts,
+                    period_start,
+                    period_end,
+                    e,
+                    preallocated=preallocated,
+                    deps=deps,
                 )
             # 成功报告落库后的普通异常（如版本关联失败）：与取消同口径按成功语义补全，
             # 不发成功告警、不写失败报告，返回与正常成功一致的结果
@@ -313,6 +320,27 @@ class ReviewAgent:
         await self._notify(_success_alert(report_md, deps.created_version_id))
         logger.info("复盘完成 report_id=%s action=%s", report.id, report.strategy_action)
         return _success_result(report, round_id)
+
+    async def _discard_drafts(self, deps: ReviewToolDeps) -> None:
+        """报告失败/取消时废弃本轮全部草稿版本；文件从未被动过，无需回滚（issue #73）。
+
+        参数：
+            deps: ReviewToolDeps，本轮工具依赖（读取其落库的草稿 id 列表）
+
+        返回：
+            None，逐个置 discarded；单个失败只记日志不中断其余废弃
+        """
+        for draft_id in deps.strategy_draft_ids:
+            try:
+                await deps.store.discard_draft(draft_id)
+            except Exception:
+                logger.exception("策略草稿废弃失败 draft_id=%s", draft_id)
+        if deps.indicator_config_store is not None:
+            for draft_id in deps.indicator_draft_ids:
+                try:
+                    await deps.indicator_config_store.discard_draft(draft_id)
+                except Exception:
+                    logger.exception("指标草稿废弃失败 draft_id=%s", draft_id)
 
     async def _finalize_success(
         self, deps: ReviewToolDeps, report_id: int, round_id: str, raw_parts: list[str]
@@ -329,6 +357,14 @@ class ReviewAgent:
             None：版本关联与审计轮闭合就地完成；此间被打断（取消/异常）时由 run 的
             对应分支经 _complete_interrupted 以成功语义补全剩余收尾
         """
+        # 草稿统一生效（issue #62/#73）：报告已 COMMIT，此刻才把文件替换为修订内容；
+        # 此前写工具只落 draft、文件从未被动过。apply 失败按异常向上抛，
+        # 由 run 的"成功落库后收尾异常"分支按成功语义补全。
+        for draft_id in deps.strategy_draft_ids:
+            await deps.store.apply_version(draft_id)
+        if deps.indicator_config_store is not None:
+            for draft_id in deps.indicator_draft_ids:
+                await deps.indicator_config_store.apply_version(draft_id)
         if deps.created_version_id is not None:
             await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
         if deps.indicator_config_version_id is not None:  # 指标短名单版本同模式关联
@@ -349,7 +385,8 @@ class ReviewAgent:
 
         attach_report_to_version 是幂等 UPDATE，打断点可能落在任一 attach 之前/之中/之后，
         无法也无须区分，两个版本关联无条件重放；重放失败只记日志（版本 report_id 留空
-        可由下轮复盘重新关联），绝不反写失败报告。
+        可由下轮复盘重新关联），绝不反写失败报告。草稿生效同样幂等重放（issue #62/#73）：
+        apply_version 对已 applied 版本只是重写同内容文件。
 
         参数：
             deps: ReviewToolDeps，本轮工具依赖（读取其创建的策略/指标版本 id）
@@ -362,6 +399,17 @@ class ReviewAgent:
             None：就地补齐版本关联与审计闭合（各自失败只记日志，不掩盖待传播的取消），
             并补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
         """
+        for draft_id in deps.strategy_draft_ids:  # 草稿生效幂等重放（issue #62/#73）
+            try:
+                await deps.store.apply_version(draft_id)
+            except Exception:
+                logger.exception("复盘收尾补生效策略草稿失败（draft_id=%s）", draft_id)
+        if deps.indicator_config_store is not None:
+            for draft_id in deps.indicator_draft_ids:
+                try:
+                    await deps.indicator_config_store.apply_version(draft_id)
+                except Exception:
+                    logger.exception("复盘收尾补生效指标草稿失败（draft_id=%s）", draft_id)
         if deps.created_version_id is not None:
             try:
                 await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
@@ -624,6 +672,7 @@ class ReviewAgent:
         exc: Exception,
         *,
         preallocated: str = "",
+        deps: ReviewToolDeps | None = None,
     ) -> dict:
         """失败收尾：落 error 报告 + 审计轮 error + 失败事件与告警，绝不向上抛。
 
@@ -646,6 +695,8 @@ class ReviewAgent:
         """
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("复盘失败：%s", error)
+        if deps is not None:
+            await self._discard_drafts(deps)  # 报告失败：本轮草稿全部废弃，文件从未被动过
         report_id: int | None = None
         try:
             report = await self._repo.review.save_review_report(

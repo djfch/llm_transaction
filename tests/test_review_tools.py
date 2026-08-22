@@ -458,7 +458,10 @@ async def test_submit_strategy_revision_success(registry, deps):
     )
     assert deps.created_version_id is not None
     assert f"v{deps.created_version_id}" in text
-    assert deps.store.current() == new  # 策略书文件已更新
+    # 草稿语义（issue #62/#73）：工具调用不动文件，报告成功后由 agent 统一生效
+    assert deps.store.current() != new
+    await deps.store.apply_version(deps.created_version_id)
+    assert deps.store.current() == new
 
 
 async def test_submit_strategy_revision_rejected(registry, deps):

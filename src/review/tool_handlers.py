@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from dataclasses import field as dataclass_field
+
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -51,6 +53,10 @@ class ReviewToolDeps:
     indicator_config_store: IndicatorConfigStore | None = None
     watchlist: tuple[str, ...] = ()
     indicator_config_version_id: int | None = None
+    # 本轮落库的草稿版本 id（issue #62/#73）：报告成功经 store.apply_version 统一生效，
+    # 失败/取消置 discarded——写工具不再直接改文件
+    strategy_draft_ids: list[int] = dataclass_field(default_factory=list)
+    indicator_draft_ids: list[int] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------
@@ -453,4 +459,8 @@ async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
     except StrategyValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原策略书未改动，修正后可重新提交）"
     deps.created_version_id = version.id
-    return f"校验通过，策略已更新至 v{version.id}（md5={version.md5[:8]}），下一轮决策生效"
+    deps.strategy_draft_ids.append(version.id)
+    return (
+        f"校验通过，修订已存为草稿 v{version.id}（md5={version.md5[:8]}）；"
+        "本轮复盘报告提交成功后统一生效，报告失败则自动废弃"
+    )

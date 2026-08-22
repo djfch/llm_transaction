@@ -286,6 +286,8 @@ async def test_submit_indicator_config_success(registry, deps, repo):
     assert "校验通过" in text
     assert deps.indicator_config_version_id is not None  # 成果记进 deps（同策略修订模式）
     assert f"v{deps.indicator_config_version_id}" in text
+    # 草稿语义（issue #62/#73）：显式生效后文件才更新
+    await deps.indicator_config_store.apply_version(deps.indicator_config_version_id)
     assert "boll" in text  # 生效短名单回显
     assert deps.indicator_config_store.load_current().shortlist == new_list  # 文件已生效
     versions = await repo.indicator_config.list_versions()
@@ -311,6 +313,7 @@ async def test_submit_indicator_config_dedup(registry, deps):
         {"shortlist": ["rsi14", "ema20", "rsi14"], "reason": "去重验证"},
     )
     assert "校验通过" in text and "2 个" in text
+    await deps.indicator_config_store.apply_version(deps.indicator_config_version_id)
     assert deps.indicator_config_store.load_current().shortlist == ["rsi14", "ema20"]
 
 

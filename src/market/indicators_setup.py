@@ -101,6 +101,7 @@ class IndicatorComponents:
             dict，人工修订短名单（created_by='human'）；校验失败上抛，路由映 422
         """
         version = await self.store.revise(shortlist, created_by="human", reason=reason)
+        await self.store.apply_version(version.id)  # 人工调整即时生效（草稿仅限复盘链路）
         return {"ok": True, "version_id": version.id}
 
     async def config_rollback(self, version_id: int) -> dict:

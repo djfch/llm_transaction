@@ -47,7 +47,7 @@ class ReviewComponents:
             StrategyValidationError: 策略内容存在无差异以外的校验错误时抛出
         """
         try:
-            version = await self.store.revise(content, reason="前端手动保存", created_by="human")
+            version = await self.store.revise_applied(content, reason="前端手动保存")
         except StrategyValidationError as exc:
             if exc.no_diff_only:  # 唯一原因是"无差异"：结构化判定，不做文案子串匹配
                 return {"saved": True, "version": None}
@@ -105,6 +105,9 @@ async def build_review(
     on_change = None if notify_event is None else lambda: notify_event({"type": "strategy_updated"})
     store = StrategyStore(strategy_path or ROOT / "system_prompt.md", repo, on_change=on_change)
     await store.seed_if_empty()
+    await store.reconcile()  # 启动对账：文件与最新生效版本不一致时以数据库为准恢复（issue #62）
+    if indicator_config_store is not None:
+        await indicator_config_store.reconcile()  # 指标短名单同款启动对账
     agent = ReviewAgent(
         settings=settings,
         provider=provider,
