@@ -192,22 +192,37 @@ def _paper_with_long_position() -> PaperGateway:
 
 
 def test_funding_settles_only_when_interval_due():
-    """验证资金费首次结算后八小时内不重复扣费且到期才再次结算。
+    """验证资金费首启只登记边界、到达周期边界才结算且不重复扣费（issue #75）。
 
     参数：无
 
     返回：
-        None，通过断言验证一小时与八小时两个时间边界
+        None，通过断言验证首次观察不结算、一小时内不结算、到达边界才再结算
     """
     gateway = _paper_with_long_position()
     last_settled: dict[str, float] = {}
-    assert settle_due_funding(gateway, last_settled, now=1000.0) == [BTC]  # 首次见到持仓即结算
-    first = gateway.account.total_funding
-    assert first != 0
+    # 首次观察只登记边界不结算：重启后水线清零，立即结算会重复收取停机前费用
+    assert settle_due_funding(gateway, last_settled, now=1000.0) == []
+    assert last_settled[BTC] == 0.0  # 1000.0 所在 8h 周期的起点
     assert settle_due_funding(gateway, last_settled, now=1000.0 + 3600) == []  # 1h < 8h 不结算
-    assert gateway.account.total_funding == first
-    assert settle_due_funding(gateway, last_settled, now=1000.0 + 28800) == [BTC]  # 到达周期再结算
-    assert gateway.account.total_funding != first
+    assert gateway.account.total_funding == 0
+    assert settle_due_funding(gateway, last_settled, now=1000.0 + 28800) == [BTC]  # 到达周期结算
+    assert gateway.account.total_funding != 0
+    # 结算后水线对齐到新边界，周期内不重复扣费
+    assert settle_due_funding(gateway, last_settled, now=1000.0 + 28800 + 3600) == []
+
+
+def test_funding_uses_live_rate_from_ticker():
+    """验证行情推送的实时资金费率覆盖启动快照，结算使用实时值（issue #75）。
+
+    参数：无
+
+    返回：
+        None，断言 on_price 注入新费率后 settle_funding 按新费率记账
+    """
+    gateway = _paper_with_long_position()
+    gateway.on_price(BTC, Decimal("50000"), funding_rate=Decimal("0.001"))
+    assert gateway.get_contract(BTC).funding_rate == Decimal("0.001")
 
 
 # ---------- 预警线生命周期（内存唯一存储） ----------
