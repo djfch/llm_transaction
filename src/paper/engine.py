@@ -32,7 +32,8 @@ from ..gateway.base import (
     TpslOrder,
 )
 from .account import FillRecord, PaperAccount
-from .convert import PriceSnap, RestingOrder, synth_ticker, to_position
+from .convert import PriceSnap, RestingOrder, position_of
+from .market_io import read_candlesticks, read_tickers
 from .funding import settle_funding as _settle_funding
 from .liquidation import LiquidationEvent, liquidate, should_liquidate
 
@@ -515,11 +516,7 @@ class PaperGateway(PaperOpenInterestMixin):
         异常：
             ValueError：limit 与 from/to 同时传入时抛出
         """
-        if limit is not None and (from_ts is not None or to_ts is not None):
-            raise ValueError("limit 与 from/to 互斥，不能同时传")
-        if self._candle_provider is None:
-            return []
-        return self._candle_provider(contract, interval, limit, from_ts, to_ts)
+        return read_candlesticks(self, contract, interval, limit, from_ts, to_ts)
 
     def get_tickers(self) -> list[Ticker]:
         """读取全部 ticker；优先走注入的 ticker_provider，否则由行情快照合成。
@@ -529,9 +526,7 @@ class PaperGateway(PaperOpenInterestMixin):
         返回：
             list[Ticker]：ticker 列表
         """
-        if self._ticker_provider is not None:
-            return self._ticker_provider()
-        return [synth_ticker(n, s, self._contracts.get(n)) for n, s in self._snaps.items()]
+        return read_tickers(self)
 
     def _market_order(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
         """撮合市价单：按标记价加滑点立即以 taker 成交，并登记请求附带的止盈止损。
@@ -615,6 +610,8 @@ class PaperGateway(PaperOpenInterestMixin):
             GatewayError：触价成交失败且原因不是余额不足时原样抛出
         """
         for order in list(self._open.values()):
+            if order.id not in self._open:
+                continue  # 本轮更早的成交触发全平清场：跳过已撤销的订单
             if order.contract != contract or not self._crossed(order):
                 continue
             if order.reduce_only and not self._is_reducing(contract, order.size):
@@ -633,13 +630,13 @@ class PaperGateway(PaperOpenInterestMixin):
                 self._cancel_failed(order, exc.label)
 
     def _trigger_tpsl(self, contract: str) -> None:
-        """价格穿越时按市价全平，并清理该方向全部保护单。
+        """价格穿越时按市价全平，并清场该合约全部挂单与保护单（issue #86）。
 
         参数：
             contract: str，合约名称
 
         返回：
-            None：价格穿越时按市价全平，并清理该方向全部保护单
+            None：价格穿越时按市价全平，并清场该合约全部挂单与保护单（issue #86）
         """
         pos = self.account.position(contract)
         if pos is None:
@@ -671,7 +668,8 @@ class PaperGateway(PaperOpenInterestMixin):
             return
         order_id = triggered[0].id
         self._execute(order_id, contract, -pos.size, mark, maker=False, text="tpsl")
-        self._clear_tpsl(contract, direction)
+        # TPSL 触发即全平：仓位已归零，残留挂单会自动重新开仓，统一清场（issue #86）
+        self._cancel_contract_orders(contract)
 
     def _apply_request_tpsl(self, req: OrderRequest) -> None:
         """把下单请求附带的止盈止损价登记为保护单。
@@ -776,7 +774,8 @@ class PaperGateway(PaperOpenInterestMixin):
     def _execute(
         self, order_id: str, contract: str, size: Decimal, price: Decimal, maker: bool, text: str
     ) -> OrderResult:
-        """执行成交：记账（保证金/手续费/盈亏）、写订单结果并清理失效止盈止损单。
+        """执行成交：记账（保证金/手续费/盈亏）、写订单结果并清理失效止盈止损单；
+        成交后仓位归零时统一清场该合约挂单与 TPSL（issue #86/#95）。
 
         参数：
             order_id: str，订单 ID
@@ -813,10 +812,18 @@ class PaperGateway(PaperOpenInterestMixin):
         self._results[order_id] = result
         self._open.pop(order_id, None)
         self._clear_stale_tpsl(contract)
+        pos_after = self.account.position(contract)
+        if pos_after is None or pos_after.size == 0:
+            # 本笔成交把仓位打到零（reduce_only 等仓平仓/全平等）：统一清场，
+            # 防残留挂单在后续 tick 自动成交重新开仓（issue #86/#95）
+            self._cancel_contract_orders(contract)
         return result
 
     def _close_all(self, req: OrderRequest, order_id: str, text: str) -> OrderResult:
-        """一键平仓：无持仓时直接返回 no_position 结果，有持仓时按市价全平并清理保护单。
+        """一键平仓：无持仓时直接返回 no_position 结果，有持仓时按市价全平并清场。
+
+        清场含该合约全部挂单与保护单（issue #86：残留普通挂单会在后续 tick
+        自动成交重新开仓）。
 
         参数：
             req: OrderRequest，平仓请求（close=True）
@@ -841,7 +848,8 @@ class PaperGateway(PaperOpenInterestMixin):
             return result
         close_req = req.model_copy(update={"size": -pos.size, "close": False})
         result = self._market_order(close_req, order_id, text)
-        self._clear_tpsl(req.contract)
+        # 手动/一键平仓即全平：仓位已归零，残留挂单会自动重新开仓，统一清场（issue #86）
+        self._cancel_contract_orders(req.contract)
         return result
 
     def _check_liquidation(self, contract: str) -> None:
@@ -861,15 +869,28 @@ class PaperGateway(PaperOpenInterestMixin):
         mark = self._snaps[contract].mark
         if should_liquidate(pos, mark, c.quanto_multiplier, self._maint(contract)):
             self.liquidations.append(liquidate(self.account, contract, mark, c.quanto_multiplier))
-            # 强平即清场：残留的普通挂单会在后续 tick 自动成交重新开仓（issue #71），
-            # 残留 TPSL 已无对应持仓；reduce_only 挂单虽无害但也已失效，一并清除。
-            # 同步把订单结果置为 cancelled，避免 list_orders("open") 返回幽灵挂单。
-            for oid in [o_id for o_id, o in self._open.items() if o.contract == contract]:
-                del self._open[oid]
-                self._results[oid] = self._results[oid].model_copy(
-                    update={"status": "finished", "finish_as": "cancelled"}
-                )
-            self._clear_tpsl(contract)
+            self._cancel_contract_orders(contract)  # 强平即清场（issue #71/#86）
+
+    def _cancel_contract_orders(self, contract: str) -> None:
+        """全平清场：清除该合约全部挂单（订单结果置 cancelled）与全部 TPSL。
+
+        仓位归零的全平类路径（强平/TPSL 触发/手动平仓）共用：残留的普通挂单会在
+        后续行情 tick 自动成交重新开仓（issue #71/#86）；reduce_only 挂单虽无害但
+        已失效，一并清除；同步把订单结果置为 cancelled，避免 list_orders("open")
+        返回幽灵挂单。与撮合/下单同在事件循环线程内联执行，无交错窗口。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            None，就地修改 _open/_results/_tpsl
+        """
+        for oid in [o_id for o_id, o in self._open.items() if o.contract == contract]:
+            del self._open[oid]
+            self._results[oid] = self._results[oid].model_copy(
+                update={"status": "finished", "finish_as": "cancelled"}
+            )
+        self._clear_tpsl(contract)
 
     def _crossed(self, order: RestingOrder) -> bool:
         """判断限价挂单是否穿透当前盘口（买单价 ≥ 卖一、卖单价 ≤ 买一）。
@@ -909,9 +930,7 @@ class PaperGateway(PaperOpenInterestMixin):
         返回：
             Position：对外持仓对象
         """
-        c = self.get_contract(pos.contract)
-        mark = self._mark(pos.contract, pos.entry_price)
-        return to_position(pos, c, mark, self._maint(pos.contract), self.account)
+        return position_of(self, pos)
 
     def _snap(self, contract: str) -> PriceSnap:
         """取合约行情快照。
