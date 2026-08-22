@@ -44,6 +44,9 @@ class FillRecord(BaseModel):
     realized_pnl: Decimal  # 本笔成交结算的已实现盈亏（开仓为 0）
     maker: bool
     is_close: bool
+    # 稳定幂等键（{order_id}:{seq}）：落库失败重试时不变，配合 trades 表
+    # 唯一索引防重复记账（issue #67）
+    trade_id: str = ""
 
 
 class PaperAccount:
@@ -61,6 +64,7 @@ class PaperAccount:
         self.available = initial_equity  # 可用余额
         self.positions: dict[str, PaperPosition] = {}
         self.fills: list[FillRecord] = []
+        self.fill_seq = 0  # 成交幂等键序号（issue #67：落库重试需稳定键）
         self.total_fee = Decimal(0)  # 累计手续费
         self.total_funding = Decimal(0)  # 累计资金费（负=净支出）
         self.total_realized = Decimal(0)  # 累计已实现盈亏（不含费用）
@@ -194,9 +198,22 @@ class PaperAccount:
             realized_pnl=realized,
             maker=maker,
             is_close=closed > 0,  # 含平仓/减仓部分即记 True（翻仓亦然）
+            trade_id=self._next_fill_id(order_id),
         )
         self.fills.append(record)
         return record
+
+    def _next_fill_id(self, order_id: str) -> str:
+        """生成成交的稳定幂等键：{order_id}:{账户级递增序号}。
+
+        参数：
+            order_id: str，成交所属订单 ID
+
+        返回：
+            str：形如 "t-xxx:12" 的幂等键；重试落库时复用同一 FillRecord 即同一键
+        """
+        self.fill_seq += 1
+        return f"{order_id}:{self.fill_seq}"
 
     def _preflight_flip(
         self,

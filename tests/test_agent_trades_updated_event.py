@@ -425,3 +425,51 @@ async def test_manual_close_emits_event(tmp_path):
         ]
     finally:
         await env.db.close()
+
+
+async def test_failed_fill_retried_with_idempotent_key(tmp_path):
+    """落库失败笔进入重试队列且幂等键防双计（issue #67）。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言首次失败笔保留、下轮重试成功且 trades 表只有一笔
+    """
+    db = Database()
+    await db.open(tmp_path / "agent.db")
+    repo = Repo(db)
+    calls = {"n": 0}
+    original = repo.save_trade
+
+    async def flaky_save_trade(*args, **kwargs):
+        """首次调用抛异常模拟写库故障，其后放行（记录调用次数）。"""
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk io error")
+        return await original(*args, **kwargs)
+
+    repo.save_trade = flaky_save_trade  # 模拟首轮写库故障
+
+    persister = FillPersister(repo, "paper")
+    fill = FillRecord(
+        order_id="t-1",
+        contract="BTC_USDT",
+        size=Decimal("1"),
+        price=Decimal("100"),
+        fee=Decimal("0"),
+        realized_pnl=Decimal("0"),
+        maker=False,
+        is_close=False,
+        trade_id="t-1:1",
+    )
+    try:
+        failures = await persister.persist_locked([fill])
+        assert failures == 1 and persister._pending == [fill]  # 失败笔留缓冲
+        failures = await persister.persist_locked([])  # 下轮重试
+        assert failures == 0 and persister._pending == []
+        rows = await repo.trades_between(0, time.time() + 1, mode="paper")
+        assert len(rows) == 1  # 幂等：只有一笔
+        assert rows[0].contract == "BTC_USDT"
+    finally:
+        await db.close()
