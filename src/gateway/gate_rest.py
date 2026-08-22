@@ -24,6 +24,8 @@ from .base import (
     Candle,
     Contract,
     GatewayError,
+    MAX_DECIMAL_DIGITS,
+    MAX_DECIMAL_EXPONENT,
     GatewayTransportError,
     OrderNotFound,
     ExchangeTrade,
@@ -256,14 +258,25 @@ def gen_client_order_id() -> str:
 
 
 def _fmt_decimal(value: Decimal) -> str:
-    """Decimal -> 普通十进制字符串（避免科学计数法）。
+    """Decimal -> 普通十进制字符串（避免科学计数法），超范围值拒绝展开。
 
     参数：
         value: Decimal，待转换或校验的值
 
     返回：
         str：Decimal -> 普通十进制字符串（避免科学计数法）
+
+    异常：
+        GatewayError：值为非有限数，或指数绝对值/有效数字超出可安全展开的
+            上限（format(value, "f") 会把极端指数展开为等长字符串，如
+            1e-1000000000 展开约 10 亿字符耗尽内存，issue #80）
     """
+    if (
+        not value.is_finite()
+        or abs(value.adjusted()) > MAX_DECIMAL_EXPONENT
+        or len(value.as_tuple().digits) > MAX_DECIMAL_DIGITS
+    ):
+        raise GatewayError(f"数值超出可表示范围: {value:.2e}", label="INVALID_PARAM")
     return format(value, "f")
 
 

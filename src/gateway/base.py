@@ -14,6 +14,13 @@ from typing import Protocol
 from pydantic import BaseModel
 from .market_stats import OpenInterestPoint
 
+# LLM 参数数值安全上限（tool_handlers._to_decimal 与 gate_rest._fmt_decimal 同口径）：
+# 防极端指数（如 1e-1000000000）在交易所参数格式化时展开为等长字符串耗尽内存
+# （issue #80）；有效数字 18 位远超任何合约的价格/张数精度，指数 ±30 覆盖从
+# 1e-8 级最小跳动到 1e30 级名义价值的全部合法范围
+MAX_DECIMAL_DIGITS = 18
+MAX_DECIMAL_EXPONENT = 30
+
 
 class GatewayError(Exception):
     """网关统一异常基类。label 为 Gate 私有错误标签（如有），status 为 HTTP 状态码。"""
