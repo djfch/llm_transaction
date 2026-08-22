@@ -7,17 +7,74 @@ ManualPriceSource 手动推送。CandleCache 只依赖 PriceSource 注册的回�
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import deque
 from typing import Protocol
 
 from ..audit.logger import get_logger
 from ..gateway.base import Candle, Gateway, Ticker
 from .feed import CandleHandler, TickerHandler, maybe_await
+from .intervals import interval_seconds
 
 logger = get_logger(__name__)
 
 # Gate REST candlesticks 单次最多返回 2000 根（当前 SDK docstring）
 REST_CANDLE_LIMIT = 2000
+# K 线停更判定：连续 STALE_MULTIPLIER 个周期没有等到新收盘 K 线即视为停更
+# （issue #74：WS 断联后缓存冻结，消费方须按停更处理而非当新鲜数据使用）
+STALE_MULTIPLIER = 2
+# 看门狗巡检间隔（秒）
+STALE_WATCHDOG_INTERVAL_S = 60
+
+
+def close_age(candles: list[Candle], interval: str, now: float | None = None) -> float | None:
+    """由 K 线列表计算最后收盘时刻距今的秒数；空列表返回 None。
+
+    供无缓存实例的消费方（上下文摘要/指标文本/工具出口）直接判定停更，
+    与 CandleCache.staleness 同口径（issue #74）。
+
+    参数：
+        candles: list[Candle]，按时间排序的 K 线列表（可为乱序，取最大 t）
+        interval: str，K 线周期
+        now: float | None，当前 Unix 时间戳（秒）；None 时取 time.time()
+
+    返回：
+        float | None：最后收盘时刻距今的秒数（不早于 0）；空列表返回 None
+    """
+    if not candles:
+        return None
+    now = time.time() if now is None else now
+    try:
+        span = interval_seconds(interval)
+    except ValueError:
+        span = 0
+    return max(0.0, now - (max(c.t for c in candles) + span))
+
+
+def stale_text(candles: list[Candle], interval: str, now: float | None = None) -> str | None:
+    """K 线已停更时返回报错文案（含停更时长），未停更或无数据返回 None。
+
+    判定口径：停更时长 > STALE_MULTIPLIER × 周期秒数（issue #74）。
+
+    参数：
+        candles: list[Candle]，K 线列表
+        interval: str，K 线周期
+        now: float | None，当前 Unix 时间戳（秒）；None 时取 time.time()
+
+    返回：
+        str | None：停更时返回「K线已停更 X.Xh」文案；否则 None
+    """
+    age = close_age(candles, interval, now)
+    if age is None:
+        return None
+    try:
+        span = interval_seconds(interval)
+    except ValueError:
+        span = 0
+    if age <= STALE_MULTIPLIER * span:
+        return None
+    return f"K线已停更 {age / 3600:.1f}h"
 
 
 class PriceSource(Protocol):
@@ -234,3 +291,100 @@ class CandleCache:
         if not bars:
             return []
         return list(bars)[-n:]
+
+    def stale_keys(self, threshold_multiplier: int = STALE_MULTIPLIER) -> list[tuple[str, str]]:
+        """找出已停更的 (合约, 周期) 键：staleness 超过 倍数×周期 即认定停更。
+
+        参数：
+            threshold_multiplier: int，停更阈值倍数（issue #74）
+
+        返回：
+            list[tuple[str, str]]：停更键列表；无则空列表
+        """
+        stale: list[tuple[str, str]] = []
+        for contract, interval in list(self._bars):
+            threshold = threshold_multiplier * interval_seconds(interval)
+            s = self.staleness(contract, interval)
+            if s is not None and s > threshold:
+                stale.append((contract, interval))
+        return stale
+
+    async def backfill_async(self, contracts: list[str], intervals: list[str]) -> None:
+        """REST 回补历史（异步上下文版）：网关调用经统一卸载层执行。
+
+        参数：
+            contracts: list[str]，需要回补的合约列表
+            intervals: list[str]，需要回补的周期列表
+
+        返回：
+            None，回补结果就地写入缓存
+        """
+        from ..gateway.async_io import run_gateway_io
+
+        for contract in contracts:
+            for interval in intervals:
+                candles = await run_gateway_io(
+                    self._gateway.get_candlesticks,
+                    contract,
+                    interval,
+                    limit=min(self._maxlen, REST_CANDLE_LIMIT),
+                )
+                candles = sorted(candles, key=lambda c: c.t)
+                self._bars[(contract, interval)] = deque(
+                    candles[-self._maxlen :], maxlen=self._maxlen
+                )
+
+    def staleness(self, contract: str, interval: str, now: float | None = None) -> float | None:
+        """最后一根 K 线的收盘时间距 now 的秒数；该键无数据返回 None。
+
+        WS 断联后缓存冻结，此值持续增大——消费方据此判定停更（issue #74）。
+        周期无法识别时退化为"当前时间 − 最后一根 K 线开盘时间"。
+
+        参数：
+            contract: str，合约名称
+            interval: str，行情或统计周期
+            now: float | None，当前 Unix 时间戳（秒）；None 时取 time.time()
+
+        返回：
+            float | None：最后收盘时刻距今的秒数（不早于 0）；键无数据返回 None
+        """
+        bars = self._bars.get((contract, interval))
+        if not bars:
+            return None
+        now = time.time() if now is None else now
+        try:
+            span = interval_seconds(interval)
+        except ValueError:
+            span = 0
+        return max(0.0, now - (bars[-1].t + span))
+
+
+async def stale_watchdog(
+    candles: CandleCache,
+    *,
+    threshold_multiplier: int = STALE_MULTIPLIER,
+    poll_interval_s: float = STALE_WATCHDOG_INTERVAL_S,
+) -> None:
+    """陈旧自愈看门狗：发现停更的 (合约×周期) 即 REST 回补，失败等下轮。
+
+    WS 断联后缓存冻结，指标与快照会基于过时数据工作（issue #74）；多数断线
+    场景交易所 REST 可达，主动回补即可续上数据，无需降级。回补复用 backfill，
+    网关调用经统一卸载层执行（不在事件循环内直接阻塞）。
+
+    参数：
+        candles: CandleCache，K 线缓存（其键集即巡检范围）
+        threshold_multiplier: int，停更阈值倍数（staleness > 倍数×周期即回补）
+        poll_interval_s: float，巡检间隔秒数
+
+    返回：
+        None，长期运行的任务协程；由调用方作为任务托管并随应用生命周期取消
+    """
+    while True:
+        await asyncio.sleep(poll_interval_s)
+        stale = candles.stale_keys(threshold_multiplier)
+        for contract, interval in stale:
+            logger.warning("K 线停更（%s %s），尝试 REST 回补", contract, interval)
+            try:
+                await candles.backfill_async([contract], [interval])
+            except Exception:
+                logger.warning("K 线回补失败（%s %s），等待下轮", contract, interval, exc_info=True)

@@ -19,7 +19,7 @@ from typing import Any
 
 from src.config import ResearchConfig, RiskConfig
 from src.gateway.base import Gateway, MAX_DECIMAL_DIGITS, MAX_DECIMAL_EXPONENT
-from src.market.candles import CandleCache
+from src.market.candles import CandleCache, stale_text
 from src.market.indicator_service import IndicatorService
 from src.market.intervals import GATE_CANDLE_INTERVALS, interval_seconds
 from src.market.triggers import MAX_ALERTS, TriggerManager
@@ -292,6 +292,10 @@ async def get_market_data(deps: ToolDeps, args: dict) -> ToolOutcome:
     interval = _opt_enum(args, "interval", set(GATE_CANDLE_INTERVALS)) or "1h"
     limit = _clamp(_opt_int(args, "limit", 24), 1, 100)
     candles = deps.candles.get_recent(contract, interval, limit)
+    stale = stale_text(candles, interval)
+    if stale is not None:
+        # 停更即报错：不给 LLM 旧 K 线，防其基于过时行情幻觉决策（issue #74）
+        return ToolOutcome(f"K 线数据不可用（{contract} {interval}）：{stale}")
     lines = [
         f"交易对：{contract}；时间尺度：{interval}；时间：北京时间（UTC+8）",
         "时间（年月日时分） | 开盘价 | 收盘价 | 最高价格 | 最低价格 | 交易量",
@@ -330,6 +334,10 @@ async def get_indicators(deps: ToolDeps, args: dict) -> ToolOutcome:
     interval = _opt_enum(args, "interval", set(GATE_CANDLE_INTERVALS)) or "1h"
     if deps.indicator_service is None:
         return ToolOutcome("错误：指标服务未接入，暂无法获取技术指标")
+    stale = stale_text(deps.candles.get_recent(contract, interval, 2), interval)
+    if stale is not None:
+        # 停更即报错：不给 LLM 基于旧 K 线的指标值，防过时行情幻觉决策（issue #74）
+        return ToolOutcome(f"错误：K 线数据不可用（{contract} {interval}）：{stale}，指标已停算")
     try:
         panel = deps.indicator_service.full_panel(contract, interval)
     except Exception as e:  # 服务未就绪/缓存异常：如实回报，不拖垮本轮决策

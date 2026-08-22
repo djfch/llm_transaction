@@ -7,6 +7,7 @@
 服务为 None 时整行省略、服务异常时降级为提示行且不影响其余 section。
 """
 
+import time
 from decimal import Decimal
 from unittest.mock import Mock
 
@@ -235,7 +236,7 @@ def _make_service(oi: Decimal | None = Decimal("8888")) -> IndicatorService:
     """
     bars = [
         Candle(
-            t=1_700_000_000 + i * 3600,
+            t=int(time.time()) // 3600 * 3600 - (60 - i) * 3600,
             o=Decimal(100 + i),
             h=Decimal(101 + i),
             l=Decimal(99 + i),
@@ -359,3 +360,45 @@ async def test_indicator_line_degrades_on_service_error(tmp_path):
     text = await _build_text_with_indicators(tmp_path, _BrokenService())
     assert "BTC_USDT 指标(1h): 暂不可用" in text
     assert "## 价格预警线" in text  # 后续 section 照常组装
+
+
+async def test_stale_candles_replaced_with_unavailable_text(tmp_path):
+    """K 线停更时上下文摘要整段替换为报错文案，不输出旧数据（issue #74）。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+
+    返回：
+        None，断言注入停更 K 线后上下文含「K线数据不可用」且不含旧价格
+    """
+    from src.market.intervals import interval_seconds
+
+    db = Database()
+    await db.open(tmp_path / "agent.db")
+    try:
+        gateway = MockGateway()
+        candles = CandleCache(gateway, ManualPriceSource())
+        old_t = int(time.time()) - 10 * interval_seconds("1h")  # 远超 2×周期
+        candles.on_candle("BTC_USDT", "1h", _old_candle(old_t), True)
+        builder = ContextBuilder(
+            gateway, Repo(db), candles, TriggerManager(lambda t, p: None), ["BTC_USDT"]
+        )
+        text = (await builder.build("timer")).text
+        assert "K线数据不可用" in text and "已停更" in text
+        assert "100" not in text.split("## 行情")[1].split("##")[0]  # 旧价格不出现
+    finally:
+        await db.close()
+
+
+def _old_candle(t: int) -> Candle:
+    """构造指定开盘时间的测试 K 线。
+
+    参数：
+        t: int，开盘时间戳（秒）
+
+    返回：
+        Candle：OHLC 固定的 K 线（收盘价 100，用于断言不泄漏）
+    """
+    return Candle(
+        t=int(t), o=Decimal(100), h=Decimal(101), l=Decimal(99), c=Decimal(100), v=Decimal(1)
+    )

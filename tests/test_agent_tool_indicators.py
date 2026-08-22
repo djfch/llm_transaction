@@ -89,16 +89,23 @@ class BrokenCandleCache:
         raise RuntimeError("缓存未就绪")
 
 
-def make_candles(n: int, start: int = 1_700_000_000) -> list[Candle]:
+def make_candles(n: int, start: int | None = None) -> list[Candle]:
     """n 根 1h K 线：收盘价单调上行（100 起），时间升序。
+
+    start 缺省时取"当前整点往前 n 根"——issue #74 停更判定下，
+    固定旧时间戳的 K 线会被工具出口拒绝。
 
     参数：
         n: int，需要读取或生成的记录数量
-        start: int，K 线起始序号
+        start: int | None，K 线起始时间戳；None 时取当前整点前推 n 小时
 
     返回：
         list[Candle]，按小时升序排列且收盘价逐根递增的 K 线列表
     """
+    if start is None:
+        import time
+
+        start = int(time.time()) // 3600 * 3600 - n * 3600
     return [
         Candle(
             t=start + i * 3600,
@@ -129,7 +136,7 @@ def _registry(service: IndicatorService | None, watchlist: list[str] | None = No
         risk_config=none,
         watchlist=watchlist if watchlist is not None else [BTC],
         repo=none,
-        candles=none,
+        candles=FakeCandleCache(make_candles(60)),
         triggers=none,
         indicator_service=service,
         daily_stats_fn=None,

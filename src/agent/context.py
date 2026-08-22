@@ -17,7 +17,7 @@ from src.audit.logger import get_logger
 from src.config import DEFAULT_INDICATOR_SHORTLIST, ResearchConfig
 from src.gateway.async_io import PRIORITY_NORMAL, read_positions_with_tpsl, run_gateway_io
 from src.gateway.base import Account, Candle, Contract, Gateway, GatewayError, Position, Ticker
-from src.market.candles import CandleCache
+from src.market.candles import CandleCache, stale_text
 from src.market.indicator_service import IndicatorService
 from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory.models import ResearchAssetView
@@ -279,7 +279,12 @@ class ContextBuilder:
         for contract in self._watchlist:
             lines.append(self._ticker_line(contract, tickers.get(contract), metas.get(contract)))
             candles = self._candles.get_recent(contract, self._interval, self._candle_n)
-            lines.append(summarize_candles(contract, self._interval, candles))
+            stale = stale_text(candles, self._interval)
+            if stale is not None:
+                # 停更即报错：不把旧 K 线喂给 LLM，防其基于过时行情幻觉决策（issue #74）
+                lines.append(f"{contract} {self._interval} K线数据不可用：{stale}")
+            else:
+                lines.append(summarize_candles(contract, self._interval, candles))
             indicator_line = self._indicator_line(contract)
             if indicator_line is not None:
                 lines.append(indicator_line)
