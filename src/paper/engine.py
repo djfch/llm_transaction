@@ -851,7 +851,8 @@ class PaperGateway(PaperOpenInterestMixin):
             contract: str，合约名
 
         返回：
-            None，触发强平时就地记账并向 liquidations 追加事件
+            None，触发强平时就地记账并向 liquidations 追加事件，同时清除该合约
+            全部挂单与 TPSL（防止残留委托自动重新开仓，issue #71）
         """
         pos = self.account.position(contract)
         if pos is None:
@@ -860,6 +861,15 @@ class PaperGateway(PaperOpenInterestMixin):
         mark = self._snaps[contract].mark
         if should_liquidate(pos, mark, c.quanto_multiplier, self._maint(contract)):
             self.liquidations.append(liquidate(self.account, contract, mark, c.quanto_multiplier))
+            # 强平即清场：残留的普通挂单会在后续 tick 自动成交重新开仓（issue #71），
+            # 残留 TPSL 已无对应持仓；reduce_only 挂单虽无害但也已失效，一并清除。
+            # 同步把订单结果置为 cancelled，避免 list_orders("open") 返回幽灵挂单。
+            for oid in [o_id for o_id, o in self._open.items() if o.contract == contract]:
+                del self._open[oid]
+                self._results[oid] = self._results[oid].model_copy(
+                    update={"status": "finished", "finish_as": "cancelled"}
+                )
+            self._clear_tpsl(contract)
 
     def _crossed(self, order: RestingOrder) -> bool:
         """判断限价挂单是否穿透当前盘口（买单价 ≥ 卖一、卖单价 ≤ 买一）。

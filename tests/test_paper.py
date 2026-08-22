@@ -289,6 +289,41 @@ def test_liquidation():
     assert gw.account.available == D("9900")  # 保证金全部亏损，无返还
 
 
+def test_liquidation_cancels_resting_orders_and_tpsl():
+    """验证强平清场：残留挂单与 TPSL 一并撤销，后续行情不再自动重新开仓（issue #71）。
+
+    参数：无
+
+    返回：
+        None，断言强平后该合约挂单/TPSL 清空，且下一 tick 不产生任何新开仓成交
+    """
+    from src.gateway.base import TpslOrder
+
+    gw = make_gateway(taker="0")
+    gw.set_leverage(BTC, 10)
+    buy(gw, 10)  # 保证金 = 1000 / 10 = 100
+    # 残留委托：远低于市价的买单（强平后会被自动撮合重新开仓）+ 保护多仓的 TPSL
+    resting = buy(gw, 5, price=D("50"))  # 限价单不成交，保持挂单
+    assert resting.id in gw._open
+    gw.create_tpsl_order(
+        TpslOrder(
+            id="tpsl-1",
+            contract=BTC,
+            direction=1,
+            kind="stop_loss",
+            trigger_price=D("80"),
+        )
+    )
+    gw.on_price(BTC, D("90"), D("89.9"), D("90.1"))  # 触发强平
+    assert len(gw.liquidations) == 1
+    assert gw._open == {}  # 残留挂单已清
+    assert gw.list_tpsl_orders(BTC) == []  # 残留 TPSL 已清
+    assert gw.list_orders(BTC, "open") == []  # 订单结果同步置 cancelled，无幽灵挂单
+    gw.on_price(BTC, D("50"), D("49.9"), D("50.1"))  # 旧挂单价位：不得重新开仓
+    assert gw.list_positions() == []
+    assert [f for f in gw.drain_fills() if f.order_id == resting.id] == []
+
+
 def test_average_entry_on_add():
     """验证同方向加仓后持仓张数与保证金累加、开仓均价按加权平均更新。
 
