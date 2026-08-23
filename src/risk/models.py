@@ -25,6 +25,18 @@ class TradeIntent(BaseModel):
     quanto_multiplier: Decimal = Field(gt=0)  # 每张合约对应的币数
 
 
+class OpenOrderIntent(BaseModel):
+    """未成交挂单快照（风控敞口计算用，issue #58）。
+
+    由 agent 工具层从网关挂单列表组装；price/size_left 为挂单价与剩余张数。
+    """
+
+    contract: str
+    price: Decimal = Field(gt=0)
+    size_left: Decimal  # 剩余张数，正买负卖
+    quanto_multiplier: Decimal = Field(gt=0)
+
+
 class Verdict(BaseModel):
     """风控判定结果：allowed=True 放行；False 拒绝并附全部命中理由。"""
 

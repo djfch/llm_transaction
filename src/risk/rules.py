@@ -8,11 +8,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from decimal import Decimal
 
 from src.config import RiskConfig
-from src.risk.models import AccountSnapshot, DailyStats, PositionSnapshot, TradeIntent
+from src.risk.models import (
+    AccountSnapshot,
+    DailyStats,
+    OpenOrderIntent,
+    PositionSnapshot,
+    TradeIntent,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,8 @@ class RuleInput:
     config: RiskConfig
     # 高置信研报方向（偏多/偏空），由调用方在有效期内传入；None=闸门不约束
     research_direction: str | None = None
+    # 该合约未成交挂单快照（issue #58 敞口完整性）；缺省空表兼容既有调用方
+    open_orders: list[OpenOrderIntent] = dataclass_field(default_factory=list)
 
 
 def intent_notional(intent: TradeIntent) -> Decimal:
@@ -89,18 +97,63 @@ def rule_kill_switch(ctx: RuleInput) -> str | None:
     return None
 
 
+def open_orders_notional(
+    open_orders: list[OpenOrderIntent], contract: str | None = None
+) -> Decimal:
+    """未成交挂单名义价值合计（|剩余张数| × quanto × 挂单价；contract 非空时只计该合约）。
+
+    参数：
+        open_orders: list[OpenOrderIntent]，未成交挂单快照
+        contract: str | None，合约过滤；None 表示全部合约
+
+    返回：
+        Decimal，挂单名义价值合计
+    """
+    total = Decimal(0)
+    for order in open_orders:
+        if contract is not None and order.contract != contract:
+            continue
+        total += abs(order.size_left) * order.quanto_multiplier * order.price
+    return total
+
+
+def _same_contract_exposure(ctx: RuleInput) -> Decimal:
+    """同合约敞口 = 该合约现有持仓名义 + 该合约未成交挂单名义（issue #57/#58）。
+
+    参数：
+        ctx: RuleInput，风控规则上下文
+
+    返回：
+        Decimal：同合约既有敞口合计（不含本单意图）
+    """
+    pos = sum(
+        (
+            abs(p.size) * p.quanto_multiplier * p.mark_price
+            for p in ctx.positions
+            if p.contract == ctx.intent.contract
+        ),
+        Decimal(0),
+    )
+    resting = open_orders_notional(ctx.open_orders, ctx.intent.contract)
+    return pos + resting
+
+
 def rule_position_limit(ctx: RuleInput) -> str | None:
-    """单仓名义价值 / 账户权益 不得超过 max_position_pct（等于放行；平仓豁免）。
+    """单仓敞口 / 账户权益 不得超过 max_position_pct（等于放行；平仓豁免）。
+
+    敞口按"该合约现有持仓 + 该合约未成交挂单 + 本单意图"合计（issue #57/#58），
+    防拆单与挂单集中成交绕过上限。
 
     参数：
         ctx: RuleInput，风控规则上下文
     返回：
-        str | None，单仓名义价值 / 账户权益 不得超过 max_position_pct（等于放行；平仓豁免）
+        str | None，超过阈值返回拒绝理由；平仓/减仓豁免；恰等于阈值放行
     """
     if ctx.intent.is_close:
         return None
-    if intent_notional(ctx.intent) > _pct(ctx.config.max_position_pct) * ctx.account.equity:
-        return f"单仓名义价值超过账户权益上限 {ctx.config.max_position_pct:.0%}"
+    exposure = _same_contract_exposure(ctx) + intent_notional(ctx.intent)
+    if exposure > _pct(ctx.config.max_position_pct) * ctx.account.equity:
+        return f"单仓名义价值（含持仓与挂单）超过账户权益上限 {ctx.config.max_position_pct:.0%}"
     return None
 
 
@@ -114,9 +167,13 @@ def rule_total_position_limit(ctx: RuleInput) -> str | None:
     """
     if ctx.intent.is_close:
         return None
-    total = positions_notional(ctx.positions) + intent_notional(ctx.intent)
+    total = (
+        positions_notional(ctx.positions)
+        + open_orders_notional(ctx.open_orders)
+        + intent_notional(ctx.intent)
+    )
     if total > _pct(ctx.config.max_total_position_pct) * ctx.account.equity:
-        return f"总持仓名义价值超过账户权益上限 {ctx.config.max_total_position_pct:.0%}"
+        return f"总持仓名义价值（含挂单）超过账户权益上限 {ctx.config.max_total_position_pct:.0%}"
     return None
 
 
