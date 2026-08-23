@@ -40,7 +40,7 @@ from src.agent.tool_leverage import (
 from src.audit.logger import get_logger
 from src.gateway.async_io import PRIORITY_HIGH, PRIORITY_NORMAL, run_gateway_io
 from src.gateway.base import Gateway, GatewayError, OrderRequest, OrderResult, Position, TpslOrder
-from src.risk.models import AccountSnapshot, TradeIntent
+from src.risk.models import AccountSnapshot, OpenOrderIntent, TradeIntent
 
 logger = get_logger(__name__)
 
@@ -127,6 +127,18 @@ async def _risk_check(
         )
     except ValidationError as e:
         raise ToolArgError(f"交易意图不合法：{e.errors()[0]['msg']}") from e
+    # 未成交挂单计入敞口（issue #58）：风控看到的必须是"持仓+挂单+本单"的完整账本
+    resting = await run_gateway_io(deps.gateway.list_orders, contract, "open", priority=priority)
+    open_orders = [
+        OpenOrderIntent(
+            contract=contract,
+            price=order.price,
+            size_left=order.left,
+            quanto_multiplier=meta.quanto_multiplier,
+        )
+        for order in resting
+        if order.left and order.left > 0
+    ]
     verdict = deps.risk_engine.check(
         intent,
         snap,
@@ -135,6 +147,7 @@ async def _risk_check(
         deps.watchlist,
         deps.risk_config,
         gate_direction,
+        open_orders=open_orders,
     )
     if not verdict.allowed:
         reason = "；".join(verdict.reasons)
@@ -576,13 +589,21 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
     epoch0 = deps.close_epochs.get(contract, 0)
     reset0 = deps.reset_epoch[0]
     is_close, effective_size = await _amend_direction(deps.gateway, contract, order_id, size)
+    # 改单完整校验（issue #59）：合并出"改完之后"的价格与张数、用真实杠杆，
+    # 不再因补丁字段缺失而跳过价格偏离或放行杠杆规则
+    open_orders = await run_gateway_io(deps.gateway.list_orders, contract, "open")
+    original = next((o for o in open_orders if o.id == order_id), None)
+    effective_price = price if price is not None else getattr(original, "price", None)
+    positions = await run_gateway_io(deps.gateway.list_positions)
+    pos = next((p for p in positions if p.contract == contract), None)
+    leverage = int(pos.leverage) if pos is not None and pos.leverage else 1
     deny = await _risk_check(
         deps,
         contract,
         size=effective_size,
-        price=price,
+        price=effective_price,
         is_close=is_close,
-        leverage=1,  # 改单不变杠杆，杠杆规则以 1 参与（恒放行）
+        leverage=leverage,
     )
     if deny is not None:
         return deny

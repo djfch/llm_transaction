@@ -82,6 +82,7 @@ def check(
     watchlist=None,
     config=None,
     research_direction=None,
+    open_orders=None,
 ):
     """使用安全默认值执行一次风控检查，允许调用方只覆盖目标规则输入。
 
@@ -93,6 +94,7 @@ def check(
         watchlist: list[str] | None，允许开仓的合约白名单；为空时仅允许 BTC_USDT
         config: RiskConfig | None，风控配置；为空时使用默认配置
         research_direction: str | None，研报方向；为空时不施加方向约束
+        open_orders: list[OpenOrderIntent] | None，未成交挂单快照；为空时视为无挂单
 
     返回：
         Verdict，风控引擎汇总全部规则后的放行或拒绝结果
@@ -105,6 +107,7 @@ def check(
         watchlist if watchlist is not None else ["BTC_USDT"],
         config or RiskConfig(),
         research_direction=research_direction,
+        open_orders=open_orders,
     )
 
 
@@ -288,10 +291,12 @@ def test_total_position_limit_equal_threshold_allowed():
     返回：
         None，断言已有 700 + 本单 100 = 800 / 权益 1000 = 0.80 达线但被允许
     """
-    # 已有持仓 700 + 本单 100 = 800 / 权益 1000 = 0.80，恰好等于上限，放行
+    # 已有持仓 700 + 本单 100 = 800 / 权益 1000 = 0.80，恰好等于总仓上限，放行
+    # （单仓上限置 1 隔离 #57 新语义：同合约持仓已计入单仓敞口会先行拒绝）
     positions = [make_position(size=D(7), mark_price=D(100))]
     intent = make_intent(side_size=D(1), price=D(100), mark_price=D(100))
-    assert check(intent=intent, positions=positions).allowed is True
+    config = RiskConfig(max_position_pct=1, max_total_position_pct=0.80)
+    assert check(intent=intent, positions=positions, config=config).allowed is True
 
 
 def test_total_position_limit_over_threshold_denied():
@@ -640,3 +645,83 @@ def test_engine_check_passes_research_direction():
     )
     assert verdict.allowed is False
     assert verdict.reasons == ["高置信研报偏空，反向开多被闸门拦截"]
+
+
+def test_position_limit_counts_same_contract_position():
+    """单仓上限计入同合约已有持仓：拆单累计超限被拒（issue #57）。
+
+    参数：无
+
+    返回：
+        None，断言同合约持仓 700+新单 100 超过 30% 上限被拒；跨合约持仓不计入
+    """
+    other = make_position(size=D(7), mark_price=D(100))
+    other.contract = "ETH_USDT"  # 跨合约持仓不得计入 BTC 单仓敞口
+    same = [make_position(size=D(7), mark_price=D(100))]
+    intent = make_intent(side_size=D(1), price=D(100), mark_price=D(100))
+    assert check(intent=intent, positions=same).allowed is False  # 同合约拆单超限
+    assert check(intent=intent, positions=[other]).allowed is True  # 跨合约不误伤
+
+
+def test_total_limit_counts_open_orders():
+    """总仓敞口计入未成交挂单：持仓+挂单+本单超限被拒（issue #58）。
+
+    参数：无
+
+    返回：
+        None，断言挂单名义计入总敞口后超限拒绝、无挂单时放行
+    """
+    from src.risk.models import OpenOrderIntent
+
+    positions = [make_position(size=D(6), mark_price=D(100))]  # 600
+    orders = [
+        OpenOrderIntent(contract="BTC_USDT", price=D(100), size_left=D(1), quanto_multiplier=D(1))
+    ]  # 挂单 100
+    intent = make_intent(side_size=D(1), price=D(100), mark_price=D(100))  # 本单 100
+    config = RiskConfig(max_position_pct=1, max_total_position_pct=0.80)  # 隔离单仓规则
+    assert (
+        check(intent=intent, positions=positions, open_orders=orders, config=config).allowed is True
+    )  # 600+100+100=800，恰等于上限：放行（等于放行约定）
+    big = [
+        OpenOrderIntent(contract="BTC_USDT", price=D(100), size_left=D(2), quanto_multiplier=D(1))
+    ]  # 挂单 200
+    assert (
+        check(
+            intent=intent,
+            positions=positions,
+            open_orders=big,
+            config=config,
+        ).allowed
+        is False
+    )  # 900 > 800 拒绝
+
+
+def test_open_orders_notional_filters_by_contract():
+    """open_orders_notional 按 contract 过滤与全量合计。
+
+    参数：无
+
+    返回：
+        None，断言指定合约只计自身挂单、None 计全部
+    """
+    from src.risk.rules import open_orders_notional
+
+    a = OpenOrderIntentFactory("BTC_USDT", D(100))
+    b = OpenOrderIntentFactory("ETH_USDT", D(50))
+    assert open_orders_notional([a, b], "BTC_USDT") == D(100)
+    assert open_orders_notional([a, b]) == D(150)
+
+
+def OpenOrderIntentFactory(contract: str, price: Decimal):
+    """构造最小挂单快照的测试辅助。
+
+    参数：
+        contract: str，合约名
+        price: Decimal，挂单价
+
+    返回：
+        OpenOrderIntent：剩余 1 张、quanto=1 的挂单快照
+    """
+    from src.risk.models import OpenOrderIntent
+
+    return OpenOrderIntent(contract=contract, price=price, size_left=D(1), quanto_multiplier=D(1))
