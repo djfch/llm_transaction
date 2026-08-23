@@ -32,8 +32,8 @@ class OpenOrderIntent(BaseModel):
     """
 
     contract: str
-    price: Decimal = Field(gt=0)
-    size_left: Decimal  # 剩余张数，正买负卖
+    price: Decimal = Field(ge=0)  # 挂单价；个别来源缺价时为 0，敞口计算侧跳过
+    size_left: Decimal  # 无符号剩余张数（|剩余量|）
     quanto_multiplier: Decimal = Field(gt=0)
 
 

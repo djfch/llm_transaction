@@ -89,6 +89,7 @@ async def _risk_check(
     is_close: bool,
     leverage: int,
     priority: int = PRIORITY_NORMAL,
+    exclude_order_id: str | None = None,
 ) -> ToolOutcome | None:
     """构造 TradeIntent 过风控；拒绝返回 deny 文本，放行返回 None。
 
@@ -137,7 +138,7 @@ async def _risk_check(
             quanto_multiplier=meta.quanto_multiplier,
         )
         for order in resting
-        if order.left and order.left > 0
+        if order.left and order.left > 0 and order.id != exclude_order_id
     ]
     verdict = deps.risk_engine.check(
         intent,
@@ -604,6 +605,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         price=effective_price,
         is_close=is_close,
         leverage=leverage,
+        exclude_order_id=order_id,  # 被改挂单的名义由生效值代表，剔除防双计
     )
     if deny is not None:
         return deny

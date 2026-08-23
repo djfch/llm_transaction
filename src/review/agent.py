@@ -491,6 +491,13 @@ class ReviewAgent:
                 },
             }
         )
+        if deps.apply_failed_ids:
+            # 生效失败必须主动告警（issue #102）：报告成功但文件未更新，
+            # 用户侧仅靠 WS 警示条可能错过
+            await self._notify(
+                "【复盘告警】报告已生成但策略修订未生效"
+                f"（draft_ids={deps.apply_failed_ids}），请人工核对 system_prompt.md"
+            )
 
     async def _recover_round_and_committed_id(
         self, preallocated: str, round_id: str, report_id: int | None

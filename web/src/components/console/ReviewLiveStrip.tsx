@@ -49,6 +49,7 @@ interface ReviewLiveStripProps {
 export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
   const { connected, lastMessage } = useWs()
   const [active, setActive] = useState(false)
+  const [applyWarning, setApplyWarning] = useState<string | null>(null)
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   // activeRef 与 active 同步：轮询/WS 双通道退出时经它去重，避免 onFinished 重复触发
   const activeRef = useRef(false)
@@ -170,8 +171,12 @@ export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
   // WS：复盘轮开始 → pinned 进入（绑定其 round_id）；轮结束 → 仅 round_id 与绑定相符（或未绑定）才退出，不符忽略
   useEffect(() => {
     if (!lastMessage) return
-    if (lastMessage.type === 'review_round_start') enterActive(lastMessage.data.round_id, true)
-    else if (lastMessage.type === 'review_round') {
+    if (lastMessage.type === 'review_round_start') {
+      setApplyWarning(null)
+      enterActive(lastMessage.data.round_id, true)
+    } else if (lastMessage.type === 'review_round') {
+      // issue #102：草稿未生效必须可见——报告成功但策略文件未更新，用户须人工核对
+      if (lastMessage.data.applied === false) setApplyWarning('复盘报告已生成，但策略修订未生效（磁盘或权限异常），请人工核对 system_prompt.md')
       if (boundIdRef.current === null || lastMessage.data.round_id === boundIdRef.current) exitActive(true)
     }
   }, [lastMessage, enterActive, exitActive])
@@ -244,21 +249,33 @@ export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
     if (connected && !was) catchUp()
   }, [connected, catchUp])
 
-  if (!active) return null
+  const banner =
+    applyWarning !== null ? (
+      <div
+        data-testid="review-apply-warning"
+        className="mb-3 rounded-lg border border-amber-400/50 bg-amber-400/10 px-3 py-2 text-xs text-amber-300"
+      >
+        ⚠ {applyWarning}
+      </div>
+    ) : null
+  if (!active && banner === null) return null
   const last = toolCalls[toolCalls.length - 1]
   return (
-    <div
-      data-testid="review-live-strip"
-      className="mb-3 flex items-center gap-2 rounded-lg border border-dashed border-violet-400/50 bg-violet-400/5 px-3 py-2 text-xs text-violet-300"
-    >
-      <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-400" />
-      </span>
-      <span>
-        {last ? `复盘进行中 · 已调用 ${toolCalls.length} 个工具 · 最近：${last.tool}` : '复盘进行中 · 等待 LLM 发起调用…'}
-      </span>
-      <span className="ml-auto text-[10px] text-zinc-500">每 3 秒自动刷新</span>
-    </div>
+    <>
+      {banner}
+      <div
+        data-testid="review-live-strip"
+        className="mb-3 flex items-center gap-2 rounded-lg border border-dashed border-violet-400/50 bg-violet-400/5 px-3 py-2 text-xs text-violet-300"
+      >
+        <span className="relative flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-400" />
+        </span>
+        <span>
+          {last ? `复盘进行中 · 已调用 ${toolCalls.length} 个工具 · 最近：${last.tool}` : '复盘进行中 · 等待 LLM 发起调用…'}
+        </span>
+        <span className="ml-auto text-[10px] text-zinc-500">每 3 秒自动刷新</span>
+      </div>
+    </>
   )
 }

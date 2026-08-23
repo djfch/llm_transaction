@@ -706,10 +706,11 @@ def test_open_orders_notional_filters_by_contract():
     """
     from src.risk.rules import open_orders_notional
 
+    zero = OpenOrderIntentFactory("BTC_USDT", D(0))  # 来源缺价兜底 0：跳过不计
     a = OpenOrderIntentFactory("BTC_USDT", D(100))
     b = OpenOrderIntentFactory("ETH_USDT", D(50))
-    assert open_orders_notional([a, b], "BTC_USDT") == D(100)
-    assert open_orders_notional([a, b]) == D(150)
+    assert open_orders_notional([zero, a, b], "BTC_USDT") == D(100)  # 缺价挂单被跳过
+    assert open_orders_notional([zero, a, b]) == D(150)
 
 
 def OpenOrderIntentFactory(contract: str, price: Decimal):
