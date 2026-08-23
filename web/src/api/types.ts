@@ -648,7 +648,7 @@ export type WsMessage =
   | { type: 'strategy_updated' }
   | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
   | { type: 'review_round_start'; data: { round_id: string } } // 复盘轮开始：进度条进入进行中态，实时数据走 /api/review/live
-  | { type: 'review_round'; data: { round_id: string; ok: boolean } } // 复盘轮结束：仅作失效信号，消费方重拉报告列表
+  | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）
   | { type: 'research_round_start'; data: { round_id: string } } // 研报轮开始：进度条进入进行中态，实时数据走 /api/research/live
   | { type: 'research_round'; data: { round_id: string; ok: boolean } } // 研报轮结束：仅作失效信号，消费方重拉研报列表
 

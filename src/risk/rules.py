@@ -113,6 +113,8 @@ def open_orders_notional(
     for order in open_orders:
         if contract is not None and order.contract != contract:
             continue
+        if order.price <= 0:
+            continue  # 来源缺价（兜底 0）：无法估值，宁少计不多计
         total += abs(order.size_left) * order.quanto_multiplier * order.price
     return total
 

@@ -1309,3 +1309,44 @@ async def test_failed_round_discards_draft(env):
         v for v in await env.repo.review.list_strategy_versions() if v.created_by == "review_agent"
     ]
     assert drafts and all(v.status == "discarded" for v in drafts)
+
+
+async def test_apply_failure_alerts_and_marks_not_applied(env):
+    """草稿生效失败：review_round 事件 applied=false 且发 TG 告警（issue #102）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言 apply 抛错时事件带 applied=False、告警含「复盘告警」且报告仍成功
+    """
+    await _seed_trades(env.repo)
+    new_prompt = "生效失败策略书：" + "顺势加仓，严格止损。" * 10
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_strategy_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "注定生效失败"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(env, provider)
+
+    async def failing_apply(version_id: int):
+        """模拟磁盘满等持久性生效失败。"""
+        raise RuntimeError("disk full")
+
+    env.store.apply_version = failing_apply
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True  # 报告按成功语义落库
+    final_event = env.events[-1]["data"]
+    assert final_event["applied"] is False  # 生效失败随事件暴露
+    assert any("复盘告警" in a and "未生效" in a for a in env.alerts)  # TG 告警已发
