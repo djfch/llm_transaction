@@ -195,6 +195,23 @@ class ReviewRepo:
         row = await cur.fetchone()
         return StrategyVersion(**dict(row)) if row is not None else None
 
+    async def discard_all_drafts(self) -> int:
+        """把全部 draft 状态的策略版本置为 discarded（启动时清理孤儿草稿，issue #100）。
+
+        启动时不存在进行中的复盘轮——此刻仍为 draft 的版本必然是上轮异常残留，
+        留在历史里可能被人工回滚激活为过期内容。
+
+        参数：无
+
+        返回：
+            int：废弃的草稿数量
+        """
+        cur = await self._conn.execute(
+            "UPDATE strategy_versions SET status='discarded' WHERE status='draft'"
+        )
+        await self._conn.commit()
+        return cur.rowcount
+
     async def attach_report_to_version(self, version_id: int, report_id: int) -> None:
         """回填触发该版本的复盘报告 id（版本先落库、报告后落库的反向关联）。
 

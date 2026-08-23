@@ -316,10 +316,64 @@ class ReviewAgent:
             logger.exception("复盘成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
             await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
             return _success_result(report, round_id)
-        await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
+        await self._emit_event(
+            {
+                "type": "review_round",
+                "data": {
+                    "round_id": round_id,
+                    "ok": True,
+                    "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
+                },
+            }
+        )
         await self._notify(_success_alert(report_md, deps.created_version_id))
         logger.info("复盘完成 report_id=%s action=%s", report.id, report.strategy_action)
         return _success_result(report, round_id)
+
+    async def _apply_drafts(self, deps: ReviewToolDeps) -> None:
+        """统一生效本轮草稿：过期拒绝 + 失败收集（issue #100）。
+
+        生效前比对最新 applied 版本编号——人工在复盘轮内保存过更高版本时，
+        旧草稿视为已被取代，直接废弃而非覆盖人工内容；单个 apply 失败不中断
+        其余草稿，失败 id 记入 deps.apply_failed_ids 供事件与告警暴露。
+
+        参数：
+            deps: ReviewToolDeps，本轮工具依赖
+
+        返回：
+            None，生效/废弃就地完成；失败 id 就地记入 deps.apply_failed_ids
+        """
+        latest_strategy = await self._repo.review.latest_applied_strategy_version()
+        for draft_id in deps.strategy_draft_ids:
+            if latest_strategy is not None and draft_id < latest_strategy.id:
+                logger.warning(
+                    "策略草稿 v%d 已被更高的人工版本 v%d 取代，废弃不生效",
+                    draft_id,
+                    latest_strategy.id,
+                )
+                await deps.store.discard_draft(draft_id)
+                continue
+            try:
+                await deps.store.apply_version(draft_id)
+            except Exception:
+                deps.apply_failed_ids.append(draft_id)
+                logger.exception("策略草稿生效失败（draft_id=%s）", draft_id)
+        if deps.indicator_config_store is not None:
+            latest_cfg = await self._repo.indicator_config.latest_applied_version()
+            for draft_id in deps.indicator_draft_ids:
+                if latest_cfg is not None and draft_id < latest_cfg.id:
+                    logger.warning(
+                        "指标配置草稿 v%d 已被更高的人工版本 v%d 取代，废弃不生效",
+                        draft_id,
+                        latest_cfg.id,
+                    )
+                    await deps.indicator_config_store.discard_draft(draft_id)
+                    continue
+                try:
+                    await deps.indicator_config_store.apply_version(draft_id)
+                except Exception:
+                    deps.apply_failed_ids.append(draft_id)
+                    logger.exception("指标配置草稿生效失败（draft_id=%s）", draft_id)
 
     async def _discard_drafts(self, deps: ReviewToolDeps) -> None:
         """报告失败/取消时废弃本轮全部草稿版本；文件从未被动过，无需回滚（issue #73）。
@@ -358,13 +412,13 @@ class ReviewAgent:
             对应分支经 _complete_interrupted 以成功语义补全剩余收尾
         """
         # 草稿统一生效（issue #62/#73）：报告已 COMMIT，此刻才把文件替换为修订内容；
-        # 此前写工具只落 draft、文件从未被动过。apply 失败按异常向上抛，
-        # 由 run 的"成功落库后收尾异常"分支按成功语义补全。
-        for draft_id in deps.strategy_draft_ids:
-            await deps.store.apply_version(draft_id)
-        if deps.indicator_config_store is not None:
-            for draft_id in deps.indicator_draft_ids:
-                await deps.indicator_config_store.apply_version(draft_id)
+        # 此前写工具只落 draft、文件从未被动过。apply 失败记录在 deps.apply_failed_ids
+        # 并向上抛，由 run 的"成功落库后收尾异常"分支按成功语义补全。
+        await self._apply_drafts(deps)
+        if deps.apply_failed_ids:
+            raise RuntimeError(
+                f"草稿生效失败（draft_ids={deps.apply_failed_ids}），文件未更新，请人工核对"
+            )
         if deps.created_version_id is not None:
             await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
         if deps.indicator_config_version_id is not None:  # 指标短名单版本同模式关联
@@ -399,17 +453,12 @@ class ReviewAgent:
             None：就地补齐版本关联与审计闭合（各自失败只记日志，不掩盖待传播的取消），
             并补发轮末 ok=True 事件（重复发送无害，前端 exitActive 幂等消化）
         """
-        for draft_id in deps.strategy_draft_ids:  # 草稿生效幂等重放（issue #62/#73）
-            try:
-                await deps.store.apply_version(draft_id)
-            except Exception:
-                logger.exception("复盘收尾补生效策略草稿失败（draft_id=%s）", draft_id)
-        if deps.indicator_config_store is not None:
-            for draft_id in deps.indicator_draft_ids:
-                try:
-                    await deps.indicator_config_store.apply_version(draft_id)
-                except Exception:
-                    logger.exception("复盘收尾补生效指标草稿失败（draft_id=%s）", draft_id)
+        try:
+            # 草稿生效幂等重放（issue #62/#73）；内部异常各自捕获，
+            # 这里再兜一层——discard 抛错不得中断审计闭合与 applied 事件（评审）
+            await self._apply_drafts(deps)
+        except Exception:
+            logger.exception("复盘收尾补生效草稿失败（成功报告已落库，不反转）")
         if deps.created_version_id is not None:
             try:
                 await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
@@ -432,7 +481,16 @@ class ReviewAgent:
                 await self._audit.end_round(round_id, "\n".join(raw_parts))
             except Exception:
                 logger.exception("复盘收尾补闭合审计轮失败（成功报告已落库，不反转）")
-        await self._emit_event({"type": "review_round", "data": {"round_id": round_id, "ok": True}})
+        await self._emit_event(
+            {
+                "type": "review_round",
+                "data": {
+                    "round_id": round_id,
+                    "ok": True,
+                    "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
+                },
+            }
+        )
 
     async def _recover_round_and_committed_id(
         self, preallocated: str, round_id: str, report_id: int | None

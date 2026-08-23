@@ -4,6 +4,7 @@
 指标服务用假 K 线/OI 缓存装配（同 test_indicator_service 模式），不触网不触库。
 """
 
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -119,12 +120,17 @@ def make_candles(n: int, start: int | None = None) -> list[Candle]:
     ]
 
 
-def _registry(service: IndicatorService | None, watchlist: list[str] | None = None) -> ToolRegistry:
+def _registry(
+    service: IndicatorService | None,
+    watchlist: list[str] | None = None,
+    candles: "FakeCandleCache | None" = None,
+) -> ToolRegistry:
     """装配只接指标服务的 ToolRegistry，其余依赖用空对象占位。
 
     参数：
         service: IndicatorService | None，指标服务实例；None 用于模拟服务未接入
         watchlist: list[str] | None，合约白名单；None 时默认只含 BTC_USDT
+        candles: FakeCandleCache | None，K 线缓存替身；None 时默认 60 根新鲜数据
 
     返回：
         ToolRegistry：可执行 get_indicators 的工具注册表
@@ -136,7 +142,7 @@ def _registry(service: IndicatorService | None, watchlist: list[str] | None = No
         risk_config=none,
         watchlist=watchlist if watchlist is not None else [BTC],
         repo=none,
-        candles=FakeCandleCache(make_candles(60)),
+        candles=candles if candles is not None else FakeCandleCache(make_candles(60)),
         triggers=none,
         indicator_service=service,
         daily_stats_fn=None,
@@ -252,3 +258,19 @@ async def test_service_failure_returns_error_text_not_raised():
     service = IndicatorService(BrokenCandleCache(), FakeOiCache({}))
     out = await _registry(service).execute("get_indicators", {"contract": BTC})
     assert "错误：指标计算失败" in out.text and "缓存未就绪" in out.text
+
+
+async def test_get_indicators_stale_returns_unavailable():
+    """K 线停更时 get_indicators 直接返回不可用文案，不输出旧指标值（issue #97）。
+
+    参数：无
+
+    返回：
+        None，断言停更缓存下返回「K 线数据不可用」且不含 EMA 值与指标面板
+    """
+    stale_start = int(time.time()) // 3600 * 3600 - 65 * 3600  # 最后一根收盘在 ~5h 前
+    stale_cache = FakeCandleCache(make_candles(60, start=stale_start))
+    registry = _registry(_service(), candles=stale_cache)
+    out = await registry.execute("get_indicators", {"contract": BTC})
+    assert "K 线数据不可用" in out.text and "停更" in out.text
+    assert "EMA20" not in out.text and "技术指标" not in out.text

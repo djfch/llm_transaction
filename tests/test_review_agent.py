@@ -246,7 +246,11 @@ async def test_run_success_without_revision(env):
     # WS 事件序列：轮始 → 轮末（成功 ok=True），round_id 与审计轮一致
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
     assert env.events[0]["data"] == {"round_id": result["round_id"]}
-    assert env.events[1]["data"] == {"round_id": result["round_id"], "ok": True}
+    assert env.events[1]["data"] == {
+        "round_id": result["round_id"],
+        "ok": True,
+        "applied": True,  # issue #100：生效结果随事件暴露
+    }
     assert len(await env.repo.review.list_strategy_versions()) == 1  # 只有播种的 v1
 
 
@@ -671,7 +675,11 @@ async def test_run_cancel_after_success_report_no_double_write(env, monkeypatch)
     assert round_row.error == ""  # 审计轮以成功语义闭合
     assert state["closed"] == 1  # 真实闭合仅发生一次（由取消分支补闭合）
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
-    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.events[-1]["data"] == {
+        "round_id": round_row.round_id,
+        "ok": True,
+        "applied": True,
+    }
 
 
 async def test_cancel_between_commit_and_return_rechecks_success(env, monkeypatch):
@@ -726,7 +734,11 @@ async def test_cancel_between_commit_and_return_rechecks_success(env, monkeypatc
     assert round_row is not None and round_row.ended_at is not None
     assert round_row.error == ""  # 审计轮以成功语义闭合
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
-    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.events[-1]["data"] == {
+        "round_id": round_row.round_id,
+        "ok": True,
+        "applied": True,
+    }
     assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
 
 
@@ -925,7 +937,11 @@ async def _assert_interrupted_success_cleanup(
     if round_id is not None:
         assert round_row.round_id == round_id
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
-    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.events[-1]["data"] == {
+        "round_id": round_row.round_id,
+        "ok": True,
+        "applied": True,
+    }
 
 
 async def test_cancel_at_strategy_attach_replays_completion(env, tmp_path, monkeypatch):
@@ -1197,7 +1213,11 @@ async def test_save_post_commit_exception_recovers_success(env, monkeypatch):
     assert round_row.error == ""  # 审计轮以成功语义闭合
     assert result["round_id"] == round_row.round_id
     assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
-    assert env.events[-1]["data"] == {"round_id": round_row.round_id, "ok": True}
+    assert env.events[-1]["data"] == {
+        "round_id": round_row.round_id,
+        "ok": True,
+        "applied": True,
+    }
     assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
 
 
