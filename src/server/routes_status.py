@@ -427,7 +427,9 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         }
 
     @router.get("/equity")
-    async def get_equity() -> dict[str, Any]:
+    async def get_equity(
+        days: int | None = Query(default=None, ge=1, le=365),
+    ) -> dict[str, Any]:
         """账户权益曲线：基准权益起步，按成交逐笔累计净盈亏得到折线点。
 
         基准按模式选取（paper 取配置初始权益，testnet/live 由账户当前权益倒推，账户不可用
@@ -440,7 +442,8 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
             points（时间与权益组成的曲线点列表，无成交时为当前时点的单点）
         """
         settings = load_settings(deps.config_path)
-        trades = await deps.repo.trades_between(0, time.time() + 1, mode=settings.mode)
+        start_ts = time.time() - days * 86_400 if days is not None else 0
+        trades = await deps.repo.trades_between(start_ts, time.time() + 1, mode=settings.mode)
         pnl_fee_sum = sum((t.pnl - t.fee for t in trades), Decimal(0))
         baseline, source = await _equity_baseline(deps, settings, pnl_fee_sum)
         equity = baseline
@@ -453,7 +456,7 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         return {
             "initial_equity": _cents(baseline),
             "baseline_source": source,
-            "points": points,
+            "points": _downsample(points),
         }
 
     @router.get("/alerts")
@@ -509,3 +512,25 @@ def create_status_router(deps: ServerDeps) -> APIRouter:
         }
 
     return router
+
+
+_MAX_EQUITY_POINTS = 500  # 权益曲线单次返回的点数上限（issue #79 载荷有界）
+
+
+def _downsample(points: list[dict[str, Any]], max_points: int = _MAX_EQUITY_POINTS) -> list[dict]:
+    """等步长抽点降采样，保留首尾点；点数不超上限时原样返回。
+
+    参数：
+        points: list[dict]，权益曲线点（时间升序）
+        max_points: int，返回点数上限
+
+    返回：
+        list[dict]：抽点后的曲线点（含首尾）；无需降采样时为原列表
+    """
+    if len(points) <= max_points:
+        return points
+    stride = -(-len(points) // max_points)  # 向上取整步长
+    sampled = points[::stride]
+    if sampled[-1] != points[-1]:
+        sampled.append(points[-1])
+    return sampled

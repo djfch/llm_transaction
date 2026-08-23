@@ -808,3 +808,45 @@ async def test_pump_events_broadcasts_queue():
     await asyncio.sleep(0.05)
     task.cancel()
     assert ws.sent[-1] == {"type": "position"}
+
+
+async def test_equity_downsamples_large_history(client: AsyncClient, deps: ServerDeps):
+    """权益曲线超过 500 点时服务端降采样，载荷有界（issue #79）。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        deps: ServerDeps，提供真实 repo 以批量插入历史成交
+
+    返回：
+        None，断言 600 笔成交下返回点数不超过上限且保留最后一个数据点
+    """
+    from decimal import Decimal
+
+    for i in range(600):
+        await deps.repo.save_trade(
+            "r1",
+            "paper",
+            "BTC_USDT",
+            Decimal(1),
+            Decimal(100),
+            fee=Decimal(0),
+            pnl=Decimal(0),
+            created_at=1_000_000 + i,
+        )
+    body = (await client.get("/api/equity")).json()
+    assert len(body["points"]) <= 501
+    assert body["points"][-1]["t"] >= 1_000_599  # 末点保留（含最新累计值）
+
+
+@pytest.mark.parametrize("bad_days", [0, -1, 366])
+async def test_equity_rejects_days_out_of_range(client: AsyncClient, bad_days: int):
+    """days 参数钳制在 1-365：越界一律 422。
+
+    参数：
+        client: AsyncClient，用于发起测试请求的客户端
+        bad_days: int，越界的窗口天数
+
+    返回：
+        None，断言非法参数返回 422
+    """
+    assert (await client.get("/api/equity", params={"days": bad_days})).status_code == 422
