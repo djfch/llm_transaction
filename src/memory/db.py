@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS causal_links (
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_mode_created ON trades(mode, created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_round ON orders(round_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_round ON audit_tool_calls(round_id);
 CREATE INDEX IF NOT EXISTS idx_strategy_versions_md5 ON strategy_versions(md5);
@@ -411,6 +412,10 @@ class Database:
         # 版本状态列（issue #62/#73）：复盘改写先落 draft 草稿、报告成功才置 applied
         # 生效；失败/取消置 discarded。历史行默认 applied 与既有语义一致。
         await self._ensure_version_status_columns()
+        # 权益曲线按模式+时间的窗口扫描索引（issue #79）
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_mode_created ON trades(mode, created_at)"
+        )
         cur = await self._conn.execute("PRAGMA table_info(review_reports)")
         if "round_id" not in {row["name"] for row in await cur.fetchall()}:
             await self._conn.execute(
