@@ -14,6 +14,7 @@ from typing import Any
 
 from src.audit.logger import get_logger
 from src.research import tool_handlers
+from src.research.providers.base import ResearchSourceError
 from src.research.tool_handlers import ResearchToolDeps, ToolArgError
 from src.research.tool_schemas import SCHEMAS
 
@@ -113,6 +114,11 @@ class ResearchToolRegistry:
             return await spec.handler(args or {})
         except ToolArgError as e:
             return f"参数错误：{e}"
+        except ResearchSourceError as e:
+            # 消息在源头已脱敏（issue #68）；不打 traceback——原因链上挂着带 API key
+            # 的原始 httpx 异常，全文落日志文件会造成二次泄漏（issue #92）
+            logger.error("研报工具 %s 数据源失败：%s", name, e)
+            return f"数据源失败：{e}"
         except Exception as e:  # 工具内部 bug 不拖垮本轮研报，落日志排查
             logger.exception("研报工具 %s 执行异常", name)
             return f"工具内部错误：{type(e).__name__}: {e}"

@@ -203,3 +203,17 @@ class IndicatorConfigRepo:
         )
         row = await cur.fetchone()
         return await self.get_version(row["id"]) if row is not None else None
+
+    async def discard_all_drafts(self) -> int:
+        """把全部 draft 状态的指标配置版本置为 discarded（启动时清理孤儿草稿，issue #100）。
+
+        参数：无
+
+        返回：
+            int：废弃的草稿数量
+        """
+        cur = await self._conn.execute(
+            "UPDATE indicator_config_versions SET status='discarded' WHERE status='draft'"
+        )
+        await self._conn.commit()
+        return cur.rowcount

@@ -587,4 +587,8 @@ async def test_build_review_passes_notify_event_to_agent(tmp_path, repo):
     assert result["ok"] is True
     assert [e["type"] for e in events] == ["review_round_start", "review_round"]
     assert events[0]["data"] == {"round_id": result["round_id"]}
-    assert events[1]["data"] == {"round_id": result["round_id"], "ok": True}
+    assert events[1]["data"] == {
+        "round_id": result["round_id"],
+        "ok": True,
+        "applied": True,
+    }

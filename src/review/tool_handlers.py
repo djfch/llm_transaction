@@ -57,6 +57,9 @@ class ReviewToolDeps:
     # 失败/取消置 discarded——写工具不再直接改文件
     strategy_draft_ids: list[int] = dataclass_field(default_factory=list)
     indicator_draft_ids: list[int] = dataclass_field(default_factory=list)
+    # 生效失败的草稿 id（磁盘满等持久性失败）：随 review_round 事件暴露给前端
+    # （issue #100：报告成功但文件未更新必须可观察）
+    apply_failed_ids: list[int] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------

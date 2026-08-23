@@ -199,13 +199,16 @@ class IndicatorConfigStore:
         """启动对账：短名单文件与最新 applied 版本不一致时以数据库为准恢复文件。
 
         堵"文件已替换、数据库落库失败/进程中断"留下的不一致窗口（issue #62）；
-        无 applied 版本或内容一致时不做任何事。
+        无 applied 版本或内容一致时不做任何事。同时清理孤儿草稿（issue #100）。
 
         参数：无
 
         返回：
-            None，不一致时恢复文件并触发变更通知；一致时静默
+            None，先废弃全部 draft，再在不一致时恢复文件并触发变更通知；一致时静默
         """
+        orphans = await self._versions.discard_all_drafts()
+        if orphans:
+            logger.warning("已废弃 %d 个孤儿指标配置草稿（上轮未正常收尾）", orphans)
         latest = await self._versions.latest_applied_version()
         try:
             current = self._path.read_text(encoding="utf-8")
