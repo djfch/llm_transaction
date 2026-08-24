@@ -623,6 +623,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -649,6 +650,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", specifier = ">=0.51.0" },
+    { name = "websockets", specifier = "<17" },
 ]
 
 [package.metadata.requires-dev]

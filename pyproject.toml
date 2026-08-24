@@ -18,6 +18,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "tzdata; sys_platform == \"win32\"",
     "uvicorn>=0.51.0",
+    # gate-ws 0.5.6 内部仍用 websockets 旧版 client 接口（已弃用），
+    # 未来大版本删除旧接口会直接挂掉行情订阅，先钉住上限
+    "websockets<17",
 ]
 
 [dependency-groups]
