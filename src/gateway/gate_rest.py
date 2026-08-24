@@ -23,6 +23,7 @@ from .base import (
     Account,
     Candle,
     Contract,
+    ContractNotFound,
     GatewayError,
     MAX_DECIMAL_DIGITS,
     MAX_DECIMAL_EXPONENT,
@@ -404,6 +405,7 @@ def _to_contract(c: gate_api.Contract) -> Contract:
         quanto_multiplier=_dec(c.quanto_multiplier),
         order_size_min=_dec(c.order_size_min),
         order_size_max=_dec(c.order_size_max),
+        market_order_size_max=_dec(getattr(c, "market_order_size_max", None)),
         order_price_round=_dec(c.order_price_round),
         enable_decimal=bool(c.enable_decimal),
         mark_price=_dec(c.mark_price),
@@ -600,6 +602,7 @@ class GateRestGateway(GateOpenInterestMixin):
         config = gate_api.Configuration(host=host, key=api_key, secret=api_secret)
         self._api = gate_api.FuturesApi(_TimeoutApiClient(config))
         self._settle = gate_config.settle
+        self._contract_cache: dict[str, Contract] = {}
 
     @staticmethod
     def _exptime() -> int:
@@ -626,9 +629,27 @@ class GateRestGateway(GateOpenInterestMixin):
             GatewayError：交易所请求失败时抛出（合约不存在时为 ContractNotFound）
         """
         try:
-            return _to_contract(self._api.get_futures_contract(self._settle, contract))
+            result = _to_contract(self._api.get_futures_contract(self._settle, contract))
+            self._contract_cache[contract] = result
+            return result
         except GateApiException as exc:
             raise wrap_gate_exception(exc) from exc
+
+    def get_cached_contract(self, contract: str) -> Contract:
+        """读取最近一次成功查询的进程内合约规格，不访问 Gate。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：最近一次成功获取的规格
+
+        异常：
+            ContractNotFound：当前进程尚无该合约缓存时抛出
+        """
+        if contract not in self._contract_cache:
+            raise ContractNotFound(f"合约规格尚未缓存: {contract}", label="CONTRACT_NOT_FOUND")
+        return self._contract_cache[contract]
 
     def get_account(self) -> Account:
         """读取合约账户的可用余额与未实现盈亏。

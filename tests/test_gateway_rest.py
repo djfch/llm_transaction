@@ -22,10 +22,48 @@ from src.gateway.gate_rest import (
     _DEFAULT_REQUEST_TIMEOUT,
     GateRestGateway,
     _TimeoutApiClient,
+    _to_contract,
     _to_position,
 )
 
 BTC = "BTC_USDT"
+
+
+def make_sdk_contract() -> SimpleNamespace:
+    """构造 _to_contract 所需的 Gate 合约响应字段。
+
+    参数：无
+
+    返回：
+        SimpleNamespace：普通上限 1000、市价单独立上限 100 的合约响应
+    """
+    return SimpleNamespace(
+        name=BTC,
+        quanto_multiplier="0.001",
+        order_size_min="1",
+        order_size_max="1000",
+        market_order_size_max="100",
+        order_price_round="0.1",
+        enable_decimal=False,
+        mark_price="60000",
+        funding_rate="0.0001",
+        funding_interval=28800,
+        maker_fee_rate="0.0002",
+        taker_fee_rate="0.0005",
+        status="trading",
+        in_delisting=False,
+    )
+
+
+def test_to_contract_maps_market_order_size_max():
+    """校验 Gate 市价单独立张数上限进入内部合约规格。
+
+    参数：无
+
+    返回：
+        None，断言 market_order_size_max 映射为 Decimal 100
+    """
+    assert _to_contract(make_sdk_contract()).market_order_size_max == Decimal(100)
 
 
 def make_gateway() -> GateRestGateway:

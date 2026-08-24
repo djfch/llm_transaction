@@ -40,6 +40,20 @@ class PaperContractStateMixin:
             raise ContractNotFound(f"合约不存在: {contract}", label="CONTRACT_NOT_FOUND")
         return self._contracts[contract]
 
+    def get_cached_contract(self, contract: str) -> Contract:
+        """读取模拟撮合当前使用的内存合约规格。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：当前内存规格
+
+        异常：
+            ContractNotFound：合约不存在时抛出
+        """
+        return self.get_contract(contract)
+
     def refresh_contract(self, contract: str) -> Contract:
         """从公共 Gate 提供方刷新规格并写入模拟撮合内存。
 

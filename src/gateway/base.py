@@ -81,6 +81,7 @@ class Contract(BaseModel):
     taker_fee_rate: Decimal
     status: str  # 只交易 trading
     in_delisting: bool
+    market_order_size_max: Decimal = Decimal(0)  # 0 表示市价单沿用普通订单上限
 
 
 class Account(BaseModel):
@@ -225,6 +226,20 @@ class Gateway(Protocol):
         异常：
             ContractNotFound：合约不存在时抛出
             GatewayError：交易所请求失败时抛出
+        """
+        ...
+
+    def get_cached_contract(self, contract: str) -> Contract:
+        """读取最近一次成功获取的内存合约规格，不访问外部接口。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：进程内最近一次成功获取的合约规格
+
+        异常：
+            ContractNotFound：内存中尚无该合约规格时抛出
         """
         ...
 

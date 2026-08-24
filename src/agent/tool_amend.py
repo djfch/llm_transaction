@@ -6,9 +6,9 @@ from decimal import Decimal
 
 from src.agent.contract_specs import fresh_contract
 from src.agent.tool_handlers import ToolArgError, ToolDeps, ToolOutcome, _need_decimal, _need_str
-from src.agent.tool_leverage import _amend_unless_close_intervened
+from src.agent.tool_leverage import _amend_unless_close_intervened, _order_fingerprint
 from src.agent.tool_order_reduction import reduction_risk_check
-from src.agent.tool_trading import _risk_check_snapshots
+from src.agent.tool_trading import _resolve_leverage, _risk_check_snapshots
 from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Gateway, OrderRequest, OrderResult, Position
 from src.risk.stop_risk import planned_stop_loss, projected_position
@@ -40,6 +40,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         raise ToolArgError(f"未找到未成交订单 {order_id}")
     positions = await run_gateway_io(deps.gateway.list_positions)
     pos = next((item for item in positions if item.contract == contract), None)
+    leverage, _ = _resolve_leverage(contract, None, positions)
     signed_left = original.left if original.size >= 0 else -original.left
     is_close = _is_reduction(original, pos, signed_left)
     deny = await _amend_risk_check(
@@ -48,7 +49,7 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         order_id=order_id,
         price=price,
         size=signed_left,
-        leverage=max(int(pos.leverage), 1) if pos is not None and pos.leverage else 1,
+        leverage=leverage,
         is_close=is_close,
         original=original,
         positions=positions,
@@ -62,12 +63,13 @@ async def amend_order(deps: ToolDeps, args: dict) -> ToolOutcome:
         order_id,
         price,
         pos.size if pos is not None else Decimal(0),
+        _order_fingerprint(original),
         epoch0,
         reset0,
     )
     if result is None:
         return ToolOutcome(
-            f"已中止：{contract} 在风控校验期间持仓、人工平仓状态或账户代际发生变化，请重新评估",
+            f"已中止：{contract} 在风控校验期间订单状态、持仓、人工平仓状态或账户代际发生变化，请重新评估",
             "deny",
             "校验期间状态变化",
         )
@@ -104,6 +106,7 @@ async def _submit_amend(
     order_id: str,
     price: Decimal,
     expected_position_size: Decimal,
+    expected_order_state: tuple,
     epoch0: int,
     reset0: int,
 ) -> OrderResult | None:
@@ -115,6 +118,7 @@ async def _submit_amend(
         order_id: str，订单 ID
         price: Decimal，新价格
         expected_position_size: Decimal，风险校验时持仓张数
+        expected_order_state: tuple，风险校验时未成交订单指纹
         epoch0: int，进入工具时的人工平仓代际
         reset0: int，进入工具时的账户重置代际
 
@@ -133,6 +137,7 @@ async def _submit_amend(
         resets=deps.reset_epoch,
         reset0=reset0,
         expected_position_size=expected_position_size,
+        expected_order_state=expected_order_state,
         mutation=True,
     )
 

@@ -65,7 +65,11 @@ async def _zero_daily() -> DailyStats:
 
 
 async def _make_tools(
-    tmp_path, *, extra_contracts: tuple = (), research_config: ResearchConfig | None = None
+    tmp_path,
+    *,
+    extra_contracts: tuple = (),
+    research_config: ResearchConfig | None = None,
+    gateway: MockGateway | None = None,
 ) -> SimpleNamespace:
     """组装工具注册表（MockGateway + tmp_path SQLite）。
 
@@ -73,6 +77,7 @@ async def _make_tools(
         tmp_path: Path，pytest 提供的临时目录
         extra_contracts: tuple，除 BTC 外需注册的附加测试合约
         research_config: ResearchConfig | None，可选的研报方向闸门配置
+        gateway: MockGateway | None，可选自定义网关；省略时按合约夹具创建
 
     返回：
         SimpleNamespace，包含数据库、仓储、模拟网关、工具依赖和注册表的测试环境
@@ -83,7 +88,7 @@ async def _make_tools(
     contracts = {"BTC_USDT": _contract("BTC_USDT", "0.001", "60000")}
     for name in extra_contracts:
         contracts[name] = _contract(name, "0.001", "60000")
-    gateway = MockGateway(contracts=contracts)
+    gateway = gateway or MockGateway(contracts=contracts)
     deps = ToolDeps(
         gateway=gateway,
         risk_engine=RiskEngine(),
@@ -326,6 +331,92 @@ async def test_amend_reduce_direction_ignores_contract_spec_outage(tmp_path, mon
             {"contract": "BTC_USDT", "order_id": order_id, "price": 59600},
         )
         assert outcome.risk_verdict == "allow", outcome.text
+    finally:
+        await env.db.close()
+
+
+async def test_amend_cross_position_uses_cross_leverage_limit(tmp_path):
+    """校验全仓遗留增仓挂单按实际全仓杠杆参与改单风控。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言全仓实际 5 倍超过 3 倍上限时改单被拒绝
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("0", cross_limit="5")
+        order = env.gateway.place_order(
+            OrderRequest(
+                contract="BTC_USDT",
+                size=Decimal(1),
+                price=Decimal(59000),
+                stop_loss_price=Decimal(58000),
+            )
+        )
+        env.deps.risk_config.max_leverage = 3
+        outcome = await env.registry.execute(
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order.id, "price": 59500},
+        )
+        assert outcome.risk_verdict == "deny"
+        assert "杠杆 5x 超过上限 3x" in outcome.text
+    finally:
+        await env.db.close()
+
+
+async def test_amend_aborts_when_order_changes_after_risk_check(tmp_path):
+    """校验最终改单前订单自身被并发扩大时安全中止。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言旧风险快照不能用于修改已经变大的订单
+    """
+
+    class ChangingOrderGateway(MockGateway):
+        """第二次持仓核对时模拟外部扩大同一挂单。"""
+
+        reads = 0
+        watched_order_id = ""
+
+        def list_positions(self) -> list[Position]:
+            """在最终写入核对阶段扩大目标订单。
+
+            参数：无
+
+            返回：
+                list[Position]：保持持仓不变的当前快照
+            """
+            self.reads += 1
+            if self.reads == 2:
+                order = self.orders[self.watched_order_id]
+                self.orders[self.watched_order_id] = order.model_copy(
+                    update={"size": Decimal(5), "left": Decimal(5)}
+                )
+            return super().list_positions()
+
+    gateway = ChangingOrderGateway(contracts={"BTC_USDT": _contract("BTC_USDT", "0.001", "60000")})
+    env = await _make_tools(tmp_path, gateway=gateway)
+    try:
+        order = gateway.place_order(
+            OrderRequest(
+                contract="BTC_USDT",
+                size=Decimal(1),
+                price=Decimal(59000),
+                stop_loss_price=Decimal(58000),
+            )
+        )
+        gateway.watched_order_id = order.id
+        outcome = await env.registry.execute(
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order.id, "price": 59500},
+        )
+        assert outcome.risk_verdict == "deny"
+        assert "订单状态" in outcome.text
+        assert gateway.orders[order.id].price == Decimal(59000)
     finally:
         await env.db.close()
 

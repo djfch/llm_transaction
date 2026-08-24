@@ -31,7 +31,7 @@ from src.agent.tool_leverage import (
 from src.agent.tool_order_reduction import place_reduction
 from src.agent.tool_trading import _record_order, _risk_check_snapshots, _validate_tpsl
 from src.gateway.async_io import run_gateway_io
-from src.gateway.base import Contract, GatewayError, OrderRequest, OrderResult, Position
+from src.gateway.base import Account, Contract, GatewayError, OrderRequest, OrderResult, Position
 from src.risk.stop_risk import planned_stop_loss, projected_position
 
 
@@ -58,6 +58,16 @@ class _PreparedExposure:
     planned_risk: Decimal
     equity: Decimal
     prev_state: tuple[int, str] | None
+    state: _ExposureState
+
+
+@dataclass(frozen=True)
+class _ExposureState:
+    """必须在风险校验前后保持不变的离散账户交易状态。"""
+
+    available: Decimal
+    positions: tuple[tuple, ...]
+    resting_orders: tuple[tuple, ...]
 
 
 def _parse_exposure_args(args: dict) -> _ExposureArgs:
@@ -72,8 +82,15 @@ def _parse_exposure_args(args: dict) -> _ExposureArgs:
     异常：
         ToolArgError：存在旧张数字段、缺少必填项或杠杆不是正整数时抛出
     """
-    if "size" in args:
-        raise ToolArgError("place_order 不接受 size；请提交 margin_usdt，由代码换算张数")
+    deprecated = sorted(
+        key for key in ("size", "reduce_only", "margin_mode", "text") if key in args
+    )
+    if deprecated:
+        size_note = "place_order 不接受 size；" if "size" in deprecated else ""
+        raise ToolArgError(
+            f"{size_note}place_order 新增敞口不接受这些旧执行字段：{', '.join(deprecated)}；"
+            "请只提交保证金、杠杆、方向与止盈止损"
+        )
     side = _need_enum(args, "side", {"long", "short"})
     leverage_value = _need_decimal(args, "leverage")
     if leverage_value <= 0 or leverage_value != leverage_value.to_integral_value():
@@ -171,6 +188,7 @@ async def _prepare_exposure(
     positions = await run_gateway_io(deps.gateway.list_positions)
     resting = await run_gateway_io(deps.gateway.list_orders, parsed.contract, "open")
     position = _position_for(positions, parsed.contract)
+    state = _exposure_state(account, positions, resting)
     state_denial = _position_state_denial(position, parsed.direction)
     if state_denial is not None:
         return state_denial
@@ -222,7 +240,68 @@ async def _prepare_exposure(
         stop_loss_price=parsed.stop_loss,
         take_profit_price=parsed.take_profit,
     )
-    return _PreparedExposure(request, sizing, risk, equity, prev_state)
+    return _PreparedExposure(request, sizing, risk, equity, prev_state, state)
+
+
+def _exposure_state(
+    account: Account, positions: list[Position], resting: list[OrderResult]
+) -> _ExposureState:
+    """提取不受正常行情跳动影响的账户、持仓与挂单指纹。
+
+    参数：
+        account: Account，当前账户快照
+        positions: list[Position]，全部持仓快照
+        resting: list[OrderResult]，目标合约未成交订单
+
+    返回：
+        _ExposureState：忽略标记价和未实现盈亏的离散交易状态
+    """
+    position_state = tuple(
+        sorted(
+            (
+                item.contract,
+                item.size,
+                item.entry_price,
+                item.margin,
+                item.leverage,
+                item.margin_mode,
+                item.cross_leverage_limit,
+            )
+            for item in positions
+            if item.size != 0
+        )
+    )
+    order_state = tuple(
+        sorted(
+            (
+                item.id,
+                item.size,
+                item.left,
+                item.price,
+                item.reduce_only,
+                item.stop_loss_price,
+                item.take_profit_price,
+            )
+            for item in resting
+        )
+    )
+    return _ExposureState(account.available, position_state, order_state)
+
+
+async def _read_exposure_state(deps: ToolDeps, contract: str) -> _ExposureState:
+    """在最终写入前重读离散交易状态。
+
+    参数：
+        deps: ToolDeps，工具依赖
+        contract: str，目标合约
+
+    返回：
+        _ExposureState：当前账户、持仓与挂单指纹
+    """
+    account = await run_gateway_io(deps.gateway.get_account)
+    positions = await run_gateway_io(deps.gateway.list_positions)
+    resting = await run_gateway_io(deps.gateway.list_orders, contract, "open")
+    return _exposure_state(account, positions, resting)
 
 
 def _sizing(parsed: _ExposureArgs, meta: Contract) -> PositionSizing:
@@ -246,6 +325,7 @@ def _sizing(parsed: _ExposureArgs, meta: Contract) -> PositionSizing:
             reference_price=reference,
             direction=parsed.direction,
             contract=meta,
+            is_market=parsed.price is None,
         )
     except ValueError as exc:
         raise ToolArgError(str(exc)) from exc
@@ -296,11 +376,17 @@ async def _place_exposure(deps: ToolDeps, args: dict) -> ToolOutcome:
         prepared = await _prepare_exposure(deps, parsed)
         if isinstance(prepared, ToolOutcome):
             return prepared
-        if prepared != first:
+        if prepared.state != first.state:
             return ToolOutcome(
-                f"已中止：{parsed.contract} 在校验期间账户、持仓或合约规格发生变化，请重新评估",
+                f"已中止：{parsed.contract} 在校验期间账户、持仓或挂单状态发生变化，请重新评估",
                 "deny",
                 "校验期间状态变化",
+            )
+        if await _read_exposure_state(deps, parsed.contract) != prepared.state:
+            return ToolOutcome(
+                f"已中止：{parsed.contract} 在最终提交前账户、持仓或挂单状态发生变化，请重新评估",
+                "deny",
+                "最终状态变化",
             )
         placed = await _apply_leverage_and_place(
             deps,

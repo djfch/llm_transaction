@@ -56,6 +56,7 @@ class PaperGateway(PaperContractStateMixin, PaperOpenInterestMixin):
     _GATEWAY_IO_INLINE_STATIC = frozenset(
         {
             "get_contract",
+            "get_cached_contract",
             "get_account",
             "list_positions",
             "set_leverage",

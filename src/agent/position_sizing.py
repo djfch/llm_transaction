@@ -42,6 +42,7 @@ def calculate_position_sizing(
     reference_price: Decimal,
     direction: int,
     contract: Contract,
+    is_market: bool = False,
 ) -> PositionSizing:
     """用保证金、杠杆和实时合约规格计算实际张数、名义价值与费用。
 
@@ -51,6 +52,7 @@ def calculate_position_sizing(
         reference_price: Decimal，市价单标记价或限价单委托价
         direction: int，下单方向，1 为多、-1 为空
         contract: Contract，Gate 实时合约规格
+        is_market: bool，是否为市价单；市价单使用独立张数上限
 
     返回：
         PositionSizing：向下取整后的实际下单结果
@@ -79,8 +81,16 @@ def calculate_position_sizing(
         raise ValueError(
             f"实际张数 {lots} 低于合约最小张数 {contract.order_size_min}，不会自动放大仓位"
         )
-    if lots > contract.order_size_max:
-        raise ValueError(f"实际张数 {lots} 超过合约最大张数 {contract.order_size_max}")
+    maximum = (
+        contract.market_order_size_max
+        if is_market and contract.market_order_size_max > 0
+        else contract.order_size_max
+    )
+    if lots > maximum:
+        label = (
+            "市价单最大张数" if is_market and contract.market_order_size_max > 0 else "合约最大张数"
+        )
+        raise ValueError(f"实际张数 {lots} 超过{label} {maximum}")
     actual_notional = lots * contract.quanto_multiplier * reference_price
     return PositionSizing(
         requested_margin=margin_usdt,
@@ -93,12 +103,15 @@ def calculate_position_sizing(
     )
 
 
-def calculate_reduction_size(position_size: Decimal, reduce_pct: Decimal) -> Decimal:
+def calculate_reduction_size(
+    position_size: Decimal, reduce_pct: Decimal, contract: Contract | None
+) -> Decimal:
     """按持仓张数和减仓比例计算不会超过请求比例的内部反向张数。
 
     参数：
         position_size: Decimal，当前持仓张数，正多负空
         reduce_pct: Decimal，减仓比例，必须位于 0 与 1 之间
+        contract: Contract | None，当前持仓的内存合约规格；缺失时按整数张安全降级
 
     返回：
         Decimal：与持仓方向相反的减仓张数
@@ -112,10 +125,12 @@ def calculate_reduction_size(position_size: Decimal, reduce_pct: Decimal) -> Dec
         raise ValueError("reduce_pct 必须在 0 与 1 之间；整仓平仓请用 close=true")
     raw = abs(position_size) * reduce_pct
     lots = (
-        raw.to_integral_value(rounding=ROUND_FLOOR)
-        if position_size == position_size.to_integral_value()
-        else _floor_decimal_size(raw)
+        _floor_decimal_size(raw)
+        if contract is not None and contract.enable_decimal
+        else raw.to_integral_value(rounding=ROUND_FLOOR)
     )
     if lots == 0:
         raise ValueError("减仓比例换算后的实际张数为 0，请提高比例或使用 close=true")
+    if contract is not None and lots < contract.order_size_min:
+        raise ValueError(f"减仓后的实际张数 {lots} 低于合约最小张数 {contract.order_size_min}")
     return -lots if position_size > 0 else lots

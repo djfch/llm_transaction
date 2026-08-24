@@ -5,6 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from src.agent.tool_handlers import ToolDeps
 from src.agent.tools import ToolRegistry
 from src.config import PaperConfig, RiskConfig
@@ -345,6 +347,152 @@ async def test_update_tpsl_profit_zone_has_zero_planned_loss(tmp_path):
         )
         assert outcome.risk_verdict == "allow"
         assert "计划止损估算 0" in outcome.text
+    finally:
+        await env.db.close()
+
+
+class _UnavailableContractGateway(MockGateway):
+    """持仓与保护单可读，但实时合约规格接口不可用。"""
+
+    def get_contract(self, contract: str) -> Contract:
+        """模拟官方规格查询故障。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：本实现不会返回
+
+        异常：
+            GatewayError：始终抛出规格查询故障
+        """
+        raise GatewayError(f"{contract} 规格查询故障")
+
+
+async def test_update_tpsl_allows_tightening_when_contract_query_fails(tmp_path):
+    """校验规格接口故障不能阻断已有止损的严格收紧。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言 58000 收紧到 58500 后新保护单生效
+    """
+    gateway = _UnavailableContractGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position()},
+    )
+    _install_stop(gateway, "58000")
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 58500}
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+        assert gateway.list_tpsl_orders("BTC_USDT")[0].trigger_price == Decimal(58500)
+    finally:
+        await env.db.close()
+
+
+async def test_update_tpsl_allows_first_protection_when_contract_query_fails(tmp_path):
+    """校验无旧止损时，规格故障也不能阻断首次建立方向正确的保护。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言首次止损成功建立并提示估算暂不可用
+    """
+    gateway = _UnavailableContractGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position()},
+    )
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 58000}
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+        assert "规格不可用" in outcome.text
+    finally:
+        await env.db.close()
+
+
+async def test_update_tpsl_allows_tightening_during_delisting(tmp_path):
+    """校验合约进入下架期后仍可收紧已有持仓止损。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言下架状态不阻断 58000 到 58500 的降险更新
+    """
+    contract = _contract().model_copy(update={"status": "delisting", "in_delisting": True})
+    gateway = MockGateway(
+        contracts={"BTC_USDT": contract},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position()},
+    )
+    _install_stop(gateway, "58000")
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 58500}
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+    finally:
+        await env.db.close()
+
+
+@pytest.mark.parametrize(
+    ("size", "loose_stop", "tight_stop", "requested_stop"),
+    [
+        (Decimal(10), Decimal(57000), Decimal(59000), Decimal(58000)),
+        (Decimal(-10), Decimal(63000), Decimal(61000), Decimal(62000)),
+    ],
+)
+async def test_update_tpsl_uses_tightest_existing_stop_independent_of_order(
+    tmp_path, size: Decimal, loose_stop: Decimal, tight_stop: Decimal, requested_stop: Decimal
+):
+    """校验多张旧止损按实际最强保护比较，不依赖接口返回顺序。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+        size: Decimal，正多负空的整仓张数
+        loose_stop: Decimal，先返回的宽松旧止损
+        tight_stop: Decimal，后返回的严格旧止损
+        requested_stop: Decimal，介于两者之间的新止损
+
+    返回：
+        None，断言相对最紧止损属于放宽且在超限时被拒绝
+    """
+    position = _long_position().model_copy(update={"size": size})
+    direction = 1 if size > 0 else -1
+    gateway = MockGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": position},
+    )
+    for stop in (loose_stop, tight_stop):
+        gateway.create_tpsl_order(
+            TpslOrder(
+                id="",
+                contract="BTC_USDT",
+                direction=direction,
+                kind="stop_loss",
+                trigger_price=stop,
+            )
+        )
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl",
+            {"contract": "BTC_USDT", "stop_loss_price": requested_stop},
+        )
+        assert outcome.risk_verdict == "deny"
+        assert "没有缩小当前风险" in outcome.text
     finally:
         await env.db.close()
 

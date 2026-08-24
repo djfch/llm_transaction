@@ -198,6 +198,25 @@ async def test_size_argument_is_rejected_and_not_in_schema(tmp_path):
         await env.db.close()
 
 
+async def test_deprecated_execution_fields_cannot_be_silently_treated_as_exposure(tmp_path):
+    """校验旧执行字段不会被静默忽略后变成新增敞口。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言 reduce_only 与 margin_mode 均在网关写入前被拒绝
+    """
+    env = await _env(tmp_path)
+    try:
+        for field, value in (("reduce_only", True), ("margin_mode", "cross")):
+            outcome = await env.registry.execute("place_order", _open_args(**{field: value}))
+            assert "不接受这些旧执行字段" in outcome.text
+        assert env.gateway.placed == []
+    finally:
+        await env.db.close()
+
+
 async def test_available_balance_includes_actual_margin_and_estimated_fee(tmp_path):
     """校验实际保证金加预计手续费超过可用余额时拒绝。
 
@@ -300,6 +319,52 @@ async def test_final_recheck_aborts_when_position_changes_during_validation(tmp_
         assert outcome.risk_verdict == "deny"
         assert "校验期间" in outcome.text
         assert gateway.placed == []
+    finally:
+        await env.db.close()
+
+
+async def test_final_recheck_uses_latest_volatile_market_snapshot(tmp_path):
+    """校验连续合法标记价变化不会被误判为持仓竞态。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言使用最终实时规格完成市价下单
+    """
+
+    class MovingMarketGateway(MockGateway):
+        """每次规格读取都返回稍有变化的正常标记价。"""
+
+        reads = 0
+
+        def get_contract(self, contract: str) -> Contract:
+            """返回持续更新的可交易规格。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                Contract：标记价逐次增加 0.1 的规格
+            """
+            self.reads += 1
+            return self.contracts[contract].model_copy(
+                update={"mark_price": D("100") + D(self.reads) / D(10)}
+            )
+
+    gateway = MovingMarketGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=D(1000), unrealised_pnl=D(0)),
+    )
+    env = await _env(tmp_path, gateway=gateway)
+    try:
+        outcome = await env.registry.execute(
+            "place_order",
+            _open_args(margin_usdt=110, leverage=1, stop_loss_price=99),
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+        assert gateway.reads >= 2
+        assert len(gateway.placed) == 1
     finally:
         await env.db.close()
 
@@ -489,5 +554,31 @@ async def test_close_and_reduce_do_not_depend_on_contract_query(tmp_path):
         assert reduced.risk_verdict == "allow", reduced.text
         assert closed.risk_verdict == "allow", closed.text
         assert gateway.positions["BTC_USDT"].size == 0
+    finally:
+        await env.db.close()
+
+
+async def test_decimal_contract_integer_position_can_reduce_fractional_lot(tmp_path):
+    """校验小数张合约即使当前持仓显示整数，也能按比例减出小数张。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言 1 张持仓减半提交 -0.5 张只减仓单
+    """
+    gateway = MockGateway(
+        contracts={"BTC_USDT": _contract(decimal_size=True, minimum="0.1")},
+        account=Account(available=D(1000), unrealised_pnl=D(0)),
+        positions={"BTC_USDT": _position(size="1")},
+    )
+    env = await _env(tmp_path, gateway=gateway)
+    try:
+        outcome = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "reduce_pct": 0.5}
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+        assert gateway.placed[-1].size == D("-0.5")
+        assert gateway.placed[-1].reduce_only is True
     finally:
         await env.db.close()

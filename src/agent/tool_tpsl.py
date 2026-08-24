@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from src.agent.context import compute_equity
-from src.agent.contract_specs import fresh_contract
 from src.agent.tool_handlers import (
     ToolArgError,
     ToolDeps,
@@ -15,11 +13,10 @@ from src.agent.tool_handlers import (
     _need_str,
     _opt_decimal,
 )
-from src.agent.tool_trading import _validate_tpsl
+from src.agent.tool_tpsl_risk import TpslRiskAssessment, assess_tpsl_risk
 from src.audit.logger import get_logger
 from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Gateway, GatewayError, TpslOrder
-from src.risk.stop_risk import planned_stop_loss
 
 logger = get_logger(__name__)
 
@@ -141,52 +138,19 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     if pos is None or pos.size == 0:
         raise ToolArgError("当前无持仓，无法设置整仓止盈止损")
     direction = 1 if pos.size > 0 else -1
-    meta = await fresh_contract(deps, contract)
-    _validate_tpsl(
+    current_orders = await run_gateway_io(deps.gateway.list_tpsl_orders, contract)
+    assessment = await assess_tpsl_risk(
+        deps=deps,
+        contract=contract,
+        positions=positions,
+        pos=pos,
         direction=direction,
-        mark_price=meta.mark_price,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        current_orders=current_orders,
     )
-    account = await run_gateway_io(deps.gateway.get_account)
-    equity = compute_equity(account, positions)
-    if equity <= 0:
-        raise ToolArgError("账户权益非正，无法估算整仓止损风险")
-    current_orders = await run_gateway_io(deps.gateway.list_tpsl_orders, contract)
-    current_stop = next(
-        (
-            item.trigger_price
-            for item in current_orders
-            if item.direction == direction and item.kind == "stop_loss"
-        ),
-        None,
-    )
-    new_risk = planned_stop_loss(
-        entry_price=pos.entry_price,
-        stop_loss_price=stop_loss,
-        size=pos.size,
-        multiplier=meta.quanto_multiplier,
-    )
-    current_risk = (
-        planned_stop_loss(
-            entry_price=pos.entry_price,
-            stop_loss_price=current_stop,
-            size=pos.size,
-            multiplier=meta.quanto_multiplier,
-        )
-        if current_stop is not None
-        else None
-    )
-    verdict = deps.risk_engine.check_stop_update(
-        new_risk=new_risk,
-        current_risk=current_risk,
-        has_current_stop=current_stop is not None,
-        equity=equity,
-        config=deps.risk_config,
-    )
-    if not verdict.allowed:
-        reason = "；".join(verdict.reasons)
-        return ToolOutcome(f"风控拒绝：{reason}", "deny", reason)
+    if isinstance(assessment, ToolOutcome):
+        return assessment
     requested = _requested_group(contract, direction, stop_loss, take_profit)
     swap = await run_gateway_io(
         _swap_tpsl_group,
@@ -200,7 +164,7 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     failure = _swap_failure_outcome(swap)
     if failure is not None:
         return failure
-    return _success_outcome(deps, stop_loss, take_profit, new_risk, current_stop, equity)
+    return _success_outcome(deps, stop_loss, take_profit, assessment)
 
 
 def _requested_group(
@@ -266,9 +230,7 @@ def _success_outcome(
     deps: ToolDeps,
     stop_loss: Decimal,
     take_profit: Decimal | None,
-    new_risk: Decimal,
-    current_stop: Decimal | None,
-    equity: Decimal,
+    assessment: TpslRiskAssessment,
 ) -> ToolOutcome:
     """组装保护单更新成功后的风险回显和首次保护警告。
 
@@ -276,17 +238,26 @@ def _success_outcome(
         deps: ToolDeps，工具依赖
         stop_loss: Decimal，新止损价
         take_profit: Decimal | None，新止盈价
-        new_risk: Decimal，新整仓计划止损估算
-        current_stop: Decimal | None，修改前止损价
-        equity: Decimal，账户权益
+        assessment: TpslRiskAssessment，风险估算与降级说明
 
     返回：
         ToolOutcome：允许结果与风险估算
     """
-    text = f"止损已更新为 {stop_loss}；整仓计划止损估算 {new_risk} USDT" + (
-        f"；止盈已更新为 {take_profit}" if take_profit else "；止盈未设置"
+    estimate = (
+        f"整仓计划止损估算 {assessment.new_risk} USDT"
+        if assessment.new_risk is not None
+        else "整仓计划止损估算因规格不可用暂不可得"
     )
-    limit = Decimal(str(deps.risk_config.max_position_stop_risk_pct)) * equity
-    if current_stop is None and new_risk > limit:
+    text = f"止损已更新为 {stop_loss}；{estimate}" + (
+        f"；止盈已更新为 {take_profit}" if take_profit is not None else "；止盈未设置"
+    )
+    if assessment.warning:
+        text += f"；警告：{assessment.warning}"
+    limit = Decimal(str(deps.risk_config.max_position_stop_risk_pct)) * assessment.equity
+    if (
+        assessment.current_stop is None
+        and assessment.new_risk is not None
+        and assessment.new_risk > limit
+    ):
         text += "；警告：首次保护止损仍超过风险上限，请继续收紧"
     return ToolOutcome(text, "allow")
