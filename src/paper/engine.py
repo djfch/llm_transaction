@@ -21,7 +21,6 @@ from ..gateway.base import (
     Account,
     Candle,
     Contract,
-    ContractNotFound,
     GatewayError,
     OrderNotFound,
     OrderRequest,
@@ -38,9 +37,10 @@ from .funding import settle_funding as _settle_funding
 from .liquidation import LiquidationEvent, liquidate, should_liquidate
 
 from .market_stats import PaperOpenInterestMixin
+from .contract_state import PaperContractStateMixin
 
 
-class PaperGateway(PaperOpenInterestMixin):
+class PaperGateway(PaperContractStateMixin, PaperOpenInterestMixin):
     """模拟撮合网关。paper 模式下替代真实网关，供 agent / 风控无差别调用。"""
 
     # 纯内存方法标记（统一卸载层 async_io 识别）：命中方法在事件循环线程内联执行，
@@ -56,6 +56,7 @@ class PaperGateway(PaperOpenInterestMixin):
     _GATEWAY_IO_INLINE_STATIC = frozenset(
         {
             "get_contract",
+            "get_cached_contract",
             "get_account",
             "list_positions",
             "set_leverage",
@@ -103,6 +104,7 @@ class PaperGateway(PaperOpenInterestMixin):
         ticker_provider: Callable[[], list[Ticker]] | None = None,
         oi_provider: Callable[[str], Decimal | None] | None = None,
         oi_history_provider: Callable[[str, str, int], list[OpenInterestPoint]] | None = None,
+        contract_provider: Callable[[str], Contract] | None = None,
     ) -> None:
         """初始化模拟撮合网关，建立账户与行情、订单等内部状态。
 
@@ -115,6 +117,8 @@ class PaperGateway(PaperOpenInterestMixin):
             oi_provider: Callable[[str], Decimal | None] | None，持仓量提供方；省略时无真实 OI 源
             oi_history_provider: Callable[[str, str, int], list[OpenInterestPoint]] | None，
                 持仓量历史提供方；省略时无历史数据
+            contract_provider: Callable[[str], Contract] | None，实时合约规格提供方；
+                省略时仅使用内存规格
 
         返回：
             None，初始化内部状态（账户、行情快照、挂单与止盈止损表等）
@@ -127,6 +131,7 @@ class PaperGateway(PaperOpenInterestMixin):
         self._ticker_provider = ticker_provider
         self._oi_provider = oi_provider  # 公共行情网关委托（paper 非 mock 行情时注入真实 OI 源）
         self._oi_history_provider = oi_history_provider
+        self._contract_provider = contract_provider
         self.account = PaperAccount(Decimal(str(config.initial_equity)))
         self._snaps: dict[str, PriceSnap] = {}
         self._leverages: dict[str, Decimal] = {}
@@ -134,17 +139,6 @@ class PaperGateway(PaperOpenInterestMixin):
         self._results: dict[str, OrderResult] = {}
         self._tpsl: dict[str, TpslOrder] = {}
         self.liquidations: list[LiquidationEvent] = []
-
-    def upsert_contract(self, contract: Contract) -> None:
-        """写入或更新合约信息（按合约名覆盖）。
-
-        参数：
-            contract: Contract，合约对象，以其 name 为键存入合约表
-
-        返回：
-            None，就地更新合约表
-        """
-        self._contracts[contract.name] = contract
 
     def set_maintenance_rate(self, contract: str, rate: Decimal) -> None:
         """按合约覆盖维持保证金率。
@@ -254,22 +248,6 @@ class PaperGateway(PaperOpenInterestMixin):
         self._results = {k: r for k, r in self._results.items() if r.status != "open"}
         self._tpsl.clear()
         self.liquidations.clear()
-
-    def get_contract(self, contract: str) -> Contract:
-        """按合约名读取合约信息。
-
-        参数：
-            contract: str，合约名
-
-        返回：
-            Contract：合约对象
-
-        异常：
-            ContractNotFound：合约不存在时抛出
-        """
-        if contract not in self._contracts:
-            raise ContractNotFound(f"合约不存在: {contract}", label="CONTRACT_NOT_FOUND")
-        return self._contracts[contract]
 
     def get_account(self) -> Account:
         """读取账户概览（可用余额与全部持仓未实现盈亏汇总）。

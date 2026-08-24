@@ -273,6 +273,7 @@ export interface DailyStats {
 export interface RiskConfig {
   max_position_pct: number // 单仓名义价值/权益 上限（0-1]
   max_total_position_pct: number // 总仓名义价值/权益 上限（0-1]
+  max_position_stop_risk_pct: number // 单个合约整仓计划止损金额/权益 上限（0-1]
   max_leverage: number // 杠杆上限（1-100 整数）
   daily_loss_limit: number // 日亏损锁仓阈值（0-1]
   max_orders_per_day: number // 日下单上限（整数）

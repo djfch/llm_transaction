@@ -123,6 +123,10 @@ def test_execution_prompt_always_appends_decision_policy(tmp_path):
     assert "不得执行" in prompt
     assert "RiskEngine" in prompt
     assert "交易所返回" in prompt
+    assert "本单保证金 U" in prompt
+    assert "不得自行计算或提交名义仓位与合约张数" in prompt
+    assert "最小保证金或最小仓位反复试单" in prompt
+    assert "放宽已有止损" in prompt
     assert prompt.count("EXECUTION_RESEARCH_POLICY_V2") == 1
     assert prompt.count("EXECUTION_DECISION_POLICY_V3") == 1
     assert prompt.count(EXECUTION_RESEARCH_POLICY_V2) == 1
@@ -175,6 +179,14 @@ def test_prompt_templates_match_current_agent_contracts():
     review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
 
     assert "stop_loss_price" in execution
+    assert "margin_usdt" in execution
+    assert "side(方向)" in execution
+    assert "不要计算或提交\n  名义仓位与合约张数" in execution
+    assert "最小保证金\n  或最小仓位反复试单" in execution
+    assert "放宽已有止损" in execution
+    assert "合约规格刷新" not in execution
+    assert "每周" not in execution
+    assert "JSON" not in execution and "YAML" not in execution
     assert "可用价格预警线 + 平仓实现" not in execution
     assert "决策摘要" in execution
     assert "风险目标、均线周期和止损参数只能采用本轮上下文或工具明确提供的值" in execution

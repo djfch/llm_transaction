@@ -196,7 +196,8 @@ async def test_paper_fills_persisted_to_trades(tmp_path):
                         "place_order",
                         {
                             "contract": "BTC_USDT",
-                            "size": 1,
+                            "side": "long",
+                            "margin_usdt": 30,
                             "leverage": 2,
                             "stop_loss_price": 58000,
                         },

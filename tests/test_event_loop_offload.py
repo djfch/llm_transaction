@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from src.agent.context import ContextBuilder, position_snapshots
-from src.agent import tool_trading
+from src.agent import tool_tpsl
 from src.agent.manual_close import close_position
 from src.agent.tool_handlers import ToolOutcome
 from src.agent.tool_leverage import (
@@ -33,7 +33,8 @@ from src.agent.tool_leverage import (
     _place_unless_close_intervened,
     _place_with_rollback,
 )
-from src.agent.tool_trading import _amend_direction, update_tpsl
+from src.agent.tool_amend import _amend_direction
+from src.agent.tool_tpsl import update_tpsl
 from src.gateway.async_io import (
     _EXECUTOR,
     PRIORITY_HIGH,
@@ -119,7 +120,14 @@ async def test_place_order_slow_gateway_keeps_heartbeat(tmp_path):
         env.gateway.list_positions = _slow(env.gateway.list_positions)
         out, ticks = await _run_with_heartbeat(
             env.registry.execute(
-                "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+                "place_order",
+                {
+                    "contract": "BTC_USDT",
+                    "side": "long",
+                    "margin_usdt": 60,
+                    "leverage": 1,
+                    "stop_loss_price": 58000,
+                },
             )
         )
         assert out.risk_verdict == "allow", out.text
@@ -400,13 +408,13 @@ async def test_high_priority_task_preempts_between_pages():
 
 
 async def test_concurrent_update_tpsl_leave_single_group(tmp_path):
-    """验证两个并发 update_tpsl 串行生效（后写覆盖），不会留下两套新保护单。
+    """验证两个并发 update_tpsl 仅首笔生效，旧快照更新会安全中止。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具
 
     返回：
-        None，断言两次更新均成功、最终该合约只剩一个止损单且触发价属于后生效者
+        None，断言一笔成功、一笔因保护组变化中止，最终只剩一套新保护单
     """
     env = await _make_tools(tmp_path)
     try:
@@ -423,8 +431,10 @@ async def test_concurrent_update_tpsl_leave_single_group(tmp_path):
         first = update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 58000})
         second = update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 57000})
         out1, out2 = await asyncio.gather(first, second)
-        assert out1.risk_verdict == "allow" and "止损已更新" in out1.text, out1.text
-        assert out2.risk_verdict == "allow" and "止损已更新" in out2.text, out2.text
+        allowed = [item for item in (out1, out2) if item.risk_verdict == "allow"]
+        aborted = [item for item in (out1, out2) if "保护单集合" in item.text]
+        assert len(allowed) == 1 and "止损已更新" in allowed[0].text
+        assert len(aborted) == 1 and "变化" in aborted[0].text
         orders = env.gateway.list_tpsl_orders("BTC_USDT")
         assert len(orders) == 1
         assert orders[0].trigger_price in (Decimal(58000), Decimal(57000))
@@ -611,14 +621,14 @@ async def test_update_tpsl_position_closed_before_swap_reports_not_updated(
     env = await _make_tools(tmp_path)
     try:
         env.gateway.positions["BTC_USDT"] = _long_position("2")
-        real_run = tool_trading.run_gateway_io
+        real_run = tool_tpsl.run_gateway_io
 
         async def _close_before_swap(fn, /, *args, **kwargs):
             if getattr(fn, "__name__", "") == "_swap_tpsl_group":
                 env.gateway.positions.pop("BTC_USDT", None)  # 风控 await 窗口内平仓完成
             return await real_run(fn, *args, **kwargs)
 
-        monkeypatch.setattr(tool_trading, "run_gateway_io", _close_before_swap)
+        monkeypatch.setattr(tool_tpsl, "run_gateway_io", _close_before_swap)
         out = await update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 58000})
         assert "止损已更新" not in out.text
         assert "未更新" in out.text
@@ -1329,7 +1339,8 @@ async def test_amend_order_aborts_when_close_intervenes(tmp_path):
         env.gateway.list_positions = _slow(env.gateway.list_positions)  # 0.3s 制造风控窗口
         amend_task = asyncio.ensure_future(
             env.registry.execute(
-                "amend_order", {"contract": "BTC_USDT", "order_id": order_id, "size": 3}
+                "amend_order",
+                {"contract": "BTC_USDT", "order_id": order_id, "price": 59500},
             )
         )
         await asyncio.sleep(0.1)  # 改单已捕获代际锚点，正在慢读风控

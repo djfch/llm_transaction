@@ -57,6 +57,7 @@ cd web && npm run lint && npx tsc --noEmit && npm run test && npm run build  # �
 
 - `config.yaml`、`watchlist.yaml`、`system_prompt.md`、`review_prompt.md`、`research_prompt.md`、`indicator_config.yaml` 为运行时文件（会被 API/程序写回），**不入库**；仓库只存 `.example` 模板，克隆后需复制（见快速开始）
 - `config.yaml`：运行模式（paper/testnet/live）、风控参数、LLM provider、通知、端口；`scheduler.autostart` 控制启动后是否自动开始决策（默认 false，在监控主页点击"启动 agent"才开始）
+- `risk.max_position_stop_risk_pct(单仓计划止损风险上限)` 默认 0.01，限制单个合约整仓从开仓均价到止损价的理论亏损占账户权益比例；保存配置后热更新运行中的风控对象。
 - `config.yaml` 的 `review` 节：复盘 agent 配置——`review.enabled(复盘开关)` 默认 true、`review.interval_days(复盘间隔天数)` 默认 1（每隔 N 天复盘最近 N 天）、`review.daily_time(到达间隔后的触发时刻，本地 HH:MM)` 默认 03:00，保存后热生效；复盘报告与策略版本历史（含 diff 与回滚）在监控页查看；人工改策略请走监控页/PUT /api/strategy（直接编辑 system_prompt.md 会热生效但不会留下版本记录）
 - `config.yaml` 的 `research` 节：研报 agent（前瞻角色，独立于交易循环）配置——`research.enabled(自动研报总开关)` 默认 false、`research.max_turns(工具调用上限)` 默认 30、`research.timeout_seconds(单次超时)` 默认 900。配置中心可分别启停东京、伦敦、纽约三个开盘前 30 分钟预设，也可添加 UTC+8 固定时间及每天/三地交易日规则；保存后立即生效，错过目标分钟不补跑，手动生成始终可用。
   - 三个预设分别在东京 09:00、伦敦 08:00、纽约 09:30 当地开盘前 30 分钟执行；伦敦和纽约会随官方时区自动切换冬夏令时。官方休市日每日刷新并缓存到 `data/market_calendar_cache.json(日历缓存)`；来源不可用时优先使用旧缓存，未知工作日按交易日处理并在配置中心警告。

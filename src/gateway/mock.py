@@ -101,6 +101,22 @@ class MockGateway:
             raise ContractNotFound(f"合约不存在: {contract}", label="CONTRACT_NOT_FOUND")
         return self.contracts[contract]
 
+    def get_cached_contract(self, contract: str) -> Contract:
+        """从 mock 内存合约表读取规格，不调用可被故障桩替换的实时查询。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：内存中的测试合约规格
+
+        异常：
+            ContractNotFound：合约不在内存表时抛出
+        """
+        if contract not in self.contracts:
+            raise ContractNotFound(f"合约不存在: {contract}", label="CONTRACT_NOT_FOUND")
+        return self.contracts[contract]
+
     def get_account(self) -> Account:
         """读取合约账户快照。
 

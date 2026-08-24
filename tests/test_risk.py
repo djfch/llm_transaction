@@ -10,6 +10,7 @@ from src.config import RiskConfig
 from src.risk.engine import RiskEngine
 from src.risk.models import AccountSnapshot, DailyStats, PositionSnapshot, TradeIntent, Verdict
 from src.risk.rules import intent_notional, positions_notional
+from src.risk.stop_risk import planned_stop_loss, projected_position
 
 D = Decimal
 
@@ -168,6 +169,66 @@ def test_positions_notional_sums_absolute_values():
         make_position(size=D(-3), mark_price=D(100)),  # 空仓按绝对值计 300
     ]
     assert positions_notional(positions) == D(500)
+
+
+def test_planned_stop_loss_handles_long_short_and_profit_zone():
+    """校验多空计划亏损公式，并把已进入盈利区的止损按零风险处理。
+
+    参数：无
+
+    返回：
+        None，断言多仓、空仓与盈利区止损的计划亏损结果
+    """
+    assert planned_stop_loss(
+        entry_price=D(100), stop_loss_price=D(95), size=D(2), multiplier=D("0.5")
+    ) == D(5)
+    assert planned_stop_loss(
+        entry_price=D(100), stop_loss_price=D(106), size=D(-3), multiplier=D("0.5")
+    ) == D(9)
+    assert planned_stop_loss(
+        entry_price=D(100), stop_loss_price=D(101), size=D(2), multiplier=D("0.5")
+    ) == D(0)
+    assert planned_stop_loss(
+        entry_price=D(100), stop_loss_price=D(99), size=D(0), multiplier=D(1)
+    ) == D(0)
+
+
+def test_projected_position_uses_weighted_entry_and_rejects_reverse():
+    """校验同向加仓采用张数加权均价，零仓直接采用新入场价，反手被拒绝。
+
+    参数：无
+
+    返回：
+        None，断言预计整仓张数、均价与非法方向分支
+    """
+    assert projected_position(
+        current_size=D(2),
+        current_entry_price=D(100),
+        added_size=D(1),
+        added_entry_price=D(130),
+    ) == (D(3), D(110))
+    assert projected_position(
+        current_size=D(0),
+        current_entry_price=D(0),
+        added_size=D(-2),
+        added_entry_price=D(90),
+    ) == (D(-2), D(90))
+    import pytest
+
+    with pytest.raises(ValueError, match="反手"):
+        projected_position(
+            current_size=D(1),
+            current_entry_price=D(100),
+            added_size=D(-1),
+            added_entry_price=D(90),
+        )
+    with pytest.raises(ValueError, match="不能为零"):
+        projected_position(
+            current_size=D(0),
+            current_entry_price=D(0),
+            added_size=D(0),
+            added_entry_price=D(90),
+        )
 
 
 # ---------- 白名单 ----------
@@ -365,6 +426,85 @@ def test_leverage_exempts_close():
         None，断言 6 倍杠杆的平仓单被允许
     """
     assert check(intent=make_intent(leverage=6, is_close=True)).allowed is True
+
+
+# ---------- 单仓整仓计划止损风险 ----------
+
+
+def test_position_stop_risk_equal_one_percent_allowed():
+    """校验整仓计划止损风险恰好为权益 1% 时放行。
+
+    参数：无
+
+    返回：
+        None，断言 10 / 1000 达线但不超过上限
+    """
+    intent = make_intent(planned_stop_risk=D(10))
+    assert check(intent=intent).allowed is True
+
+
+def test_position_stop_risk_over_one_percent_denied():
+    """校验整仓计划止损风险超过权益 1% 时拒绝新增敞口。
+
+    参数：无
+
+    返回：
+        None，断言 10.01 / 1000 超限且理由标明计划止损估算
+    """
+    intent = make_intent(planned_stop_risk=D("10.01"))
+    verdict = check(intent=intent)
+    assert verdict.allowed is False
+    assert any("计划止损估算" in reason for reason in verdict.reasons)
+
+
+def test_position_stop_risk_exempts_reduction():
+    """校验平仓和减仓不受新增计划止损风险上限阻断。
+
+    参数：无
+
+    返回：
+        None，断言降险意图即使携带超大估算值仍放行
+    """
+    intent = make_intent(is_close=True, planned_stop_risk=D(999))
+    assert check(intent=intent).allowed is True
+
+
+def test_stop_update_allows_tightening_but_rejects_widening_over_limit():
+    """校验已有超限止损只能向更小风险调整，等风险或扩大风险均拒绝。
+
+    参数：无
+
+    返回：
+        None，断言收紧放行、放宽和等风险拒绝
+    """
+    engine = RiskEngine()
+    common = {
+        "has_current_stop": True,
+        "equity": D(1000),
+        "config": RiskConfig(),
+    }
+    assert engine.check_stop_update(new_risk=D(15), current_risk=D(20), **common).allowed
+    assert not engine.check_stop_update(new_risk=D(25), current_risk=D(20), **common).allowed
+    assert not engine.check_stop_update(new_risk=D(20), current_risk=D(20), **common).allowed
+    assert engine.check_stop_update(new_risk=D(10), current_risk=D(20), **common).allowed
+
+
+def test_stop_update_allows_first_protection_even_when_still_over_limit():
+    """校验当前没有止损时允许先补方向正确的保护，即使估算仍超过 1%。
+
+    参数：无
+
+    返回：
+        None，断言首次补保护放行，并覆盖无当前风险值的分支
+    """
+    verdict = RiskEngine().check_stop_update(
+        new_risk=D(50),
+        current_risk=None,
+        has_current_stop=False,
+        equity=D(1000),
+        config=RiskConfig(),
+    )
+    assert verdict.allowed is True
 
 
 # ---------- 日亏损锁仓 ----------

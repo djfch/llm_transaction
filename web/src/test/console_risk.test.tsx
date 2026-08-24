@@ -20,6 +20,7 @@ const CONFIG: AppConfig = {
   risk: {
     max_position_pct: 0.3,
     max_total_position_pct: 0.8,
+    max_position_stop_risk_pct: 0.01,
     max_leverage: 5,
     daily_loss_limit: 0.1,
     max_orders_per_day: 20,
@@ -36,18 +37,27 @@ const holder = vi.hoisted(() => ({
 vi.mock('../api', () => ({ api: { getConfig: () => holder.getConfig() } }))
 
 describe('RiskPanel(硬性风控 · 代码保证)', () => {
-  it('渲染四行风控参数（比例 ×100 百分比）+ 裁决说明', async () => {
+  it('使用中文标签渲染全部风控参数与裁决说明', async () => {
     render(<RiskPanel />)
     expect(screen.getByText('硬性风控 · 代码保证')).toBeInTheDocument()
-    expect(await screen.findByText('单仓上限 max_position_pct')).toBeInTheDocument()
+    expect(await screen.findByText('单仓名义价值上限')).toBeInTheDocument()
     expect(screen.getByText('30%')).toBeInTheDocument()
-    expect(screen.getByText('总仓上限 max_total_position_pct')).toBeInTheDocument()
+    expect(screen.getByText('总仓名义价值上限')).toBeInTheDocument()
     expect(screen.getByText('80%')).toBeInTheDocument()
-    expect(screen.getByText('价格偏离 max_deviation')).toBeInTheDocument()
+    expect(screen.getByText('单仓计划止损风险上限')).toBeInTheDocument()
+    expect(screen.getByText('1%')).toBeInTheDocument()
+    expect(screen.getByText('最大杠杆')).toBeInTheDocument()
+    expect(screen.getByText('5x')).toBeInTheDocument()
+    expect(screen.getByText('委托价偏离上限')).toBeInTheDocument()
     expect(screen.getByText('2%')).toBeInTheDocument()
-    expect(screen.getByText('日亏锁仓 daily_loss_limit')).toBeInTheDocument()
+    expect(screen.getByText('当日亏损锁仓线')).toBeInTheDocument()
     const loss = screen.getByText('10%')
     expect(loss.className).toContain('text-rose-300') // 日亏锁仓警示色
+    expect(screen.getByText('每日开仓单数上限')).toBeInTheDocument()
+    expect(screen.getByText('20')).toBeInTheDocument()
+    expect(screen.getByText('风控总开关')).toBeInTheDocument()
+    expect(screen.getByText('未开启')).toBeInTheDocument()
+    expect(screen.queryByText(/max_position_pct|max_total_position_pct/)).not.toBeInTheDocument()
     expect(screen.getByText(/LLM 仅有建议权/)).toBeInTheDocument()
     expect(holder.getConfig).toHaveBeenCalledTimes(1)
   })

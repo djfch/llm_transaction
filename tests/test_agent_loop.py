@@ -294,7 +294,8 @@ async def test_full_round_audited(env: SimpleNamespace):
                         "place_order",
                         {
                             "contract": "BTC_USDT",
-                            "size": 1,
+                            "side": "long",
+                            "margin_usdt": 30,
                             "leverage": 2,
                             "stop_loss_price": 58000,
                         },
@@ -337,7 +338,8 @@ async def test_full_round_audited(env: SimpleNamespace):
     ]
     place = calls[1]
     assert place.risk_verdict == "allow" and place.risk_reason == ""
-    assert json.loads(place.args_json)["size"] == 1
+    place_args = json.loads(place.args_json)
+    assert place_args["margin_usdt"] == 30 and "size" not in place_args
     assert "下单成功" in json.loads(place.result_json)["text"]
 
     assert len(env.gateway.placed) == 1  # 风控放行，真实下单
@@ -483,7 +485,8 @@ async def test_risk_deny_recorded_no_order(env: SimpleNamespace):
                         "place_order",
                         {
                             "contract": "BTC_USDT",
-                            "size": 100,
+                            "side": "long",
+                            "margin_usdt": 6000,
                             "leverage": 1,
                             "stop_loss_price": 58000,
                         },
@@ -587,7 +590,16 @@ async def test_invalid_args_return_error_text(env: SimpleNamespace):
             _resp(
                 "",
                 [
-                    ToolCall("place_order", {"size": 1}, "c1"),  # 缺 contract
+                    ToolCall(
+                        "place_order",
+                        {
+                            "side": "long",
+                            "margin_usdt": 60,
+                            "leverage": 1,
+                            "stop_loss_price": 58000,
+                        },
+                        "c1",
+                    ),  # 缺 contract
                     ToolCall(
                         "set_price_alert",
                         {"contract": "BTC_USDT", "direction": "up", "price": 100},

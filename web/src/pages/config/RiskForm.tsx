@@ -6,20 +6,22 @@ import { useMemo, useState } from 'react'
 import type { RiskConfig } from '../../api/types'
 import { parseRisk, validateRisk, type RiskFormValues } from './validate'
 
-/** 字段元数据：技术配置键直接作为标签，不追加括号注释。 */
+/** 字段元数据：内部配置键不变，用户界面只显示中文业务含义。 */
 const FIELDS: Array<{ key: keyof RiskFormValues; label: string }> = [
-  { key: 'max_position_pct', label: 'max_position_pct' },
-  { key: 'max_total_position_pct', label: 'max_total_position_pct' },
-  { key: 'max_leverage', label: 'max_leverage' },
-  { key: 'daily_loss_limit', label: 'daily_loss_limit' },
-  { key: 'max_orders_per_day', label: 'max_orders_per_day' },
-  { key: 'max_deviation', label: 'max_deviation' },
+  { key: 'max_position_pct', label: '单仓名义价值上限' },
+  { key: 'max_total_position_pct', label: '总仓名义价值上限' },
+  { key: 'max_position_stop_risk_pct', label: '单仓计划止损风险上限' },
+  { key: 'max_leverage', label: '最大杠杆' },
+  { key: 'daily_loss_limit', label: '当日亏损锁仓线' },
+  { key: 'max_orders_per_day', label: '每日开仓单数上限' },
+  { key: 'max_deviation', label: '委托价偏离上限' },
 ]
 
 function toValues(risk: RiskConfig): RiskFormValues {
   return {
     max_position_pct: String(risk.max_position_pct),
     max_total_position_pct: String(risk.max_total_position_pct),
+    max_position_stop_risk_pct: String(risk.max_position_stop_risk_pct),
     max_leverage: String(risk.max_leverage),
     daily_loss_limit: String(risk.daily_loss_limit),
     max_orders_per_day: String(risk.max_orders_per_day),
@@ -95,7 +97,7 @@ export default function RiskForm({
         {saveError && <span className="text-xs text-rose-400">保存失败：{saveError}</span>}
       </div>
       <p className="mt-2 text-[10px] text-zinc-600">
-        kill_switch 总开关请在顶栏操作；风控参数保存后下一轮决策生效。
+        风控总开关请在顶栏操作；保存后运行中的风控参数立即更新。
       </p>
     </div>
   )

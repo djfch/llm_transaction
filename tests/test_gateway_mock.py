@@ -437,6 +437,18 @@ def test_build_payload_market_order():
     assert payload["text"].startswith("t-")
 
 
+def test_build_payload_decimal_contract_size_is_plain_string():
+    """小数张按普通十进制字符串进入 Gate 下单载荷。
+
+    参数：无
+
+    返回：
+        None，断言不转整数、不使用科学计数法
+    """
+    payload = build_order_payload(OrderRequest(contract=BTC, size=Decimal("0.125")))
+    assert payload["size"] == "0.125"
+
+
 def test_build_payload_limit_order():
     """限价单载荷完整保留价格、TIF、reduce_only、止盈止损和自定义订单号。
 

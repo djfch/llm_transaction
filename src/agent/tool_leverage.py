@@ -314,6 +314,28 @@ def _place_unless_close_intervened(
     return gateway.place_order(req)
 
 
+def _order_fingerprint(order: OrderResult) -> tuple:
+    """提取改单风控依赖的完整未成交订单指纹。
+
+    参数：
+        order: OrderResult，未成交订单快照
+
+    返回：
+        tuple：订单方向、剩余张数、价格、只减仓标记与附带保护价
+    """
+    return (
+        order.id,
+        order.contract,
+        order.status,
+        order.size,
+        order.left,
+        order.price,
+        order.reduce_only,
+        order.stop_loss_price,
+        order.take_profit_price,
+    )
+
+
 def _amend_unless_close_intervened(
     gateway: Gateway,
     contract: str,
@@ -324,6 +346,8 @@ def _amend_unless_close_intervened(
     epoch0: int,
     resets: list[int] | None = None,
     reset0: int | None = None,
+    expected_position_size: Decimal | None = None,
+    expected_order_state: tuple | None = None,
 ) -> OrderResult | None:
     """线程内比对平仓/重置代际：人工平仓或账户重置介入则放弃增仓改单，否则执行改单。
 
@@ -344,6 +368,8 @@ def _amend_unless_close_intervened(
         resets: list[int] | None，账户重置代际计数器（ToolDeps.reset_epoch）；
             None 表示不校验重置代际
         reset0: int | None，进入改单流程前捕获的重置代际；resets 非 None 时必填
+        expected_position_size: Decimal | None，风控校验时的持仓张数；提供时须在改单前一致
+        expected_order_state: tuple | None，风控校验时的订单指纹；提供时须在改单前一致
     返回：
         OrderResult | None，代际一致返回改单结果；任一代际已变（人工平仓介入或
         账户已重置）返回 None
@@ -352,6 +378,20 @@ def _amend_unless_close_intervened(
         return None
     if resets is not None and resets[0] != reset0:
         return None
+    if expected_position_size is not None:
+        position = next(
+            (item for item in gateway.list_positions() if item.contract == contract), None
+        )
+        actual_size = position.size if position is not None else Decimal(0)
+        if actual_size != expected_position_size:
+            return None
+    if expected_order_state is not None:
+        order = next(
+            (item for item in gateway.list_orders(contract, "open") if item.id == order_id),
+            None,
+        )
+        if order is None or _order_fingerprint(order) != expected_order_state:
+            return None
     return gateway.amend_order(contract, order_id, price=price, size=size)
 
 

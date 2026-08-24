@@ -41,7 +41,11 @@ def compute_equity(account: Account, positions: list[Position]) -> Decimal:
 
 
 async def position_snapshots(
-    gateway: Gateway, positions: list[Position], *, priority: int = PRIORITY_NORMAL
+    gateway: Gateway,
+    positions: list[Position],
+    *,
+    priority: int = PRIORITY_NORMAL,
+    metadata: dict[str, Contract] | None = None,
 ) -> list[PositionSnapshot]:
     """持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）。
 
@@ -53,12 +57,15 @@ async def position_snapshots(
         gateway: Gateway，交易所网关
         positions: list[Position]，当前持仓列表
         priority: int，卸载优先级；手动安全操作传 PRIORITY_HIGH
+        metadata: dict[str, Contract] | None，调用方已读取的合约规格，可避免重复查询
     返回：
         list[PositionSnapshot]，持仓 → 风控快照（quanto_multiplier 取合约元数据；标记价缺失时回退元数据）
     """
     snaps = []
     for p in positions:
-        meta = await run_gateway_io(gateway.get_contract, p.contract, priority=priority)
+        meta = (metadata or {}).get(p.contract)
+        if meta is None:
+            meta = await run_gateway_io(gateway.get_contract, p.contract, priority=priority)
         mark = p.mark_price if p.mark_price > 0 else meta.mark_price
         snaps.append(
             PositionSnapshot(
@@ -333,17 +340,17 @@ class ContextBuilder:
         return f"{contract}: 无行情数据"
 
     def _alerts_section(self) -> str:
-        """未触发价格预警线（内存唯一存储，重启即失效——如实暴露给 LLM，供其决定重设/取消）。
+        """生成当前未触发价格预警线，供模型决定保留或取消。
 
         条数超 alerts_n 时按 id 升序截断（旧的优先展示），标题保留总数、尾部标注未显示
         条数，避免预警线异常累积时上下文无界膨胀。
 
         参数：无
         返回：
-            str，未触发价格预警线（内存唯一存储，重启即失效——如实暴露给 LLM，供其决定重设/取消）
+            str：当前未触发预警线及超出展示上限的数量
         """
         triggers = sorted(self._triggers.list(), key=lambda t: t.id)
-        lines = [f"## 价格预警线（内存·重启即失效，{len(triggers)}/{MAX_ALERTS} 条）"]
+        lines = [f"## 价格预警线（{len(triggers)}/{MAX_ALERTS} 条）"]
         if not triggers:
             lines.append("（无）")
         for t in triggers[: self._alerts_n]:

@@ -53,35 +53,41 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "place_order": {
         "description": (
-            "下单（开仓/平仓）。size 为张数：正=开多/买入，负=开空/卖出；"
-            "会产生新敞口时必须提供 stop_loss_price 止损价，take_profit_price 可选；"
-            "close=true 平掉该合约全部持仓；不传 price 为市价单。下单前自动过风控，拒绝时返回理由"
+            "保证金下单、平仓或减仓。开仓/同向加仓提交 side、margin_usdt、leverage 和止损，"
+            "代码换算名义仓位与 Gate 张数并固定逐仓；close=true 整仓市价平仓；"
+            "reduce_pct 部分减仓。反手必须先平仓；下单前自动过硬风控"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "contract": {"type": "string", "description": "合约名，如 BTC_USDT"},
-                "size": {"type": "number", "description": "张数，正多负空；close=true 时忽略"},
+                "side": {
+                    "type": "string",
+                    "enum": ["long", "short"],
+                    "description": "新增敞口方向；long=多，short=空",
+                },
+                "margin_usdt": {
+                    "type": "number",
+                    "description": "本单投入保证金，单位 USDT；代码按杠杆换算实际张数",
+                },
                 "price": {"type": "number", "description": "限价；不传为市价单"},
                 "tif": {
                     "type": "string",
                     "enum": ["gtc", "ioc", "poc", "fok"],
                     "description": "限价单有效期策略，默认 gtc；市价单自动 ioc",
                 },
-                "reduce_only": {"type": "boolean", "description": "只减仓，默认 false"},
-                "close": {"type": "boolean", "description": "平掉全部持仓，默认 false"},
+                "reduce_pct": {
+                    "type": "number",
+                    "description": "部分减仓比例，必须在 0 与 1 之间；整仓平仓改用 close=true",
+                },
+                "close": {"type": "boolean", "description": "按市价平掉该合约全部持仓"},
                 "leverage": {
                     "type": "integer",
-                    "description": "该合约持仓杠杆倍数（声明后下单前对整仓实际生效，下单失败会尽力回滚）；未提供时沿用当前持仓杠杆",
-                },
-                "margin_mode": {
-                    "type": "string",
-                    "enum": ["isolated", "cross"],
-                    "description": "设置杠杆时的保证金模式；未提供时跟随当前持仓模式（无持仓为 isolated 逐仓）",
+                    "description": "新增敞口的杠杆倍数；保证金模式固定为逐仓",
                 },
                 "stop_loss_price": {
                     "type": "number",
-                    "description": "止损触发价；开仓、加仓或反手新开仓时必填",
+                    "description": "止损触发价；开仓或同向加仓必填",
                 },
                 "take_profit_price": {"type": "number", "description": "止盈触发价，可选"},
             },
@@ -101,16 +107,15 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "amend_order": {
-        "description": "修改未成交挂单的价格或数量（至少提供一项）",
+        "description": "只修改未成交挂单价格；改变订单金额须撤单后重新提交 place_order",
         "parameters": {
             "type": "object",
             "properties": {
                 "contract": {"type": "string", "description": "合约名"},
                 "order_id": {"type": "string", "description": "订单 ID"},
                 "price": {"type": "number", "description": "新价格"},
-                "size": {"type": "number", "description": "新张数（正多负空）"},
             },
-            "required": ["contract", "order_id"],
+            "required": ["contract", "order_id", "price"],
         },
     },
     "cancel_order": {
@@ -126,8 +131,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "set_price_alert": {
         "description": (
-            "设置价格预警线：价格越线时触发唤醒。预警线仅保存在内存，进程重启即失效"
-            "（需重新设置）；相同合约/方向/价格的预警线重复设置时直接返回已存在提示，不会重复创建；"
+            "设置价格预警线：价格越线时触发唤醒；"
+            "相同合约/方向/价格的预警线重复设置时直接返回已存在提示，不会重复创建；"
             "全局最多 10 条，达到上限须先用 cancel_price_alert 取消旧预警"
         ),
         "parameters": {
@@ -197,7 +202,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     "calc": {
         "description": (
             "计算数学表达式：支持 + - * / ^（幂）与括号，如 2*(3-1)^2 → 8。"
-            "适合盈亏比、仓位名义价值等衍生计算，28 位有效数字高精度计算"
+            "适合盈亏比等策略数字，禁止用来换算名义仓位或合约张数；28 位有效数字高精度计算"
         ),
         "parameters": {
             "type": "object",

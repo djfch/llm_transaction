@@ -41,6 +41,7 @@ _RUNTIME_KEYS = frozenset(
     {
         "risk.max_position_pct",
         "risk.max_total_position_pct",
+        "risk.max_position_stop_risk_pct",
         "risk.max_leverage",
         "risk.daily_loss_limit",
         "risk.max_orders_per_day",

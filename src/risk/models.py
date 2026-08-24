@@ -23,6 +23,7 @@ class TradeIntent(BaseModel):
     leverage: int = Field(ge=1)  # 请求杠杆倍数
     mark_price: Decimal = Field(gt=0)  # 当前标记价（市价单估值与价格偏离判定用）
     quanto_multiplier: Decimal = Field(gt=0)  # 每张合约对应的币数
+    planned_stop_risk: Decimal | None = Field(default=None, ge=0)  # 成交后整仓计划止损金额
 
 
 class OpenOrderIntent(BaseModel):
