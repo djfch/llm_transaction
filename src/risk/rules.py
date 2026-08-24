@@ -192,6 +192,58 @@ def rule_leverage(ctx: RuleInput) -> str | None:
     return f"杠杆 {ctx.intent.leverage}x 超过上限 {ctx.config.max_leverage}x"
 
 
+def rule_position_stop_risk(ctx: RuleInput) -> str | None:
+    """新增敞口后的整仓计划止损金额不得超过账户权益上限。
+
+    参数：
+        ctx: RuleInput，风控规则上下文
+
+    返回：
+        str | None：超过上限时的拒绝理由；无计划止损数据、降险操作或达线时返回 None
+    """
+    risk = ctx.intent.planned_stop_risk
+    if ctx.intent.is_close or risk is None:
+        return None
+    limit = _pct(ctx.config.max_position_stop_risk_pct) * ctx.account.equity
+    if risk > limit:
+        return (
+            f"整仓计划止损估算 {risk} USDT 超过账户权益上限 "
+            f"{ctx.config.max_position_stop_risk_pct:.0%}"
+        )
+    return None
+
+
+def stop_update_rejection(
+    *,
+    new_risk: Decimal,
+    current_risk: Decimal | None,
+    has_current_stop: bool,
+    equity: Decimal,
+    config: RiskConfig,
+) -> str | None:
+    """判断整仓止损修改是否因扩大超限风险而应被拒绝。
+
+    参数：
+        new_risk: Decimal，新止损对应的整仓计划止损金额
+        current_risk: Decimal | None，当前止损对应的整仓计划止损金额；无止损时为 None
+        has_current_stop: bool，当前是否已有止损保护
+        equity: Decimal，账户权益
+        config: RiskConfig，风险配置
+
+    返回：
+        str | None：需要拒绝时的理由；达线以内、首次补止损或确实缩小风险时返回 None
+    """
+    limit = _pct(config.max_position_stop_risk_pct) * equity
+    if new_risk <= limit or not has_current_stop:
+        return None
+    if current_risk is not None and new_risk < current_risk:
+        return None
+    return (
+        f"新止损的整仓计划止损估算 {new_risk} USDT 超过账户权益上限 "
+        f"{config.max_position_stop_risk_pct:.0%}，且没有缩小当前风险"
+    )
+
+
 def rule_daily_loss(ctx: RuleInput) -> str | None:
     """日亏损锁仓：当日已实现+未实现亏损超过 daily_loss_limit×权益 时只平不开（等于放行）。
 
@@ -263,6 +315,7 @@ ALL_RULES = [
     rule_position_limit,
     rule_total_position_limit,
     rule_leverage,
+    rule_position_stop_risk,
     rule_daily_loss,
     rule_max_orders,
     rule_price_deviation,

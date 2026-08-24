@@ -151,9 +151,11 @@ async def test_put_config_updates_shared_runtime_risk(deps: ServerDeps, client: 
     deps.runtime_settings = runtime
     raw = (await client.get("/api/config")).json()
     raw["risk"]["max_position_pct"] = 0.5
+    raw["risk"]["max_position_stop_risk_pct"] = 0.02
     r = await client.put("/api/config", json=raw)
     assert r.json() == {"saved": True, "needs_restart": []}
     assert runtime.risk.max_position_pct == 0.5  # 共享对象已原地更新
+    assert runtime.risk.max_position_stop_risk_pct == 0.02
 
 
 async def test_put_config_updates_shared_runtime_scheduler(deps: ServerDeps, client: AsyncClient):

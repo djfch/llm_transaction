@@ -142,6 +142,7 @@ class AgentsConfig(BaseModel):
 class RiskConfig(BaseModel):
     max_position_pct: float = Field(default=0.30, gt=0, le=1)
     max_total_position_pct: float = Field(default=0.80, gt=0, le=1)
+    max_position_stop_risk_pct: float = Field(default=0.01, gt=0, le=1)
     max_leverage: int = Field(default=5, ge=1, le=100)
     daily_loss_limit: float = Field(default=0.10, gt=0, le=1)
     max_orders_per_day: int = Field(default=20, ge=1)

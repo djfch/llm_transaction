@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from src.config import RiskConfig
 from src.risk.models import (
     AccountSnapshot,
@@ -12,6 +14,7 @@ from src.risk.models import (
     Verdict,
 )
 from src.risk.rules import ALL_RULES, RuleInput
+from src.risk.rules import stop_update_rejection
 
 
 class RiskEngine:
@@ -60,3 +63,33 @@ class RiskEngine:
         if reasons:
             return Verdict.deny(reasons)
         return Verdict.allow()
+
+    def check_stop_update(
+        self,
+        *,
+        new_risk: Decimal,
+        current_risk: Decimal | None,
+        has_current_stop: bool,
+        equity: Decimal,
+        config: RiskConfig,
+    ) -> Verdict:
+        """校验止损修改：超限时只允许首次补保护或确实缩小风险。
+
+        参数：
+            new_risk: Decimal，新止损对应的整仓计划止损金额
+            current_risk: Decimal | None，当前止损对应的计划止损金额；无止损时为 None
+            has_current_stop: bool，当前是否已有止损保护
+            equity: Decimal，账户权益
+            config: RiskConfig，风险配置
+
+        返回：
+            Verdict：允许修改或附带拒绝理由的判定结果
+        """
+        reason = stop_update_rejection(
+            new_risk=new_risk,
+            current_risk=current_risk,
+            has_current_stop=has_current_stop,
+            equity=equity,
+            config=config,
+        )
+        return Verdict.deny([reason]) if reason else Verdict.allow()

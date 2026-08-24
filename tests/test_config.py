@@ -33,6 +33,7 @@ def test_load_default_settings():
     settings = load_settings()
     assert settings.mode == "paper"
     assert settings.risk.max_leverage == 5
+    assert settings.risk.max_position_stop_risk_pct == 0.01
     assert settings.gate.settle == "usdt"
 
 
