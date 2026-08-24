@@ -1,5 +1,5 @@
 /**
- * 硬性风控速览：标题「硬性风控 · 代码保证」+ 四行风控参数 + 裁决说明。
+ * 硬性风控速览：标题「硬性风控 · 代码保证」+ 全部风控参数 + 裁决说明。
  * 数据自管：api.getConfig() 取 risk 段；比例字段（0-1）×100 显示为百分比。
  * daily_loss_limit 语义（src/risk/rules.py）：当日已实现+未实现亏损超 daily_loss_limit×权益 时
  * 只平不开——同为权益比例，故与三个 pct 字段一样按百分比显示。
@@ -9,7 +9,7 @@ import { useApiData } from '../../hooks/useApiData'
 import { fmtPct } from '../../utils/format'
 import StateHint from '../StateHint'
 
-/** 参数行：label(含字段名) 左灰字，值右等宽 */
+/** 参数行：中文业务标签左灰字，值右等宽。 */
 function RiskRow({ label, value, cls }: { label: string; value: string; cls?: string }) {
   return (
     <li className="flex justify-between">
@@ -30,16 +30,27 @@ export default function RiskPanel() {
         {risk && (
           <>
             <ul className="space-y-2 text-[11px]">
-              <RiskRow label="单仓上限 max_position_pct" value={fmtPct(risk.max_position_pct)} />
+              <RiskRow label="单仓名义价值上限" value={fmtPct(risk.max_position_pct)} />
               <RiskRow
-                label="总仓上限 max_total_position_pct"
+                label="总仓名义价值上限"
                 value={fmtPct(risk.max_total_position_pct)}
               />
-              <RiskRow label="价格偏离 max_deviation" value={fmtPct(risk.max_deviation)} />
               <RiskRow
-                label="日亏锁仓 daily_loss_limit"
+                label="单仓计划止损风险上限"
+                value={fmtPct(risk.max_position_stop_risk_pct)}
+              />
+              <RiskRow label="最大杠杆" value={`${risk.max_leverage}x`} />
+              <RiskRow
+                label="当日亏损锁仓线"
                 value={fmtPct(risk.daily_loss_limit)}
                 cls="text-rose-300"
+              />
+              <RiskRow label="每日开仓单数上限" value={String(risk.max_orders_per_day)} />
+              <RiskRow label="委托价偏离上限" value={fmtPct(risk.max_deviation)} />
+              <RiskRow
+                label="风控总开关"
+                value={risk.kill_switch ? '已开启' : '未开启'}
+                cls={risk.kill_switch ? 'text-rose-300' : 'text-emerald-300'}
               />
             </ul>
             <p className="mt-3 text-[10px] leading-relaxed text-zinc-600">

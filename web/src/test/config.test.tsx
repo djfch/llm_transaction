@@ -10,6 +10,7 @@ import { parseRisk, validateRisk } from '../pages/config/validate'
 const baseRisk: RiskConfig = {
   max_position_pct: 0.3,
   max_total_position_pct: 0.8,
+  max_position_stop_risk_pct: 0.01,
   max_leverage: 5,
   daily_loss_limit: 0.1,
   max_orders_per_day: 20,
@@ -20,6 +21,7 @@ const baseRisk: RiskConfig = {
 const validValues = {
   max_position_pct: '0.3',
   max_total_position_pct: '0.8',
+  max_position_stop_risk_pct: '0.01',
   max_leverage: '5',
   daily_loss_limit: '0.1',
   max_orders_per_day: '20',
@@ -32,6 +34,7 @@ describe('validateRisk(纯校验函数)', () => {
     expect(parseRisk(validValues)).toEqual({
       max_position_pct: 0.3,
       max_total_position_pct: 0.8,
+      max_position_stop_risk_pct: 0.01,
       max_leverage: 5,
       daily_loss_limit: 0.1,
       max_orders_per_day: 20,
@@ -52,22 +55,26 @@ describe('RiskForm(风控参数表单)', () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<RiskForm initial={baseRisk} onSave={onSave} />)
 
-    const leverageInput = screen.getByLabelText('max_leverage')
+    const stopRiskInput = screen.getByLabelText('单仓计划止损风险上限')
     const saveBtn = screen.getByRole('button', { name: /保存风控参数/ })
 
     // 非法值：0 → 报错 + 禁用保存
-    fireEvent.change(leverageInput, { target: { value: '0' } })
-    expect(await screen.findByText('杠杆上限需为 1–100 的整数')).toBeInTheDocument()
+    fireEvent.change(stopRiskInput, { target: { value: '0' } })
+    expect(
+      await screen.findByText('单仓计划止损风险上限需在 (0, 1] 区间'),
+    ).toBeInTheDocument()
     expect(saveBtn).toBeDisabled()
 
     // 修正为合法值 → 错误消失，可保存
-    fireEvent.change(leverageInput, { target: { value: '10' } })
-    expect(screen.queryByText('杠杆上限需为 1–100 的整数')).not.toBeInTheDocument()
+    fireEvent.change(stopRiskInput, { target: { value: '0.02' } })
+    expect(
+      screen.queryByText('单仓计划止损风险上限需在 (0, 1] 区间'),
+    ).not.toBeInTheDocument()
     expect(saveBtn).toBeEnabled()
 
     fireEvent.click(saveBtn)
     expect(onSave).toHaveBeenCalledTimes(1)
     // 提交内容：解析后的数字 + 保留未在表单内的 kill_switch 字段
-    expect(onSave).toHaveBeenCalledWith({ ...baseRisk, max_leverage: 10 })
+    expect(onSave).toHaveBeenCalledWith({ ...baseRisk, max_position_stop_risk_pct: 0.02 })
   })
 })

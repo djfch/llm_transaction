@@ -83,6 +83,7 @@ const CONFIG: AppConfig = {
   risk: {
     max_position_pct: 0.3,
     max_total_position_pct: 0.8,
+    max_position_stop_risk_pct: 0.01,
     max_leverage: 5,
     daily_loss_limit: 0.1,
     max_orders_per_day: 20,
