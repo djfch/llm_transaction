@@ -163,19 +163,30 @@ describe('MarkersOverlay', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
-  it('标记中心越过主价格绘图区时自动隐藏', async () => {
-    const series = seriesHarness(100)
-    const view = render(overlayUi(chartAt(100), series.api))
+  it('标记落在主价格绘图区之外但面板之内（留白/成交量带）照常显示', async () => {
+    // y=210 落在底部 26% 成交量带内（旧语义隐藏，新语义保留）
+    render(overlayUi(chartAt(100), seriesHarness(210).api))
     await screen.findByRole('button', { name: /买入成交/ })
+  })
 
-    view.rerender(overlayUi(chartAt(100), seriesHarness(210).api))
-
+  it('标记圆越出面板上下沿时隐藏，缩放回到面板内重新显示', async () => {
+    const series = seriesHarness(280)
+    const view = render(overlayUi(chartAt(100), series.api))
+    // 买单标记 y=280+16=296，越出面板下沿（300-8=292）→ 隐藏
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /买入成交/ })).not.toBeInTheDocument(),
     )
+
+    // 模拟缩小图表：价格坐标回到 240，标记 y=256 回到面板内 → 重新显示
+    act(() => {
+      series.setY(240)
+      series.emitDataChanged()
+    })
+    await screen.findByRole('button', { name: /买入成交/ })
+    view.unmount()
   })
 
-  it('使用时间轴宽度与 pane 高度裁剪价格轴和成交量区域', async () => {
+  it('标记圆越出时间轴两端时隐藏，拖回可视区重新显示', async () => {
     const view = render(overlayUi(chartAt(100, 200), seriesHarness(100, 270).api))
     await screen.findByRole('button', { name: /买入成交/ })
     view.rerender(overlayUi(chartAt(250, 200), seriesHarness(100, 270).api))
@@ -185,10 +196,28 @@ describe('MarkersOverlay', () => {
 
     view.rerender(overlayUi(chartAt(100, 200), seriesHarness(100, 270).api))
     await screen.findByRole('button', { name: /买入成交/ })
-    view.rerender(overlayUi(chartAt(100, 200), seriesHarness(190, 270).api))
+  })
+
+  it('卖在最高点：标记贴高点上方，越出面板顶沿时隐藏、缩小时重新显示', async () => {
+    holder.getTrades.mockResolvedValue({
+      items: [{ ...BUY_TRADE, id: 9, size: -1, source: 'llm_close' }],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    })
+    // 卖单标记锚定 bar.h=105：priceY=20 → 标记 y=4，越出面板顶沿（半径 8）→ 隐藏
+    const series = seriesHarness(20)
+    render(overlayUi(chartAt(100), series.api))
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: /买入成交/ })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('button', { name: /卖出成交/ })).not.toBeInTheDocument(),
     )
+
+    // 缩小图表：priceY=30 → 标记 y=14 进入面板 → 显示
+    act(() => {
+      series.setY(30)
+      series.emitDataChanged()
+    })
+    await screen.findByRole('button', { name: /卖出成交/ })
   })
 
   it('ticker 数据更新后重算纵坐标，并在卸载时清理订阅', async () => {

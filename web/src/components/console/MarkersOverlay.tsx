@@ -1,7 +1,8 @@
 /**
- * K线买卖点覆盖层：保留原圆形 b/s 徽标，并把标记限制在主价格绘图区。
- * 坐标随图表可视范围重算；越过时间轴或主价格区边界时直接隐藏，
- * 不进入成交量区域，也不影响图表纵轴自动缩放。
+ * K线买卖点覆盖层：保留原圆形 b/s 徽标，锚点不变（卖在 K 线高点上方、买在低点下方）。
+ * 坐标随图表可视范围重算；仅当整个标记圆越出主图面板边界（时间轴两端或面板上下沿，
+ * 含顶部留白与成交量带）时隐藏——标记允许落在主价格绘图区之外的面板留白里，
+ * 用户缩小/拖动图表使其回到面板内时重新显示；不影响图表纵轴自动缩放。
  * 数据：当前合约成交（getTrades 带合约过滤）；WS trades_updated 事件触发重拉；
  * 无归属决策轮（roundId 空串）的标记照常绘制但渲染为不可点击。
  */
@@ -58,15 +59,10 @@ function markerClass(side: 'buy' | 'sell', interactive: boolean): string {
     : `${base}${inter} border-rose-400/70 bg-rose-500/25 text-rose-300`
 }
 
-function markerInsidePlot(
-  x: number,
-  y: number,
-  width: number,
-  top: number,
-  bottom: number,
-): boolean {
+/** 标记圆是否完整落在主图面板内：越出时间轴两端或面板上下沿即整体隐藏（进入留白/成交量带不隐藏） */
+function markerInsidePane(x: number, y: number, width: number, height: number): boolean {
   const radius = MARKER_SIZE / 2
-  return x >= radius && x <= width - radius && y >= top + radius && y <= bottom - radius
+  return x >= radius && x <= width - radius && y >= radius && y <= height - radius
 }
 
 function positionMarkers(
@@ -79,9 +75,6 @@ function positionMarkers(
   paneHeight: number,
 ): PositionedMarker[] {
   if (plotWidth <= 0 || paneHeight <= 0) return []
-  const margins = series.priceScale().options().scaleMargins
-  const plotTop = paneHeight * margins.top
-  const plotBottom = paneHeight * (1 - margins.bottom)
   const timeScale = chart.timeScale()
   const positioned: PositionedMarker[] = []
 
@@ -94,7 +87,7 @@ function positionMarkers(
     const priceY = series.priceToCoordinate(anchor)
     if (priceY === null) continue
     const y = priceY + (marker.side === 'buy' ? MARKER_OFFSET : -MARKER_OFFSET)
-    if (!markerInsidePlot(x, y, plotWidth, plotTop, plotBottom)) continue
+    if (!markerInsidePane(x, y, plotWidth, paneHeight)) continue
     positioned.push({ ...marker, x, y })
   }
   return positioned
