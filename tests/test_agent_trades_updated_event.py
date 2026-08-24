@@ -366,7 +366,13 @@ async def test_drain_round_emits_event_only_when_fills(tmp_path):
                 [
                     ToolCall(
                         "place_order",
-                        {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+                        {
+                            "contract": "BTC_USDT",
+                            "side": "long",
+                            "margin_usdt": 60,
+                            "leverage": 1,
+                            "stop_loss_price": 58000,
+                        },
                         "c1",
                     )
                 ],
@@ -405,7 +411,13 @@ async def test_manual_close_emits_event(tmp_path):
                 [
                     ToolCall(
                         "place_order",
-                        {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+                        {
+                            "contract": "BTC_USDT",
+                            "side": "long",
+                            "margin_usdt": 60,
+                            "leverage": 1,
+                            "stop_loss_price": 58000,
+                        },
                         "c1",
                     )
                 ],

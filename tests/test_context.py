@@ -1,6 +1,6 @@
 """ContextBuilder 单元测试：价格预警线段——内存唯一存储语义如实暴露给 LLM。
 
-段标题标注「内存·重启即失效」；空列表显示（无）；有条目时按 above/below 用词逐行列出
+段标题只展示当前条数；空列表显示（无）；有条目时按 above/below 用词逐行列出
 （与 set_price_alert / cancel_price_alert 工具参数用词一致，LLM 可直接照抄参数调用取消）。
 
 另覆盖行情段的指标短名单行：每合约 K 线摘要行后的第三行——短名单回调驱动内容、
@@ -57,7 +57,7 @@ async def test_alerts_section_empty(tmp_path):
     """
     text = await _build_text(TriggerManager(lambda t, p: None), tmp_path)
 
-    assert "## 价格预警线（内存·重启即失效，0/10 条）" in text
+    assert "## 价格预警线（0/10 条）" in text
     assert "（无）" in text
 
 
@@ -77,7 +77,7 @@ async def test_alerts_section_lists_pending(tmp_path):
 
     text = await _build_text(triggers, tmp_path)
 
-    assert "## 价格预警线（内存·重启即失效，2/10 条）" in text
+    assert "## 价格预警线（2/10 条）" in text
     assert "- BTC_USDT above 70000" in text
     assert "- ETH_USDT below 3000" in text
     # 条目带设置时间（_fmt_ts 的 MM-DD HH:MM 形态），供 LLM 判断新旧
@@ -99,7 +99,7 @@ async def test_alerts_section_truncates_to_alerts_n(tmp_path):
 
     text = await _build_text(triggers, tmp_path, alerts_n=2)
 
-    assert "## 价格预警线（内存·重启即失效，3/10 条）" in text  # 标题保留总数
+    assert "## 价格预警线（3/10 条）" in text  # 标题保留总数
     assert "- BTC_USDT above 10000" in text
     assert "- BTC_USDT above 20000" in text
     assert "- BTC_USDT above 30000" not in text  # 超出部分截断

@@ -171,7 +171,13 @@ async def test_drain_trade_source_open_close_liquidation(tmp_path):
                 [
                     ToolCall(
                         "place_order",
-                        {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+                        {
+                            "contract": "BTC_USDT",
+                            "side": "long",
+                            "margin_usdt": 60,
+                            "leverage": 1,
+                            "stop_loss_price": 58000,
+                        },
                         "c1",
                     )
                 ],
@@ -184,7 +190,13 @@ async def test_drain_trade_source_open_close_liquidation(tmp_path):
                 [
                     ToolCall(
                         "place_order",
-                        {"contract": "BTC_USDT", "size": 1, "leverage": 5, "stop_loss_price": 1},
+                        {
+                            "contract": "BTC_USDT",
+                            "side": "long",
+                            "margin_usdt": 12,
+                            "leverage": 5,
+                            "stop_loss_price": 1,
+                        },
                         "c3",
                     )
                 ],

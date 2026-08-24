@@ -488,7 +488,7 @@ class Repo:
         """当日统计：realized_pnl=当日已实现盈亏合计；orders_today=当日开仓单数。
 
         均按 mode 过滤。orders_today 只计开仓单：is_close=1 的平仓/减仓单
-        （close/reduce_only，落库时置位，见 tool_trading.place_order）在 SQL 层排除；
+        （close/reduce_only，落库时置位，见 tool_order_reduction.place_reduction）在 SQL 层排除；
         side_size != '0' 为遗留兜底（is_close 置位前的历史平仓单 side_size 恒为 '0'，
         开仓单按构造恒非 0，不会误排）；
         pnl 以 TEXT 存 Decimal 字符串，逐行取出后在 Python 侧合计，避免
@@ -499,7 +499,7 @@ class Repo:
             day_start_ts: float，当日零点 Unix 时间戳
 
         返回：
-            DailyStats，当日统计：realized_pnl=当日已实现盈亏合计；orders_today=当日开仓单数。  均按 mode 过滤。orders_today 只计开仓单：is_close=1 的平仓/减仓单 （close/reduce_only，落库时置位，见 tool_trading.place_order）在 SQL 层排除； side_size != '0' 为遗留兜底（is_close 置位前的历史平仓单 side_size 恒为 '0'， 开仓单按构造恒非 0，不会误排）； pnl 以 TEXT 存 Decimal 字符串，逐行取出后在 Python 侧合计，避免 SQLite SUM 把 TEXT 转 REAL 引入浮点误差
+            DailyStats，当日统计：realized_pnl=当日已实现盈亏合计；orders_today=当日开仓单数。  均按 mode 过滤。orders_today 只计开仓单：is_close=1 的平仓/减仓单 （close/reduce_only，落库时置位，见 tool_order_reduction.place_reduction）在 SQL 层排除； side_size != '0' 为遗留兜底（is_close 置位前的历史平仓单 side_size 恒为 '0'， 开仓单按构造恒非 0，不会误排）； pnl 以 TEXT 存 Decimal 字符串，逐行取出后在 Python 侧合计，避免 SQLite SUM 把 TEXT 转 REAL 引入浮点误差
 
         """
         cur = await self._conn.execute(

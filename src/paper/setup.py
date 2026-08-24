@@ -9,6 +9,17 @@ from .engine import PaperGateway
 
 
 class PublicMarketGateway(Protocol):
+    def get_contract(self, contract: str) -> Contract:
+        """读取单个永续合约的实时规格。
+
+        参数：
+            contract: str，合约名
+
+        返回：
+            Contract：合约乘数、张数上下限与交易状态等实时规格
+        """
+        ...
+
     def get_tickers(self) -> list[Ticker]:
         """读取全部合约的最新行情摘要。
 
@@ -79,6 +90,7 @@ def build_paper_gateway(
         ticker_provider=public.get_tickers if public else None,
         oi_provider=public.fetch_open_interest if public else None,
         oi_history_provider=public.fetch_open_interest_history if public else None,
+        contract_provider=public.get_contract if public else None,
     )
     for contract in contracts:
         gateway.upsert_contract(contract)

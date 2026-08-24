@@ -607,6 +607,18 @@ def test_gateway_uses_timeout_api_client():
     assert isinstance(gateway._api.api_client, _TimeoutApiClient)
 
 
+def test_gateway_sdk_enables_decimal_contract_size_protocol():
+    """验证 Gate SDK 默认发送小数张协议请求头。
+
+    参数：无
+
+    返回：
+        None，断言官方 SDK 客户端启用 X-Gate-Size-Decimal 协议
+    """
+    gateway = make_gateway()
+    assert gateway._api.api_client.default_headers["X-Gate-Size-Decimal"] == "1"
+
+
 def test_timeout_client_injects_default_timeout(monkeypatch: pytest.MonkeyPatch):
     """验证未显式指定 _request_timeout 的调用被注入默认（连接, 读取）超时。
 

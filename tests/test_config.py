@@ -13,6 +13,7 @@ from src.config import (
     CredentialConfig,
     LLMConfig,
     ResearchConfig,
+    RiskConfig,
     ReviewConfig,
     SchedulerConfig,
     Settings,
@@ -35,6 +36,28 @@ def test_load_default_settings():
     assert settings.risk.max_leverage == 5
     assert settings.risk.max_position_stop_risk_pct == 0.01
     assert settings.gate.settle == "usdt"
+
+
+def test_old_risk_config_without_stop_risk_uses_one_percent_default():
+    """校验旧配置缺少整仓止损字段时自动采用 1% 默认值。
+
+    参数：无
+
+    返回：
+        None，断言无需迁移即可完成模型校验
+    """
+    risk = RiskConfig.model_validate(
+        {
+            "max_position_pct": 0.3,
+            "max_total_position_pct": 0.8,
+            "max_leverage": 5,
+            "daily_loss_limit": 0.1,
+            "max_orders_per_day": 20,
+            "max_deviation": 0.02,
+            "kill_switch": False,
+        }
+    )
+    assert risk.max_position_stop_risk_pct == 0.01
 
 
 def test_load_watchlist():

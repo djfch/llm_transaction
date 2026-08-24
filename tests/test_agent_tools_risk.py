@@ -16,7 +16,7 @@ from src.agent.tool_leverage import _recheck_prev_state
 from src.agent.tool_trading import _resolve_leverage
 from src.agent.tools import ToolRegistry
 from src.config import ResearchConfig, RiskConfig
-from src.gateway.base import Contract, GatewayError, OrderStateUnknown, Position
+from src.gateway.base import Contract, GatewayError, OrderRequest, OrderStateUnknown, Position
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
@@ -118,33 +118,73 @@ async def _open_limit_order(env: SimpleNamespace, size: int = 1, price: int = 59
     opens = (
         pos is None or pos.size == 0 or (pos.size > 0) == (size > 0) or abs(size) > abs(pos.size)
     )
-    args = {"contract": "BTC_USDT", "size": size, "price": price}
     if opens:
-        args["stop_loss_price"] = 58000 if size > 0 else 62000
-    out = await env.registry.execute("place_order", args)
-    assert out.risk_verdict == "allow", out.text
+        out = await env.registry.execute("place_order", _margin_order_args(size=size, price=price))
+        assert out.risk_verdict == "allow", out.text
+    else:
+        result = env.gateway.place_order(
+            OrderRequest(
+                contract="BTC_USDT", size=Decimal(size), price=Decimal(price), reduce_only=True
+            )
+        )
+        return result.id
     return next(o.id for o in env.gateway.orders.values() if o.status == "open")
+
+
+def _margin_order_args(
+    *,
+    size: int = 1,
+    price: int | None = None,
+    leverage: int = 1,
+    contract: str = "BTC_USDT",
+) -> dict:
+    """把测试目标张数换成生产接口使用的保证金参数。
+
+    参数：
+        size: int，测试希望得到的带方向张数
+        price: int | None，限价；None 表示标记价 60000
+        leverage: int，请求杠杆
+        contract: str，合约标识
+
+    返回：
+        dict：side、margin_usdt、leverage 和止损等保证金下单字段
+    """
+    reference = Decimal(price or 60000)
+    margin = abs(Decimal(size)) * reference * Decimal("0.001") / Decimal(leverage)
+    result = {
+        "contract": contract,
+        "side": "long" if size > 0 else "short",
+        "margin_usdt": margin,
+        "leverage": leverage,
+        "stop_loss_price": 58000 if size > 0 else 62000,
+    }
+    if price is not None:
+        result["price"] = price
+    return result
 
 
 # ---------- amend_order 必须先过风控 ----------
 
 
-async def test_amend_order_over_position_limit_denied(tmp_path):
-    """校验改单后名义价值超过单仓上限时被风控拒绝，且原挂单不变。
+async def test_amend_order_size_change_is_rejected(tmp_path):
+    """校验改单接口不再接受张数，改变金额必须撤单重下。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
 
     返回：
-        None，断言 risk_verdict 为 deny、提示含"单仓"且挂单剩余数量仍为 1
+        None，断言 size 被拒绝且原挂单剩余数量不变
     """
     env = await _make_tools(tmp_path)
     try:
+        schema = next(item for item in env.registry.schemas() if item["name"] == "amend_order")
+        assert "size" not in schema["parameters"]["properties"]
         order_id = await _open_limit_order(env)
         out = await env.registry.execute(
-            "amend_order", {"contract": "BTC_USDT", "order_id": order_id, "size": 100}
-        )  # 改后名义价值 6000 > 单仓上限 3000
-        assert out.risk_verdict == "deny" and "单仓" in out.text
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order_id, "price": 59500, "size": 100},
+        )
+        assert "只允许修改价格" in out.text
         assert env.gateway.orders[order_id].left == Decimal(1)  # 改单未生效
     finally:
         await env.db.close()
@@ -182,8 +222,16 @@ async def test_amend_order_non_watchlist_denied(tmp_path):
     """
     env = await _make_tools(tmp_path, extra_contracts=("DOGE_USDT",))
     try:
+        order = env.gateway.place_order(
+            OrderRequest(
+                contract="DOGE_USDT",
+                size=Decimal(1),
+                price=Decimal(59000),
+                stop_loss_price=Decimal(58000),
+            )
+        )
         out = await env.registry.execute(
-            "amend_order", {"contract": "DOGE_USDT", "order_id": "x", "size": 1}
+            "amend_order", {"contract": "DOGE_USDT", "order_id": order.id, "price": 59500}
         )
         assert out.risk_verdict == "deny" and "白名单" in out.text
     finally:
@@ -204,69 +252,80 @@ async def test_amend_order_allowed_and_persisted(tmp_path):
         order_id = await _open_limit_order(env)
         out = await env.registry.execute(
             "amend_order",
-            {"contract": "BTC_USDT", "order_id": order_id, "price": 59500, "size": 2},
+            {"contract": "BTC_USDT", "order_id": order_id, "price": 59500},
         )
         assert out.risk_verdict == "allow", out.text
-        assert env.gateway.orders[order_id].left == Decimal(2)
+        assert env.gateway.orders[order_id].left == Decimal(1)
         rows = await env.repo.list_orders("r-test")
         assert len(rows) == 1  # 更新原行，不新增（避免 orders_today 重复计数）
-        assert rows[0].price == Decimal("59500") and rows[0].side_size == Decimal(2)
+        assert rows[0].price == Decimal("59500") and rows[0].side_size == Decimal(1)
     finally:
         await env.db.close()
 
 
 async def test_amend_reduce_direction_exempt_kill_switch(tmp_path):
-    """校验 kill_switch 开启时减仓方向改单豁免，加仓方向改单照拒。
+    """校验 kill_switch 开启时，既有减仓挂单仍可只修改价格。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具，测试数据库落在其中
 
     返回：
-        None，断言减仓改单 allow、反向加仓改单 deny 且提示含 "kill_switch"
+        None，断言减仓改单放行且张数不可被修改
     """
     env = await _make_tools(tmp_path)
     try:
-        await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )  # 持多仓
+        await env.registry.execute("place_order", _margin_order_args())  # 持多仓
         order_id = await _open_limit_order(env, size=-1, price=59500)  # 限价卖单挂出
         env.deps.risk_config.kill_switch = True
         out = await env.registry.execute(
             "amend_order",
-            {"contract": "BTC_USDT", "order_id": order_id, "size": -1, "price": 59600},
+            {"contract": "BTC_USDT", "order_id": order_id, "price": 59600},
         )
         assert out.risk_verdict == "allow", out.text  # 减仓方向豁免 kill_switch（同 place）
         out2 = await env.registry.execute(
             "amend_order",
             {"contract": "BTC_USDT", "order_id": order_id, "size": 2, "price": 59600},
         )
-        assert out2.risk_verdict == "deny" and "kill_switch" in out2.text  # 加仓方向照拒
+        assert "只允许修改价格" in out2.text
     finally:
         await env.db.close()
 
 
-async def test_amend_flip_exceeds_position_not_exempt(tmp_path):
-    """反向改单数量超过持仓 = 翻仓（新敞口），不得豁免 kill_switch（回归 #翻仓豁免洞）。
+async def test_amend_reduce_direction_ignores_contract_spec_outage(tmp_path, monkeypatch):
+    """校验官方规格临时不可用时，既有减仓挂单仍可修改价格。
 
     参数：
-        tmp_path: Path，pytest 提供的临时目录
+        tmp_path: Path，pytest 临时目录夹具
+        monkeypatch: pytest.MonkeyPatch，用于模拟合约规格查询失败
 
     返回：
-        None，通过断言验证上述行为，无返回值
+        None，断言减仓改单不读取官方规格且正常放行
     """
     env = await _make_tools(tmp_path)
     try:
-        await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )  # 持多仓 1
-        order_id = await _open_limit_order(env, size=-1, price=59500)  # 反向限价卖单挂出
-        env.deps.risk_config.kill_switch = True
-        out = await env.registry.execute(
+        await env.registry.execute("place_order", _margin_order_args())
+        order_id = await _open_limit_order(env, size=-1, price=59500)
+
+        def _spec_outage(contract):
+            """模拟官方合约规格接口不可用。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                None，实际总是抛出异常
+
+            异常：
+                GatewayError：模拟官方查询失败
+            """
+            raise GatewayError(f"{contract} 官方规格查询失败")
+
+        monkeypatch.setattr(env.gateway, "get_contract", _spec_outage)
+        outcome = await env.registry.execute(
             "amend_order",
-            {"contract": "BTC_USDT", "order_id": order_id, "size": -2, "price": 59600},
-        )  # 反向改到 -2 > 持仓 1：翻仓成空头新敞口
-        assert out.risk_verdict == "deny" and "kill_switch" in out.text
-        assert env.gateway.orders[order_id].left == Decimal(1)  # 改单未生效
+            {"contract": "BTC_USDT", "order_id": order_id, "price": 59600},
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
     finally:
         await env.db.close()
 
@@ -287,7 +346,7 @@ async def test_place_order_declared_leverage_over_limit_denied(tmp_path):
     try:
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 10, "stop_loss_price": 58000},
+            _margin_order_args(leverage=10),
         )
         assert out.risk_verdict == "deny" and "超过上限" in out.text
         assert env.gateway.placed == []
@@ -326,7 +385,7 @@ async def test_place_order_declared_leverage_applied(tmp_path):
         env.gateway.set_leverage = _spy
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert out.risk_verdict == "allow", out.text
         assert spy == [("BTC_USDT", 3, "isolated")]  # 无持仓：下单前先 set_leverage 生效
@@ -366,9 +425,7 @@ async def test_place_order_local_save_failure_forbids_retry(tmp_path, monkeypatc
             raise RuntimeError("db down")
 
         monkeypatch.setattr(env.repo, "save_order", _boom)
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )
+        out = await env.registry.execute("place_order", _margin_order_args())
         assert "禁止重试" in out.text
         assert "内部错误" not in out.text
         assert len(env.gateway.placed) == 1  # 订单已真实提交到网关
@@ -390,13 +447,9 @@ async def test_reduce_only_order_not_counted_in_orders_today(tmp_path):
     """
     env = await _make_tools(tmp_path)
     try:
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )
+        out = await env.registry.execute("place_order", _margin_order_args(size=2))
         assert out.risk_verdict == "allow"
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": -1, "reduce_only": True}
-        )
+        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "reduce_pct": 0.5})
         assert out.risk_verdict == "allow", out.text
         stats = await env.repo.daily_stats("paper", 0.0)
         assert stats.orders_today == 1  # 只有开仓单计入
@@ -459,16 +512,10 @@ async def test_close_order_skips_price_deviation(tmp_path):
     """
     env = await _make_tools(tmp_path)
     try:
-        await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
-        )  # 持多仓
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "close": True, "price": 100}
-        )
-        assert out.risk_verdict == "allow", out.text  # close 单 price 被网关忽略，不过偏离
-        out2 = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "price": 100, "stop_loss_price": 90}
-        )
+        await env.registry.execute("place_order", _margin_order_args())  # 持多仓
+        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
+        assert out.risk_verdict == "allow", out.text
+        out2 = await env.registry.execute("place_order", _margin_order_args(price=100))
         assert out2.risk_verdict == "deny" and "偏离" in out2.text  # 开仓仍受偏离约束
     finally:
         await env.db.close()
@@ -477,7 +524,7 @@ async def test_close_order_skips_price_deviation(tmp_path):
 # ---------- 研报方向闸门（高置信反向开仓拦截，降级一律放行） ----------
 
 _GATE_ON = ResearchConfig(gate_enabled=True, gate_max_age_hours=13)
-_OPEN_LONG = {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000}
+_OPEN_LONG = _margin_order_args()
 
 
 async def _save_report(
@@ -735,7 +782,7 @@ async def test_research_gate_btc_view_does_not_block_eth(tmp_path):
         await _save_report(env, "偏空", "高", contract="BTC_USDT")
         out = await env.registry.execute(
             "place_order",
-            {"contract": "ETH_USDT", "size": 1, "stop_loss_price": 58000},
+            _margin_order_args(contract="ETH_USDT"),
         )
         assert out.risk_verdict == "allow", out.text
     finally:
@@ -797,9 +844,7 @@ async def test_place_order_close_string_false_does_not_close_position(tmp_path):
     try:
         await env.registry.execute("place_order", _OPEN_LONG)  # 先持多仓
         assert env.gateway.positions["BTC_USDT"].size == 1
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "close": "false"}
-        )
+        out = await env.registry.execute("place_order", {**_margin_order_args(), "close": "false"})
         assert "参数错误" in out.text and "close" in out.text
         assert env.gateway.positions["BTC_USDT"].size == 1  # 仓位未被平掉
         assert len(env.gateway.placed) == 1  # 只有开仓单进入网关
@@ -807,8 +852,8 @@ async def test_place_order_close_string_false_does_not_close_position(tmp_path):
         await env.db.close()
 
 
-async def test_place_order_bool_params_reject_non_bool_types(tmp_path):
-    """验证 close/reduce_only 只接受 JSON 布尔，显式 null、字符串、整数、数组、对象一律拒绝。
+async def test_place_order_close_rejects_non_bool_types(tmp_path):
+    """验证 close 只接受 JSON 布尔，显式 null、字符串、整数、数组、对象一律拒绝。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
@@ -818,17 +863,10 @@ async def test_place_order_bool_params_reject_non_bool_types(tmp_path):
     """
     env = await _make_tools(tmp_path)
     try:
-        for name in ("close", "reduce_only"):
-            for bad in ("false", "true", "0", "", 0, 1, None, [], {}):
-                args = {
-                    "contract": "BTC_USDT",
-                    "size": 1,
-                    "stop_loss_price": 58000,
-                    "leverage": 5,
-                    name: bad,
-                }
-                out = await env.registry.execute("place_order", args)
-                assert "参数错误" in out.text and name in out.text, f"{name}={bad!r} 未被拒绝"
+        for bad in ("false", "true", "0", "", 0, 1, None, [], {}):
+            args = {**_margin_order_args(leverage=5), "close": bad}
+            out = await env.registry.execute("place_order", args)
+            assert "参数错误" in out.text and "close" in out.text, f"close={bad!r} 未被拒绝"
         assert env.gateway.placed == []  # 下单未到达网关
         assert "BTC_USDT" not in env.gateway.positions  # 调杠杆未到达网关
     finally:
@@ -848,13 +886,11 @@ async def test_place_order_bool_params_accept_explicit_bools(tmp_path):
     try:
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000, "close": False},
+            {**_margin_order_args(), "close": False},
         )
         assert out.risk_verdict == "allow", out.text
         assert env.gateway.positions["BTC_USDT"].size == 1
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "close": True, "reduce_only": False}
-        )
+        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
         assert out.risk_verdict == "allow", out.text
         assert env.gateway.positions["BTC_USDT"].size == 0
     finally:
@@ -951,7 +987,7 @@ async def test_place_order_gateway_reject_rolls_back_leverage(tmp_path, monkeypa
         monkeypatch.setattr(env.gateway, "place_order", _reject)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "下单失败" in out.text and "已回滚" in out.text
         assert spy == [("BTC_USDT", 3, "isolated"), ("BTC_USDT", 2, "isolated")]
@@ -990,11 +1026,11 @@ async def test_place_order_risk_window_leverage_change_fails_closed(tmp_path):
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
-        assert out.risk_verdict == "deny" and "风控锁" in out.text
+        assert out.risk_verdict == "deny" and "校验期间" in out.text
         assert spy == []  # 未触达改杠杆
-        assert len(engaged) == 1
+        assert engaged == []
         assert env.gateway.positions["BTC_USDT"].leverage == Decimal(5)  # 未被旧锚点覆盖
     finally:
         await env.db.close()
@@ -1033,7 +1069,7 @@ async def test_place_order_rollback_aborts_on_concurrent_change(tmp_path, monkey
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "回滚中止" in out.text and "风控锁" in out.text
         assert len(engaged) == 1
@@ -1075,7 +1111,7 @@ async def test_place_order_state_unknown_keeps_leverage(tmp_path, monkeypatch):
         monkeypatch.setattr(env.gateway, "place_order", _timeout)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "状态未知" in out.text and "禁止盲目重试" in out.text
         assert spy == [("BTC_USDT", 3, "isolated")]  # 不回滚
@@ -1086,13 +1122,13 @@ async def test_place_order_state_unknown_keeps_leverage(tmp_path, monkeypatch):
 
 
 async def test_place_order_margin_mode_follows_current_position(tmp_path):
-    """验证未声明 margin_mode 时跟随当前持仓模式（全仓持仓不再被强带逐仓）。
+    """验证新增敞口固定逐仓且拒绝向全仓持仓加仓。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言 set_leverage 收到 cross 模式且下单成功
+        None，断言请求在触达杠杆写入前被拒绝
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1101,10 +1137,10 @@ async def test_place_order_margin_mode_follows_current_position(tmp_path):
         _spy_set_leverage(env, spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
-        assert out.risk_verdict == "allow", out.text
-        assert spy == [("BTC_USDT", 3, "cross")]
+        assert out.risk_verdict == "deny" and "当前持仓不是逐仓" in out.text
+        assert spy == []
     finally:
         await env.db.close()
 
@@ -1141,7 +1177,7 @@ async def test_place_order_failure_without_prior_position_keeps_leverage(tmp_pat
         monkeypatch.setattr(env.gateway, "place_order", _reject)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "下单失败" in out.text and "人工核对" in out.text
         assert spy == [("BTC_USDT", 3, "isolated")]  # 无先验状态，不回滚
@@ -1180,14 +1216,14 @@ def _wire_engage_spy(env: SimpleNamespace) -> list:
 
 
 async def test_place_order_rollback_restores_cross_leverage_limit(tmp_path, monkeypatch):
-    """验证全仓 5x 临时改 3x 下单失败后，回滚恢复全仓 5x 而非固定 1x。
+    """验证全仓持仓不会进入杠杆修改与回滚事务。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
-        monkeypatch: pytest.MonkeyPatch，用于替换网关下单方法注入失败
+        monkeypatch: pytest.MonkeyPatch，用于监控网关下单是否被触达
 
     返回：
-        None，断言回滚目标为 (5, cross)、持仓 cross_leverage_limit 恢复为 5
+        None，断言加仓直接拒绝且交易所写入均未发生
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1195,27 +1231,26 @@ async def test_place_order_rollback_restores_cross_leverage_limit(tmp_path, monk
         spy: list = []
         _spy_set_leverage(env, spy)
 
-        def _reject(req):
-            """模拟交易所明确拒绝下单。
+        placed: list = []
+
+        def _place_spy(req):
+            """记录意外触达的交易所下单请求。
 
             参数：
                 req: OrderRequest，下单请求
 
             返回：
-                None，实际不会返回（总是抛出异常）
-
-            异常：
-                GatewayError，模拟交易所明确拒绝（不会重单）
+                None，仅记录请求
             """
-            raise GatewayError("余额不足", label="INSUFFICIENT_BALANCE")
+            placed.append(req)
 
-        monkeypatch.setattr(env.gateway, "place_order", _reject)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
-        assert "已回滚至 5（cross）" in out.text
-        assert spy == [("BTC_USDT", 3, "cross"), ("BTC_USDT", 5, "cross")]
+        assert out.risk_verdict == "deny" and "当前持仓不是逐仓" in out.text
+        assert spy == [] and placed == []
         pos = env.gateway.positions["BTC_USDT"]
         assert pos.leverage == Decimal(0) and pos.cross_leverage_limit == Decimal(5)
     finally:
@@ -1238,7 +1273,7 @@ async def test_place_order_skips_set_leverage_when_target_equals_current(tmp_pat
         _spy_set_leverage(env, spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert out.risk_verdict == "allow", out.text
         assert spy == []  # 目标等于现状：不触达交易所
@@ -1305,14 +1340,14 @@ async def test_place_order_rollback_failure_engages_kill_switch(tmp_path, monkey
         monkeypatch.setattr(env.gateway, "place_order", _maybe_reject)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "回滚失败" in out.text and "风控锁" in out.text
         assert len(engaged) == 1
         state["reject"] = False
         out2 = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert out2.risk_verdict == "deny" and "kill_switch" in out2.text
     finally:
@@ -1351,7 +1386,7 @@ async def test_place_order_state_unknown_engages_kill_switch(tmp_path, monkeypat
         monkeypatch.setattr(env.gateway, "place_order", _timeout)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "状态未知" in out.text and "禁止盲目重试" in out.text and "风控锁" in out.text
         assert len(engaged) == 1
@@ -1395,7 +1430,7 @@ async def test_place_order_leverage_unknown_but_applied_reconciles(tmp_path, mon
         monkeypatch.setattr(env.gateway, "set_leverage", _applied_then_error)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "下单成功" in out.text, out.text
     finally:
@@ -1452,7 +1487,7 @@ async def test_place_order_leverage_unknown_not_applied_aborts(tmp_path, monkeyp
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "未生效" in out.text and "订单未提交" in out.text
         assert placed == []
@@ -1531,7 +1566,7 @@ async def test_place_order_leverage_unknown_delayed_commit_locks(tmp_path, monke
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "风控锁" in out.text and "未生效" not in out.text, out.text
         assert placed == []
@@ -1591,7 +1626,7 @@ async def test_place_order_leverage_unknown_stable_not_applied_aborts(tmp_path, 
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "未生效" in out.text and "订单未提交" in out.text and "风控锁" not in out.text
         assert placed == []
@@ -1677,7 +1712,7 @@ async def test_place_order_leverage_gateway_error_timeout_delayed_commit_locks(
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "风控锁" in out.text and "未生效" not in out.text, out.text
         assert placed == []
@@ -1688,14 +1723,14 @@ async def test_place_order_leverage_gateway_error_timeout_delayed_commit_locks(
 
 
 async def test_place_order_inherited_leverage_concurrent_change_locks(tmp_path, monkeypatch):
-    """验证省略 leverage 新增敞口时，风控 await 窗口内的外部调杠杆被复核拦截。
+    """验证新增敞口在校验窗口内的外部调杠杆会安全中止。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
         monkeypatch: pytest.MonkeyPatch，用于在 daily_stats_fn 里模拟外部调杠杆
 
     返回：
-        None，断言订单绝不触达网关下单、触发风控锁并 deny
+        None，断言订单绝不触达网关下单且返回快照变化拒绝
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1732,11 +1767,11 @@ async def test_place_order_inherited_leverage_concurrent_change_locks(tmp_path, 
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},
+            _margin_order_args(),
         )
-        assert out.risk_verdict == "deny" and "风控锁" in out.text, out.text
+        assert out.risk_verdict == "deny" and "校验期间" in out.text, out.text
         assert placed == []
-        assert len(engaged) == 1
+        assert engaged == []
     finally:
         await env.db.close()
 
@@ -1792,7 +1827,7 @@ async def test_place_order_rollback_verification_mismatch_locks(tmp_path, monkey
         monkeypatch.setattr(env.gateway, "place_order", _reject)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "核验" in out.text and "风控锁" in out.text
         assert len(engaged) == 1
@@ -1801,13 +1836,13 @@ async def test_place_order_rollback_verification_mismatch_locks(tmp_path, monkey
 
 
 async def test_place_order_refuses_when_cross_leverage_unknown(tmp_path):
-    """验证全仓实际杠杆未知时拒绝调杠杆下单并触发风控锁（不触达交易所）。
+    """验证全仓实际杠杆未知时仍按逐仓不变量拒绝加仓。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言文本含状态未知与风控锁提示、set_leverage 未被调用、回调被触发
+        None，断言文本说明现有持仓不是逐仓且不触达交易所
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1818,24 +1853,24 @@ async def test_place_order_refuses_when_cross_leverage_unknown(tmp_path):
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
-        assert "杠杆状态未知" in out.text and "风控锁" in out.text
-        assert out.risk_verdict == "deny"  # 硬拒绝按风控拒绝归类，供审计正确统计
+        assert "当前持仓不是逐仓" in out.text
+        assert out.risk_verdict == "deny"
         assert spy == []  # 未触达交易所
-        assert len(engaged) == 1
+        assert engaged == []
     finally:
         await env.db.close()
 
 
 async def test_place_order_undeclared_leverage_cross_unknown_denied(tmp_path):
-    """验证省略 leverage 时，全仓杠杆未知的新增敞口同样被拒绝并触发风控锁。
+    """验证全仓持仓不会因参数变化绕过逐仓加仓限制。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言文本含状态未知与风控锁提示、set_leverage 未被调用、回调被触发
+        None，断言请求按逐仓不变量拒绝且不触达交易所
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1846,24 +1881,24 @@ async def test_place_order_undeclared_leverage_cross_unknown_denied(tmp_path):
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 58000},  # 未声明 leverage
+            _margin_order_args(),  # 未声明 leverage
         )
-        assert "杠杆状态未知" in out.text and "风控锁" in out.text
+        assert "当前持仓不是逐仓" in out.text
         assert out.risk_verdict == "deny"
         assert spy == []  # 未触达交易所
-        assert len(engaged) == 1
+        assert engaged == []
     finally:
         await env.db.close()
 
 
 async def test_place_order_non_integer_cross_leverage_refused(tmp_path):
-    """验证全仓杠杆为小数（lever=4.35 回退路径）时视为不可回滚，新增敞口 fail closed。
+    """验证小数杠杆全仓持仓同样不能接受逐仓加仓。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言文本含状态未知与风控锁提示、set_leverage 未被调用、回调被触发
+        None，断言请求按逐仓不变量拒绝且不触达交易所
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1874,12 +1909,12 @@ async def test_place_order_non_integer_cross_leverage_refused(tmp_path):
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
-        assert "杠杆状态未知" in out.text and "风控锁" in out.text
+        assert "当前持仓不是逐仓" in out.text
         assert out.risk_verdict == "deny"
         assert spy == []  # 未触达交易所
-        assert len(engaged) == 1
+        assert engaged == []
     finally:
         await env.db.close()
 
@@ -1903,7 +1938,7 @@ async def test_place_order_zero_size_cross_entry_does_not_lock(tmp_path, monkeyp
         engaged = _wire_engage_spy(env)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "下单成功" in out.text, out.text
         assert engaged == [] and env.deps.risk_config.kill_switch is False
@@ -1927,9 +1962,7 @@ async def test_place_order_close_skips_leverage_and_guard(tmp_path):
         spy: list = []
         _spy_set_leverage(env, spy)
         engaged = _wire_engage_spy(env)
-        out = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "close": True, "leverage": 3}
-        )
+        out = await env.registry.execute("place_order", {"contract": "BTC_USDT", "close": True})
         assert out.risk_verdict == "allow", out.text
         assert spy == []  # 平仓不调杠杆
         assert engaged == []  # 平仓不被守卫拦截
@@ -1971,7 +2004,7 @@ async def test_place_order_unexpected_error_locks_without_rollback(tmp_path, mon
         monkeypatch.setattr(env.gateway, "place_order", _boom)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "下单结果不明" in out.text and "禁止盲目重试" in out.text and "风控锁" in out.text
         assert len(engaged) == 1
@@ -1982,14 +2015,14 @@ async def test_place_order_unexpected_error_locks_without_rollback(tmp_path, mon
 
 
 async def test_place_order_rollback_restores_mode_switch(tmp_path, monkeypatch):
-    """验证全仓 5x 临时切逐仓 3x 下单失败后，回滚同时恢复杠杆与全仓模式。
+    """验证代码不会把已有全仓持仓临时切换为逐仓后加仓。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
-        monkeypatch: pytest.MonkeyPatch，用于替换网关下单方法注入失败
+        monkeypatch: pytest.MonkeyPatch，用于监控网关下单是否被触达
 
     返回：
-        None，断言回滚调用为 (5, cross)、持仓恢复全仓 5x
+        None，断言请求直接拒绝且没有发生模式切换或下单
     """
     env = await _make_tools(tmp_path)
     try:
@@ -1997,33 +2030,26 @@ async def test_place_order_rollback_restores_mode_switch(tmp_path, monkeypatch):
         spy: list = []
         _spy_set_leverage(env, spy)
 
-        def _reject(req):
-            """模拟交易所明确拒绝下单。
+        placed: list = []
+
+        def _place_spy(req):
+            """记录意外触达的交易所下单请求。
 
             参数：
                 req: OrderRequest，下单请求
 
             返回：
-                None，实际不会返回（总是抛出异常）
-
-            异常：
-                GatewayError，模拟交易所明确拒绝（不会重单）
+                None，仅记录请求
             """
-            raise GatewayError("余额不足", label="INSUFFICIENT_BALANCE")
+            placed.append(req)
 
-        monkeypatch.setattr(env.gateway, "place_order", _reject)
+        monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {
-                "contract": "BTC_USDT",
-                "size": 1,
-                "leverage": 3,
-                "margin_mode": "isolated",
-                "stop_loss_price": 58000,
-            },
+            _margin_order_args(leverage=3),
         )
-        assert "已回滚至 5（cross）" in out.text
-        assert spy == [("BTC_USDT", 3, "isolated"), ("BTC_USDT", 5, "cross")]
+        assert out.risk_verdict == "deny" and "当前持仓不是逐仓" in out.text
+        assert spy == [] and placed == []
         pos = env.gateway.positions["BTC_USDT"]
         assert pos.margin_mode == "cross" and pos.cross_leverage_limit == Decimal(5)
     finally:
@@ -2031,13 +2057,13 @@ async def test_place_order_rollback_restores_mode_switch(tmp_path, monkeypatch):
 
 
 async def test_place_order_skips_set_leverage_when_cross_equals_current(tmp_path):
-    """验证全仓持仓声明同等杠杆与模式时，不调用交易所 set_leverage。
+    """验证全仓持仓即使杠杆相等也不能继续新增敞口。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言 set_leverage 探针无调用记录且下单成功
+        None，断言请求被拒绝且 set_leverage 探针无调用记录
     """
     env = await _make_tools(tmp_path)
     try:
@@ -2046,10 +2072,10 @@ async def test_place_order_skips_set_leverage_when_cross_equals_current(tmp_path
         _spy_set_leverage(env, spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 5, "stop_loss_price": 58000},
+            _margin_order_args(leverage=5),
         )
-        assert out.risk_verdict == "allow", out.text
-        assert spy == []  # 目标 (5, cross) 等于现状：不触达交易所
+        assert out.risk_verdict == "deny" and "当前持仓不是逐仓" in out.text
+        assert spy == []
     finally:
         await env.db.close()
 
@@ -2124,15 +2150,14 @@ async def test_recheck_prev_state_slow_gateway_does_not_block_event_loop(tmp_pat
 
 
 async def test_place_order_concurrent_leverage_writes_serialized(tmp_path, monkeypatch):
-    """验证两个并发 place_order 的杠杆写事务被合约级锁序列化，后进入者重检 fail closed。
+    """验证两个并发新增敞口事务在合约锁内串行重算。
 
     参数：
         tmp_path: Path，pytest 提供的临时目录
         monkeypatch: pytest.MonkeyPatch，用于注入慢 set_leverage 放大交错窗口
 
     返回：
-        None，断言恰好一笔订单提交成功且下单瞬间杠杆等于其声明值、另一笔被风控锁拒绝
-        （无锁时两笔都会成功且可能以错误杠杆提交，本测试必红）
+        None，断言两笔订单均按各自杠杆安全提交且未触发风控锁
     """
     env = await _make_tools(tmp_path)
     try:
@@ -2176,22 +2201,18 @@ async def test_place_order_concurrent_leverage_writes_serialized(tmp_path, monke
         out_a, out_b = await asyncio.gather(
             env.registry.execute(
                 "place_order",
-                {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+                _margin_order_args(leverage=3),
             ),
             env.registry.execute(
                 "place_order",
-                {"contract": "BTC_USDT", "size": 1, "leverage": 4, "stop_loss_price": 58000},
+                _margin_order_args(leverage=4),
             ),
         )
-        # 锁序列化：先拿锁者完成整个事务，后拿锁者重检发现快照失效，fail closed
-        assert len(placed) == 1
-        # 成功单下单瞬间的杠杆等于其声明值（不会出现按 3x 风控却在 4x 状态提交）
-        assert placed_leverage[0] in (Decimal(3), Decimal(4))
-        texts = [out_a.text, out_b.text]
-        assert any("下单成功" in t for t in texts)
-        assert any("风控锁" in t for t in texts)
-        assert env.deps.risk_config.kill_switch is True
-        assert len(engaged) == 1
+        assert len(placed) == 2
+        assert sorted(placed_leverage) == [Decimal(3), Decimal(4)]
+        assert all("下单成功" in out.text for out in (out_a, out_b))
+        assert env.deps.risk_config.kill_switch is False
+        assert engaged == []
     finally:
         await env.db.close()
 
@@ -2246,7 +2267,7 @@ async def test_place_order_confirm_read_detects_external_change_locks(tmp_path, 
         monkeypatch.setattr(env.gateway, "place_order", _place_spy)
         out = await env.registry.execute(
             "place_order",
-            {"contract": "BTC_USDT", "size": 1, "leverage": 3, "stop_loss_price": 58000},
+            _margin_order_args(leverage=3),
         )
         assert "风控锁" in out.text and "订单未提交" in out.text
         assert placed == []

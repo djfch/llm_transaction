@@ -8,7 +8,15 @@ from types import SimpleNamespace
 from src.agent.tool_handlers import ToolDeps
 from src.agent.tools import ToolRegistry
 from src.config import PaperConfig, RiskConfig
-from src.gateway.base import Account, Candle, Contract, GatewayError, OrderRequest, TpslOrder
+from src.gateway.base import (
+    Account,
+    Candle,
+    Contract,
+    GatewayError,
+    OrderRequest,
+    Position,
+    TpslOrder,
+)
 from src.gateway.mock import MockGateway
 from src.market.candles import CandleCache, ManualPriceSource
 from src.market.triggers import TriggerManager
@@ -182,27 +190,161 @@ async def test_open_requires_valid_stop_and_applies_leverage(tmp_path):
     gateway = MockGateway(contracts={"BTC_USDT": _contract()})
     env = await _registry(tmp_path, gateway)
     try:
-        missing = await env.registry.execute("place_order", {"contract": "BTC_USDT", "size": 1})
+        missing = await env.registry.execute(
+            "place_order",
+            {"contract": "BTC_USDT", "side": "long", "margin_usdt": 20, "leverage": 3},
+        )
         wrong = await env.registry.execute(
-            "place_order", {"contract": "BTC_USDT", "size": 1, "stop_loss_price": 61000}
+            "place_order",
+            {
+                "contract": "BTC_USDT",
+                "side": "long",
+                "margin_usdt": 20,
+                "leverage": 3,
+                "stop_loss_price": 61000,
+            },
         )
         ok = await env.registry.execute(
             "place_order",
             {
                 "contract": "BTC_USDT",
-                "size": 1,
+                "side": "long",
+                "margin_usdt": 20,
                 "leverage": 3,
                 "stop_loss_price": 58000,
                 "take_profit_price": 64000,
             },
         )
-        assert "必须提供" in missing.text and "低于标记价" in wrong.text
+        assert "缺少必填参数 stop_loss_price" in missing.text and "低于标记价" in wrong.text
         assert ok.risk_verdict == "allow"
         assert gateway.placed[-1].stop_loss_price == Decimal(58000)
         tpsl = {o.kind: o.trigger_price for o in gateway.list_tpsl_orders("BTC_USDT")}
         assert tpsl["stop_loss"] == Decimal(58000)
         assert tpsl["take_profit"] == Decimal(64000)
         assert gateway.positions["BTC_USDT"].leverage == Decimal(3)
+    finally:
+        await env.db.close()
+
+
+def _long_position(*, entry: str = "60000") -> Position:
+    """构造 10 张 BTC 多仓供整仓止损金额测试。
+
+    参数：
+        entry: str，整仓开仓均价
+
+    返回：
+        Position：标记价 60000、逐仓 2 倍的多仓
+    """
+    return Position(
+        contract="BTC_USDT",
+        size=Decimal(10),
+        entry_price=Decimal(entry),
+        mark_price=Decimal(60000),
+        liq_price=Decimal(0),
+        leverage=Decimal(2),
+        margin=Decimal(0),
+        unrealised_pnl=Decimal(0),
+    )
+
+
+def _install_stop(gateway: MockGateway, price: str) -> None:
+    """给测试多仓安装一张当前整仓止损单。
+
+    参数：
+        gateway: MockGateway，待写入保护单的网关
+        price: str，止损触发价
+
+    返回：
+        None，就地写入一张 stop_loss 保护单
+    """
+    gateway.create_tpsl_order(
+        TpslOrder(
+            id="",
+            contract="BTC_USDT",
+            direction=1,
+            kind="stop_loss",
+            trigger_price=Decimal(price),
+        )
+    )
+
+
+async def test_update_tpsl_rejects_over_limit_widening_but_allows_tightening(tmp_path):
+    """校验当前已超限时放宽止损被拒，确实收紧风险则允许。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言 20 USDT 当前风险可收紧到 15，但不能放宽到 30
+    """
+    gateway = MockGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position()},
+    )
+    _install_stop(gateway, "58000")
+    env = await _registry(tmp_path, gateway)
+    try:
+        widened = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 57000}
+        )
+        tightened = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 58500}
+        )
+        assert widened.risk_verdict == "deny" and "没有缩小当前风险" in widened.text
+        assert tightened.risk_verdict == "allow"
+        assert "计划止损估算 15" in tightened.text
+    finally:
+        await env.db.close()
+
+
+async def test_update_tpsl_first_protection_over_limit_is_allowed_with_warning(tmp_path):
+    """校验无止损仓位首次补保护即使仍超 1% 也放行并明确警告。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言新止损生效且结果要求继续收紧
+    """
+    gateway = MockGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position()},
+    )
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 57000}
+        )
+        assert outcome.risk_verdict == "allow"
+        assert "首次保护止损仍超过风险上限" in outcome.text
+    finally:
+        await env.db.close()
+
+
+async def test_update_tpsl_profit_zone_has_zero_planned_loss(tmp_path):
+    """校验止损移入盈利区时计划亏损为零而不是取绝对值。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言开仓均价 58000、止损 59000 的计划止损估算为零
+    """
+    gateway = MockGateway(
+        contracts={"BTC_USDT": _contract()},
+        account=Account(available=Decimal(1000), unrealised_pnl=Decimal(0)),
+        positions={"BTC_USDT": _long_position(entry="58000")},
+    )
+    _install_stop(gateway, "57000")
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": 59000}
+        )
+        assert outcome.risk_verdict == "allow"
+        assert "计划止损估算 0" in outcome.text
     finally:
         await env.db.close()
 

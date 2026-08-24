@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from src.agent import tool_handlers, tool_plans, tool_trading
+from src.agent import (
+    tool_amend,
+    tool_cancel,
+    tool_handlers,
+    tool_order_entry,
+    tool_plans,
+    tool_tpsl,
+)
 from src.agent.tool_handlers import ToolArgError, ToolDeps, ToolOutcome
 from src.agent.tool_schemas import SCHEMAS
 from src.audit.logger import get_logger
@@ -22,14 +29,14 @@ logger = get_logger(__name__)
 ToolHandler = Callable[[dict], Awaitable[ToolOutcome]]
 
 # 工具名 → 执行函数（schema 在 tool_schemas.SCHEMAS 中同名定义；
-# 交易类工具在 tool_trading，其余在 tool_handlers）
+# 交易类工具按动作拆分模块，其余在 tool_handlers）
 _HANDLERS: dict[str, Callable[[ToolDeps, dict], Awaitable[ToolOutcome]]] = {
     "get_market_data": tool_handlers.get_market_data,
     "get_indicators": tool_handlers.get_indicators,
-    "place_order": tool_trading.place_order,
-    "update_tpsl": tool_trading.update_tpsl,
-    "amend_order": tool_trading.amend_order,
-    "cancel_order": tool_trading.cancel_order,
+    "place_order": tool_order_entry.place_order,
+    "update_tpsl": tool_tpsl.update_tpsl,
+    "amend_order": tool_amend.amend_order,
+    "cancel_order": tool_cancel.cancel_order,
     "set_price_alert": tool_handlers.set_price_alert,
     "cancel_price_alert": tool_handlers.cancel_price_alert,
     "set_next_wakeup": tool_handlers.set_next_wakeup,
