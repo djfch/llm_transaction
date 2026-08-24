@@ -44,3 +44,25 @@ async def cached_contract(deps: ToolDeps, contract: str) -> Contract | None:
         return await run_gateway_io(provider, contract)
     except GatewayError:
         return None
+
+
+async def reduction_contract(deps: ToolDeps, contract: str) -> Contract | None:
+    """优先读取缓存，冷启动时尝试实时获取可用于降险换算的规格。
+
+    查询失败时返回 None，让整数张减仓继续按持仓本身可确定的单位安全降级；
+    此路径不检查交易状态，避免下架状态阻断已有持仓降险。
+
+    参数：
+        deps: ToolDeps，工具依赖
+        contract: str，合约标识
+
+    返回：
+        Contract | None：缓存或实时规格；官方接口不可用时为 None
+    """
+    meta = await cached_contract(deps, contract)
+    if meta is not None:
+        return meta
+    try:
+        return await run_gateway_io(deps.gateway.get_contract, contract)
+    except GatewayError:
+        return None

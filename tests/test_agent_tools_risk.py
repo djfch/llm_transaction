@@ -366,6 +366,44 @@ async def test_amend_cross_position_uses_cross_leverage_limit(tmp_path):
         await env.db.close()
 
 
+async def test_amend_cross_fractional_leverage_rounds_up_for_risk(tmp_path):
+    """校验全仓小数实际杠杆按向上取整值参与改单风控。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言实际 4.35 倍在上限 4 时拒绝、上限 5 时放行
+    """
+    env = await _make_tools(tmp_path)
+    try:
+        env.gateway.positions["BTC_USDT"] = _long_position("0", cross_limit="4.35")
+        order = env.gateway.place_order(
+            OrderRequest(
+                contract="BTC_USDT",
+                size=Decimal(1),
+                price=Decimal(59000),
+                stop_loss_price=Decimal(58000),
+            )
+        )
+        env.deps.risk_config.max_leverage = 4
+        denied = await env.registry.execute(
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order.id, "price": 59500},
+        )
+        assert denied.risk_verdict == "deny"
+        assert "杠杆 5x 超过上限 4x" in denied.text
+
+        env.deps.risk_config.max_leverage = 5
+        allowed = await env.registry.execute(
+            "amend_order",
+            {"contract": "BTC_USDT", "order_id": order.id, "price": 59500},
+        )
+        assert allowed.risk_verdict == "allow", allowed.text
+    finally:
+        await env.db.close()
+
+
 async def test_amend_aborts_when_order_changes_after_risk_check(tmp_path):
     """校验最终改单前订单自身被并发扩大时安全中止。
 

@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 
 from pydantic import ValidationError
 
@@ -220,8 +220,14 @@ def _resolve_leverage(
         if pos.margin_mode == "cross":
             limit = pos.cross_leverage_limit
             if limit is not None and limit > 0:
-                return max(int(limit), 1), None  # 全仓有效杠杆以 cross_leverage_limit 为准
-        return max(int(pos.leverage), 1), None  # leverage=0 表示全仓，缺失时按 1 参与判定
+                return (
+                    max(int(limit.to_integral_value(rounding=ROUND_CEILING)), 1),
+                    None,
+                )  # 风控使用不低于全仓实际值的整数杠杆
+        return (
+            max(int(pos.leverage.to_integral_value(rounding=ROUND_CEILING)), 1),
+            None,
+        )  # leverage=0 表示全仓，缺失时按 1 参与判定
     return 1, None
 
 

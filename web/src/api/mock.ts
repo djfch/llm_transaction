@@ -650,25 +650,32 @@ function mockCall(
 
 /** 有归属成交的轮：分析 → 下单(allow) → 成交结论；llm_raw 的 tool_use 与审计链逐条对应 */
 function fillNarrative(fill: Trade): Pick<RoundDetail, 'llm_raw' | 'tool_calls'> {
-  const action = fill.source === 'llm_open' ? (fill.size > 0 ? '开多' : '开空') : '平仓'
+  const isOpen = fill.source === 'llm_open'
+  const action = isOpen ? (fill.size > 0 ? '开多' : '开空') : '平仓'
   const klineArgs = { contract: fill.contract, interval: '1h', limit: 20 }
-  const orderArgs = {
-    contract: fill.contract,
-    side: fill.size > 0 ? 'long' : 'short',
-    margin_usdt: 50,
-    leverage: 3,
-    stop_loss_price: fill.size > 0 ? fill.price * 0.98 : fill.price * 1.02,
-  }
+  const orderArgs: Record<string, unknown> = isOpen
+    ? {
+        contract: fill.contract,
+        side: fill.size > 0 ? 'long' : 'short',
+        margin_usdt: 50,
+        leverage: 3,
+        stop_loss_price: fill.size > 0 ? fill.price * 0.98 : fill.price * 1.02,
+      }
+    : { contract: fill.contract, close: true }
+  const orderIntent = isOpen
+    ? `${fill.contract} 信号符合策略，投入 50 U、使用 3 倍杠杆${action}。`
+    : `${fill.contract} 已满足离场条件，提交整仓平仓。`
+  const orderResult = isOpen
+    ? `保证金订单已成交 @ ${fill.price}（成交ID ${fill.id}）`
+    : `整仓平仓订单已成交 @ ${fill.price}（成交ID ${fill.id}）`
   const llm_raw = [
     anthropicTurn(`账户信息已注入上下文，检查 ${fill.contract} 走势。`, [{ name: 'get_market_data', input: klineArgs }]),
-    anthropicTurn(`${fill.contract} 信号符合策略，投入 50 U、使用 3 倍杠杆${action}。`, [
-      { name: 'place_order', input: orderArgs },
-    ]),
+    anthropicTurn(orderIntent, [{ name: 'place_order', input: orderArgs }]),
     anthropicTurn(`已${action} ${fill.contract}（成交价 ${fill.price}），30 分钟后复查。`),
   ].join('\n')
   const toolCalls: ToolCall[] = [
     mockCall(1, 'get_market_data', klineArgs, '返回 20 根 K 线'),
-    mockCall(2, 'place_order', orderArgs, `保证金订单已成交 @ ${fill.price}（成交ID ${fill.id}）`, 'allow'),
+    mockCall(2, 'place_order', orderArgs, orderResult, 'allow'),
   ]
   return { llm_raw, tool_calls: toolCalls }
 }

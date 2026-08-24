@@ -526,6 +526,20 @@ async def test_close_and_reduce_do_not_depend_on_contract_query(tmp_path):
     class BrokenContractGateway(MockGateway):
         """合约规格查询失败但持仓和下单仍可用的网关。"""
 
+        def get_cached_contract(self, contract: str) -> Contract:
+            """模拟冷启动时目标合约尚无缓存。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                Contract：本实现不会返回
+
+            异常：
+                GatewayError：始终表示缓存缺失
+            """
+            raise GatewayError(f"{contract} 缓存缺失")
+
         def get_contract(self, contract: str) -> Contract:
             """模拟官方规格查询失败。
 
@@ -580,5 +594,63 @@ async def test_decimal_contract_integer_position_can_reduce_fractional_lot(tmp_p
         assert outcome.risk_verdict == "allow", outcome.text
         assert gateway.placed[-1].size == D("-0.5")
         assert gateway.placed[-1].reduce_only is True
+    finally:
+        await env.db.close()
+
+
+async def test_live_cold_cache_fetches_decimal_spec_before_partial_reduction(tmp_path):
+    """校验 live 冷启动空缓存会实时读取小数张规格后再减仓。
+
+    参数：
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，断言 1 张持仓减半时读取官方规格并提交 -0.5 张
+    """
+
+    class ColdCacheGateway(MockGateway):
+        """模拟进程刚重启、仅实时接口可提供合约规格的 live 网关。"""
+
+        live_reads = 0
+
+        def get_cached_contract(self, contract: str) -> Contract:
+            """模拟当前进程尚未缓存目标合约。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                Contract：本实现不会返回
+
+            异常：
+                GatewayError：始终表示缓存缺失
+            """
+            raise GatewayError(f"{contract} 缓存缺失")
+
+        def get_contract(self, contract: str) -> Contract:
+            """通过实时接口返回支持小数张的合约规格。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                Contract：支持 0.1 最小张数的实时规格
+            """
+            self.live_reads += 1
+            return self.contracts[contract]
+
+    gateway = ColdCacheGateway(
+        contracts={"BTC_USDT": _contract(decimal_size=True, minimum="0.1")},
+        account=Account(available=D(1000), unrealised_pnl=D(0)),
+        positions={"BTC_USDT": _position(size="1")},
+    )
+    env = await _env(tmp_path, gateway=gateway)
+    try:
+        outcome = await env.registry.execute(
+            "place_order", {"contract": "BTC_USDT", "reduce_pct": 0.5}
+        )
+        assert outcome.risk_verdict == "allow", outcome.text
+        assert gateway.live_reads == 1
+        assert gateway.placed[-1].size == D("-0.5")
     finally:
         await env.db.close()

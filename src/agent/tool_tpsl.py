@@ -37,6 +37,7 @@ def _swap_tpsl_group(
     contract: str,
     direction: int,
     expected_size: Decimal,
+    expected_group: tuple[tuple, ...],
     requested: list[TpslOrder],
 ) -> _TpslSwapResult:
     """完整创建新保护单组后撤销旧组，并在事务开始时重核持仓。
@@ -46,6 +47,7 @@ def _swap_tpsl_group(
         contract: str，合约标识
         direction: int，持仓方向（1 多 / -1 空）
         expected_size: Decimal，风险校验时读取的整仓张数
+        expected_group: tuple[tuple, ...]，风险校验时同方向保护单指纹
         requested: list[TpslOrder]，待创建的完整新保护组
 
     返回：
@@ -60,6 +62,8 @@ def _swap_tpsl_group(
     ):
         return _TpslSwapResult("position_changed")
     old = [item for item in gateway.list_tpsl_orders(contract) if item.direction == direction]
+    if _tpsl_group_fingerprint(old, direction) != expected_group:
+        return _TpslSwapResult("protection_changed")
     created: list[TpslOrder] = []
     try:
         for item in requested:
@@ -70,6 +74,25 @@ def _swap_tpsl_group(
         rollback_failed = _rollback_created(gateway, created)
         return _TpslSwapResult("create_failed", str(exc), rollback_failed=rollback_failed)
     return _cancel_old_group(gateway, old, created)
+
+
+def _tpsl_group_fingerprint(orders: list[TpslOrder], direction: int) -> tuple[tuple, ...]:
+    """提取指定持仓方向的完整保护单集合指纹。
+
+    参数：
+        orders: list[TpslOrder]，保护单快照
+        direction: int，持仓方向（1 多 / -1 空）
+
+    返回：
+        tuple[tuple, ...]：按订单 ID 排序的类型、方向与触发价指纹
+    """
+    return tuple(
+        sorted(
+            (item.id, item.contract, item.direction, item.kind, item.trigger_price)
+            for item in orders
+            if item.direction == direction
+        )
+    )
 
 
 def _rollback_created(gateway: Gateway, created: list[TpslOrder]) -> list[str]:
@@ -152,12 +175,14 @@ async def update_tpsl(deps: ToolDeps, args: dict) -> ToolOutcome:
     if isinstance(assessment, ToolOutcome):
         return assessment
     requested = _requested_group(contract, direction, stop_loss, take_profit)
+    expected_group = _tpsl_group_fingerprint(current_orders, direction)
     swap = await run_gateway_io(
         _swap_tpsl_group,
         deps.gateway,
         contract,
         direction,
         pos.size,
+        expected_group,
         requested,
         mutation=True,
     )
@@ -212,6 +237,8 @@ def _swap_failure_outcome(swap: _TpslSwapResult) -> ToolOutcome | None:
         return None
     if swap.stage == "position_changed":
         return ToolOutcome("止盈止损未更新：持仓张数或方向已变化，请重新计算")
+    if swap.stage == "protection_changed":
+        return ToolOutcome("止盈止损未更新：保护单集合在校验期间发生变化，请重新计算")
     if swap.stage == "create_unknown":
         return ToolOutcome(f"更新状态未知；旧保护单未撤销，请人工核对且不要重试：{swap.error}")
     if swap.stage == "create_failed":

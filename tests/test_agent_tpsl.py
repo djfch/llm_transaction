@@ -581,6 +581,89 @@ async def test_update_tpsl_creates_full_new_group_before_cancelling_old(tmp_path
         await env.db.close()
 
 
+@pytest.mark.parametrize(
+    ("size", "old_stop", "requested_stop", "tighter_stop"),
+    [
+        (Decimal(10), Decimal(57000), Decimal(58000), Decimal(59000)),
+        (Decimal(-10), Decimal(63000), Decimal(62000), Decimal(61000)),
+    ],
+)
+async def test_update_tpsl_aborts_when_protection_group_changes_after_risk(
+    tmp_path,
+    size: Decimal,
+    old_stop: Decimal,
+    requested_stop: Decimal,
+    tighter_stop: Decimal,
+):
+    """校验风控后保护单集合变化时中止替换且不撤销更紧保护。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具
+        size: Decimal，正多负空的持仓张数
+        old_stop: Decimal，风险校验时已有的宽松止损
+        requested_stop: Decimal，本轮请求的收紧止损
+        tighter_stop: Decimal，校验后外部新增的更紧止损
+
+    返回：
+        None，断言外部新增的更紧止损保留且没有创建请求止损
+    """
+
+    class ChangingProtectionGateway(_TraceGateway):
+        """在最终事务重读保护组时模拟外部新增更紧止损。"""
+
+        reads = 0
+
+        def list_tpsl_orders(self, contract: str) -> list[TpslOrder]:
+            """第二次读取前插入一张外部更紧止损。
+
+            参数：
+                contract: str，合约名
+
+            返回：
+                list[TpslOrder]：当前完整保护单集合
+            """
+            self.reads += 1
+            if self.reads == 2:
+                super().create_tpsl_order(
+                    TpslOrder(
+                        id="",
+                        contract=contract,
+                        direction=1 if size > 0 else -1,
+                        kind="stop_loss",
+                        trigger_price=tighter_stop,
+                    )
+                )
+            return super().list_tpsl_orders(contract)
+
+    gateway = ChangingProtectionGateway()
+    direction = 1 if size > 0 else -1
+    gateway.positions["BTC_USDT"] = _long_position().model_copy(update={"size": size})
+    gateway.create_tpsl_order(
+        TpslOrder(
+            id="",
+            contract="BTC_USDT",
+            direction=direction,
+            kind="stop_loss",
+            trigger_price=old_stop,
+        )
+    )
+    gateway.events.clear()
+    env = await _registry(tmp_path, gateway)
+    try:
+        outcome = await env.registry.execute(
+            "update_tpsl", {"contract": "BTC_USDT", "stop_loss_price": requested_stop}
+        )
+        assert outcome.risk_verdict != "allow"
+        assert "保护单" in outcome.text and "变化" in outcome.text
+        assert gateway.events == ["create:stop_loss"]
+        assert {item.trigger_price for item in gateway.list_tpsl_orders("BTC_USDT")} == {
+            old_stop,
+            tighter_stop,
+        }
+    finally:
+        await env.db.close()
+
+
 class _CreateTakeProfitFailsGateway(_TraceGateway):
     def create_tpsl_order(self, order: TpslOrder) -> TpslOrder:
         """模拟创建新止盈单失败，止损单仍交由基础网关创建。

@@ -408,13 +408,13 @@ async def test_high_priority_task_preempts_between_pages():
 
 
 async def test_concurrent_update_tpsl_leave_single_group(tmp_path):
-    """验证两个并发 update_tpsl 串行生效（后写覆盖），不会留下两套新保护单。
+    """验证两个并发 update_tpsl 仅首笔生效，旧快照更新会安全中止。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具
 
     返回：
-        None，断言两次更新均成功、最终该合约只剩一个止损单且触发价属于后生效者
+        None，断言一笔成功、一笔因保护组变化中止，最终只剩一套新保护单
     """
     env = await _make_tools(tmp_path)
     try:
@@ -431,8 +431,10 @@ async def test_concurrent_update_tpsl_leave_single_group(tmp_path):
         first = update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 58000})
         second = update_tpsl(env.deps, {"contract": "BTC_USDT", "stop_loss_price": 57000})
         out1, out2 = await asyncio.gather(first, second)
-        assert out1.risk_verdict == "allow" and "止损已更新" in out1.text, out1.text
-        assert out2.risk_verdict == "allow" and "止损已更新" in out2.text, out2.text
+        allowed = [item for item in (out1, out2) if item.risk_verdict == "allow"]
+        aborted = [item for item in (out1, out2) if "保护单集合" in item.text]
+        assert len(allowed) == 1 and "止损已更新" in allowed[0].text
+        assert len(aborted) == 1 and "变化" in aborted[0].text
         orders = env.gateway.list_tpsl_orders("BTC_USDT")
         assert len(orders) == 1
         assert orders[0].trigger_price in (Decimal(58000), Decimal(57000))

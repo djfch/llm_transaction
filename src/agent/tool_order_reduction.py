@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from src.agent.context import compute_equity
-from src.agent.contract_specs import cached_contract
+from src.agent.contract_specs import reduction_contract
 from src.agent.position_sizing import calculate_reduction_size
 from src.agent.tool_handlers import (
     ToolArgError,
@@ -81,7 +81,7 @@ async def place_reduction(deps: ToolDeps, args: dict, *, close: bool) -> ToolOut
     if close and price is not None:
         raise ToolArgError("close=true 为整仓市价平仓，不接受 price")
     try:
-        meta = None if close else await cached_contract(deps, contract)
+        meta = None if close else await reduction_contract(deps, contract)
         size = (
             Decimal(0)
             if close
