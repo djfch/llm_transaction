@@ -15,6 +15,7 @@ import { useApiData } from '../../hooks/useApiData'
 import { usePageState } from '../../hooks/usePageState'
 import { fmtNum, fmtPct2, fmtSigned, fmtTime, pnlClass } from '../../utils/format'
 import StateHint from '../StateHint'
+import ModelBadge from './ModelBadge'
 import PaginationControls from './PaginationControls'
 import ReviewLiveStrip from './ReviewLiveStrip'
 import ReviewToolChain from './ReviewToolChain'
@@ -141,6 +142,12 @@ function ReportItem({
             区间 {fmtDay(report.periodStart)} ~ {fmtDay(report.periodEnd)}
           </span>
           <ActionBadge report={report} />
+          <ModelBadge
+            model={report.llmModel}
+            thinkingEffort={report.llmThinkingEffort}
+            credentialName={report.llmCredentialName}
+            provider={report.llmProvider}
+          />
           <span className={`ml-auto text-[10px] text-zinc-600 transition-transform ${expanded ? 'rotate-90' : ''}`}>
             ▸
           </span>

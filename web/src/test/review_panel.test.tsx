@@ -30,6 +30,10 @@ const REPORTS: ReviewReportSummary[] = [
     error: 'LLM 响应超时',
     roundId: '',
     time: iso(1784600000),
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   },
   {
     id: 6,
@@ -42,6 +46,10 @@ const REPORTS: ReviewReportSummary[] = [
     error: '',
     roundId: 'rvw-round-6',
     time: iso(1784510000),
+    llmCredentialName: 'kimi-main',
+    llmProvider: 'openai_responses',
+    llmModel: 'kimi-k2-thinking',
+    llmThinkingEffort: 'high',
   },
   ...Array.from({ length: 5 }, (_, i) => {
     const id = 5 - i
@@ -56,6 +64,10 @@ const REPORTS: ReviewReportSummary[] = [
       error: '',
       roundId: '',
       time: iso(1784420000 - i * 3600),
+      llmCredentialName: '',
+      llmProvider: '',
+      llmModel: '',
+      llmThinkingEffort: '',
     }
   }),
 ]
@@ -93,6 +105,10 @@ const ROUND_DETAIL: RoundDetail = {
     },
   ],
   strategyMd5: '',
+  llmCredentialName: '',
+  llmProvider: '',
+  llmModel: '',
+  llmThinkingEffort: '',
 }
 
 /** 进行中的复盘轮（/api/review/live 形状）：409 catchup 补漏联动用例用（started_at 贴近当前，避免触发僵尸轮防线）。 */
@@ -174,6 +190,14 @@ describe('ReviewPanel(复盘报告)', () => {
     expect(screen.getAllByText(/区间 .+ ~ .+/).length).toBe(5)
     expect(screen.getByText('第 1/2 页 · 共 7 条复盘')).toBeInTheDocument()
     expect(holder.getReviewReports).toHaveBeenCalledWith(0, 5)
+  })
+
+  it('模型徽标：带身份的报告行显示模型与思考强度，无身份的老报告不渲染徽标', async () => {
+    render(<ReviewPanel />)
+    await screen.findByText('复盘失败：LLM 响应超时')
+
+    // 仅 id6（身份齐全）带模型徽标；失败行与 roundId 空串的老报告均不渲染
+    expect(screen.getAllByText('kimi-k2-thinking · high')).toHaveLength(1)
   })
 
   it('点击展开：lazy 拉取全文，展示统计表格与 reportMd 完整内容', async () => {

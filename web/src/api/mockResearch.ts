@@ -105,6 +105,10 @@ const researchReports: ResearchReportDetail[] = [
     roundId: '',
     time: nowIso(6),
     causalLinks: [],
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   },
   {
     id: 1,
@@ -134,6 +138,10 @@ const researchReports: ResearchReportDetail[] = [
     roundId: 'rs-mock-1',
     time: nowIso(30),
     causalLinks,
+    llmCredentialName: 'ds-main',
+    llmProvider: 'openai_compat',
+    llmModel: 'deepseek-v4-flash',
+    llmThinkingEffort: '',
   },
 ]
 
@@ -158,6 +166,10 @@ function summaryOf(report: ResearchReportDetail): ResearchReportSummary {
     error: report.error,
     roundId: report.roundId,
     time: report.time,
+    llmCredentialName: report.llmCredentialName,
+    llmProvider: report.llmProvider,
+    llmModel: report.llmModel,
+    llmThinkingEffort: report.llmThinkingEffort,
   }
 }
 
@@ -178,6 +190,10 @@ function runMockResearch(reportType: string, hours: number): { id: number; round
     roundId,
     time,
     causalLinks: [],
+    llmCredentialName: 'ds-main',
+    llmProvider: 'openai_compat',
+    llmModel: 'deepseek-v4-flash',
+    llmThinkingEffort: '',
   })
   return { id, roundId }
 }

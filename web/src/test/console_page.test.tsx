@@ -70,6 +70,10 @@ const DETAIL: RoundDetail = {
   llm_raw: 'RAW-SMOKE',
   tool_calls: [],
   strategyMd5: 'md5',
+  llmCredentialName: '',
+  llmProvider: '',
+  llmModel: '',
+  llmThinkingEffort: '',
 }
 
 /** 可变数仓：WS 消息（测试中途改写触发联动）+ 联动查询的调用计数 */

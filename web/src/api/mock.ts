@@ -14,6 +14,7 @@ import type {
   CredentialStatus,
   EquityPoint,
   LiveSnapshot,
+  LLMIdentityInfo,
   Note,
   OpenOrder,
   PriceAlert,
@@ -221,6 +222,26 @@ const watchlist = { settle: 'usdt', contracts: ['BTC_USDT', 'ETH_USDT'] }
 
 const WAKE_SOURCES = ['定时唤醒', '价格触发', '启动']
 
+/** mock 模型身份：两种模型按序号交替（演示时间线对比徽标），每 7 轮一条全空（历史数据无记录，降级不渲染徽标） */
+function mockIdentity(seq: number): LLMIdentityInfo {
+  if (seq % 7 === 0) {
+    return { llmCredentialName: '', llmProvider: '', llmModel: '', llmThinkingEffort: '' }
+  }
+  return seq % 2 === 0
+    ? {
+        llmCredentialName: 'kimi-main',
+        llmProvider: 'openai_responses',
+        llmModel: 'kimi-k2-thinking',
+        llmThinkingEffort: 'high',
+      }
+    : {
+        llmCredentialName: 'ds-main',
+        llmProvider: 'openai_compat',
+        llmModel: 'deepseek-v4-flash',
+        llmThinkingEffort: '',
+      }
+}
+
 /** 生成 37 轮决策摘要（倒序：最新在前），用于演示分页。 */
 function buildRounds(): RoundSummary[] {
   return Array.from({ length: 37 }, (_, i) => {
@@ -237,6 +258,7 @@ function buildRounds(): RoundSummary[] {
           : '波动率不足，维持现有持仓，继续观察。',
       // 按序号轮转关联三个策略版本（演示版本标签 join）；每 5 轮一条空串（历史数据无关联，显示「—」）
       strategyMd5: seq % 5 === 0 ? '' : (VERSION_MD5S[seq % VERSION_MD5S.length] ?? ''),
+      ...mockIdentity(seq),
       pnl_after: pnl,
       // 每 6 轮一条归属笔记引文（跨页分布，演示任意页都能显示笔记）
       note:
@@ -391,6 +413,10 @@ export const mockApi: ApiClient = {
       wake_source: '复盘',
       summary: '复盘审计轮（演示数据）：无归属成交，按观望叙事构造通用工具链。',
       strategyMd5: '',
+      llmCredentialName: '',
+      llmProvider: '',
+      llmModel: '',
+      llmThinkingEffort: '',
     }
     return reply(buildRoundDetail(meta))
   },
@@ -721,6 +747,10 @@ function buildRoundDetail(meta: RoundSummary): RoundDetail {
     prompt_snapshot: promptSnapshot(meta),
     context_snapshot: meta.summary,
     strategyMd5: meta.strategyMd5,
+    llmCredentialName: meta.llmCredentialName,
+    llmProvider: meta.llmProvider,
+    llmModel: meta.llmModel,
+    llmThinkingEffort: meta.llmThinkingEffort,
     ...body,
   }
 }

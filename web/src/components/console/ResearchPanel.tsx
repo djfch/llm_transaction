@@ -16,6 +16,7 @@ import { useApiData } from '../../hooks/useApiData'
 import { usePageState } from '../../hooks/usePageState'
 import { fmtTime } from '../../utils/format'
 import StateHint from '../StateHint'
+import ModelBadge from './ModelBadge'
 import PaginationControls from './PaginationControls'
 import { ResearchAssetBadges, ResearchAssetDetails } from './ResearchAssetViews'
 import ResearchLiveStrip from './ResearchLiveStrip'
@@ -216,6 +217,12 @@ function ReportItem({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[11px] tabular-nums text-zinc-500">{fmtTime(report.time)}</span>
           <TypeBadge type={report.reportType} />
+          <ModelBadge
+            model={report.llmModel}
+            thinkingEffort={report.llmThinkingEffort}
+            credentialName={report.llmCredentialName}
+            provider={report.llmProvider}
+          />
           {!failed && <ResearchAssetBadges assets={report.assetViews} />}
           {!failed && (
             <span className={'ml-auto text-[10px] text-zinc-600 transition-transform ' + (expanded ? 'rotate-90' : '')}>

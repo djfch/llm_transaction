@@ -41,6 +41,10 @@ const reviewReports: ReviewReport[] = [
     error: 'LLM 响应超时，本次复盘失败',
     roundId: '', // 空串 = 无关联，演示「老报告」降级
     time: new Date(Date.now() - 11 * 3600_000).toISOString(),
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   },
   {
     id: 2,
@@ -55,6 +59,10 @@ const reviewReports: ReviewReport[] = [
     error: '',
     roundId: '9f3ab2c1d4e54f01', // 演示工具链内嵌：mock getRound 对未知 roundId 回退通用详情
     time: new Date(Date.now() - 35 * 3600_000).toISOString(),
+    llmCredentialName: 'kimi-main',
+    llmProvider: 'openai_responses',
+    llmModel: 'kimi-k2-thinking',
+    llmThinkingEffort: 'high',
   },
   {
     id: 1,
@@ -69,6 +77,10 @@ const reviewReports: ReviewReport[] = [
     error: '',
     roundId: '', // 空串 = 无关联，演示「老报告」降级
     time: new Date(Date.now() - 59 * 3600_000).toISOString(),
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   },
 ]
 
@@ -140,6 +152,10 @@ function runMockReview(): { id: number; periodStart: number; periodEnd: number; 
     error: '',
     roundId, // 非空 roundId：演示新报告内嵌工具链
     time: new Date(periodEnd * 1000).toISOString(),
+    llmCredentialName: 'kimi-main',
+    llmProvider: 'openai_responses',
+    llmModel: 'kimi-k2-thinking',
+    llmThinkingEffort: 'high',
   })
   return { id: newId, periodStart, periodEnd, roundId }
 }

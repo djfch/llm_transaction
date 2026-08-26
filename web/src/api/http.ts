@@ -22,6 +22,7 @@ import type {
   IndicatorSeriesResponse,
   KillSwitchResult,
   LiveSnapshot,
+  LLMIdentityInfo,
   NotesPageResult,
   PaperResetResult,
   OpenOrder,
@@ -272,6 +273,24 @@ function adaptNotes(raw: RawNotesPage): NotesPageResult {
   }
 }
 
+/** 后端模型身份四键（snake_case；契约恒带，可选仅防御历史后端/老数据） */
+interface RawLLMIdentity {
+  llm_credential_name?: string
+  llm_provider?: string
+  llm_model?: string
+  llm_thinking_effort?: string
+}
+
+/** 后端 snake 四键 → 前端 LLMIdentityInfo：缺失/空值统一降级为空串（历史轮无记录） */
+function adaptLLMIdentity(raw?: RawLLMIdentity | null): LLMIdentityInfo {
+  return {
+    llmCredentialName: raw?.llm_credential_name ?? '',
+    llmProvider: raw?.llm_provider ?? '',
+    llmModel: raw?.llm_model ?? '',
+    llmThinkingEffort: raw?.llm_thinking_effort ?? '',
+  }
+}
+
 /** 后端 /api/rounds 列表项：Decisions 行 + audit 摘要 + 归属笔记引文（note 可空） */
 interface RawRoundItem {
   round_id: string
@@ -279,6 +298,7 @@ interface RawRoundItem {
   context_summary: string
   created_at: number
   strategy_md5?: string // 契约恒为 string；可选仅防御历史后端
+  audit?: RawLLMIdentity | null // 契约恒带（无审计行时为 null）；可选仅防御历史后端
   note?: { content: string; created_at: number } | null // 契约恒带此键；可选仅防御历史后端
 }
 
@@ -299,6 +319,7 @@ function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
       wake_source: r.wake_source,
       summary: r.context_summary,
       strategyMd5: r.strategy_md5 ?? '',
+      ...adaptLLMIdentity(r.audit),
       pnl_after: undefined,
       note: r.note
         ? { content: r.note.content, time: new Date(r.note.created_at * 1000).toISOString() }
@@ -307,13 +328,13 @@ function adaptRounds(raw: RawRoundsPage): RoundsPageResult {
   }
 }
 
-/** 后端详情原始形状：历史快照可能没有 context_snapshot，统一降级为空串。 */
-type RawRoundDetail = Omit<RoundDetail, 'strategyMd5' | 'context_snapshot'> & {
+/** 后端详情原始形状：历史快照可能没有 context_snapshot，统一降级为空串；模型身份四键为 snake_case。 */
+type RawRoundDetail = Omit<RoundDetail, 'strategyMd5' | 'context_snapshot' | keyof LLMIdentityInfo> & {
   strategy_md5?: string
   context_snapshot?: string
-}
+} & RawLLMIdentity
 
-/** 后端 round 详情 → 前端 RoundDetail：strategy_md5 适配为 strategyMd5 */
+/** 后端 round 详情 → 前端 RoundDetail：strategy_md5 适配为 strategyMd5，模型身份四键转 camelCase */
 function adaptRoundDetail(raw: RawRoundDetail): RoundDetail {
   return {
     round_id: raw.round_id,
@@ -322,6 +343,7 @@ function adaptRoundDetail(raw: RawRoundDetail): RoundDetail {
     llm_raw: raw.llm_raw,
     tool_calls: raw.tool_calls,
     strategyMd5: raw.strategy_md5 ?? '',
+    ...adaptLLMIdentity(raw),
   }
 }
 
@@ -337,8 +359,8 @@ function adaptDailyStats(raw: RawDailyStats): DailyStats {
   }
 }
 
-/** 后端复盘报告原始项（列表/详情同 10 键，仅 report_md 长度不同） */
-interface RawReviewReport {
+/** 后端复盘报告原始项（列表/详情同 14 键，仅 report_md 长度不同；模型身份四键由审计轮 join） */
+interface RawReviewReport extends RawLLMIdentity {
   id: number
   period_start: number
   period_end: number
@@ -368,6 +390,7 @@ function adaptReviewReport(raw: RawReviewReport): ReviewReportSummary {
     error: raw.error ?? '',
     roundId: raw.round_id ?? '', // 老报告/异常缺省降级为空串（契约保证返回，?? 为防御）
     time: new Date(raw.created_at * 1000).toISOString(),
+    ...adaptLLMIdentity(raw),
   }
 }
 
@@ -412,8 +435,8 @@ interface RawResearchAssetDetail extends RawResearchAssetSummary {
   created_at: number
 }
 
-/** 后端当前研报响应：报告头不再包含全局方向和逐标的详情字段。 */
-interface RawResearchReport {
+/** 后端当前研报响应：报告头不再包含全局方向和逐标的详情字段；模型身份四键由审计轮 join。 */
+interface RawResearchReport extends RawLLMIdentity {
   id: number
   schema_version: number
   summary: string
@@ -452,6 +475,7 @@ function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
     error: raw.error,
     roundId: raw.round_id,
     time: new Date(raw.created_at * 1000).toISOString(),
+    ...adaptLLMIdentity(raw),
   }
 }
 /** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御）；broken_at 为断点节点下标 */
