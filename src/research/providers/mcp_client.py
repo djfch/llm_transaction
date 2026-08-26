@@ -248,8 +248,11 @@ class McpSession:
         返回：
             None，收到停止哨兵后结束（工作项结果经各自 Future 回传）
         """
+        queue = self._queue  # 抓局部引用：_shutdown 放弃路径（关闭期间被取消/超时）
+        # 会把实例属性置 None——runner 若抑制取消继续收尾，回读属性会拿到 None
+        # 死于 AttributeError，已投递的清理项也再无人 await
         while True:
-            work, fut = await self._queue.get()
+            work, fut = await queue.get()
             if work is None:
                 return
             try:
@@ -389,14 +392,16 @@ class McpSession:
             self._ctx = None
 
     async def _shutdown(self, exc_info: tuple) -> None:
-        """投递清理工作项与停止哨兵后等待 runner 退出；卡死超时强制取消，不长时间阻塞。
+        """投递清理工作项与停止哨兵后等待 runner 退出；超时强制取消 runner。
 
         参数：
             exc_info: tuple，调用方 async with 退出时的异常信息三元组
 
         返回：
             None，就地停止 runner 并将其与队列置为 None；正常路径下清理工作项
-                已在 runner 内执行完毕（哨兵排在清理之后），超时路径由后台尽力完成
+                已在 runner 内执行完毕（哨兵排在清理之后）；超时路径取消 runner
+                并等待其终止——若 runner 内工作项抑制取消，终止时点由底层操作
+                自身超时兜底（软上限，非严格 5 秒硬截止）
 
         异常：
             asyncio.CancelledError：调用方在关闭期间被外部取消时原样抛出

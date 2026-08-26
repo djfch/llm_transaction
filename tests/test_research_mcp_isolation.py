@@ -295,3 +295,62 @@ def test_default_timeout_is_60_seconds() -> None:
         None，通过断言验证上述行为，无返回值
     """
     assert McpSession(kind="http", url="http://localhost")._timeout == 60.0
+
+
+async def test_abandoned_runner_still_drains_close_work() -> None:
+    """关闭序列被打断（关闭期二次取消）后，被抛弃的 runner 仍消费清理项与哨兵正常退出。
+
+    回归（审查 M1）：runner 主循环原先每轮重读 self._queue——工作项抑制首次取消
+    继续存活（anyio 病理形态），_shutdown 放弃路径已把实例属性置 None，runner
+    下一轮即死于 AttributeError（未取回异常噪音），已投递的 _close_impl 再无人
+    await（never awaited 警告）。修复后 runner 把队列抓进局部变量，不再回读实例属性。
+
+    参数：无
+
+    返回：
+        None，断言实例属性已放弃、runner 仍干净退出且清理工作项实际执行
+    """
+
+    class _SuppressOnceSession(_FakeSession):
+        """抑制首次取消继续存活的底层会话（模拟 anyio 内部吸收取消继续收尾的病理形态）。"""
+
+        async def call_tool(self, name: str, args: dict) -> SimpleNamespace:
+            """首次取消被吸收后继续挂起，第二次取消打断。
+
+            参数：
+                name: str，工具名
+                args: dict，工具调用参数
+
+            返回：
+                SimpleNamespace，永不正常返回
+
+            异常：
+                asyncio.CancelledError：第二次取消时抛出（不再抑制）
+            """
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(60)  # 抑制首次取消（anyio 内部收尾），第二次取消打断
+
+    fake = _SuppressOnceSession(lambda name, args: None)
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, fake)
+    runner = session._runner
+
+    call = asyncio.create_task(session.call_tool("get_flash"))
+    await asyncio.sleep(0.02)  # 让挂起的工作项进入 runner
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    closing = asyncio.create_task(session.__aexit__(None, None, None))
+    await asyncio.sleep(0.02)  # 让 _shutdown 进入 wait_for 等待 runner
+    closing.cancel()  # 第一次：wait_for 取消 runner，工作项抑制取消继续存活
+    await asyncio.sleep(0.02)  # 让抑制生效，closing 卡在等待 runner 死亡
+    closing.cancel()  # 第二次：打断等待——_shutdown 走强取消 + 置 None + 重抛路径
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert session._runner is None  # 实例属性已放弃
+
+    await asyncio.wait_for(runner, timeout=2)  # runner 不被 None 毒死：喝完清理项与哨兵
+    assert fake.closed  # 清理工作项实际执行
