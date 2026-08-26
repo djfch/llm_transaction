@@ -339,7 +339,7 @@ flowchart LR
 | `trades(成交记录)` | 成交、手续费和已实现盈亏 | `source(成交来源)`、`pnl(已实现盈亏)`、`exchange_trade_id(交易所成交ID幂等键)` |
 | `notes(Agent 笔记)` | 跨决策轮传递的判断要点 | `content(笔记正文)` |
 | `wakeup(未接线的唤醒记录)` | 表和 Repo 写入方法存在，但当前调度器和工具不读写此表 | `scheduled_at(计划时间)`、`source(来源)` |
-| `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)` |
+| `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)`、`llm_credential_name/llm_provider/llm_model/llm_thinking_effort(本轮调用的模型身份，历史行为空串不回填)` |
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |
 | `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议固定为 v2 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)` |
