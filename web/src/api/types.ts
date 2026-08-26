@@ -492,7 +492,7 @@ export interface ReviewReportSummary extends LLMIdentityInfo {
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
 }
 
-/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 10 键，reportMd 为全文） */
+/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 14 键，reportMd 为全文） */
 export type ReviewReport = ReviewReportSummary
 
 /** 复盘报告分页：GET /api/review/reports（后端仅返回 items/total，无 offset/limit 回显） */

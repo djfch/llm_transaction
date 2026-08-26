@@ -77,15 +77,16 @@ def _report_json(contracts: tuple[str, ...]) -> str:
 class ResearchMockProvider:
     """实现 LLMProvider 协议的研报专用 Mock（不触网，输出确定性成功）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, identity: LLMIdentity | None = None) -> None:
         """初始化 Mock Provider，对话轮次计数器归零。
 
-        参数：无
+        参数：
+            identity: LLMIdentity | None，注入的模型身份；None 时取全空默认值（与历史轮同口径）
 
-        返回：None，仅初始化内部状态（轮次计数器置 0、模型身份为全空默认值）
+        返回：None，仅初始化内部状态（轮次计数器置 0、模型身份落为注入值或全空默认值）
         """
         self._calls = 0
-        self.identity = LLMIdentity()
+        self.identity = identity if identity is not None else LLMIdentity()
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """模拟一轮研报对话：首轮按白名单发出工具调用，拿到市场数据后返回 v2 研报 JSON。

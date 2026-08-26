@@ -24,6 +24,7 @@ from src.review.agent import ReviewAgent
 from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader
 from src.review.strategy import StrategyStore
+from src.utils import LLMIdentity
 
 _INIT = "初始策略书：" + "稳健交易，控制回撤。" * 10
 _PERIOD = (1000.0, 2000.0)
@@ -211,6 +212,36 @@ async def _seed_trades(repo: Repo) -> None:
         source="llm_close",
         created_at=1500.0,
     )
+
+
+async def test_run_records_provider_identity(env):
+    """复盘轮开轮即把 provider 的模型身份落入审计四列（跨模型效果对比的数据源）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言审计行四列与注入身份一致，无返回值
+    """
+    await _seed_trades(env.repo)
+    provider = StubProvider([LLMResponse(text="# 复盘结论\n整体表现平稳。", raw="raw-1")])
+    provider.identity = LLMIdentity(
+        credential_name="kimi-main",
+        provider="openai_responses",
+        model="kimi-k2-thinking",
+        thinking_effort="high",
+    )
+    result = await _make_agent(env, provider).run(*_PERIOD)
+
+    assert result["ok"] is True
+    row = await env.repo.get_audit_round(result["round_id"])
+    assert row is not None
+    assert (
+        row.llm_credential_name,
+        row.llm_provider,
+        row.llm_model,
+        row.llm_thinking_effort,
+    ) == ("kimi-main", "openai_responses", "kimi-k2-thinking", "high")
 
 
 async def test_run_success_without_revision(env):

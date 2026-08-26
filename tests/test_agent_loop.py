@@ -33,6 +33,7 @@ from src.market.triggers import MAX_ALERTS, TriggerManager
 from src.memory import Database, Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
+from src.utils import LLMIdentity
 
 
 class MockProvider:
@@ -267,6 +268,35 @@ async def env(tmp_path):
 
 
 # ---------- 完整一轮：工具调用全部落审计 ----------
+
+
+async def test_round_records_provider_identity(env: SimpleNamespace):
+    """决策轮开轮即把 provider 的模型身份落入审计四列（跨模型效果对比的数据源）。
+
+    参数：
+        env: SimpleNamespace，已组装的测试环境
+
+    返回：
+        None：断言审计行四列与注入身份一致，无返回值
+    """
+    provider = MockProvider([_resp("观望", [], '{"turn":1}')])
+    provider.identity = LLMIdentity(
+        credential_name="ds-main",
+        provider="openai_compat",
+        model="deepseek-v4-flash",
+        thinking_effort="high",
+    )
+    result = await _make_loop(env, provider).run_once("timer")
+
+    assert result.ok
+    row = await env.repo.get_audit_round(result.round_id)
+    assert row is not None
+    assert (
+        row.llm_credential_name,
+        row.llm_provider,
+        row.llm_model,
+        row.llm_thinking_effort,
+    ) == ("ds-main", "openai_compat", "deepseek-v4-flash", "high")
 
 
 async def test_full_round_audited(env: SimpleNamespace):

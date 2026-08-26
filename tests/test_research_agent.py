@@ -28,6 +28,7 @@ from src.research.providers.base import (
 from src.research.providers.blockbeats import BlockbeatsSource  # noqa: F401
 from src.research.providers.jin10 import BEIJING_TZ
 from src.research.prompts import ResearchPromptLoader
+from src.utils import LLMIdentity
 
 logger = get_logger(__name__)
 
@@ -421,6 +422,37 @@ async def test_full_round_success(repo: Repo, settings: Settings, tmp_path) -> N
         "fetch_indicators",
         "get_research_market_data",
     ]
+
+
+async def test_run_records_provider_identity(repo: Repo, settings: Settings, tmp_path) -> None:
+    """研报轮开轮即把 provider 的模型身份落入审计四列（跨模型效果对比的数据源）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，断言审计行四列与注入身份一致
+    """
+    provider = _SequentialProvider()
+    provider.identity = LLMIdentity(
+        credential_name="ds-main",
+        provider="openai_compat",
+        model="deepseek-v4-flash",
+        thinking_effort="high",
+    )
+    agent = await _build_agent(repo, settings, provider, tmp_path)
+    result = await agent.run(report_type="us")
+
+    assert result["ok"] is True
+    row = await repo.get_audit_round(result["round_id"])
+    assert row is not None
+    assert (
+        row.llm_credential_name,
+        row.llm_provider,
+        row.llm_model,
+        row.llm_thinking_effort,
+    ) == ("ds-main", "openai_compat", "deepseek-v4-flash", "high")
 
 
 async def test_bad_json_falls_to_error_report(repo: Repo, settings: Settings, tmp_path) -> None:
