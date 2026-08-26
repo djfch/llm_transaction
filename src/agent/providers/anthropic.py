@@ -16,6 +16,7 @@ import anthropic
 from src.agent.providers.base import LLMError, LLMResponse, ToolCall
 from src.agent.providers.thinking import anthropic_thinking
 from src.config import CredentialConfig, LLMConfig
+from src.utils import LLMIdentity
 
 
 class AnthropicProvider:
@@ -44,6 +45,13 @@ class AnthropicProvider:
         self._model = config.model
         self._max_tokens = config.max_tokens
         self._thinking_effort = config.thinking_effort
+        # 模型身份（开轮快照落库用）：凭证配置带凭证名，旧平铺配置无凭证名
+        self.identity = LLMIdentity(
+            credential_name=getattr(config, "name", ""),
+            provider=config.provider,
+            model=config.model,
+            thinking_effort=config.thinking_effort,
+        )
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """调用 Anthropic Messages API 发起一轮对话，返回统一格式的回复。

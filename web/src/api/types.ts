@@ -67,8 +67,16 @@ export interface PriceAlert {
   time: string // 设置时间（ISO 字符串，由适配层自 created_at(Unix秒) 转换）
 }
 
+/** 本轮调用 LLM 的身份（契约四键；四字段全空串 = 功能上线前的历史数据无记录） */
+export interface LLMIdentityInfo {
+  llmCredentialName: string // 凭证名（配置中 credential 的 name，空串 = 未记录）
+  llmProvider: string // Provider 类型（anthropic / openai_compat / openai_responses）
+  llmModel: string // 模型名（对比不同模型效果的主键）
+  llmThinkingEffort: string // 思考强度档位（空串 = 该模型无此配置或未记录）
+}
+
 /** 决策轮摘要：GET /api/rounds?offset=&limit= */
-export interface RoundSummary {
+export interface RoundSummary extends LLMIdentityInfo {
   round_id: string // 决策轮 ID
   started_at: string // 开始时间（ISO 字符串）
   wake_source: string // 唤醒来源（定时唤醒 / 价格触发 / 启动）
@@ -101,7 +109,7 @@ export interface ToolCall {
 }
 
 /** 决策轮审计详情：GET /api/rounds/{round_id} */
-export interface RoundDetail {
+export interface RoundDetail extends LLMIdentityInfo {
   round_id: string
   prompt_snapshot: string // 完整 prompt 快照
   context_snapshot: string // 首次发送给 LLM 的 user 上下文快照
@@ -471,7 +479,7 @@ export interface KillSwitchResult {
 }
 
 /** 复盘报告摘要：GET /api/review/reports（列表项 reportMd 截断 200 字符，省流量） */
-export interface ReviewReportSummary {
+export interface ReviewReportSummary extends LLMIdentityInfo {
   id: number // 报告 ID
   periodStart: string // 统计区间起（ISO 字符串，由 period_start(Unix秒) 适配）
   periodEnd: string // 统计区间止（ISO 字符串，由 period_end(Unix秒) 适配）
@@ -484,7 +492,7 @@ export interface ReviewReportSummary {
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
 }
 
-/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 10 键，reportMd 为全文） */
+/** 复盘报告详情：GET /api/review/reports/{id}（同摘要 14 键，reportMd 为全文） */
 export type ReviewReport = ReviewReportSummary
 
 /** 复盘报告分页：GET /api/review/reports（后端仅返回 items/total，无 offset/limit 回显） */
@@ -528,7 +536,7 @@ export interface ResearchAssetDetail extends ResearchAssetSummary {
 }
 
 /** 研报摘要：报告头只含当前协议字段，成功项必须有逐标的摘要。 */
-export interface ResearchReportSummary {
+export interface ResearchReportSummary extends LLMIdentityInfo {
   id: number
   reportType: string
   schemaVersion: number

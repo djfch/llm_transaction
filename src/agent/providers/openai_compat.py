@@ -15,6 +15,7 @@ import openai
 from src.agent.providers.base import LLMError, LLMParseError, LLMResponse, ToolCall
 from src.agent.providers.thinking import thinking_wire_kwargs
 from src.config import CredentialConfig, LLMConfig
+from src.utils import LLMIdentity
 
 
 class OpenAICompatProvider:
@@ -47,6 +48,13 @@ class OpenAICompatProvider:
         self._model = config.model
         self._max_tokens = config.max_tokens
         self._thinking_effort = config.thinking_effort
+        # 模型身份（开轮快照落库用）：凭证配置带凭证名，旧平铺配置无凭证名
+        self.identity = LLMIdentity(
+            credential_name=getattr(config, "name", ""),
+            provider=config.provider,
+            model=config.model,
+            thinking_effort=config.thinking_effort,
+        )
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """发起一轮对话：把中性工具定义转成 OpenAI 格式并调用 chat.completions。

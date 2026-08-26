@@ -4,7 +4,37 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from decimal import Decimal, DivisionByZero, InvalidOperation, Overflow, localcontext
+
+
+# ---------- LLM 调用身份：开轮快照落库（audit_rounds），供跨模型效果对比 ----------
+
+
+@dataclass(frozen=True)
+class LLMIdentity:
+    """一次 LLM 调用实际使用的模型身份（凭证名/厂商/模型/思考强度）。
+
+    全字段空串表示身份未知（历史轮次、测试桩或未注入身份的 provider）。
+    """
+
+    credential_name: str = ""
+    provider: str = ""
+    model: str = ""
+    thinking_effort: str = ""
+
+
+def identity_of(provider: object) -> LLMIdentity:
+    """读取 provider 携带的模型身份；无 identity 属性（测试桩等）时返回全空身份。
+
+    参数：
+        provider: object，LLM provider 实例（鸭子类型，携带 identity 属性则读取）
+
+    返回：
+        LLMIdentity，provider 携带的模型身份；缺失或类型不符时为全空默认身份
+    """
+    identity = getattr(provider, "identity", None)
+    return identity if isinstance(identity, LLMIdentity) else LLMIdentity()
 
 
 async def maybe_await(result: Awaitable[None] | None) -> None:

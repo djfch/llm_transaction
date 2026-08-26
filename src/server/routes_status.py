@@ -33,6 +33,30 @@ def _require_gateway(deps: ServerDeps) -> Gateway:
     return deps.gateway
 
 
+def _llm_identity_fields(audit: AuditRound | None) -> dict[str, str]:
+    """审计轮 → 模型身份四键（凭证名/厂商/模型/思考强度）；无审计记录时全空串。
+
+    参数：
+        audit: AuditRound | None，审计轮记录；None 表示无关联审计轮（历史报告等）
+
+    返回：
+        dict[str, str]，llm_credential_name/llm_provider/llm_model/llm_thinking_effort 四键
+    """
+    if audit is None:
+        return {
+            "llm_credential_name": "",
+            "llm_provider": "",
+            "llm_model": "",
+            "llm_thinking_effort": "",
+        }
+    return {
+        "llm_credential_name": audit.llm_credential_name,
+        "llm_provider": audit.llm_provider,
+        "llm_model": audit.llm_model,
+        "llm_thinking_effort": audit.llm_thinking_effort,
+    }
+
+
 def _audit_summary(audit: AuditRound | None) -> dict[str, Any] | None:
     """决策轮列表里的审计摘要（不含 prompt/上下文全文，避免列表过大）。
 
@@ -50,6 +74,7 @@ def _audit_summary(audit: AuditRound | None) -> dict[str, Any] | None:
         "started_at": audit.started_at,
         "ended_at": audit.ended_at,
         "error": audit.error,
+        **_llm_identity_fields(audit),
     }
 
 

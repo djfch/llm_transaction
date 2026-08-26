@@ -21,6 +21,7 @@ from dataclasses import replace
 
 from src.agent.providers.base import LLMProvider, LLMResponse, ToolCall
 from src.audit.logger import get_logger
+from src.utils import identity_of
 
 logger = get_logger(__name__)
 
@@ -67,6 +68,8 @@ class RetryingProvider:
         self._inner = inner
         self._max_attempts = max(1, max_attempts)
         self._backoff = backoff
+        # 模型身份透传：开轮快照记录的是被包裹的真实 provider 身份
+        self.identity = identity_of(inner)
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """调用底层 LLM 提供器，并在普通异常时按退避配置使用原参数重试。

@@ -47,7 +47,7 @@ from src.review.stats import compute_review_stats, format_stats_text
 from src.review.strategy import StrategyStore
 from src.review.tool_handlers import ReviewToolDeps
 from src.review.tools import ReviewToolRegistry
-from src.utils import maybe_await
+from src.utils import identity_of, maybe_await
 
 logger = get_logger(__name__)
 
@@ -243,7 +243,11 @@ class ReviewAgent:
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
             round_id = await self._audit.begin_round(
-                self._settings.mode, "review", full_prompt, round_id=preallocated
+                self._settings.mode,
+                "review",
+                full_prompt,
+                round_id=preallocated,
+                llm_identity=identity_of(self._provider),
             )
             await self._emit_event({"type": "review_round_start", "data": {"round_id": round_id}})
             stats_text, stats_json = await self._pre_stats(period_start, period_end)

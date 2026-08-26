@@ -10,14 +10,14 @@
 - GET  /api/notes → items[] 含 content/created_at/round_id；顶层 total/offset/limit
 - GET  /api/alerts → 元素含 id/contract/direction/price/active/created_at（LLM 价格唤醒，内存唯一存储，触发即移除，active 恒真）
 - GET  /api/daily_stats → realized_pnl/orders_today/max_orders_per_day（风控口径当日统计）
-- GET  /api/rounds → items[] 含 round_id/strategy_md5/note(归属笔记引文,无归属为 null) 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error；顶层 total/offset/limit
+- GET  /api/rounds → items[] 含 round_id/strategy_md5/note(归属笔记引文,无归属为 null) 且 audit 摘要含 round_id/prompt_md5/started_at/ended_at/error/llm_credential_name/llm_provider/llm_model/llm_thinking_effort；顶层 total/offset/limit
 - GET  /api/rounds/{id} → round 字段展平到顶层（round_id/strategy_md5/prompt_snapshot/llm_raw 等）
        + tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms（args/result 为已解析对象）
 - GET  /api/agent/live → in_round/round（可为 null）/tool_calls[] 含 seq/tool/args/risk_verdict/risk_reason/result/duration_ms
 - GET  /api/review/live → round(可为 null)/tool_calls[]（形状同 /api/agent/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
 - GET  /api/research/live → round(可为 null)/tool_calls[]（形状同 /api/review/live）；可选 ?round_id= 按 ID 取轮（查无/异类轮返回 round=null）
-- GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id；顶层 total
-- GET  /api/review/reports/{id} → 同列表项 10 键，report_md 为全文
+- GET  /api/review/reports → items[] 含 id/period_start/period_end/stats_json/report_md(截断200字符)/strategy_action/new_version_id/error/created_at/round_id/llm_credential_name/llm_provider/llm_model/llm_thinking_effort；顶层 total
+- GET  /api/review/reports/{id} → 同列表项 14 键，report_md 为全文
 - POST /api/review/run → started/period_start/period_end/round_id（409 复盘进行中；503 LLM 未配置或未接线；422 区间非法）
 - POST /api/research/run → started/report_type/hours/round_id（409 研报进行中；503 未接线或 LLM 未配置；422 hours 越界）
 - GET  /api/strategy/versions → items[] 含 id/md5/created_by/reason/report_id/created_at（不含 content，省流量）
@@ -644,7 +644,8 @@ async def test_post_secrets_contract_and_no_echo(client: AsyncClient, deps: Serv
 
 _REPORT_SPEC = (
     "id:i period_start:n period_end:n stats_json:s report_md:s "
-    "strategy_action:s new_version_id:i error:s created_at:n round_id:s"
+    "strategy_action:s new_version_id:i error:s created_at:n round_id:s "
+    "llm_credential_name:s llm_provider:s llm_model:s llm_thinking_effort:s"
 )
 
 
@@ -711,6 +712,10 @@ async def test_review_strategy_contract(client: AsyncClient):
         "started_at",
         "ended_at",
         "error",
+        "llm_credential_name",
+        "llm_provider",
+        "llm_model",
+        "llm_thinking_effort",
     }
     assert live["round"]["round_id"] == "rv1"
     assert live["tool_calls"], "/api/review/live tool_calls 应非空"

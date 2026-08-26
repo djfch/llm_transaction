@@ -87,6 +87,10 @@ class AuditRound(BaseModel):
     started_at: float
     ended_at: float | None
     error: str
+    llm_credential_name: str = ""  # 本轮实际使用的 LLM 凭证名（空=未知/历史轮次）
+    llm_provider: str = ""  # 本轮 LLM 厂商（anthropic/openai_compat/openai_responses）
+    llm_model: str = ""  # 本轮实际调用的模型名
+    llm_thinking_effort: str = ""  # 本轮思考强度档位（空=跟随模型默认/未知）
 
 
 class AuditToolCall(BaseModel):

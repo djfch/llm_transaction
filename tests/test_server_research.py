@@ -146,6 +146,10 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "error",
             "round_id",
             "created_at",
+            "llm_credential_name",
+            "llm_provider",
+            "llm_model",
+            "llm_thinking_effort",
             "asset_views",
         }
         assert item["round_id"] == "rs-round-1"
@@ -303,6 +307,10 @@ async def test_research_live_returns_in_progress_round(repo: Repo, tmp_path: Pat
             "started_at",
             "ended_at",
             "error",
+            "llm_credential_name",
+            "llm_provider",
+            "llm_model",
+            "llm_thinking_effort",
         }
         assert body["round"]["round_id"] == "rs1"
         assert body["round"]["wake_source"] == "research"

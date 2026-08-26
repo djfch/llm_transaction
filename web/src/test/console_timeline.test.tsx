@@ -24,6 +24,11 @@ const ROUNDS: RoundSummary[] = Array.from({ length: 37 }, (_, index) => ({
   wake_source: ['定时唤醒', '价格触发', '手动唤醒'][index % 3],
   summary: `第 ${100 - index} 轮结论摘要`,
   strategyMd5: index % 5 === 4 ? '' : index % 5 === 3 ? 'md5-unknown' : ['md5-aaa', 'md5-bbb'][index % 2],
+  // 模型身份：每 4 轮一条全空（功能上线前的历史轮无记录，徽标降级不渲染）
+  llmCredentialName: index % 4 === 0 ? '' : 'kimi-main',
+  llmProvider: index % 4 === 0 ? '' : 'openai_responses',
+  llmModel: index % 4 === 0 ? '' : 'kimi-k2-thinking',
+  llmThinkingEffort: index % 4 === 0 ? '' : 'high',
 }))
 
 /** 策略版本表夹具（最新在前）：md5-aaa→v2 复盘、md5-bbb→v3 人工 */
@@ -76,6 +81,10 @@ function detail(roundId: string): RoundDetail {
       { seq: 1, tool: 'get_account', args: {}, risk_verdict: '', risk_reason: '', result: 'ok', duration_ms: 5 },
     ],
     strategyMd5: 'md5-aaa',
+    llmCredentialName: 'kimi-main',
+    llmProvider: 'openai_responses',
+    llmModel: 'kimi-k2-thinking',
+    llmThinkingEffort: 'high',
   }
 }
 
@@ -260,13 +269,25 @@ describe('RoundTimeline(决策时间线)', () => {
     expect(screen.getAllByText('—').length).toBe(2)
   })
 
+  it('模型徽标：有身份的轮显示模型与思考强度，历史轮（空身份）不渲染徽标', async () => {
+    renderTimeline()
+    await screen.findByText('第 100 轮结论摘要')
+
+    // 第一页 5 轮中第 99/98/97 轮带模型徽标（第 100/96 轮为每 4 轮一条的空身份历史轮）
+    expect(screen.getAllByText('kimi-k2-thinking · high')).toHaveLength(3)
+    const legacyCard = document.querySelector('[data-round-id="id-100"]')
+    expect(legacyCard?.textContent ?? '').not.toContain('kimi-k2-thinking')
+  })
+
   it('展开的轮详情同样展示策略版本标签', async () => {
     renderTimeline()
     await screen.findByText('第 100 轮结论摘要')
 
     fireEvent.click(screen.getByText('#100'))
     await waitFor(() => expect(holder.getRound).toHaveBeenCalledWith('id-100'))
-    expect(await screen.findByText('策略版本：v2 · 复盘')).toBeInTheDocument()
+    expect(await screen.findByText('策略版本：v2 · 复盘', { exact: false })).toBeInTheDocument()
+    // 详情头部同行展示模型身份（模型 · 思考强度（凭证名））
+    expect(screen.getByText(/模型：kimi-k2-thinking · high（凭证 kimi-main）/)).toBeInTheDocument()
   })
 
   it('WS round 事件一并刷新策略版本表', async () => {

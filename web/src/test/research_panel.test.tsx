@@ -43,6 +43,10 @@ function report(id: number, summary: string): ResearchReportSummary {
     error: '',
     roundId: '',
     time: iso(1784420000 - id * 3600),
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   }
 }
 
@@ -58,6 +62,10 @@ const REPORTS: ResearchReportSummary[] = [
     error: 'LLM 响应超时',
     roundId: '',
     time: iso(1784600000),
+    llmCredentialName: '',
+    llmProvider: '',
+    llmModel: '',
+    llmThinkingEffort: '',
   },
   {
     id: 6,
@@ -70,6 +78,10 @@ const REPORTS: ResearchReportSummary[] = [
     error: '',
     roundId: 'rs-round-6',
     time: iso(1784510000),
+    llmCredentialName: 'ds-main',
+    llmProvider: 'openai_compat',
+    llmModel: 'deepseek-v4-flash',
+    llmThinkingEffort: '',
   },
   ...Array.from({ length: 5 }, (_, index) => report(5 - index, '第 ' + (5 - index) + ' 份研报')),
 ]
@@ -100,6 +112,10 @@ const ROUND_DETAIL: RoundDetail = {
     duration_ms: 8,
   }],
   strategyMd5: '',
+  llmCredentialName: '',
+  llmProvider: '',
+  llmModel: '',
+  llmThinkingEffort: '',
 }
 
 /** 进行中的研报轮（/api/research/live 形状）：409 catchup 补漏联动用例用（started_at 贴近当前，避免触发僵尸轮防线）。 */
@@ -192,6 +208,14 @@ describe('ResearchPanel(研报面板)', () => {
     expect(screen.getByText('亚盘 BTC 获得宏观与技术共振。')).toBeInTheDocument()
     expect(screen.queryByText('旧版')).not.toBeInTheDocument()
     expect(screen.getByText('第 1/2 页 · 共 7 条研报')).toBeInTheDocument()
+  })
+
+  it('模型徽标：带身份的研报行显示模型名，无身份的老研报不渲染徽标', async () => {
+    render(<ResearchPanel />)
+    await screen.findByText('研报失败：LLM 响应超时')
+
+    // 仅 id6（身份齐全，无思考强度档位）带模型徽标；失败行与老研报均不渲染
+    expect(screen.getAllByText('deepseek-v4-flash')).toHaveLength(1)
   })
 
   it('成功卡片展开逐标的详情、因果链和工具调用链', async () => {

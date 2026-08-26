@@ -12,6 +12,7 @@ import type { RoundDetail, RoundSummary, StrategyVersion } from '../../api/types
 import { fmtClock, fmtTime, shortRoundId, strategyCreatorText } from '../../utils/format'
 import ClampText from './ClampText'
 import ConversationThread from './ConversationThread'
+import ModelBadge from './ModelBadge'
 import ToolSteps from './ToolSteps'
 
 /** 归属本轮的 Agent 笔记（引文块数据；随 /rounds 当前页下发的 round.note 直传） */
@@ -142,6 +143,13 @@ export default function TimelineCard({
           <span className="font-mono text-sm font-bold text-zinc-200">#{shortRoundId(round.round_id)}</span>
           <span className={wakeBadgeClass(round.wake_source)}>{round.wake_source}</span>
           <StrategyVersionBadge version={resolveStrategyVersion(round.strategyMd5)} />
+          {/* 模型徽标：模型名为空（历史轮无记录）时 ModelBadge 自行不渲染 */}
+          <ModelBadge
+            model={round.llmModel}
+            thinkingEffort={round.llmThinkingEffort}
+            credentialName={round.llmCredentialName}
+            provider={round.llmProvider}
+          />
           {/* 历史轮都是已完成，使用灰字小徽标 */}
           <span className="text-[11px] text-zinc-600">已完成</span>
           <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
@@ -180,6 +188,13 @@ export default function TimelineCard({
             <>
               <p className="mb-2 font-mono text-[11px] text-zinc-500">
                 策略版本：{strategyVersionText(resolveStrategyVersion(detail.strategyMd5))}
+                {detail.llmModel !== '' && (
+                  <>
+                    {'　'}模型：{detail.llmModel}
+                    {detail.llmThinkingEffort !== '' ? ` · ${detail.llmThinkingEffort}` : ''}
+                    {detail.llmCredentialName !== '' ? `（凭证 ${detail.llmCredentialName}）` : ''}
+                  </>
+                )}
               </p>
               <FoldSection
                 title={`工具调用详情 · tool_calls（${detail.tool_calls.length} 步）`}

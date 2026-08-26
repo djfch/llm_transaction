@@ -18,6 +18,7 @@ from src.memory.plans_repo import PlansRepo
 from src.memory.research_repo import ResearchRepo
 from src.memory.review_repo import ReviewRepo, query_page_rows, row_without_total
 from src.risk.models import DailyStats
+from src.utils import LLMIdentity
 
 
 def _now() -> float:
@@ -638,6 +639,7 @@ class Repo:
         context_snapshot: str = "",
         strategy_md5: str = "",
         started_at: float | None = None,
+        llm_identity: LLMIdentity | None = None,
     ) -> None:
         """一轮开始时写入审计主表（llm_raw/ended_at/error 由 finish_audit_round 补全）。
 
@@ -650,13 +652,18 @@ class Repo:
             context_snapshot: str，本轮上下文快照全文
             strategy_md5: str，策略正文摘要
             started_at: float | None，可选轮次开始时间戳
+            llm_identity: LLMIdentity | None，本轮实际使用的模型身份（凭证名/厂商/
+                模型/思考强度，开轮快照供跨模型对比）；None 时按全空身份落库
 
         返回：
             None，一轮开始时写入审计主表（llm_raw/ended_at/error 由 finish_audit_round 补全）
         """
+        identity = llm_identity or LLMIdentity()
         await self._conn.execute(
             "INSERT INTO audit_rounds(round_id,mode,wake_source,prompt_md5,strategy_md5,"
-            "prompt_snapshot,context_snapshot,started_at) VALUES(?,?,?,?,?,?,?,?)",
+            "prompt_snapshot,context_snapshot,started_at,"
+            "llm_credential_name,llm_provider,llm_model,llm_thinking_effort)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 round_id,
                 mode,
@@ -666,6 +673,10 @@ class Repo:
                 prompt_snapshot,
                 context_snapshot,
                 started_at if started_at is not None else _now(),
+                identity.credential_name,
+                identity.provider,
+                identity.model,
+                identity.thinking_effort,
             ),
         )
         await self._conn.commit()

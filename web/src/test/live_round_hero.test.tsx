@@ -138,6 +138,10 @@ beforeEach(() => {
       llm_raw: 'RAW-CONCLUSION',
       tool_calls: [],
       strategyMd5: '',
+      llmCredentialName: '',
+      llmProvider: '',
+      llmModel: '',
+      llmThinkingEffort: '',
     }),
   )
 })
@@ -272,6 +276,10 @@ describe('LiveRoundHero(实时决策轮多 agent)', () => {
       llm_raw: rejectedRaw,
       tool_calls: [],
       strategyMd5: '',
+      llmCredentialName: '',
+      llmProvider: '',
+      llmModel: '',
+      llmThinkingEffort: '',
     })
 
     await renderHero()
