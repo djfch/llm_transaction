@@ -127,6 +127,10 @@ async def test_live_in_progress_round(repo: Repo, tmp_path: Path):
         "started_at": 2000.0,
         "ended_at": None,
         "error": "",
+        "llm_credential_name": "",
+        "llm_provider": "",
+        "llm_model": "",
+        "llm_thinking_effort": "",
     }
     assert body["tool_calls"] == [
         {
@@ -190,6 +194,10 @@ async def test_live_finished_latest_round(repo: Repo, tmp_path: Path):
         "started_at": 1000.0,
         "ended_at": 1010.0,
         "error": "",
+        "llm_credential_name": "",
+        "llm_provider": "",
+        "llm_model": "",
+        "llm_thinking_effort": "",
     }
     assert body["tool_calls"] == []
 

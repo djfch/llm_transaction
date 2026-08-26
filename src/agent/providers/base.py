@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from src.utils import LLMIdentity
+
 
 class LLMError(Exception):
     """LLM 调用失败；raw 保存服务端已返回但后续处理失败的原始响应。"""
@@ -52,7 +54,13 @@ class LLMResponse:
 
 
 class LLMProvider(Protocol):
-    """LLM 供应商统一接口。"""
+    """LLM 供应商统一接口。
+
+    identity 为模型身份快照（凭证名/厂商/模型/思考强度），开轮时落审计主表，
+    供跨模型效果对比；读取统一走 src.utils.identity_of（缺失时降级全空）。
+    """
+
+    identity: LLMIdentity
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """发起一轮对话。tools 为中性格式 {name, description, parameters(JSON Schema)}。

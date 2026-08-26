@@ -74,7 +74,11 @@ CREATE TABLE IF NOT EXISTS audit_rounds (
     llm_raw TEXT NOT NULL DEFAULT '',
     started_at REAL NOT NULL,
     ended_at REAL,
-    error TEXT NOT NULL DEFAULT ''
+    error TEXT NOT NULL DEFAULT '',
+    llm_credential_name TEXT NOT NULL DEFAULT '',
+    llm_provider TEXT NOT NULL DEFAULT '',
+    llm_model TEXT NOT NULL DEFAULT '',
+    llm_thinking_effort TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS audit_tool_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -368,6 +372,8 @@ class Database:
         - trades.exchange_order_id：历史成交无交易所订单 id，保持 NULL（乱序补正
           只能跳过这些旧行，属可接受残留），不回填。
         - review_reports.round_id：老报告无审计轮可循，保持默认 ''（无关联），不回填。
+        - audit_rounds.llm_credential_name/llm_provider/llm_model/llm_thinking_effort：
+          历史轮次无法可靠推断当时所用模型，保持默认 ''（身份未知），不回填。
         - causal_links.topic/supersedes_id/await_verification：旧链无主题（''）、无替代关系
           （NULL）、按待验证处理（1），不回填；supersedes 索引只在迁移末尾建（旧库须先补列，
           SCHEMA 阶段建会因缺列报错，同 trades.exchange_trade_id）。
@@ -412,6 +418,8 @@ class Database:
         # 版本状态列（issue #62/#73）：复盘改写先落 draft 草稿、报告成功才置 applied
         # 生效；失败/取消置 discarded。历史行默认 applied 与既有语义一致。
         await self._ensure_version_status_columns()
+        # 模型身份四列（跨模型效果对比）：历史轮次无法可靠推断当时所用模型，保持默认 ''，不回填
+        await self._ensure_audit_llm_identity_columns()
         # 权益曲线按模式+时间的窗口扫描索引（issue #79）
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_mode_created ON trades(mode, created_at)"
@@ -463,4 +471,20 @@ class Database:
             if "status" not in {row["name"] for row in await cur.fetchall()}:
                 await self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'applied'"
+                )
+
+    async def _ensure_audit_llm_identity_columns(self) -> None:
+        """为审计主表补模型身份四列（幂等）：开轮快照落库，供跨模型效果对比。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐，历史行默认 ''（身份未知），不回填
+        """
+        cur = await self._conn.execute("PRAGMA table_info(audit_rounds)")
+        audit_cols = {row["name"] for row in await cur.fetchall()}
+        for col in ("llm_credential_name", "llm_provider", "llm_model", "llm_thinking_effort"):
+            if col not in audit_cols:
+                await self._conn.execute(  # 列名为代码常量
+                    f"ALTER TABLE audit_rounds ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )

@@ -161,6 +161,10 @@ async def test_review_live_returns_latest_review_round(repo: Repo, tmp_path: Pat
             "started_at",
             "ended_at",
             "error",
+            "llm_credential_name",
+            "llm_provider",
+            "llm_model",
+            "llm_thinking_effort",
         }
         assert body["round"]["round_id"] == "rv1"
         assert body["round"]["wake_source"] == "review"

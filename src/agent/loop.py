@@ -39,7 +39,7 @@ from src.market.triggers import TriggerManager
 from src.memory.repo import Repo
 from src.risk.engine import RiskEngine
 from src.risk.models import DailyStats
-from src.utils import maybe_await
+from src.utils import identity_of, maybe_await
 
 logger = get_logger(__name__)
 
@@ -248,7 +248,11 @@ class DecisionLoop:
         strategy_md5 = self._prompts.body_md5()  # 策略书原文 md5，落库供复盘按版本关联
         # 先落审计行（空上下文快照）：后续任何失败都在 audit_rounds 留痕迹
         round_id = await self._audit.begin_round(
-            self._settings.mode, wake_source, prompt, strategy_md5=strategy_md5
+            self._settings.mode,
+            wake_source,
+            prompt,
+            strategy_md5=strategy_md5,
+            llm_identity=identity_of(self._provider),
         )
         await self._emit_round_start(round_id, wake_source)
         self._deps.round_id = round_id

@@ -644,7 +644,8 @@ async def test_post_secrets_contract_and_no_echo(client: AsyncClient, deps: Serv
 
 _REPORT_SPEC = (
     "id:i period_start:n period_end:n stats_json:s report_md:s "
-    "strategy_action:s new_version_id:i error:s created_at:n round_id:s"
+    "strategy_action:s new_version_id:i error:s created_at:n round_id:s "
+    "llm_credential_name:s llm_provider:s llm_model:s llm_thinking_effort:s"
 )
 
 
@@ -711,6 +712,10 @@ async def test_review_strategy_contract(client: AsyncClient):
         "started_at",
         "ended_at",
         "error",
+        "llm_credential_name",
+        "llm_provider",
+        "llm_model",
+        "llm_thinking_effort",
     }
     assert live["round"]["round_id"] == "rv1"
     assert live["tool_calls"], "/api/review/live tool_calls 应非空"

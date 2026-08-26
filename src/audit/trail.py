@@ -1,7 +1,8 @@
 """审计追踪：一轮决策的完整溯源（SQLite + JSON 快照双写）。
 
 每轮决策生成 round_id，记录 prompt 快照（含 md5）、上下文快照、LLM 原始输出、
-工具调用链（工具名/入参/风控判定/执行结果/耗时）与异常信息。
+工具调用链（工具名/入参/风控判定/执行结果/耗时）、模型身份快照（凭证名/厂商/
+模型/思考强度，开轮时固化，供跨模型效果对比）与异常信息。
 SQLite 供列表与详情查询，logs/audit/round_<id>.json 全文快照供回放与前端钻取。
 """
 
@@ -16,6 +17,7 @@ from typing import Any
 from src.audit.logger import get_logger
 from src.config import AuditConfig
 from src.memory.repo import Repo
+from src.utils import LLMIdentity
 
 logger = get_logger(__name__)
 
@@ -58,6 +60,7 @@ class AuditTrail:
         context: str = "",
         strategy_md5: str = "",
         round_id: str | None = None,
+        llm_identity: LLMIdentity | None = None,
     ) -> str:
         """开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id。
 
@@ -67,6 +70,8 @@ class AuditTrail:
         供复盘按策略版本关联本轮。
         round_id 支持调用方预分配（手动点火路径：响应与 WS 轮始事件需同一身份），
         为空时由本方法生成。
+        llm_identity 为本轮实际使用的模型身份快照（开轮落库后不再随凭证热切换变化），
+        供跨模型效果对比；None 时按全空身份落库（表示未知）。
 
         参数：
             mode: str，交易运行模式
@@ -75,6 +80,7 @@ class AuditTrail:
             context: str，本轮决策上下文全文
             strategy_md5: str，策略书内容摘要；为空时不按版本过滤
             round_id: str | None，调用方预分配的轮次编号；None 或空串时自动生成
+            llm_identity: LLMIdentity | None，本轮模型身份（凭证名/厂商/模型/思考强度）
 
         返回：
             str：开启一轮：生成 round_id，存 prompt md5 与全文快照，返回 round_id
@@ -89,6 +95,7 @@ class AuditTrail:
             prompt_snapshot=system_prompt,
             context_snapshot=context,
             strategy_md5=strategy_md5,
+            llm_identity=llm_identity,
         )
         logger.info("审计轮次开始 round_id=%s mode=%s wake=%s", round_id, mode, wake_source)
         return round_id

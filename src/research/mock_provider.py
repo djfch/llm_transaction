@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from src.agent.providers.base import LLMResponse, ToolCall
+from src.utils import LLMIdentity
 
 
 def _watchlist_contracts(messages: list[dict]) -> tuple[str, ...]:
@@ -81,9 +82,10 @@ class ResearchMockProvider:
 
         参数：无
 
-        返回：None，仅初始化内部状态（轮次计数器置 0）
+        返回：None，仅初始化内部状态（轮次计数器置 0、模型身份为全空默认值）
         """
         self._calls = 0
+        self.identity = LLMIdentity()
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """模拟一轮研报对话：首轮按白名单发出工具调用，拿到市场数据后返回 v2 研报 JSON。

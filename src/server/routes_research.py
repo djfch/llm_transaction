@@ -13,9 +13,10 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from src.config import load_settings
-from src.memory.models import CausalLink, ResearchAssetView, ResearchReport
+from src.memory.models import AuditRound, CausalLink, ResearchAssetView, ResearchReport
 from src.server.deps import ServerDeps
 from src.server.routes_status import (  # tool_calls/JSON 字段与 /agent/live 同一序列化口径
+    _llm_identity_fields,
     _parse_json_field,
     _tool_call_item,
 )
@@ -78,12 +79,15 @@ def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
     return item
 
 
-def _report_item(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
-    """报告头只暴露当前协议字段；逐标的列表使用摘要形状。
+def _report_item(
+    report: ResearchReport, views: list[ResearchAssetView], audit: AuditRound | None = None
+) -> dict[str, Any]:
+    """报告头只暴露当前协议字段（含模型身份四键）；逐标的列表使用摘要形状。
 
     参数：
         report: ResearchReport，研报或复盘报告记录
         views: list[ResearchAssetView]，报告对应的逐标的研判列表
+        audit: AuditRound | None，报告关联的审计轮（取模型身份）；None 时身份四键全空串
 
     返回：
         dict[str, Any]，包含报告头与逐标的摘要的响应字典
@@ -98,21 +102,25 @@ def _report_item(report: ResearchReport, views: list[ResearchAssetView]) -> dict
         "error": report.error,
         "round_id": report.round_id,
         "created_at": report.created_at,
+        **_llm_identity_fields(audit),
         "asset_views": [_asset_summary(view) for view in views],
     }
 
 
-def _report_detail(report: ResearchReport, views: list[ResearchAssetView]) -> dict[str, Any]:
+def _report_detail(
+    report: ResearchReport, views: list[ResearchAssetView], audit: AuditRound | None = None
+) -> dict[str, Any]:
     """组装研报详情响应体：报告头字段不变，逐标的由摘要换成完整详情。
 
     参数：
         report: ResearchReport，研报报告头（summary/cross_market_view 等）
         views: list[ResearchAssetView]，该研报的逐标的结论视图列表
+        audit: AuditRound | None，报告关联的审计轮（取模型身份）；None 时身份四键全空串
 
     返回：
         dict[str, Any]：研报详情；结构同 _report_item，但 asset_views 为完整详情形状
     """
-    item = _report_item(report, views)
+    item = _report_item(report, views, audit)
     item["asset_views"] = [_asset_detail(view) for view in views]
     return item
 
@@ -184,10 +192,12 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]，研报分页列表（最新在前，含失败记录与逐标的摘要）
         """
         reports, total = await deps.repo.research.list_reports_page(limit=limit, offset=offset)
+        # 批量取关联审计轮（免 N+1）：模型身份四键随报告返回，供跨模型对比
+        audits = await deps.repo.list_audit_rounds([r.round_id for r in reports if r.round_id])
         items = []
         for report in reports:
             views = await deps.repo.research.list_asset_views_by_report(report.id)
-            items.append(_report_item(report, views))
+            items.append(_report_item(report, views, audits.get(report.round_id)))
         return {"items": items, "total": total}
 
     @router.get("/research/reports/{report_id}")
@@ -207,7 +217,8 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
         if report is None:
             raise HTTPException(status_code=404, detail=f"研报不存在: {report_id}")
         views = await deps.repo.research.list_asset_views_by_report(report_id)
-        item = _report_detail(report, views)
+        audit = await deps.repo.get_audit_round(report.round_id) if report.round_id else None
+        item = _report_detail(report, views, audit)
         links = await deps.repo.research.list_causal_links_by_report(report_id)
         item["causal_links"] = [_causal_link_item(link) for link in links]
         return item

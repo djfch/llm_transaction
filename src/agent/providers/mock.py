@@ -7,19 +7,23 @@
 from __future__ import annotations
 
 from src.agent.providers.base import LLMResponse, ToolCall
+from src.utils import LLMIdentity
 
 
 class MockProvider:
     """实现 LLMProvider 协议的假 Provider（不触网）。"""
 
-    def __init__(self) -> None:
-        """初始化假 Provider，把对话轮次计数器清零。
+    def __init__(self, identity: LLMIdentity | None = None) -> None:
+        """初始化假 Provider，把对话轮次计数器清零并记录模型身份。
 
-        参数：无
+        参数：
+            identity: LLMIdentity | None，开轮快照落库用的模型身份；省略时为全空
+                默认身份（落库字段为空串，表示未知）
 
-        返回：None，就地初始化实例的轮次计数器
+        返回：None，就地初始化实例的轮次计数器与模型身份
         """
         self._calls = 0
+        self.identity = identity or LLMIdentity()
 
     async def chat(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         """按预设剧本返回确定性的假 LLM 回复（不触网）。

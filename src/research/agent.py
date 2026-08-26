@@ -47,7 +47,7 @@ from src.research.prompts import ResearchPromptLoader, render_tool_docs
 from src.research.tool_handlers import ResearchToolDeps
 from src.research.timeout_audit import record_failed_raw, wait_with_raw
 from src.research.tools import ResearchToolRegistry
-from src.utils import maybe_await
+from src.utils import identity_of, maybe_await
 
 logger = get_logger(__name__)
 
@@ -200,7 +200,11 @@ class ResearchAgent:
             registry = ResearchToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
             round_id = await self._audit.begin_round(
-                self._settings.mode, "research", full_prompt, round_id=preallocated
+                self._settings.mode,
+                "research",
+                full_prompt,
+                round_id=preallocated,
+                llm_identity=identity_of(self._provider),
             )
             await self._emit_event({"type": "research_round_start", "data": {"round_id": round_id}})
             briefing = await build_preinjection(deps, hours)

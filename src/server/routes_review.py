@@ -15,10 +15,13 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from src.config import load_settings
-from src.memory.models import ReviewReport, StrategyVersion
+from src.memory.models import AuditRound, ReviewReport, StrategyVersion
 from src.review.strategy import StrategyValidationError
 from src.server.deps import ServerDeps
-from src.server.routes_status import _tool_call_item  # tool_calls 与 /agent/live 同一序列化口径
+from src.server.routes_status import (  # tool_calls 与 /agent/live 同一序列化口径
+    _llm_identity_fields,
+    _tool_call_item,
+)
 
 _LIST_REPORT_MD_LIMIT = 200  # 列表项 report_md 截断长度（省流量，详情端点给全文）
 
@@ -30,17 +33,21 @@ class _ReviewRunBody(BaseModel):
     end_ts: float
 
 
-def _report_item(report: ReviewReport, *, truncate: bool) -> dict[str, Any]:
-    """报告响应项：10 个契约键固定；truncate 时 report_md 截断（列表省流量，键名不变）。
+def _report_item(
+    report: ReviewReport, *, truncate: bool, audit: AuditRound | None = None
+) -> dict[str, Any]:
+    """报告响应项：契约键固定（含模型身份四键）；truncate 时 report_md 截断（列表省流量，键名不变）。
 
     参数：
         report: ReviewReport，研报或复盘报告记录
         truncate: bool，是否截断报告正文
+        audit: AuditRound | None，报告关联的审计轮（取模型身份）；None 时身份四键全空串
 
     返回：
         dict[str, Any]，契约键固定的复盘报告响应字典
     """
     item = report.model_dump()
+    item.update(_llm_identity_fields(audit))
     if truncate:
         item["report_md"] = item["report_md"][:_LIST_REPORT_MD_LIMIT]
     return item
@@ -102,7 +109,14 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]，复盘报告分页列表（最新在前）；report_md 截断 200 字符省流量
         """
         reports, total = await deps.repo.review.list_review_reports_page(limit=limit, offset=offset)
-        return {"items": [_report_item(r, truncate=True) for r in reports], "total": total}
+        # 批量取关联审计轮（免 N+1）：模型身份四键随报告返回，供跨模型对比
+        audits = await deps.repo.list_audit_rounds([r.round_id for r in reports if r.round_id])
+        return {
+            "items": [
+                _report_item(r, truncate=True, audit=audits.get(r.round_id)) for r in reports
+            ],
+            "total": total,
+        }
 
     @router.get("/review/reports/{report_id}")
     async def get_review_report(report_id: int) -> dict[str, Any]:
@@ -120,7 +134,8 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
         report = await deps.repo.review.get_review_report(report_id)
         if report is None:
             raise HTTPException(status_code=404, detail=f"复盘报告不存在: {report_id}")
-        return _report_item(report, truncate=False)
+        audit = await deps.repo.get_audit_round(report.round_id) if report.round_id else None
+        return _report_item(report, truncate=False, audit=audit)
 
     @router.get("/review/live")
     async def get_review_live(round_id: str | None = Query(default=None)) -> dict[str, Any]:
