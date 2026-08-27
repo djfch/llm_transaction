@@ -256,6 +256,93 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
         assert links[0]["status"] == "concluded"
 
 
+def _asset_view_row(contract: str) -> dict[str, Any]:
+    """构造最小逐标的结论字典（多标的研报夹具用，键集同 save_report_fixture 内部行）。
+
+    参数：
+        contract: str，合约名
+
+    返回：
+        dict[str, Any]：可直接传给 save_report_bundle 的逐标的结论行
+    """
+    return {
+        "contract": contract,
+        "direction": "中性",
+        "confidence": "低",
+        "horizon": "当日",
+        "market_regime": "震荡",
+        "technical_confirmation": "中性",
+        "basis_type": "混合",
+        "data_status": "完整",
+        "evidence_json": "[]",
+        "risks_json": "[]",
+        "narrative": "",
+        "market_context_json": "{}",
+    }
+
+
+async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
+    """详情研报复盘：复盘记录按 contract 分组挂到对应逐标的详情键（issue #113 C8）。
+
+    同一研报可被多次复盘，故同一标的下是多条记录（按 id 正序）；
+    未被复盘的标的 research_reviews 为空数组；evidence_reviews/outcome 解析为对象。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证分组挂载、键集契约与 JSON 解析，无返回值
+    """
+    report, _views = await repo.research.save_report_bundle(
+        report_type="manual",
+        summary="",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="",
+        asset_views=[_asset_view_row("BTC_USDT"), _asset_view_row("ETH_USDT")],
+    )
+    first = await repo.research_review.save_review(
+        review_report_id=1,
+        report_id=report.id,
+        contract="BTC_USDT",
+        direction_relation="方向正确",
+        reasoning_quality="链条完整",
+        evidence_reviews_json='[{"index": 1, "comment": "依据成立"}]',
+        confidence_assessment="置信度合规",
+        improvement_advice="继续保持",
+        outcome_json='{"data_status": "ok", "return_pct": 1.2}',
+    )
+    second = await repo.research_review.save_review(
+        review_report_id=2,
+        report_id=report.id,
+        contract="BTC_USDT",
+        direction_relation="方向相反",
+    )
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        detail = (await c.get(f"/api/research/reports/{report.id}")).json()
+        by_contract = {v["contract"]: v for v in detail["asset_views"]}
+        btc_reviews = by_contract["BTC_USDT"]["research_reviews"]
+        assert [r["id"] for r in btc_reviews] == [first.id, second.id]  # 多条按 id 正序
+        assert set(btc_reviews[0]) == {
+            "id",
+            "review_report_id",
+            "direction_relation",
+            "reasoning_quality",
+            "evidence_reviews",
+            "confidence_assessment",
+            "improvement_advice",
+            "outcome",
+            "created_at",
+        }
+        assert btc_reviews[0]["review_report_id"] == 1
+        assert btc_reviews[0]["evidence_reviews"] == [{"index": 1, "comment": "依据成立"}]
+        assert btc_reviews[0]["outcome"] == {"data_status": "ok", "return_pct": 1.2}
+        assert btc_reviews[1]["outcome"] == {}  # 默认 outcome_json '{}' 解析为空对象
+        assert by_contract["ETH_USDT"]["research_reviews"] == []  # 未复盘标的给空数组
+
+
 # ---------- GET /api/research/live ----------
 
 

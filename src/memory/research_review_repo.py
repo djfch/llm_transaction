@@ -277,6 +277,22 @@ class ResearchReviewRepo:
         rows.reverse()  # 最新在前 → id 正序（便于拼接上下文与展示）
         return rows
 
+    async def list_reviews_by_report(self, report_id: int) -> list[ResearchReview]:
+        """按 id 正序返回某份研报的全部复盘记录（同一研报可被多次复盘，故为多条）。
+
+        参数：
+            report_id: int，被复盘的研报编号
+
+        返回：
+            list[ResearchReview]：该研报的复盘记录，按 id 正序（最旧在前）；
+            未被复盘过时返回空列表
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM research_reviews WHERE report_id=? ORDER BY id",
+            (report_id,),
+        )
+        return [ResearchReview(**dict(r)) for r in await cur.fetchall()]
+
     async def has_review(self, report_id: int, contract: str) -> bool:
         """目标逐标的结论是否已被任何正式复盘批改过。
 

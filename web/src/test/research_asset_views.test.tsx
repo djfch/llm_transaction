@@ -52,4 +52,80 @@ describe('逐标的研报展示', () => {
     expect(screen.getByText(/资金费率偏高/)).toBeInTheDocument()
     expect(screen.getByText(/数据：不可用/)).toBeInTheDocument()
   })
+
+  it('详情渲染研报复盘块：四段评价、逐条依据评价与客观结果摘要；空数组不渲染', () => {
+    const reviewed = {
+      ...asset,
+      evidence: ['放量增仓（4h）'],
+      risks: [],
+      narrative: '',
+      time: new Date(0).toISOString(),
+      researchReviews: [{
+        id: 2,
+        reviewReportId: 7,
+        directionRelation: '兑现',
+        reasoningQuality: '因果链成立',
+        evidenceReviews: [{ index: 0, comment: '引用准确' }],
+        confidenceAssessment: '与证据强度匹配',
+        improvementAdvice: '宏观依据须注明兑现窗口',
+        outcome: {
+          data_status: 'complete', candles_actual: 6, candles_expected: 6,
+          start_price: 67400, end_price: 70800, return_pct: 5.04,
+          high: 71500, max_up_pct: 6.1, low: 66600, max_down_pct: -1.2,
+        },
+        createdAt: '2026-08-07T01:05:00.000Z',
+      }],
+    }
+    render(
+      <ResearchAssetDetails
+        summary=""
+        crossMarketView=""
+        globalRisks={[]}
+        assets={[reviewed, { ...asset, contract: 'ETH_USDT', evidence: [], risks: [], narrative: '', time: new Date(0).toISOString(), researchReviews: [] }]}
+      />,
+    )
+    // 复盘块头部与四段评价
+    expect(screen.getByText(/复盘报告 #7/)).toBeInTheDocument()
+    expect(screen.getByText('兑现')).toBeInTheDocument()
+    expect(screen.getByText('因果链成立')).toBeInTheDocument()
+    expect(screen.getByText('与证据强度匹配')).toBeInTheDocument()
+    expect(screen.getByText('宏观依据须注明兑现窗口')).toBeInTheDocument()
+    // 逐条依据评价（序号从 0 开始）
+    expect(screen.getByText(/#0 引用准确/)).toBeInTheDocument()
+    // 客观结果摘要（与后端 _format_outcome 同口径，数据状态只保留中文）
+    expect(screen.getByText(/客观结果：数据状态 完整（K线 6\/6） \| 起价 67400 → 止价 70800 \| 涨跌 5.04%/)).toBeInTheDocument()
+    // ETH 无复盘：不出现第二个复盘块
+    expect(screen.getAllByText(/复盘 · /)).toHaveLength(1)
+  })
+
+  it('复盘客观结果无价格数据时只呈现状态与说明', () => {
+    render(
+      <ResearchAssetDetails
+        summary=""
+        crossMarketView=""
+        globalRisks={[]}
+        assets={[{
+          ...asset,
+          evidence: [],
+          risks: [],
+          narrative: '',
+          time: new Date(0).toISOString(),
+          researchReviews: [{
+            id: 3,
+            reviewReportId: 8,
+            directionRelation: '',
+            reasoningQuality: '',
+            evidenceReviews: [],
+            confidenceAssessment: '',
+            improvementAdvice: '',
+            outcome: { data_status: 'unavailable', error: '窗口内无 K 线' },
+            createdAt: '2026-08-07T01:05:00.000Z',
+          }],
+        }]}
+      />,
+    )
+    expect(screen.getByText(/客观结果：数据状态 不可用（窗口内无 K 线）/)).toBeInTheDocument()
+    // 四段评价全空时不渲染对应标签
+    expect(screen.queryByText('方向关系：')).not.toBeInTheDocument()
+  })
 })

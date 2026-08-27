@@ -1,7 +1,7 @@
 /**
  * 配置抽屉：右侧滑出，固定定位、宽 480px、滑入动画、遮罩点击 / ESC 关闭。
  * 内部完整复用 pages/config 六个表单（SecretsForm/AgentCredentialsForm/GeneralForm/RiskForm/
- * WatchlistEditor/StrategyEditor）及 StrategyVersions 版本历史；表单为 props 驱动，
+ * WatchlistEditor/StrategyEditor）及 StrategyVersions/ResearchPromptVersions 版本历史；表单为 props 驱动，
  * 数据由本抽屉在打开时统一拉取。仅在 open 时挂载表单主体：关闭不发起请求，每次打开拉取最新配置。
  */
 import { useEffect, useState, type ReactNode } from 'react'
@@ -15,6 +15,7 @@ import SecretsForm from '../../pages/config/SecretsForm'
 import AgentCredentialsForm from '../../pages/config/AgentCredentialsForm'
 import StrategyEditor from '../../pages/config/StrategyEditor'
 import StrategyVersions from '../../pages/config/StrategyVersions'
+import ResearchPromptVersions from '../../pages/config/ResearchPromptVersions'
 import WatchlistEditor from '../../pages/config/WatchlistEditor'
 import ResearchScheduleForm from '../../pages/config/ResearchScheduleForm'
 import type { ResearchConfig, ResearchScheduleConfig } from '../../api/types'
@@ -66,11 +67,14 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
   const secretsQ = useApiData(() => api.getSecretsStatus(), [])
   const watchlistQ = useApiData(() => api.getWatchlist(), [])
   const strategyQ = useApiData(() => api.getStrategy(), [])
+  const researchPromptQ = useApiData(() => api.getResearchPrompt(), [])
   const scheduleQ = useApiData(() => api.getResearchScheduleStatus(), [])
   // PUT /api/config 响应附带的 LLM 热生效错误（空 = 正常）
   const [llmError, setLlmError] = useState<string | null>(null)
   // 策略保存成功信号：递增驱动 StrategyVersions 重拉版本列表（保存会生成新版本落库）
   const [strategySavedTick, setStrategySavedTick] = useState(0)
+  // 研报提示词保存成功信号：同策略口径驱动 ResearchPromptVersions 重拉版本列表
+  const [researchPromptSavedTick, setResearchPromptSavedTick] = useState(0)
 
   return (
     <>
@@ -142,6 +146,25 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
           LLM 热生效错误：{llmError}
         </p>
       )}
+
+      <DrawerSection title="研报 Prompt · 在线编辑与版本历史" query={researchPromptQ}>
+        {(content) => (
+          <>
+            <StrategyEditor
+              initial={content}
+              ariaLabel="research_prompt 内容"
+              onSave={async (next) => {
+                await api.putResearchPrompt(next)
+                researchPromptQ.reload()
+                setResearchPromptSavedTick((t) => t + 1) // 保存生成新版本，通知版本历史重拉
+              }}
+            />
+            {/* 版本历史侧栏（挂在编辑器下方）；回滚成功后经 researchPromptQ.reload 重拉全文，编辑器随 initial 同步；
+                refreshKey 在保存成功后递增，驱动版本列表重拉 */}
+            <ResearchPromptVersions onRolledBack={researchPromptQ.reload} refreshKey={researchPromptSavedTick} />
+          </>
+        )}
+      </DrawerSection>
 
       {/* 模拟盘权益重置（自主页账户面板挪入）：仅 paper 模式渲染；成功后经 onReset 联动刷新父级 */}
       {configQ.data?.mode === 'paper' && (

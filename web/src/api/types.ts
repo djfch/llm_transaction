@@ -526,12 +526,36 @@ export interface ResearchAssetSummary {
   dataStatus: string
 }
 
+/** 逐条依据评价：与原研报 evidence 一一对应（index 为原依据序号，从 0 开始；comment 为评价文本） */
+export interface ResearchEvidenceReview {
+  index: number // 原研报 evidence 的序号（从 0 开始）
+  comment: string // 该条依据的复盘评价
+}
+
+/**
+ * 研报复盘记录：复盘 agent 对一份研报中单个合约结论的批改（issue #113）。
+ * 挂在研报详情 assetViews[].researchReviews 下（同一研报可被多次复盘，故为数组）；
+ * GET /api/research/reports/{id} 返回（evidence_reviews/outcome 已由后端解析为对象）。
+ */
+export interface ResearchReviewItem {
+  id: number // 复盘记录 ID
+  reviewReportId: number // 产生本记录的复盘报告 ID（由 review_report_id 适配）
+  directionRelation: string // 方向关系评价
+  reasoningQuality: string // 推理质量评价
+  evidenceReviews: ResearchEvidenceReview[] // 逐条依据评价（与原研报 evidence 1:1）
+  confidenceAssessment: string // 置信度合规评价
+  improvementAdvice: string // 改进建议
+  outcome: Record<string, unknown> // 代码按历史 K 线计算的客观行情结果（LLM 不可写）
+  createdAt: string // 复盘时间（ISO 字符串，由 created_at(Unix秒) 适配）
+}
+
 /** 逐标的结论详情；marketContext(市场快照)只保存在后端，不进入 API。 */
 export interface ResearchAssetDetail extends ResearchAssetSummary {
   evidence: string[]
   risks: string[]
   narrative: string
   time: string
+  researchReviews?: ResearchReviewItem[] // 该标的的研报复盘记录（无复盘为 []；旧契约缺省）
 }
 
 /** 研报摘要：报告头只含当前协议字段，成功项必须有逐标的摘要。 */
@@ -558,10 +582,10 @@ export interface ChainNode {
 export interface CausalLinkView {
   id: number // 因果链 ID
   reportId: number // 归属研报 ID（由 report_id 适配）
-  chain: ChainNode[] // 有序节点链（待跟踪 1-6 节点 / 已结论 2-6 节点）
+  chain: ChainNode[] // 有序节点链（跟踪中 1-6 节点 / 已结论 2-6 节点）
   confidence: number // 链式置信度（0-1）
   evidence: string[] // 支撑证据列表
-  status: string // 状态：tracking(待跟踪) / concluded(已结论) / superseded(已被替代)
+  status: string // 状态：tracking(跟踪中) / concluded(已结论) / superseded(已被替代)
   topic: string // 事件主题（同主题链聚合成族；空串 = 旧数据无主题）
   supersedesId: number | null // 本链替代的旧链 ID（修正版有值；null = 非修正版）
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
@@ -624,6 +648,22 @@ export interface StrategyVersion {
 /** 策略版本详情：GET /api/strategy/versions/{id}（含 content 全文） */
 export interface StrategyVersionDetail extends StrategyVersion {
   content: string // 策略书完整原文
+}
+
+/** 研报提示词版本（列表项不含 content 全文）：GET /api/research/prompt/versions */
+export interface ResearchPromptVersion {
+  id: number // 版本号（vN 的 N）
+  md5: string // 提示词原文 md5（与研报记录 research_prompt_md5 关联）
+  createdBy: string // 来源：human(人工) / review_agent(复盘) / rollback(回滚)
+  reason: string // 变更理由
+  reviewReportId: number | null // 触发本版本的复盘报告 ID（人工版本为 null）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+  status: string // 状态：applied(已生效) / draft(草稿) / discarded(已废弃)
+}
+
+/** 研报提示词版本详情：GET /api/research/prompt/versions/{id}（含 content 全文） */
+export interface ResearchPromptVersionDetail extends ResearchPromptVersion {
+  content: string // 研报提示词完整原文
 }
 
 /** 回滚结果：POST /api/strategy/rollback/{id}（回滚 = 写回历史内容 + 记 rollback 新版本） */
@@ -736,4 +776,16 @@ export interface ApiClient {
   getStrategyDiff(fromId: number, toId: number): Promise<string>
   /** 回滚到指定策略版本（生成 rollback 新版本）；404 经 ApiError 抛出。 */
   rollbackStrategy(id: number): Promise<RollbackResult>
+  /** 当前研报提示词原文（text/plain）。 */
+  getResearchPrompt(): Promise<string>
+  /** 保存研报提示词（校验失败 422 经 ApiError 抛出）；响应为原文回显。 */
+  putResearchPrompt(content: string): Promise<string>
+  /** 研报提示词版本列表（最新在前，不含 content 全文）。 */
+  getResearchPromptVersions(): Promise<ResearchPromptVersion[]>
+  /** 研报提示词版本详情（含 content 全文）；404 经 ApiError 抛出。 */
+  getResearchPromptVersion(id: number): Promise<ResearchPromptVersionDetail>
+  /** 两版本研报提示词 unified diff（纯文本）。 */
+  getResearchPromptDiff(fromId: number, toId: number): Promise<string>
+  /** 回滚到指定研报提示词版本（生成 rollback 新版本）；404 经 ApiError 抛出。 */
+  rollbackResearchPrompt(id: number): Promise<RollbackResult>
 }

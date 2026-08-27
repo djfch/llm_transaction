@@ -2,7 +2,7 @@
  * 配置抽屉集成测试：回滚成功后提示可见、策略编辑器内容同步为目标版本。
  * 不变量：抽屉内表单数据已就绪时，后台刷新不得销毁用户可见状态（提示/已保存标记/未保存编辑）。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppConfig, AppConfigPatch, StrategyVersion } from '../api/types'
 import ConfigDrawer from '../components/console/ConfigDrawer'
@@ -79,6 +79,14 @@ vi.mock('../api', () => ({
     getStrategyDiff: (from: number, to: number) => holder.getStrategyDiff(from, to),
     rollbackStrategy: (id: number) => holder.rollbackStrategy(id),
     putStrategy: (content: string) => holder.putStrategy(content),
+    // 研报 Prompt 区块（本测试只断言其渲染，不交互）：给最小可用桩
+    getResearchPrompt: () => Promise.resolve('# 研报提示词'),
+    putResearchPrompt: (content: string) => Promise.resolve(content),
+    getResearchPromptVersions: () => Promise.resolve([]),
+    getResearchPromptVersion: (id: number) =>
+      Promise.resolve({ id, md5: '', createdBy: 'human', reason: '', reviewReportId: null, time: '', status: 'applied', content: '' }),
+    getResearchPromptDiff: () => Promise.resolve(''),
+    rollbackResearchPrompt: (id: number) => Promise.resolve({ rolledBackTo: id, version: id + 1 }),
   },
   // StrategyVersions catch 分支仅取 message，但保持与生产 mock 一致的透出形态
   ApiError: class ApiError extends Error {},
@@ -163,9 +171,10 @@ describe('ConfigDrawer(配置抽屉) · 策略版本回滚', () => {
     await screen.findByText('初始版本')
     const versionCallsBefore = holder.getStrategyVersions.mock.calls.length
 
-    // 修改内容并保存
+    // 修改内容并保存（抽屉内有策略/研报两个编辑器，按钮重名：限定在策略 textarea 所在 section 内点保存）
     fireEvent.change(textarea, { target: { value: '策略书 v3 手改全文' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存并热更新' }))
+    const strategySection = textarea.closest('section')!
+    fireEvent.click(within(strategySection).getByRole('button', { name: '保存并热更新' }))
 
     await waitFor(() => expect(holder.putStrategy).toHaveBeenCalledWith('策略书 v3 手改全文'))
     // 保存后版本列表查询必须再次触发

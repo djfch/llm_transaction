@@ -1,4 +1,7 @@
-import type { ResearchAssetDetail, ResearchAssetSummary } from '../../api/types'
+/** 研报逐标的结论展示：徽标（列表摘要）+ 详情卡（结构/叙事/证据/风险 + 研报复盘记录）。
+ *  复盘块仅在 asset.researchReviews 非空时渲染；客观结果(outcome)摘要与后端 _format_outcome 同口径。 */
+import type { ResearchAssetDetail, ResearchAssetSummary, ResearchReviewItem } from '../../api/types'
+import { fmtTime } from '../../utils/format'
 
 const directionStyle: Record<string, string> = {
   偏多: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300',
@@ -36,6 +39,72 @@ function ListBlock({ title, items }: { title: string; items: string[] }) {
   )
 }
 
+/** 客观结果数据状态：后端枚举 complete/partial/unavailable 只保留中文（未知值原样显示） */
+const DATA_STATUS_TEXT: Record<string, string> = {
+  complete: '完整',
+  partial: '部分',
+  unavailable: '不可用',
+}
+
+/** 客观行情结果一行摘要：与后端 _format_outcome 同口径（无价格数据时只呈现状态与说明） */
+function outcomeSummary(outcome: Record<string, unknown>): string {
+  const rawStatus = String(outcome.data_status ?? 'unknown')
+  const status = DATA_STATUS_TEXT[rawStatus] ?? rawStatus
+  if (outcome.start_price == null) {
+    const error = String(outcome.error ?? '')
+    return `数据状态 ${status}（${error !== '' ? error : '无价格数据'}）`
+  }
+  return (
+    `数据状态 ${status}（K线 ${String(outcome.candles_actual)}/${String(outcome.candles_expected)}）` +
+    ` | 起价 ${String(outcome.start_price)} → 止价 ${String(outcome.end_price)}` +
+    ` | 涨跌 ${String(outcome.return_pct)}%` +
+    ` | 区间最高 ${String(outcome.high)}（${String(outcome.max_up_pct)}%）` +
+    ` | 区间最低 ${String(outcome.low)}（${String(outcome.max_down_pct)}%）`
+  )
+}
+
+/** 复盘字段行：「标签：内容」（内容为空时由调用方跳过，不渲染） */
+function ReviewRow({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="flex gap-1.5 text-[11px] leading-4">
+      <span className="shrink-0 text-zinc-500">{label}：</span>
+      <span className="text-zinc-300">{text}</span>
+    </div>
+  )
+}
+
+/** 单条研报复盘卡：复盘时间/来源报告 + 四段评价 + 逐条依据评价 + 客观结果摘要 */
+function ReviewCard({ review }: { review: ResearchReviewItem }) {
+  return (
+    <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
+      <p className="text-[10px] text-zinc-500">
+        复盘 · {fmtTime(review.createdAt)} · 复盘报告 #{review.reviewReportId}
+      </p>
+      <div className="mt-1 space-y-1">
+        {review.directionRelation !== '' && <ReviewRow label="方向关系" text={review.directionRelation} />}
+        {review.reasoningQuality !== '' && <ReviewRow label="推理质量" text={review.reasoningQuality} />}
+        {review.confidenceAssessment !== '' && <ReviewRow label="置信度合规" text={review.confidenceAssessment} />}
+        {review.improvementAdvice !== '' && <ReviewRow label="改进建议" text={review.improvementAdvice} />}
+      </div>
+      {review.evidenceReviews.length > 0 && (
+        <div className="mt-1.5">
+          <p className="text-[10px] text-zinc-500">依据逐条评价</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {review.evidenceReviews.map((item) => (
+              <li key={item.index} className="text-[11px] leading-4 text-zinc-400">
+                #{item.index} {item.comment}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {Object.keys(review.outcome).length > 0 && (
+        <p className="mt-1.5 text-[11px] leading-4 text-zinc-400">客观结果：{outcomeSummary(review.outcome)}</p>
+      )}
+    </div>
+  )
+}
+
 function AssetCard({ asset }: { asset: ResearchAssetDetail }) {
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
@@ -57,6 +126,10 @@ function AssetCard({ asset }: { asset: ResearchAssetDetail }) {
       )}
       <ListBlock title="证据" items={asset.evidence ?? []} />
       <ListBlock title="风险" items={asset.risks ?? []} />
+      {/* 研报复盘记录（无复盘为 []/缺省，不渲染） */}
+      {(asset.researchReviews ?? []).map((review) => (
+        <ReviewCard key={review.id} review={review} />
+      ))}
     </section>
   )
 }

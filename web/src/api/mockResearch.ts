@@ -1,20 +1,33 @@
 /** 研报 mock：只模拟当前逐标的协议，失败报告不生成逐标的结论。
  *  实时研报轮：未点火时 getResearchLive 回 round null；runResearch 点火后先返进行中轮、
  *  再被轮询翻转为已结束（演示进度条「激活→轮询→退出→刷新」完整循环，与 mockReview 同模式）。
- *  runResearch 返回的 roundId 与随后 getResearchLive 进行中轮的 round_id 一致（模块级 liveRoundId 对齐）。 */
+ *  runResearch 返回的 roundId 与随后 getResearchLive 进行中轮的 round_id 一致（模块级 liveRoundId 对齐）。
+ *  研报提示词：模块级 researchPrompt（当前内容）+ researchPromptVersions（版本历史，最新在前）；
+ *  保存/回滚都会前插新版本，diff 为 mock 级整体替换式 +/- 文本（同 mockReview 策略版本口径）。
+ *  研报复盘：id=1 研报的 BTC 结论播种 researchReviews，演示详情页复盘块。 */
 import { ApiError } from './http'
 import type {
   ApiClient,
   CausalLinkView,
   ResearchAssetDetail,
   ResearchLive,
+  ResearchPromptVersionDetail,
   ResearchReportDetail,
   ResearchReportSummary,
 } from './types'
 
 type ResearchMockHandlers = Pick<
   ApiClient,
-  'getResearchReports' | 'getResearchReport' | 'runResearch' | 'getResearchLive'
+  | 'getResearchReports'
+  | 'getResearchReport'
+  | 'runResearch'
+  | 'getResearchLive'
+  | 'getResearchPrompt'
+  | 'putResearchPrompt'
+  | 'getResearchPromptVersions'
+  | 'getResearchPromptVersion'
+  | 'getResearchPromptDiff'
+  | 'rollbackResearchPrompt'
 >
 
 const nowIso = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600_000).toISOString()
@@ -125,6 +138,22 @@ const researchReports: ResearchReportDetail[] = [
         risks: ['美联储官员讲话偏鹰或压制风险偏好', '亚盘流动性偏薄，波动易被放大'],
         narrative:
           '亚盘时段宏观面偏多，CPI 低于预期，美元与实际利率回落；ETF 资金流和技术结构同步确认，但仍需防范鹰派讲话与薄流动性。',
+        researchReviews: [
+          {
+            id: 2,
+            reviewReportId: 1,
+            directionRelation: '兑现',
+            reasoningQuality: '方向判断与 ETF 资金流证据一致，但宏观利多兑现的时点论证偏弱。',
+            evidenceReviews: [
+              { index: 0, comment: 'CPI 数值与公布时间引用准确' },
+              { index: 2, comment: '资金费率方向对，但「中性」表述与原文「略偏正」有出入' },
+            ],
+            confidenceAssessment: '与证据强度匹配',
+            improvementAdvice: '宏观事件类依据应给出兑现窗口的明确时间界。',
+            outcome: { data_status: 'complete', candles_actual: 6, candles_expected: 6, start_price: 67400, end_price: 70800, return_pct: 5.04, high: 71500, max_up_pct: 6.1, low: 66600, max_down_pct: -1.2 },
+            createdAt: nowIso(6),
+          },
+        ],
       }),
     ],
     error: '',
@@ -242,6 +271,82 @@ function buildResearchLive(active: boolean): ResearchLive {
   }
 }
 
+// ---- 研报提示词 mock：当前内容 + 版本历史（最新在前），保存/回滚均前插新版本 ----
+
+/** 研报提示词当前内容（与首个 applied 版本 v3 同文，保持叙事自洽） */
+let researchPrompt = '# 研报 Agent Prompt\n\n你是宏观与消息面前瞻研报 Agent。\n\n## 决策规则\n- 只输出白名单合约的方向结论\n'
+
+const researchPromptVersions: ResearchPromptVersionDetail[] = [
+  {
+    id: 4,
+    md5: 'd4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9',
+    createdBy: 'review_agent',
+    reason: '复盘建议：宏观事件依据需给出兑现窗口（草稿待生效）',
+    reviewReportId: 2,
+    time: nowIso(2),
+    status: 'draft',
+    content: researchPrompt + '- 宏观事件依据须注明兑现时间窗口\n',
+  },
+  {
+    id: 3,
+    md5: '3f4a5b6c7d8e9f00112233445566778899aabb',
+    createdBy: 'review_agent',
+    reason: '复盘修订：收紧高置信门槛',
+    reviewReportId: 1,
+    time: nowIso(20),
+    status: 'applied',
+    content: researchPrompt,
+  },
+  {
+    id: 2,
+    md5: '2f3a4b5c6d7e8f90112233445566778899aabb',
+    createdBy: 'review_agent',
+    reason: '复盘修订草稿（未生效即被 v3 取代）',
+    reviewReportId: 1,
+    time: nowIso(26),
+    status: 'discarded',
+    content: '# 研报 Agent Prompt\n\n你是宏观与消息面前瞻研报 Agent。\n',
+  },
+  {
+    id: 1,
+    md5: '1f2a3b4c5d6e7f890112233445566778899aab',
+    createdBy: 'human',
+    reason: '初始版本',
+    reviewReportId: null,
+    time: nowIso(50),
+    status: 'applied',
+    content: '# 研报 Agent Prompt\n\n你是宏观与消息面前瞻研报 Agent。\n',
+  },
+]
+
+/** 前插一个 applied 版本并写回当前内容；返回新版本号 */
+function applyPromptVersion(content: string, createdBy: 'human' | 'rollback', reason: string): number {
+  researchPrompt = content
+  const id = Math.max(0, ...researchPromptVersions.map((v) => v.id)) + 1
+  researchPromptVersions.unshift({
+    id,
+    md5: 'mock-md5-' + id,
+    createdBy,
+    reason,
+    reviewReportId: null,
+    time: new Date().toISOString(),
+    status: 'applied',
+    content,
+  })
+  return id
+}
+
+/** mock 级整体替换式文本 diff（同 mockReview 策略版本口径）：同文返 ''，否则逐行 - 旧 / + 新 */
+function mockPromptDiff(fromId: number, toId: number): string {
+  const from = researchPromptVersions.find((v) => v.id === fromId)
+  const to = researchPromptVersions.find((v) => v.id === toId)
+  if (!from || !to) throw new ApiError(404, '研报提示词版本不存在: ' + (!from ? fromId : toId))
+  if (from.content === to.content) return ''
+  const removed = from.content.split('\n').map((line) => '- ' + line)
+  const added = to.content.split('\n').map((line) => '+ ' + line)
+  return [`--- v${fromId}`, `+++ v${toId}`, ...removed, ...added].join('\n')
+}
+
 export function createResearchMock(reply: <T>(value: T) => Promise<T>) {
   const handlers: ResearchMockHandlers = {
     getResearchReports: (offset, limit) =>
@@ -273,6 +378,37 @@ export function createResearchMock(reply: <T>(value: T) => Promise<T>) {
         if (activePollsLeft <= 0) liveRoundActive = false
       }
       return reply(buildResearchLive(liveRoundActive))
+    },
+    getResearchPrompt: () => reply(researchPrompt),
+    putResearchPrompt: (content) => {
+      applyPromptVersion(content, 'human', '前端手动保存')
+      return reply(content)
+    },
+    // 列表项剥掉 content 全文（与后端契约一致：列表不含正文）
+    getResearchPromptVersions: () =>
+      reply(
+        researchPromptVersions.map((v) => ({
+          id: v.id,
+          md5: v.md5,
+          createdBy: v.createdBy,
+          reason: v.reason,
+          reviewReportId: v.reviewReportId,
+          time: v.time,
+          status: v.status,
+        })),
+      ),
+    getResearchPromptVersion: (id) => {
+      const version = researchPromptVersions.find((v) => v.id === id)
+      return version
+        ? reply(structuredClone(version))
+        : Promise.reject(new ApiError(404, '研报提示词版本不存在: ' + id))
+    },
+    getResearchPromptDiff: (fromId, toId) => reply(mockPromptDiff(fromId, toId)),
+    rollbackResearchPrompt: (id) => {
+      const target = researchPromptVersions.find((v) => v.id === id)
+      if (!target) return Promise.reject(new ApiError(404, '研报提示词版本不存在: ' + id))
+      const newId = applyPromptVersion(target.content, 'rollback', '回滚到 v' + id)
+      return reply({ rolledBackTo: id, version: newId })
     },
   }
 

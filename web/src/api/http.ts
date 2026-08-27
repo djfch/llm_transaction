@@ -33,6 +33,10 @@ import type {
   ResearchLive,
   ResearchAssetDetail,
   ResearchAssetSummary,
+  ResearchEvidenceReview,
+  ResearchPromptVersion,
+  ResearchPromptVersionDetail,
+  ResearchReviewItem,
   ResearchTechnicalConfirmation,
   ResearchReportDetail,
   ResearchReportsPage,
@@ -427,11 +431,25 @@ interface RawResearchAssetSummary {
   data_status: string
 }
 
+/** 后端研报复盘记录原始项（evidence_reviews/outcome 契约上已解析为对象，可选仅防御） */
+interface RawResearchReview {
+  id: number
+  review_report_id: number
+  direction_relation: string
+  reasoning_quality: string
+  evidence_reviews?: unknown
+  confidence_assessment: string
+  improvement_advice: string
+  outcome?: unknown
+  created_at: number
+}
+
 interface RawResearchAssetDetail extends RawResearchAssetSummary {
   evidence?: unknown
   risks?: unknown
   narrative: string
   created_at: number
+  research_reviews?: RawResearchReview[]
 }
 
 /** 后端当前研报响应：报告头不再包含全局方向和逐标的详情字段；模型身份四键由审计轮 join。 */
@@ -557,10 +575,39 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
       : [],
     confidence: Number(raw.confidence),
     evidence: adaptStringList(raw.evidence),
-    status: raw.status ?? 'tracking', // 契约必有；防御 null 时按待跟踪灰显
+    status: raw.status ?? 'tracking', // 契约必有；防御 null 时按跟踪中灰显
     topic: typeof raw.topic === 'string' ? raw.topic : '',
     supersedesId: raw.supersedes_id ?? null,
     time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 逐条依据评价适配：契约 {index, comment} 对象数组；结构非法的元素丢弃（无法定位原依据） */
+function adaptEvidenceReview(raw: unknown): ResearchEvidenceReview | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const item = raw as { index?: unknown; comment?: unknown }
+  if (typeof item.index !== 'number' || typeof item.comment !== 'string') return null
+  return { index: item.index, comment: item.comment }
+}
+
+/** 后端研报复盘 → 前端 ResearchReviewItem：evidence_reviews/outcome 防御性解析，created_at(Unix秒) 转 ISO */
+function adaptResearchReview(raw: RawResearchReview): ResearchReviewItem {
+  const evidence = tryParseJson(raw.evidence_reviews)
+  const outcome = tryParseJson(raw.outcome)
+  return {
+    id: raw.id,
+    reviewReportId: raw.review_report_id,
+    directionRelation: raw.direction_relation ?? '',
+    reasoningQuality: raw.reasoning_quality ?? '',
+    evidenceReviews: Array.isArray(evidence)
+      ? evidence.map(adaptEvidenceReview).filter((e): e is ResearchEvidenceReview => e !== null)
+      : [],
+    confidenceAssessment: raw.confidence_assessment ?? '',
+    improvementAdvice: raw.improvement_advice ?? '',
+    outcome: outcome !== null && typeof outcome === 'object' && !Array.isArray(outcome)
+      ? (outcome as Record<string, unknown>)
+      : {},
+    createdAt: new Date((raw.created_at ?? 0) * 1000).toISOString(),
   }
 }
 
@@ -571,6 +618,7 @@ function adaptResearchAssetDetail(raw: RawResearchAssetDetail): ResearchAssetDet
     risks: adaptStringList(raw.risks),
     narrative: raw.narrative ?? '',
     time: new Date((raw.created_at ?? 0) * 1000).toISOString(),
+    researchReviews: (raw.research_reviews ?? []).map(adaptResearchReview),
   }
 }
 
@@ -624,6 +672,31 @@ function adaptStrategyVersion(raw: RawStrategyVersion): StrategyVersion {
     reason: raw.reason,
     reportId: raw.report_id ?? null,
     time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端研报提示词版本原始项（列表无 content，详情有；status 为 applied/draft/discarded） */
+interface RawResearchPromptVersion {
+  id: number
+  md5: string
+  created_by: string
+  reason: string
+  review_report_id: number | null
+  created_at: number
+  status: string
+  content?: string
+}
+
+/** 后端研报提示词版本 → 前端 ResearchPromptVersion：created_at(Unix秒) 转 ISO time */
+function adaptResearchPromptVersion(raw: RawResearchPromptVersion): ResearchPromptVersion {
+  return {
+    id: raw.id,
+    md5: raw.md5,
+    createdBy: raw.created_by,
+    reason: raw.reason,
+    reviewReportId: raw.review_report_id ?? null,
+    time: new Date(raw.created_at * 1000).toISOString(),
+    status: raw.status,
   }
 }
 
@@ -877,5 +950,27 @@ export const httpApi: ApiClient = {
   rollbackStrategy: async (id) =>
     adaptRollback(
       await request<{ rolled_back_to: number; version: number }>(`/strategy/rollback/${id}`, { method: 'POST' }),
+    ),
+  // 研报提示词在线编辑与版本历史（issue #113）：GET/PUT 与 /strategy 同约 PlainText 原文
+  getResearchPrompt: () => requestText('/research/prompt'),
+  putResearchPrompt: (content) => requestText('/research/prompt', { method: 'PUT', body: content }),
+  getResearchPromptVersions: async () =>
+    (await request<{ items: RawResearchPromptVersion[] }>('/research/prompt/versions')).items.map(
+      adaptResearchPromptVersion,
+    ),
+  getResearchPromptVersion: async (id): Promise<ResearchPromptVersionDetail> => {
+    const raw = await request<RawResearchPromptVersion>(`/research/prompt/versions/${id}`)
+    return { ...adaptResearchPromptVersion(raw), content: raw.content ?? '' }
+  },
+  getResearchPromptDiff: (fromId, toId) => {
+    const qs = new URLSearchParams({ from: String(fromId), to: String(toId) })
+    return requestText(`/research/prompt/diff?${qs.toString()}`)
+  },
+  // 回滚响应键与策略回滚一致（{rolled_back_to, version}），复用同一适配
+  rollbackResearchPrompt: async (id) =>
+    adaptRollback(
+      await request<{ rolled_back_to: number; version: number }>(`/research/prompt/rollback/${id}`, {
+        method: 'POST',
+      }),
     ),
 }

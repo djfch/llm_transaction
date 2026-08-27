@@ -387,13 +387,13 @@ async def test_on_wake_pushes_round_start_then_round(build_ctx):
 
 
 async def test_research_subsystem_assembled(build_ctx):
-    """验证研报 agent、调度器和服务器手动运行回调来自同一子系统装配。
+    """验证研报 agent、调度器、提示词版本写回调和服务器手动运行回调来自同一子系统装配。
 
     参数：
         build_ctx: Callable，应用上下文异步构建夹具
 
     返回：
-        None，通过断言验证研报组件存在且运行回调同源
+        None，通过断言验证研报组件存在且运行/提示词写回调同源
     """
     ctx = await build_ctx()
     assert ctx.research.agent is not None
@@ -401,6 +401,10 @@ async def test_research_subsystem_assembled(build_ctx):
     deps = ctx.server_deps
     assert deps is not None
     assert deps.research_run == ctx.research.scheduler.start_now
+    # 研报提示词版本写回调（issue #113 C8）：主程序恒装配 store，与策略写回调同口径接线
+    assert ctx.research.prompt_store is not None
+    assert deps.research_prompt_save == ctx.research.research_prompt_save
+    assert deps.research_prompt_rollback == ctx.research.research_prompt_rollback
 
 
 async def test_build_research_receives_notify_event(build_ctx, monkeypatch):

@@ -159,6 +159,11 @@ vi.mock('../api', () => ({
     getIndicatorSeries: () => Promise.resolve({ contract: 'BTC_USDT', interval: '1h', series: {} }),
     // 配置抽屉数据源与 paper 重置（重置联动测试用）；策略面板复用 getStrategy/getStrategyVersions
     getStrategy: () => holder.getStrategy(),
+    // 配置抽屉研报 Prompt 区块（本文件测试不与其交互）：最小可用桩
+    getResearchPrompt: () => Promise.resolve('# 研报提示词'),
+    putResearchPrompt: (content: string) => Promise.resolve(content),
+    getResearchPromptVersions: () => Promise.resolve([]),
+    getResearchPromptDiff: () => Promise.resolve(''),
     getStrategyVersion: (id: number) =>
       Promise.resolve({
         id,

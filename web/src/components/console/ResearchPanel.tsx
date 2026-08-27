@@ -37,7 +37,7 @@ const REPORT_TYPE_LABELS: Record<string, string> = {
 
 /** 因果链状态 → 文案与配色（未知值原样灰显） */
 const LINK_STATUS: Record<string, { label: string; className: string }> = {
-  tracking: { label: '待跟踪', className: 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400' },
+  tracking: { label: '跟踪中', className: 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400' },
   concluded: { label: '已结论', className: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300' },
   superseded: { label: '已被替代', className: 'border-zinc-700/40 bg-zinc-800/30 text-zinc-500' },
 }

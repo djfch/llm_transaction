@@ -1,15 +1,19 @@
 /**
  * system_prompt.md 在线编辑：等宽 textarea + 保存按钮。
  * initial 变化（宿主重拉策略全文，如版本回滚）时同步覆盖编辑区。
+ * 研报提示词编辑复用本组件（ariaLabel 传「research_prompt 内容」区分无障碍标签）。
  */
 import { useEffect, useState } from 'react'
 
 export default function StrategyEditor({
   initial,
   onSave,
+  ariaLabel = 'system_prompt 内容',
 }: {
   initial: string
   onSave: (content: string) => Promise<void>
+  /** 编辑区无障碍标签：研报提示词复用时传「research_prompt 内容」（默认系统提示词口径） */
+  ariaLabel?: string
 }) {
   const [content, setContent] = useState(initial)
   const [pending, setPending] = useState(false)
@@ -47,7 +51,7 @@ export default function StrategyEditor({
         }}
         rows={14}
         spellCheck={false}
-        aria-label="system_prompt 内容"
+        aria-label={ariaLabel}
         className="w-full rounded-lg border border-white/10 bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200 focus:border-violet-400/60 focus:outline-none"
       />
       <div className="mt-3 flex items-center gap-3">

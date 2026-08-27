@@ -624,6 +624,10 @@ def _build_server(
         research_schedule_status=ctx.research.scheduler.status,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,
+        # 研报提示词版本写回调（issue #113）：store 由主程序恒装配（上方已播种/对账），
+        # 与策略写回调同口径无条件接线
+        research_prompt_save=ctx.research.research_prompt_save,
+        research_prompt_rollback=ctx.research.research_prompt_rollback,
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
         indicators=indicators,
