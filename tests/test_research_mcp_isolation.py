@@ -591,3 +591,69 @@ async def test_caller_cancel_during_shutdown_still_propagates() -> None:
         await closing
     assert session._runner is None  # 实例属性已放弃
     await asyncio.wait_for(runner, timeout=2)  # runner 喝完哨兵正常退出，不泄漏
+
+
+async def test_close_swallows_leaked_cancel_and_still_closes_transport() -> None:
+    """回归（审查缺口）：会话退出抛泄漏取消时，传输层退出不被跳过。
+
+    _close_safely 逐步吞 BaseException（含 anyio 泄漏取消）；旧实现只吞
+    Exception，会话退出抛取消会直接逃逸出 _close_impl，传输层 __aexit__
+    被跳过——留下未关闭的连接/子进程。本测试钉住"取消被吞且传输层仍关闭"，
+    若把 BaseException 改回 Exception 则本测试变红（旧代码 ctx 不被关闭）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+
+    class _CancelExitSession(_FakeSession):
+        """退出时先标记关闭再抛泄漏取消的伪底层会话（模拟 anyio 风暴落在关闭期）。"""
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """标记已关闭后抛 CancelledError（模拟 anyio 泄漏取消）。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，无正常返回
+
+            异常：
+                asyncio.CancelledError：模拟黏滞取消重投递落在关闭期，总是抛出
+            """
+            self.closed = True
+            raise asyncio.CancelledError("storm during exit")
+
+    class _RecordingCtx:
+        """记录 __aexit__ 是否被调用的伪传输层上下文。"""
+
+        def __init__(self) -> None:
+            """初始化关闭标记。
+
+            参数：无
+
+            返回：
+                None，就地写入实例属性
+            """
+            self.closed = False
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """标记传输层已关闭。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，就地把 closed 置为 True
+            """
+            self.closed = True
+
+    fake = _CancelExitSession(lambda name, args: None)
+    ctx = _RecordingCtx()
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, fake)
+    session._ctx = ctx
+    await session.__aexit__(None, None, None)  # 泄漏取消被吞，不向外抛
+    assert fake.closed and ctx.closed  # 传输层退出未被取消跳过
+    assert session._runner is None
