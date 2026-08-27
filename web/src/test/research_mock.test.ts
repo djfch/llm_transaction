@@ -9,7 +9,7 @@ describe('mock 初始研报', () => {
     expect(page.total).toBe(2)
     expect(page.items[0].error).not.toBe('')
     expect(page.items[0].assetViews).toEqual([])
-    expect(page.items[1].schemaVersion).toBe(2)
+    expect(page.items[1].schemaVersion).toBe(3)
     expect(page.items[1].assetViews[0].contract).toBe('BTC_USDT')
     expect(['确认', '冲突', '中性', '不可用']).toContain(
       page.items[1].assetViews[0].technicalConfirmation,
@@ -23,16 +23,15 @@ describe('mock 初始研报', () => {
     expect(asset.evidence[0]).toBe('美国 6 月 CPI 同比 3.0%，低于预期 3.1%（金十日历）')
     expect(asset.risks).toHaveLength(2)
     expect(detail.causalLinks).toHaveLength(3)
-    const verified = detail.causalLinks.find((link) => link.status === 'verified')
-    const pending = detail.causalLinks.find((link) => link.status === 'pending')
+    const concluded = detail.causalLinks.find((link) => link.status === 'concluded')
+    const tracking = detail.causalLinks.find((link) => link.status === 'tracking')
     const superseded = detail.causalLinks.find((link) => link.status === 'superseded')
-    expect(verified?.chain[0]).toMatchObject({
+    expect(concluded?.chain[0]).toMatchObject({
       node: '美国 6 月 CPI 同比回落至 3.0%',
       kind: '事件',
       timeline_id: 1287,
     })
-    expect(verified?.awaitVerification).toBe(false)
-    expect(pending?.supersedesId).toBe(3)
+    expect(tracking?.supersedesId).toBe(3)
     expect(superseded?.topic).toBe('美联储')
   })
 

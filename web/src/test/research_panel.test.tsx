@@ -35,7 +35,7 @@ function report(id: number, summary: string): ResearchReportSummary {
   return {
     id,
     reportType: 'manual',
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary,
     crossMarketView: '',
     globalRisks: [],
@@ -54,7 +54,7 @@ const REPORTS: ResearchReportSummary[] = [
   {
     id: 7,
     reportType: 'manual',
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary: '',
     crossMarketView: '',
     globalRisks: [],
@@ -70,7 +70,7 @@ const REPORTS: ResearchReportSummary[] = [
   {
     id: 6,
     reportType: 'asia_open',
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary: '亚盘 BTC 获得宏观与技术共振。',
     crossMarketView: 'BTC 强于 ETH',
     globalRisks: ['美联储鹰派讲话'],
@@ -92,7 +92,6 @@ function detailAsset(summary: ResearchAssetSummary): ResearchAssetDetail {
     evidence: ['放量增仓（4h）'],
     risks: ['资金费率偏高'],
     narrative: 'BTC 逐标的研判',
-    verifyResult: '',
     time: iso(1784510000),
   }
 }
@@ -181,11 +180,9 @@ beforeEach(() => {
         ],
         confidence: 0.72,
         evidence: ['金十日历'],
-        status: 'verified',
-        brokenAt: null,
+        status: 'concluded',
         topic: 'CPI',
         supersedesId: null,
-        awaitVerification: false,
         time: iso(1784510000),
       }] : [],
     })

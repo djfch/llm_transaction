@@ -380,16 +380,11 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
         except (TypeError, ValueError):
             chain = []
         nodes = " → ".join(str(n.get("node", ""))[:25] for n in chain if isinstance(n, dict))
-        tag = "待验证" if link.await_verification else "结论"
+        tag = "待验证" if link.status == "tracking" else "结论"
         if link.supersedes_id is not None:
             status = f"替代链#{link.supersedes_id}"  # 本链替代了旧链 X
         else:
-            status = {
-                "pending": "当前版",
-                "verified": "已验证",
-                "failed": "已否决",
-                "superseded": "已被替代",
-            }.get(link.status, link.status)
+            status = {"superseded": "已被替代"}.get(link.status, "当前版")
         lines.append(
             f"- [链#{link.id}][{link.topic or '无主题'}][{tag}][{status}] {nodes}"
             f"（置信度 {link.confidence}）"
@@ -514,7 +509,7 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
             "topic": topic,
             "supersedes_id": supersedes_id,
-            "await_verification": await_verification,
+            "status": "tracking" if await_verification else "concluded",
         }
     )
     nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain)

@@ -354,7 +354,7 @@ async def test_submit_causal_links_staged(deps) -> None:
     staged = deps.pending_causal_links[0]
     assert staged["topic"] == "油价"
     assert staged["supersedes_id"] is None
-    assert staged["await_verification"] is True  # 默认待验证
+    assert staged["status"] == "tracking"  # 默认待跟踪
     # 暂存 ≠ 落库：表内仍为空（等 agent 落研报后回填）
     assert await deps.repo.research.list_causal_links() == []
 
@@ -431,7 +431,7 @@ async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
         },
     )
     assert "已暂存" in text
-    assert deps.pending_causal_links[0]["await_verification"] is True
+    assert deps.pending_causal_links[0]["status"] == "tracking"
 
 
 async def test_submit_causal_links_await_verification_parsing(deps) -> None:
@@ -454,7 +454,7 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
         },
     )
     assert "已暂存" in text and "结论" in text
-    assert deps.pending_causal_links[-1]["await_verification"] is False
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
     text = await _run(
         deps,
         "submit_causal_links",
@@ -659,7 +659,7 @@ async def test_read_causal_links_arg_boundaries(deps) -> None:
 
 
 async def test_submit_causal_links_await_verification_shapes(deps) -> None:
-    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别。
+    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别（映射 tracking/concluded）。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -667,7 +667,8 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    for raw, expected in [(1, True), (0, False), ("true", True), ("是", True), ("否", False)]:
+    cases = [(1, "tracking"), (0, "concluded"), ("true", "tracking"), ("是", "tracking")]
+    for raw, expected in cases + [("否", "concluded")]:
         text = await _run(
             deps,
             "submit_causal_links",
@@ -679,7 +680,7 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
             },
         )
         assert "已暂存" in text
-        assert deps.pending_causal_links[-1]["await_verification"] is expected
+        assert deps.pending_causal_links[-1]["status"] == expected
 
 
 async def test_read_causal_links_empty(deps) -> None:
@@ -723,7 +724,7 @@ async def test_read_causal_links_lists_family(repo: Repo) -> None:
         chain_json='[{"node": "关税结论"}]',
         confidence=0.6,
         topic="关税",
-        await_verification=False,
+        status="concluded",
     )
     deps = ResearchToolDeps(
         provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
@@ -868,7 +869,7 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
         chain_json='[{"node": "关税结论"}]',
         confidence=0.6,
         topic="关税",
-        await_verification=False,  # 结论链不进池
+        status="concluded",  # 结论链不进池
     )
     old = await repo.research.save_causal_link(
         report_id=report.id,

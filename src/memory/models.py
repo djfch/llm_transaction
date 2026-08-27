@@ -198,13 +198,15 @@ class ResearchReport(BaseModel):
     """研报报告头：逐标的结论统一存于 ResearchAssetView。
 
     report_type 取值：manual（手动触发）/ asia_open / europe_open / us_open（三盘定时 slot）；
-    schema_version 固定为 2；error 非空表示本次研报失败且没有逐标的结论；
-    round_id 为产生本研报的审计轮 id。
+    schema_version 取值：2（历史代际）/ 3（当前代际，issue #113 起写入）；error 非空表示
+    本次研报失败且没有逐标的结论；round_id 为产生本研报的审计轮 id；
+    research_prompt_md5 为生成本研报所用的 research_prompt.md 正文 md5（与
+    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）。
     """
 
     id: int
     report_type: str
-    schema_version: int = 2
+    schema_version: int = 3
     summary: str = ""
     cross_market_view: str = ""
     global_risks_json: str = "[]"
@@ -212,6 +214,7 @@ class ResearchReport(BaseModel):
     error: str = ""
     round_id: str = ""
     created_at: float
+    research_prompt_md5: str = ""
 
 
 class ResearchAssetView(BaseModel):
@@ -231,21 +234,17 @@ class ResearchAssetView(BaseModel):
     risks_json: str = "[]"
     narrative: str = ""
     market_context_json: str = "{}"
-    verify_result: str = ""
     created_at: float
 
 
 class CausalLink(BaseModel):
-    """因果链（分析笔记）：研报 agent 提交的链式因果推导，复盘验证状态。
+    """因果链（分析笔记）：研报 agent 提交的链式因果推导。
 
     chain_json 为有序节点链 JSON（node/kind/timeline_id）；
-    status 取值：pending（待验证）/ verified（复盘确认）/ failed（复盘否决）/
+    status 取值：tracking（待跟踪，事件仍在发展）/ concluded（已结论）/
     superseded（已被更新版替代）；
-    broken_at 为断点节点下标（复盘标记，None = 未定位）；
     topic 为事件主题（同主题多次提交聚合成族）；
-    supersedes_id 为新链声明的替代目标（版本化：旧链保留留档）；
-    await_verification 为 agent 显式声明（True=待验证中间态，允许半成品，
-    进入未闭合监控池；False=结论链）。
+    supersedes_id 为新链声明的替代目标（版本化：旧链保留留档）。
     """
 
     id: int
@@ -253,9 +252,51 @@ class CausalLink(BaseModel):
     chain_json: str
     confidence: float
     evidence_json: str = "[]"
-    status: str = "pending"
-    broken_at: int | None = None
+    status: str = "tracking"
     topic: str = ""
     supersedes_id: int | None = None
-    await_verification: bool = True
     created_at: float
+
+
+class ResearchReview(BaseModel):
+    """研报复盘记录：复盘 agent 对一份研报中单个合约结论的批改（issue #113）。
+
+    review_report_id 指向产生本记录的复盘报告；report_id+contract 定位被复盘的
+    逐标的结论；同一份复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘。
+    direction_relation（方向关系评价）/reasoning_quality（推理质量评价）/
+    confidence_assessment（置信度合规评价）/improvement_advice（改进建议）为复盘
+    agent 的批改文本；evidence_reviews_json 为逐条依据评价列表（与原研报 evidence
+    一一对应，后端强制 1:1 校验）；outcome_json 为代码按历史 K 线计算的客观行情
+    结果（LLM 不可写）。
+    """
+
+    id: int
+    review_report_id: int
+    report_id: int
+    contract: str
+    direction_relation: str = ""
+    reasoning_quality: str = ""
+    evidence_reviews_json: str = "[]"
+    confidence_assessment: str = ""
+    improvement_advice: str = ""
+    outcome_json: str = "{}"
+    created_at: float
+
+
+class ResearchPromptVersion(BaseModel):
+    """研报提示词版本：content 为 research_prompt.md 正文完整原文（issue #113）。
+
+    md5 与 research_reports.research_prompt_md5 关联（研报落库时记录所用正文 md5）。
+    created_by 取值：human（人工修改/初始播种）/ review_agent（复盘 agent 改写）/
+    rollback（回滚）。review_report_id 指向触发本版本的复盘报告（人工版本为 None）。
+    status 取值：applied 已生效 / draft 草稿 / discarded 已废弃。
+    """
+
+    id: int
+    content: str
+    md5: str
+    created_by: str
+    reason: str
+    review_report_id: int | None = None
+    created_at: float
+    status: str = "applied"

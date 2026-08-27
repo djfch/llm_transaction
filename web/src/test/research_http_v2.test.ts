@@ -10,7 +10,7 @@ describe('研报 v2 端点适配', () => {
       report_type: 'manual',
       error: '',
       round_id: 'r-v2',
-      schema_version: 2,
+      schema_version: 3,
       summary: '市场分化',
       cross_market_view: 'BTC 强于 ETH',
       created_at: 1784595600,
@@ -39,7 +39,6 @@ describe('研报 v2 端点适配', () => {
             evidence: [{ point: '放量增仓', source: '4h' }],
             risks: ['费率偏高'],
             narrative: 'BTC 研判',
-            verify_result: '',
             created_at: 1784595600,
           }],
           causal_links: [],
@@ -54,7 +53,7 @@ describe('研报 v2 端点适配', () => {
     }))
 
     const listed = (await httpApi.getResearchReports(0, 5)).items[0]
-    expect(listed.schemaVersion).toBe(2)
+    expect(listed.schemaVersion).toBe(3)
     expect(listed.assetViews?.[0].contract).toBe('BTC_USDT')
     const detail = await httpApi.getResearchReport(9)
     expect(detail.globalRisks).toEqual(['宏观波动'])

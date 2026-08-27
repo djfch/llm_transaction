@@ -157,7 +157,7 @@ async def _section_timeline(deps: ResearchToolDeps, hours: int = 24) -> str:
 
 
 async def _section_judgments(deps: ResearchToolDeps) -> str:
-    """读取近七天研报并按报告与合约渲染带验证结果的历史判断段落。
+    """读取近七天研报并按报告与合约渲染历史判断段落。
 
     参数：
         deps: ResearchToolDeps，提供研报仓库的共享依赖
@@ -168,7 +168,7 @@ async def _section_judgments(deps: ResearchToolDeps) -> str:
     reports = await deps.repo.research.list_reports(7)
     if not reports:
         return "## 历史研报结论\n（暂无记录，这是你的首次研报）"
-    title = f"## 历史研报结论（近 7 天，{len(reports)} 份，含验证结果）"
+    title = f"## 历史研报结论（近 7 天，{len(reports)} 份）"
     return await render_judgments(deps.repo.research, reports, title)
 
 

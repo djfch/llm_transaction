@@ -431,7 +431,6 @@ interface RawResearchAssetDetail extends RawResearchAssetSummary {
   evidence?: unknown
   risks?: unknown
   narrative: string
-  verify_result: string
   created_at: number
 }
 
@@ -478,7 +477,7 @@ function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
     ...adaptLLMIdentity(raw),
   }
 }
-/** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御）；broken_at 为断点节点下标 */
+/** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御） */
 interface RawCausalLink {
   id: number
   report_id: number
@@ -486,10 +485,8 @@ interface RawCausalLink {
   confidence: number | string
   evidence?: unknown
   status: string
-  broken_at?: number | null
   topic?: string
   supersedes_id?: number | null
-  await_verification?: unknown
   created_at: number
 }
 
@@ -560,16 +557,9 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
       : [],
     confidence: Number(raw.confidence),
     evidence: adaptStringList(raw.evidence),
-    status: raw.status ?? 'pending',
-    brokenAt: raw.broken_at ?? null,
+    status: raw.status ?? 'tracking', // 契约必有；防御 null 时按待跟踪灰显
     topic: typeof raw.topic === 'string' ? raw.topic : '',
     supersedesId: raw.supersedes_id ?? null,
-    // 防御解析：缺字段（旧数据）按待验证；布尔/0-1/常见字符串形态均识别
-    awaitVerification:
-      raw.await_verification !== false &&
-      raw.await_verification !== 0 &&
-      raw.await_verification !== 'false' &&
-      raw.await_verification !== '0',
     time: new Date(raw.created_at * 1000).toISOString(),
   }
 }
@@ -580,7 +570,6 @@ function adaptResearchAssetDetail(raw: RawResearchAssetDetail): ResearchAssetDet
     evidence: adaptEvidenceList(raw.evidence),
     risks: adaptStringList(raw.risks),
     narrative: raw.narrative ?? '',
-    verifyResult: raw.verify_result ?? '',
     time: new Date((raw.created_at ?? 0) * 1000).toISOString(),
   }
 }

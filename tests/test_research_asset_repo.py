@@ -63,7 +63,7 @@ async def test_save_report_bundle_and_query_latest_asset(repo: Repo) -> None:
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None，断言 schema_version=2、摘要与标的顺序一致，且 ETH 最新结论的行情上下文原样读回
+        None，断言 schema_version=3、摘要与标的顺序一致，且 ETH 最新结论的行情上下文原样读回
     """
     report, views = await repo.research.save_report_bundle(
         report_type="us_open",
@@ -75,7 +75,7 @@ async def test_save_report_bundle_and_query_latest_asset(repo: Repo) -> None:
         asset_views=[_asset("BTC_USDT"), _asset("ETH_USDT")],
     )
 
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.summary == "美盘逐标的研报"
     assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
     stored = await repo.research.list_asset_views_by_report(report.id)
@@ -206,7 +206,7 @@ async def test_failed_report_uses_current_schema_without_asset_views(repo: Repo)
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None，断言失败报告 schema_version=2、error 原样、summary 为空且逐标的结论列表为空
+        None，断言失败报告 schema_version=3、error 原样、summary 为空且逐标的结论列表为空
     """
     failed = await repo.research.save_failed_report(
         report_type="manual",
@@ -216,7 +216,7 @@ async def test_failed_report_uses_current_schema_without_asset_views(repo: Repo)
 
     loaded = await repo.research.get_report(failed.id)
     assert loaded is not None
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == 3
     assert loaded.error == "ValueError: 输出无效"
     assert loaded.summary == ""
     assert await repo.research.list_asset_views_by_report(failed.id) == []

@@ -32,7 +32,6 @@ describe('逐标的研报展示', () => {
           evidence: ['放量增仓（4h）'],
           risks: ['资金费率偏高'],
           narrative: 'BTC 结构获得催化验证',
-          verifyResult: '',
           time: new Date(0).toISOString(),
         }, {
           ...asset,
@@ -43,7 +42,6 @@ describe('逐标的研报展示', () => {
           evidence: [],
           risks: [],
           narrative: '数据不足，维持中性。',
-          verifyResult: '',
           time: new Date(0).toISOString(),
         }]}
       />,

@@ -63,8 +63,8 @@ def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
 
     返回：
         dict[str, Any]：逐标的详情；在摘要 8 键之上追加 evidence（证据列表）、
-        risks（风险列表）、narrative（研判叙述）、verify_result（复盘验证结果）、
-        created_at（创建时间戳）；evidence/risks 由 *_json 字段解析为对象
+        risks（风险列表）、narrative（研判叙述）、created_at（创建时间戳）；
+        evidence/risks 由 *_json 字段解析为对象
     """
     item = _asset_summary(view)
     item.update(
@@ -72,7 +72,6 @@ def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
             "evidence": _parse_json_field(view.evidence_json),
             "risks": _parse_json_field(view.risks_json),
             "narrative": view.narrative,
-            "verify_result": view.verify_result,
             "created_at": view.created_at,
         }
     )
@@ -141,10 +140,8 @@ def _causal_link_item(link: CausalLink) -> dict[str, Any]:
         "confidence": link.confidence,
         "evidence": _parse_json_field(link.evidence_json),
         "status": link.status,
-        "broken_at": link.broken_at,
         "topic": link.topic,
         "supersedes_id": link.supersedes_id,
-        "await_verification": link.await_verification,
         "created_at": link.created_at,
     }
 

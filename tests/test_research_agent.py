@@ -1175,9 +1175,8 @@ async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, t
     links = await repo.research.list_causal_links()
     assert len(links) == 1
     assert links[0].report_id == result["report_id"]
-    assert links[0].status == "pending"
+    assert links[0].status == "tracking"
     assert links[0].topic == "油价"  # topic 透传
-    assert links[0].await_verification is True  # 默认待验证
     assert links[0].supersedes_id is None
     chain = json.loads(links[0].chain_json)
     assert [n["node"] for n in chain] == ["油价上涨", "通胀预期上升", "BTC 承压"]
@@ -1588,7 +1587,7 @@ async def test_v2_round_saves_every_whitelist_asset(
     assert result["ok"] is True
     assert result["asset_count"] == 2
     report = await repo.research.get_report(result["report_id"])
-    assert report is not None and report.schema_version == 2
+    assert report is not None and report.schema_version == 3
     views = await repo.research.list_asset_views_by_report(report.id)
     assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
     assert json.loads(views[0].market_context_json)["contract"] == "BTC_USDT"

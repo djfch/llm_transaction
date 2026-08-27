@@ -30,11 +30,9 @@ const causalLinks: CausalLinkView[] = [
     ],
     confidence: 0.72,
     evidence: ['金十日历：CPI 公布值低于预期'],
-    status: 'verified',
-    brokenAt: null,
+    status: 'concluded',
     topic: 'CPI',
     supersedesId: null,
-    awaitVerification: false,
     time: nowIso(30),
   },
   {
@@ -44,10 +42,8 @@ const causalLinks: CausalLinkView[] = [
     confidence: 0.5,
     evidence: ['金十快讯'],
     status: 'superseded',
-    brokenAt: null,
     topic: '美联储',
     supersedesId: null,
-    awaitVerification: true,
     time: nowIso(30),
   },
   {
@@ -59,11 +55,9 @@ const causalLinks: CausalLinkView[] = [
     ],
     confidence: 0.55,
     evidence: ['CME FedWatch'],
-    status: 'pending',
-    brokenAt: null,
+    status: 'tracking',
     topic: '美联储',
     supersedesId: 3,
-    awaitVerification: true,
     time: nowIso(29),
   },
 ]
@@ -86,7 +80,6 @@ function asset(
     evidence: ['日线与 4 小时结构尚未形成突破'],
     risks: ['事件可能打破震荡结构'],
     narrative: contract + ' 暂无重要催化，等待价格、成交量与持仓量共同确认。',
-    verifyResult: '',
     time,
     ...overrides,
   }
@@ -96,7 +89,7 @@ const researchReports: ResearchReportDetail[] = [
   {
     id: 2,
     reportType: 'manual',
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary: '',
     crossMarketView: '',
     globalRisks: [],
@@ -113,7 +106,7 @@ const researchReports: ResearchReportDetail[] = [
   {
     id: 1,
     reportType: 'asia_open',
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary: '亚盘风险偏好改善，BTC 技术结构获得确认。',
     crossMarketView: 'BTC 强于 ETH。',
     globalRisks: ['美联储官员讲话偏鹰', '亚盘流动性偏薄'],
@@ -181,7 +174,7 @@ function runMockResearch(reportType: string, hours: number): { id: number; round
   researchReports.unshift({
     id,
     reportType,
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary: '白名单合约整体处于震荡观察阶段，暂无高置信方向。',
     crossMarketView: 'BTC 与 ETH 同步缺少增量催化。',
     globalRisks: ['临近美盘开盘，事件驱动风险上升'],

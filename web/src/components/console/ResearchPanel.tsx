@@ -35,11 +35,10 @@ const REPORT_TYPE_LABELS: Record<string, string> = {
   us_open: '美盘',
 }
 
-/** 因果链验证状态 → 文案与配色（未知值原样灰显） */
+/** 因果链状态 → 文案与配色（未知值原样灰显） */
 const LINK_STATUS: Record<string, { label: string; className: string }> = {
-  pending: { label: '待验证', className: 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400' },
-  verified: { label: '已确认', className: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300' },
-  failed: { label: '已否决', className: 'border-rose-400/40 bg-rose-400/10 text-rose-300' },
+  tracking: { label: '待跟踪', className: 'border-zinc-600/50 bg-zinc-700/30 text-zinc-400' },
+  concluded: { label: '已结论', className: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300' },
   superseded: { label: '已被替代', className: 'border-zinc-700/40 bg-zinc-800/30 text-zinc-500' },
 }
 
@@ -102,7 +101,7 @@ function ChainNodeChip({ node }: { node: ChainNode }) {
   )
 }
 
-/** 一条因果链：状态/置信度/断点小字 + chip 节点链（→ 串联）+ 支撑证据（有值时） */
+/** 一条因果链：状态/置信度小字 + chip 节点链（→ 串联）+ 支撑证据（有值时） */
 function CausalLinkCard({
   link,
   replacedById,
@@ -118,15 +117,7 @@ function CausalLinkCard({
     <li className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className={`${BADGE_BASE} ${status.className}`}>{status.label}</span>
-        {!link.awaitVerification && link.status !== 'superseded' && (
-          <span className={`${BADGE_BASE} border-violet-500/30 bg-violet-500/10 text-violet-300`}>
-            结论
-          </span>
-        )}
         <span className="text-[10px] tabular-nums text-zinc-500">链置信度 {Math.round(link.confidence * 100)}%</span>
-        {link.brokenAt !== null && (
-          <span className="text-[10px] text-rose-400/80">断点：第 {link.brokenAt + 1} 个节点</span>
-        )}
         {link.supersedesId !== null && (
           <span className="text-[10px] text-amber-400/70">替代链#{link.supersedesId}</span>
         )}

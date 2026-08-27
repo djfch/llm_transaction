@@ -74,7 +74,7 @@ class ResearchAssetRepoMixin:
             cur = await conn.execute(
                 "INSERT INTO research_reports(report_type,schema_version,summary,"
                 "cross_market_view,global_risks_json,raw_json,error,round_id,created_at)"
-                " VALUES(?,2,?,?,?,?,?,?,?)",
+                " VALUES(?,3,?,?,?,?,?,?,?)",
                 (
                     report_type,
                     summary,
@@ -97,7 +97,7 @@ class ResearchAssetRepoMixin:
         report = ResearchReport(
             id=report_id,
             report_type=report_type,
-            schema_version=2,
+            schema_version=3,
             summary=summary,
             cross_market_view=cross_market_view,
             global_risks_json=global_risks_json,
@@ -131,13 +131,13 @@ class ResearchAssetRepoMixin:
             cur = await conn.execute(
                 "INSERT INTO research_asset_views(report_id,contract,direction,confidence,horizon,"
                 "market_regime,technical_confirmation,basis_type,data_status,evidence_json,"
-                "risks_json,narrative,market_context_json,verify_result,created_at)"
+                "risks_json,narrative,market_context_json,created_at)"
                 " VALUES(:report_id,:contract,:direction,:confidence,:horizon,:market_regime,"
                 ":technical_confirmation,:basis_type,:data_status,:evidence_json,:risks_json,"
-                ":narrative,:market_context_json,'',:created_at)",
+                ":narrative,:market_context_json,:created_at)",
                 values,
             )
-            views.append(ResearchAssetView(id=cur.lastrowid or 0, verify_result="", **values))
+            views.append(ResearchAssetView(id=cur.lastrowid or 0, **values))
         return views
 
     async def list_asset_views_by_report(

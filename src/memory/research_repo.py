@@ -10,8 +10,8 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 - causal_links 由工具 submit_causal_links 校验暂存、研报落库后由 agent 代码回填
   report_id 批量落库（LLM 无法预知本轮研报 id，H1 修复后口径）；
 - causal_links 版本化：新链可声明 supersedes_id 替代旧链（同事务把旧链 status 标记
-  superseded，旧链保留留档）；待验证链（await_verification=1）进入未闭合监控池，
-  由预注入持续跟进，直到被替代或复盘验证结案。
+  superseded，旧链保留留档）；待跟踪链（status=tracking）进入待跟踪监控池，
+  由预注入持续跟进，直到被替代或提交结论版结案。
 """
 
 from __future__ import annotations
@@ -169,14 +169,14 @@ class ResearchRepo(ResearchAssetRepoMixin):
         cur = await self._conn.execute(
             "INSERT INTO research_reports(report_type,schema_version,summary,"
             "cross_market_view,global_risks_json,raw_json,error,round_id,created_at)"
-            " VALUES(?,2,?,?,?,?,?,?,?)",
+            " VALUES(?,3,?,?,?,?,?,?,?)",
             (report_type, "", "", "[]", raw_json, error, round_id, ts),
         )
         await self._conn.commit()
         return ResearchReport(
             id=cur.lastrowid or 0,
             report_type=report_type,
-            schema_version=2,
+            schema_version=3,
             raw_json=raw_json,
             error=error,
             round_id=round_id,
@@ -317,9 +317,9 @@ class ResearchRepo(ResearchAssetRepoMixin):
         evidence_json: str = "[]",
         topic: str = "",
         supersedes_id: int | None = None,
-        await_verification: bool = True,
+        status: str = "tracking",
     ) -> CausalLink:
-        """落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）。
+        """落库一条因果链；status 默认 tracking（待跟踪，事件仍在发展）。
 
         版本化：supersedes_id 非空时同一事务内先插入新链、再把旧链 status 标记为
         superseded（旧链保留留档，复盘可对比各版本）；任一步失败整体不 commit
@@ -332,25 +332,23 @@ class ResearchRepo(ResearchAssetRepoMixin):
             evidence_json: str，因果链证据 JSON
             topic: str，因果链主题
             supersedes_id: int | None，被当前链替代的旧链编号
-            await_verification: bool，该链是否仍需后续验证
+            status: str，链状态（tracking 待跟踪 / concluded 已结论）
 
         返回：
-            CausalLink：落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）
+            CausalLink：落库一条因果链；status 默认 tracking（待跟踪，事件仍在发展）
         """
         cur = await self._conn.execute(
             "INSERT INTO causal_links(report_id,chain_json,confidence,evidence_json,"
-            "status,broken_at,topic,supersedes_id,await_verification,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "status,topic,supersedes_id,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (
                 report_id,
                 chain_json,
                 confidence,
                 evidence_json,
-                "pending",
-                None,
+                status,
                 topic,
                 supersedes_id,
-                int(bool(await_verification)),
                 _now(),
             ),
         )
@@ -365,9 +363,9 @@ class ResearchRepo(ResearchAssetRepoMixin):
             chain_json=chain_json,
             confidence=confidence,
             evidence_json=evidence_json,
+            status=status,
             topic=topic,
             supersedes_id=supersedes_id,
-            await_verification=bool(await_verification),
             created_at=_now(),
         )
 
@@ -385,20 +383,19 @@ class ResearchRepo(ResearchAssetRepoMixin):
         return CausalLink(**dict(row)) if row else None
 
     async def list_pending_causal_links(self, limit: int = 10) -> list[CausalLink]:
-        """未闭合链：待验证声明（await_verification=1）且未被替代（status=pending）。
+        """待跟踪链（status=tracking）：事件仍在发展、未被替代也未结论的当前版。
 
         预注入用：最新在前取 limit 条后按 id 正序返回；不按时间淘汰——事件发展
-        需要时间，直到被替代或复盘盖章才闭合。
+        需要时间，直到被替代或提交结论版才结案。
 
         参数：
             limit: int，每页最多返回的记录数量
 
         返回：
-            list[CausalLink]：未闭合链：待验证声明（await_verification=1）且未被替代（status=pending）
+            list[CausalLink]：待跟踪链（status=tracking）：事件仍在发展、未被替代也未结论的当前版
         """
         cur = await self._conn.execute(
-            "SELECT * FROM causal_links WHERE status='pending' AND await_verification=1"
-            " ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM causal_links WHERE status='tracking' ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         rows = [CausalLink(**dict(r)) for r in await cur.fetchall()]
