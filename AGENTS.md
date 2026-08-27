@@ -26,8 +26,8 @@ src/
   agent/                     # LLM 循环、Provider 抽象、工具集（交易类工具在 tool_trading）、成交落库与对账（fill_persist/fill_sync）
   audit/                     # 审计溯源与日志
   scheduler/                 # 唤醒调度
-  review/                    # 复盘 agent：只读工具 + 策略/指标短名单版本化
-  research/                  # 研报 agent（前瞻）：数据源（金十/律动 MCP + FRED + Polymarket）+ 12 工具（11 只读，含逐标的 4h/1d 市场快照 + submit_causal_links 唯一写）+ 逐标的结论与输入快照 + 预注入/事实层/因果链版本化 + 三盘调度 + 按合约方向闸门
+  review/                    # 复盘 agent：只读工具 + 策略/指标短名单版本化 + 研报复盘记录与研报提示词草稿修订（issue #113）
+  research/                  # 研报 agent（前瞻）：数据源（金十/律动 MCP + FRED + Polymarket）+ 12 工具（11 只读，含逐标的 4h/1d 市场快照 + submit_causal_links 唯一写）+ 逐标的结论与输入快照 + 预注入/事实层/因果链版本化 + 提示词版本化（prompt_store）+ 三盘调度 + 按合约方向闸门
   notify/                    # Telegram 通知
   server/                    # FastAPI 监控 API + WebSocket
   main.py / bootstrap.py     # 主入口 / 应用组装（配置、网关、行情、风控、Agent、调度、通知、监控装配）

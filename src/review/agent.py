@@ -5,7 +5,7 @@
 - 正常路径：wake_source='review' 开审计轮 → 中文简报（区间 + 当前策略全文 +
   代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本经 bundle 单事务落
   review_reports（含代码计算的研报复盘统计段）+ research_reviews →
-  有修订则版本↔报告互相关联（策略书与指标短名单各自判空关联）→ 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
+  有修订则版本↔报告互相关联（策略书/指标短名单/研报提示词各自判空关联）→ 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
 - WS 事件（notify_event 注入时）：begin_round 后广播 review_round_start，
   结束审计轮后广播 review_round（成功 ok=True / _fail 路径 ok=False）；
   事件失败只记日志绝不影响复盘；provider None 提前返回时零事件；
@@ -13,7 +13,7 @@
   绝不向上抛，确保复盘失败不影响交易决策循环；唯独外部取消（asyncio.CancelledError，
   如停机 shutdown）原样抛出保持取消语义——成功报告落库前取消/异常走同一失败收尾；
   成功报告落库后，取消与普通异常同口径：禁止双写失败报告，经 _complete_interrupted
-  补齐剩余幂等收尾（策略/指标版本关联重放 + 成功闭合审计 + ok=True 轮末事件），
+  补齐剩余幂等收尾（策略/指标/研报提示词版本关联重放 + 成功闭合审计 + ok=True 轮末事件），
   取消随后原样抛出、普通异常按成功结果返回；打断可能掐在「成功报告 COMMIT 已执行、
   保存函数未返回」的窗口（内存 report_id 仍为 None），取消与普通异常分支同口径
   不信内存布尔位，按 round_id 反查数据库定口径（反查失败记日志后回落失败收尾）；
@@ -43,6 +43,7 @@ from src.market.indicator_service import IndicatorService
 from src.memory.models import ReviewReport
 from src.memory.repo import Repo
 from src.review.bundle import save_review_bundle
+from src.review.drafts import apply_drafts, discard_drafts
 from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader, render_tool_docs
 from src.review.stats import compute_review_stats, format_stats_text
@@ -143,6 +144,7 @@ class ReviewAgent:
         indicator_config_store: IndicatorConfigStore | None = None,
         watchlist: Iterable[str] | None = None,
         candle_source: Any | None = None,
+        research_prompt_store: Any | None = None,
     ) -> None:
         """组装复盘 agent：全部依赖构造期注入，保存为实例属性。
 
@@ -166,6 +168,9 @@ class ReviewAgent:
             candle_source: Any | None，K 线只读来源（CandleSource 窄协议，生产装配
                 RecentWindowCandleSource 包网关）；省略时研报复盘案例的客观结果降级
                 为 unavailable（不拖垮复盘）
+            research_prompt_store: Any | None，研报提示词版本存储（ResearchPromptStore
+                窄协议：revise/apply_version/discard_draft/current/list_versions/
+                get_version，issue #113）；省略时研报提示词工具降级为中文提示
 
         返回：
             None，仅把依赖保存为实例属性（构造期装配，无其他副作用）
@@ -186,6 +191,7 @@ class ReviewAgent:
         # 每轮 run 构造 deps 时才拍快照，避免固化启动时名单（热更新后复盘看不到新合约）
         self._watchlist = watchlist
         self._candle_source = candle_source  # None（未装配）时案例客观结果降级 unavailable
+        self._research_prompt_store = research_prompt_store  # None（未装配）时提示词工具降级
 
     def set_provider(self, provider: _ProviderProtocol) -> None:
         """热替换复盘使用的 LLM provider。
@@ -247,6 +253,7 @@ class ReviewAgent:
                 indicator_config_store=self._indicator_config_store,
                 watchlist=tuple(self._watchlist or ()),  # 每轮对活名单拍快照，跟随热更新
                 candle_source=self._candle_source,  # 研报复盘案例客观行情的 K 线来源
+                research_prompt_store=self._research_prompt_store,  # 研报提示词版本存储
             )
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
@@ -344,11 +351,7 @@ class ReviewAgent:
         return _success_result(report, round_id)
 
     async def _apply_drafts(self, deps: ReviewToolDeps) -> None:
-        """统一生效本轮草稿：过期拒绝 + 失败收集（issue #100）。
-
-        生效前比对最新 applied 版本编号——人工在复盘轮内保存过更高版本时，
-        旧草稿视为已被取代，直接废弃而非覆盖人工内容；单个 apply 失败不中断
-        其余草稿，失败 id 记入 deps.apply_failed_ids 供事件与告警暴露。
+        """统一生效本轮草稿：过期拒绝 + 失败收集（issue #100，实现见 review/drafts.py）。
 
         参数：
             deps: ReviewToolDeps，本轮工具依赖
@@ -356,37 +359,7 @@ class ReviewAgent:
         返回：
             None，生效/废弃就地完成；失败 id 就地记入 deps.apply_failed_ids
         """
-        latest_strategy = await self._repo.review.latest_applied_strategy_version()
-        for draft_id in deps.strategy_draft_ids:
-            if latest_strategy is not None and draft_id < latest_strategy.id:
-                logger.warning(
-                    "策略草稿 v%d 已被更高的人工版本 v%d 取代，废弃不生效",
-                    draft_id,
-                    latest_strategy.id,
-                )
-                await deps.store.discard_draft(draft_id)
-                continue
-            try:
-                await deps.store.apply_version(draft_id)
-            except Exception:
-                deps.apply_failed_ids.append(draft_id)
-                logger.exception("策略草稿生效失败（draft_id=%s）", draft_id)
-        if deps.indicator_config_store is not None:
-            latest_cfg = await self._repo.indicator_config.latest_applied_version()
-            for draft_id in deps.indicator_draft_ids:
-                if latest_cfg is not None and draft_id < latest_cfg.id:
-                    logger.warning(
-                        "指标配置草稿 v%d 已被更高的人工版本 v%d 取代，废弃不生效",
-                        draft_id,
-                        latest_cfg.id,
-                    )
-                    await deps.indicator_config_store.discard_draft(draft_id)
-                    continue
-                try:
-                    await deps.indicator_config_store.apply_version(draft_id)
-                except Exception:
-                    deps.apply_failed_ids.append(draft_id)
-                    logger.exception("指标配置草稿生效失败（draft_id=%s）", draft_id)
+        await apply_drafts(self._repo, deps)
 
     async def _discard_drafts(self, deps: ReviewToolDeps) -> None:
         """报告失败/取消时废弃本轮全部草稿版本；文件从未被动过，无需回滚（issue #73）。
@@ -397,17 +370,7 @@ class ReviewAgent:
         返回：
             None，逐个置 discarded；单个失败只记日志不中断其余废弃
         """
-        for draft_id in deps.strategy_draft_ids:
-            try:
-                await deps.store.discard_draft(draft_id)
-            except Exception:
-                logger.exception("策略草稿废弃失败 draft_id=%s", draft_id)
-        if deps.indicator_config_store is not None:
-            for draft_id in deps.indicator_draft_ids:
-                try:
-                    await deps.indicator_config_store.discard_draft(draft_id)
-                except Exception:
-                    logger.exception("指标草稿废弃失败 draft_id=%s", draft_id)
+        await discard_drafts(deps)
 
     async def _finalize_success(
         self, deps: ReviewToolDeps, report_id: int, round_id: str, raw_parts: list[str]
@@ -437,6 +400,10 @@ class ReviewAgent:
         if deps.indicator_config_version_id is not None:  # 指标短名单版本同模式关联
             await self._repo.indicator_config.attach_report_to_version(
                 deps.indicator_config_version_id, report_id
+            )
+        if deps.research_prompt_version_id is not None:  # 研报提示词版本同模式关联（issue #113）
+            await self._repo.research_prompt.attach_report_to_version(
+                deps.research_prompt_version_id, report_id
             )
         await self._audit.end_round(round_id, "\n".join(raw_parts))
 
@@ -488,6 +455,16 @@ class ReviewAgent:
                 logger.exception(
                     "复盘收尾补关联指标版本失败（version_id=%s）",
                     deps.indicator_config_version_id,
+                )
+        if deps.research_prompt_version_id is not None:  # 研报提示词版本同模式补关联
+            try:
+                await self._repo.research_prompt.attach_report_to_version(
+                    deps.research_prompt_version_id, report_id
+                )
+            except Exception:
+                logger.exception(
+                    "复盘收尾补关联研报提示词版本失败（version_id=%s）",
+                    deps.research_prompt_version_id,
                 )
         if not audit_closed:
             try:

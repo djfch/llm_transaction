@@ -48,6 +48,7 @@ class ResearchAssetRepoMixin:
         raw_json: str,
         round_id: str,
         asset_views: list[dict],
+        research_prompt_md5: str = "",
     ) -> tuple[ResearchReport, list[ResearchAssetView]]:
         """原子保存当前报告头与全部逐标的结论。
 
@@ -59,6 +60,8 @@ class ResearchAssetRepoMixin:
             raw_json: str，模型原始输出 JSON
             round_id: str，研报轮次标识
             asset_views: list[dict]，全部逐标的结论数据
+            research_prompt_md5: str，生成本研报所用的 research_prompt.md 正文 md5
+                （与 research_prompt_versions.md5 关联；缺省空串表示未接线）
         返回：
             tuple[ResearchReport, list[ResearchAssetView]]，原子保存当前报告头与全部逐标的结论
         异常：
@@ -73,8 +76,9 @@ class ResearchAssetRepoMixin:
             await conn.execute("BEGIN IMMEDIATE")
             cur = await conn.execute(
                 "INSERT INTO research_reports(report_type,schema_version,summary,"
-                "cross_market_view,global_risks_json,raw_json,error,round_id,created_at)"
-                " VALUES(?,3,?,?,?,?,?,?,?)",
+                "cross_market_view,global_risks_json,raw_json,error,round_id,created_at,"
+                "research_prompt_md5)"
+                " VALUES(?,3,?,?,?,?,?,?,?,?)",
                 (
                     report_type,
                     summary,
@@ -84,6 +88,7 @@ class ResearchAssetRepoMixin:
                     "",
                     round_id,
                     created_at,
+                    research_prompt_md5,
                 ),
             )
             report_id = cur.lastrowid or 0
@@ -104,6 +109,7 @@ class ResearchAssetRepoMixin:
             raw_json=raw_json,
             round_id=round_id,
             created_at=created_at,
+            research_prompt_md5=research_prompt_md5,
         )
         return report, views
 

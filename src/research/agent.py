@@ -227,7 +227,13 @@ class ResearchAgent:
             )
             payload = await wait_with_raw(retry, self._timeout, self._audit, round_id, raw_parts)
             report, asset_count = await persist_payload(
-                self._repo, report_type=report_type, payload=payload, round_id=round_id, deps=deps
+                self._repo,
+                report_type=report_type,
+                payload=payload,
+                round_id=round_id,
+                deps=deps,
+                # 落库所用提示词正文 md5：与版本表同口径，供复盘按版本归因（issue #113）
+                research_prompt_md5=self._prompts.body_md5(),
             )
             report_id = report.id
             # 收尾（因果链回填 + end_round）可被打断：report_id 已置位，remaining_links

@@ -1468,3 +1468,194 @@ async def test_run_research_review_end_to_end(env):
     round_row = await env.repo.latest_audit_round("paper")
     assert round_row is not None
     assert "研报复盘" in (round_row.context_snapshot or "")  # 简报含研报复盘工作引导
+
+
+# ---------- 研报提示词草稿流（issue #113 C6） ----------
+
+
+def _research_prompt_store(env, tmp_path):
+    """构造已播种 v1 的研报提示词版本存储（供复盘 agent 装配）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象（取其 repo 落版本）
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        ResearchPromptStore，绑定临时提示词文件与仓储的存储实例（已完成 v1 播种）
+    """
+    from src.research.prompt_store import ResearchPromptStore
+
+    path = tmp_path / "research_prompt.md"
+    path.write_text("初始研报提示词：" + "先事实后判断。" * 20, encoding="utf-8")
+    store = ResearchPromptStore(path, env.repo)
+    return store
+
+
+def _prompt_revision_provider(new_prompt: str) -> StubProvider:
+    """构造「提交研报提示词修订 → 最终文本」的复盘脚本。
+
+    参数：
+        new_prompt: str，本轮要提交的研报提示词新全文
+
+    返回：
+        StubProvider，依次回放修订工具调用与最终文本的两段式 stub
+    """
+    return StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_research_prompt_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "研报复盘修订"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-2"),
+        ]
+    )
+
+
+async def test_research_prompt_revision_applied_on_success(env, tmp_path):
+    """研报提示词草稿随报告成功生效：文件更新、版本 applied、关联复盘报告 id。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言文件/状态/关联三件套
+    """
+    store = _research_prompt_store(env, tmp_path)
+    await store.seed_if_empty()  # v1
+    new_prompt = "修订后研报提示词：" + "逐条核对证据，先找反对材料。" * 10
+    agent = _make_agent(env, _prompt_revision_provider(new_prompt), research_prompt_store=store)
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    assert store.current() == new_prompt  # 成功提交后文件更新
+    version = await env.repo.research_prompt.get_version(2)  # v1 种子，v2 本轮草稿
+    assert version is not None and version.status == "applied"
+    assert version.created_by == "review_agent"
+    reports, _ = await env.repo.review.list_review_reports_page(10, 0)
+    assert version.review_report_id == reports[0].id  # 版本↔报告关联已回填
+
+
+async def test_failed_round_discards_research_prompt_draft(env, tmp_path):
+    """复盘失败时研报提示词草稿被废弃：文件不变、版本状态 discarded。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言 provider 崩溃后文件保持旧内容、草稿状态为 discarded
+    """
+    store = _research_prompt_store(env, tmp_path)
+    await store.seed_if_empty()
+    new_prompt = "不会生效的提示词：" + "注定失败。" * 30
+    provider = _prompt_revision_provider(new_prompt)
+    agent = _make_agent(env, provider, research_prompt_store=store)
+    original_chat = provider.chat
+    calls = {"n": 0}
+
+    async def chat_boom_late(system, messages, tools):
+        """首轮正常返回工具调用，次轮直接崩溃（模拟报告前 LLM 故障）。"""
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("llm crashed")
+        return await original_chat(system, messages, tools)
+
+    agent._provider.chat = chat_boom_late
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is False
+    assert store.current().startswith("初始研报提示词")  # 文件从未被动过
+    drafts = [
+        v for v in await env.repo.research_prompt.list_versions() if v.created_by == "review_agent"
+    ]
+    assert drafts and all(v.status == "discarded" for v in drafts)
+
+
+async def test_cancel_at_prompt_attach_replays_completion(env, tmp_path, monkeypatch):
+    """取消掐在研报提示词版本 attach：补全收尾重放幂等关联，审计成功闭合，取消原样传播。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，向研报提示词版本 attach 注入一次性取消
+
+    返回：
+        None，断言取消传播且补全收尾副作用齐全
+    """
+    store = _research_prompt_store(env, tmp_path)
+    await store.seed_if_empty()
+    new_prompt = "修订后研报提示词：" + "逐条核对证据。" * 20
+    agent = _make_agent(env, _prompt_revision_provider(new_prompt), research_prompt_store=store)
+    real_attach = env.repo.research_prompt.attach_report_to_version
+    state = {"cancelled": False}
+
+    async def cancelling_attach(version_id, report_id):
+        """首次调用抛取消（真实关联不发生），其后调用转真实关联。
+
+        参数：
+            version_id: int，待关联的研报提示词版本编号
+            report_id: int，已落库成功报告的编号
+
+        返回：
+            None：后续调用委托真实 attach 完成关联
+
+        异常：
+            asyncio.CancelledError：首次调用时模拟外部取消
+        """
+        if not state["cancelled"]:
+            state["cancelled"] = True
+            raise asyncio.CancelledError()
+        await real_attach(version_id, report_id)
+
+    monkeypatch.setattr(env.repo.research_prompt, "attach_report_to_version", cancelling_attach)
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run(*_PERIOD)
+    # 补全收尾：单份成功报告、草稿已生效并补回填关联、审计成功闭合、ok=True 轮末事件
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1 and reports[0].error == ""
+    version = await env.repo.research_prompt.get_version(2)
+    assert version is not None and version.status == "applied"
+    assert version.review_report_id == reports[0].id
+    assert store.current() == new_prompt
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None and round_row.ended_at is not None and round_row.error == ""
+    assert [e["type"] for e in env.events] == ["review_round_start", "review_round"]
+    assert env.events[-1]["data"]["ok"] is True
+    assert env.alerts == []  # 打断收尾路径既不发成功告警也不发失败告警
+
+
+async def test_research_prompt_tools_degrade_in_agent_loop(env):
+    """未装配 store 时 agent 轮内调用两个工具只收降级提示，复盘正常完成。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言复盘成功且版本表为空
+    """
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_research_prompt_revision",
+                        args={"new_prompt_md": "x" * 200, "reason": "未装配场景"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(env, provider)  # 不传 research_prompt_store
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    assert await env.repo.research_prompt.list_versions() == []

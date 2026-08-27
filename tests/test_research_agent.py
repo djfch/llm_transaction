@@ -2238,3 +2238,27 @@ async def test_save_post_commit_exception_recovers_success(
     assert result["round_id"] == audit_round.round_id
     assert [e["type"] for e in events] == ["research_round_start", "research_round"]
     assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": True}
+
+
+async def test_run_records_research_prompt_md5(repo: Repo, settings: Settings, tmp_path) -> None:
+    """研报落库记录所用提示词正文 md5：与版本表同口径，供复盘按版本归因（issue #113）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_md5 等于正文内容的 md5
+    """
+    import hashlib
+
+    content = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    (tmp_path / "research_prompt.md").write_text(content, encoding="utf-8")
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    expected = hashlib.md5(content.encode("utf-8")).hexdigest()
+    assert report.research_prompt_md5 == expected

@@ -26,11 +26,14 @@ from src.research.scheduler import ResearchScheduler
 
 @dataclass
 class ResearchComponents:
-    """研报子系统组件束：agent / 数据聚合器 / 定时调度器。"""
+    """研报子系统组件束：agent / 数据聚合器 / 定时调度器 / 提示词版本存储。"""
 
     agent: ResearchAgent
     data_provider: ResearchDataProvider
     scheduler: ResearchScheduler
+    # 研报提示词版本存储（issue #113）：bootstrap 创建并完成播种/对账后注入，
+    # 供 server 端版本查询与人工保存/回滚；测试直建组件束时可为 None
+    prompt_store: object | None = None
 
 
 def _build_data_provider(cfg: ResearchConfig) -> ResearchDataProvider:
@@ -72,6 +75,7 @@ def build_research(
     candle_cache: object | None = None,
     gateway: object | None = None,
     watchlist: list[str] | None = None,
+    prompt_store: object | None = None,
 ) -> ResearchComponents:
     """装配研报代理、数据聚合器和调度器，并建立可选市场数据与事件通道。
 
@@ -84,6 +88,8 @@ def build_research(
         candle_cache: object | None，逐标的 K 线缓存
         gateway: object | None，逐标的行情与合约查询网关
         watchlist: list[str] | None，本轮允许研究的合约白名单
+        prompt_store: object | None，研报提示词版本存储（bootstrap 已播种/对账，
+            issue #113）；None 时组件束仅不携带该引用，不影响研报运行
 
     返回：
         ResearchComponents，已接线的研报代理、数据聚合器与调度器
@@ -107,4 +113,6 @@ def build_research(
         timeout_seconds=cfg.timeout_seconds,
     )
     scheduler = ResearchScheduler(settings, agent, repo)
-    return ResearchComponents(agent=agent, data_provider=data_provider, scheduler=scheduler)
+    return ResearchComponents(
+        agent=agent, data_provider=data_provider, scheduler=scheduler, prompt_store=prompt_store
+    )

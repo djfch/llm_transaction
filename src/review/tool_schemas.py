@@ -1,7 +1,7 @@
 """复盘工具的 JSON Schema 定义（中性格式，provider 各自转换为厂商格式）。
 
-13 个只读工具 + 3 个写工具（submit_strategy_revision / submit_indicator_config /
-submit_research_review 为写出口），无任何交易工具。
+14 个只读工具 + 4 个写工具（submit_strategy_revision / submit_indicator_config /
+submit_research_review / submit_research_prompt_revision 为写出口），无任何交易工具。
 schema 只描述参数形状供 LLM 参考；真正的校验在执行函数内完成
 （校验失败返回错误文本而非抛异常，见 tool_handlers / tool_indicators / tool_research）。
 """
@@ -156,6 +156,37 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "description": "策略书完整新文本（Markdown，全文重写，不是 diff）",
                 },
                 "reason": {"type": "string", "description": "修订理由（引用复盘证据）"},
+            },
+            "required": ["new_prompt_md", "reason"],
+        },
+    },
+    "get_research_prompt_versions": {
+        "description": (
+            "查看研报提示词版本：不传 version_id 返回版本列表（最多 50 条）+ 当前提示词全文；"
+            "传 version_id 返回该版本完整原文"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "version_id": {"type": "integer", "description": "版本号（vN 的 N），可空"},
+            },
+        },
+    },
+    "submit_research_prompt_revision": {
+        "description": (
+            "提交研报提示词修订（研报提示词写出口）：new_prompt_md 为提示词完整新文本"
+            "（全文重写）。服务端校验（≥100 字符、≤32KB、与当前版本有差异），通过则生成"
+            "草稿版本 vN，本轮复盘报告提交成功后统一生效；拒绝则返回原因列表，修正后可重试。"
+            "仅当研报复盘发现可重复偏差且有明确改进方向时才调用，无实质收获时不要调用"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "new_prompt_md": {
+                    "type": "string",
+                    "description": "研报提示词完整新文本（Markdown，全文重写，不是 diff）",
+                },
+                "reason": {"type": "string", "description": "修订理由（引用研报复盘证据）"},
             },
             "required": ["new_prompt_md", "reason"],
         },

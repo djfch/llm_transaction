@@ -118,6 +118,19 @@ class ResearchPromptLoader:
         full += "\n\n" + RESEARCH_EVIDENCE_POLICY_V1 + "\n\n" + tool_docs
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
+    def body_md5(self) -> str:
+        """返回提示词正文（不含固定附录与工具说明）的 md5，与版本表 md5 同口径。
+
+        研报落库时记入 research_reports.research_prompt_md5，供复盘按正文版本
+        归因判断（issue #113）。
+
+        参数：无
+
+        返回：
+            str：当前正文缓存的 md5 十六进制摘要
+        """
+        return hashlib.md5(self._load_body().encode("utf-8")).hexdigest()
+
 
 def render_tool_docs(specs: list[_ToolSpecLike]) -> str:
     """工具说明段：名称 + 描述 + 必填参数（schema 明细经 API tools 字段单独下发）。

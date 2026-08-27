@@ -390,3 +390,123 @@ def test_review_registry_has_no_causal_link_write(registry) -> None:
     names = {spec.name for spec in registry.specs}
     assert "submit_causal_links" not in names
     assert not any("causal" in name for name in names)  # 复盘侧无任何因果链工具
+
+
+# ---------- 研报提示词版本工具（issue #113 C6） ----------
+
+
+@pytest.fixture
+async def prompt_store(deps: ReviewToolDeps, tmp_path):
+    """给 deps 装配研报提示词版本存储（临时文件 + 播种 v1）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（就地挂 research_prompt_store）
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        ResearchPromptStore：已播种 v1 的研报提示词存储（deps 已持有引用）
+    """
+    from src.research.prompt_store import ResearchPromptStore
+
+    path = tmp_path / "research_prompt.md"
+    path.write_text("初始研报提示词：" + "先事实后判断。" * 20, encoding="utf-8")
+    store = ResearchPromptStore(path, deps.repo)
+    await store.seed_if_empty()
+    deps.research_prompt_store = store
+    return store
+
+
+async def test_research_prompt_tools_degrade_when_unassembled(
+    registry: ReviewToolRegistry,
+) -> None:
+    """未装配 store 时两个工具返回中文降级提示，不中断本轮复盘。
+
+    参数：
+        registry: ReviewToolRegistry，工具注册表（deps 默认无 research_prompt_store）
+
+    返回：
+        None，断言降级提示文本
+    """
+    text = await registry.execute("get_research_prompt_versions", {})
+    assert "未装配" in text
+    text = await registry.execute(
+        "submit_research_prompt_revision",
+        {"new_prompt_md": "x" * 200, "reason": "测试"},
+    )
+    assert "未装配" in text
+
+
+async def test_submit_research_prompt_revision_draft(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, prompt_store
+) -> None:
+    """提交修订：校验通过落 draft、deps 记录版本 id 与草稿 id，文件不动。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        prompt_store: ResearchPromptStore，已装配的研报提示词存储
+
+    返回：
+        None，断言草稿状态、deps 回写与文件未变
+    """
+    new_prompt = "修订后研报提示词：" + "逐条核对证据。" * 20
+    text = await registry.execute(
+        "submit_research_prompt_revision",
+        {"new_prompt_md": new_prompt, "reason": "研报复盘发现证据门槛过低"},
+    )
+    assert "草稿 v2" in text and "统一生效" in text
+    assert deps.research_prompt_version_id == 2
+    assert deps.research_prompt_draft_ids == [2]
+    version = await deps.repo.research_prompt.get_version(2)
+    assert version is not None and version.status == "draft"
+    assert version.created_by == "review_agent"
+    assert prompt_store.current().startswith("初始研报提示词")  # 草稿期文件不动
+
+
+async def test_submit_research_prompt_revision_validation_rejects(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, prompt_store
+) -> None:
+    """校验拒绝（过短/无差异）返回原因文本，不落版本、不回写 deps。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        prompt_store: ResearchPromptStore，已装配的研报提示词存储
+
+    返回：
+        None，断言拒绝文案与无副作用
+    """
+    text = await registry.execute(
+        "submit_research_prompt_revision", {"new_prompt_md": "太短", "reason": "x"}
+    )
+    assert "校验拒绝" in text and "过短" in text
+    current = prompt_store.current()
+    text = await registry.execute(
+        "submit_research_prompt_revision", {"new_prompt_md": current, "reason": "x"}
+    )
+    assert "校验拒绝" in text and "无差异" in text
+    assert deps.research_prompt_version_id is None
+    assert deps.research_prompt_draft_ids == []
+    assert len(await deps.repo.research_prompt.list_versions()) == 1  # 只有种子 v1
+
+
+async def test_get_research_prompt_versions(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, prompt_store
+) -> None:
+    """版本查询：列表含状态/来源/理由并附当前全文；version_id 取详情；不存在给提示。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        prompt_store: ResearchPromptStore，已装配的研报提示词存储
+
+    返回：
+        None，断言列表、详情与不存在提示三种形态
+    """
+    text = await registry.execute("get_research_prompt_versions", {})
+    assert "研报提示词版本共 1 个" in text and "状态=applied" in text
+    assert "当前研报提示词全文" in text and "初始研报提示词" in text
+    detail = await registry.execute("get_research_prompt_versions", {"version_id": 1})
+    assert "v1" in detail and "全文" in detail
+    missing = await registry.execute("get_research_prompt_versions", {"version_id": 99})
+    assert "不存在" in missing

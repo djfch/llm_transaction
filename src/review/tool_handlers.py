@@ -67,6 +67,13 @@ class ReviewToolDeps:
     pending_research_reviews: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
     # K 线只读来源（CandleSource 窄协议，Gateway/paper 引擎结构满足）；None 时案例客观结果降级为 unavailable
     candle_source: Any | None = None
+    # 研报提示词版本存储（issue #113 草稿模式同策略书）：None（未装配）时
+    # submit_research_prompt_revision / get_research_prompt_versions 返回「未装配」降级提示；
+    # research_prompt_version_id 为 submit 成功时置位（轮末版本↔报告关联），
+    # research_prompt_draft_ids 为本轮草稿（成功统一生效、失败废弃）
+    research_prompt_store: Any | None = None
+    research_prompt_version_id: int | None = None
+    research_prompt_draft_ids: list[int] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------

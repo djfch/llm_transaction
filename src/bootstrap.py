@@ -48,6 +48,7 @@ from src.market.candles import stale_watchdog
 from src.paper.setup import build_paper_gateway
 from src.review.research_outcome import RecentWindowCandleSource
 from src.review.setup import ReviewComponents, build_review
+from src.research.prompt_store import ResearchPromptStore
 from src.research.setup import ResearchComponents, build_research
 from src.risk.engine import RiskEngine
 from src.scheduler.wakeup import WakeupScheduler
@@ -426,6 +427,15 @@ async def build_app(
         fill_persister=fill_persister,
         indicators=indicators,
     )
+    # 研报提示词版本存储（issue #113）：启动播种 v1 + 对账（孤儿草稿废弃、文件以库为准），
+    # 复盘 agent 经它做草稿修订；变更即广播 research_prompt_updated
+    research_prompt_store = ResearchPromptStore(
+        ROOT / "research_prompt.md",
+        repo,
+        on_change=lambda: event_queue.put_nowait({"type": "research_prompt_updated"}),
+    )
+    await research_prompt_store.seed_if_empty()
+    await research_prompt_store.reconcile()
     ctx = AppContext(
         settings=settings,
         db=db,
@@ -444,6 +454,7 @@ async def build_app(
             watchlist=watchlist.contracts,
             # Gate 网关 from/to 区间路径不可用，包一层最近 N 根+窗口过滤适配器（issue #113）
             candle_source=RecentWindowCandleSource(gateway),
+            research_prompt_store=research_prompt_store,
         ),
         research=build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
             settings,
@@ -454,6 +465,7 @@ async def build_app(
             candle_cache=candles,
             gateway=gateway,
             watchlist=watchlist.contracts,
+            prompt_store=research_prompt_store,
         ),
         scheduler=scheduler,
         event_queue=event_queue,
