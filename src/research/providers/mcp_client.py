@@ -4,11 +4,13 @@ mcp 2.0 SDK：streamable_http_client / stdio_client + ClientSession；
 连接或调用失败抛 ResearchSourceError（工具层转中文哨兵，不中断研报轮）。
 
 runner 隔离：anyio 任务组在网络抖动/超时时会把内部取消以 CancelledError
-（非 Exception 子类）漏进调用协程，并在后续每次 await 反复再抛，曾打穿研报
-收尾并杀死调度循环。McpSession 因此把连接/调用/关闭全部投递给一个专属
-runner 任务执行——anyio 作用域整个活在 runner 内，泄漏取消在 runner 边界
-就地转成 ResearchSourceError；调用方真被外部取消（shutdown）时其 await 点
-由事件循环正常抛 CancelledError，原样传播，取消语义不变。
+（非 Exception 子类）漏进调用协程；取消作用域退出前还会每个事件循环周期
+向宿主任务反复重投递（黏滞取消），曾杀死 runner 并被关闭流程误判为调用方
+取消，打穿研报收尾。McpSession 因此把连接/调用/关闭全部投递给一个专属
+runner 任务执行——anyio 作用域整个活在 runner 内：连接失败先就地回卷已进
+作用域（止住重投递源头），工作项逃逸的泄漏取消在 runner 边界就地转成
+ResearchSourceError，主循环对重投递免疫；调用方真被外部取消（shutdown）时
+其 await 点由事件循环正常抛 CancelledError，原样传播，取消语义不变。
 """
 
 from __future__ import annotations
@@ -240,8 +242,10 @@ class McpSession:
         """runner 主循环：顺序执行投递的工作项，结果/异常经 Future 回传调用方。
 
         anyio 任务组整个活在本任务内（进出同任务，满足 anyio 约束）；工作项逃逸的
-        任何 BaseException（含泄漏取消、异常组）就地转成 ResearchSourceError，
-        runner 自身不因此死亡，仅由停止哨兵结束。
+        任何 BaseException（含泄漏取消、异常组）就地转成 ResearchSourceError。
+        空闲等待点 queue.get() 同样不设防不行：黏滞取消的重投递会落在这里，
+        曾直接杀死 runner（2026-08-27 生产事故）——吞掉重投递继续等，
+        runner 仅由停止哨兵结束。
 
         参数：无
 
@@ -252,7 +256,12 @@ class McpSession:
         # 会把实例属性置 None——runner 若抑制取消继续收尾，回读属性会拿到 None
         # 死于 AttributeError，已投递的清理项也再无人 await
         while True:
-            work, fut = await queue.get()
+            try:
+                work, fut = await queue.get()
+            except asyncio.CancelledError:
+                # 黏滞取消的重投递落在空闲 await 上：吞掉继续等——停止信号只走
+                # 哨兵（清理项排在哨兵前投递，保证收尾先执行），取消不代表停止
+                continue
             if work is None:
                 return
             try:
@@ -311,7 +320,8 @@ class McpSession:
 
         异常：
             ResearchSourceError：连接、会话建立或初始化任一步骤失败时抛出，
-                原始异常保留在 __cause__ 中
+                原始异常保留在 __cause__ 中；CancelledError（anyio 泄漏取消）原样
+                上抛，交 runner 边界统一转写——两条路径都已先回卷已进作用域
         """
         try:
             if self._kind == "http":
@@ -330,8 +340,14 @@ class McpSession:
             self._session = ClientSession(read, write, read_timeout_seconds=self._timeout)
             await self._session.__aenter__()
             await self._session.initialize()
-        except Exception as exc:
-            raise ResearchSourceError(f"MCP 连接失败（{self._kind}）：{_fmt_exc(exc)}") from exc
+        except BaseException as exc:
+            # 连接中途失败必须就地回卷已进入的 anyio 作用域：取消作用域不退出，
+            # 黏滞取消会在本任务上每个事件循环周期反复重投递（2026-08-27 生产事故），
+            # 后续 idle 的 queue.get() 会被直接打死
+            await self._close_safely((None, None, None))
+            if isinstance(exc, Exception):
+                raise ResearchSourceError(f"MCP 连接失败（{self._kind}）：{_fmt_exc(exc)}") from exc
+            raise
 
     async def _call_impl(self, name: str, args: dict | None) -> str:
         """在 runner 任务内执行一次 MCP 工具调用（原 call_tool 调用逻辑）。
@@ -368,8 +384,34 @@ class McpSession:
         tools = await self._session.list_tools()
         return [t.name for t in tools.tools]
 
+    async def _close_safely(self, exc_info: tuple) -> None:
+        """逐步释放会话与底层连接/子进程：每步独立吞掉一切异常（含泄漏取消）。
+
+        连接失败回卷与正常关闭共用本逻辑；单步失败不阻断另一步，保证资源尽量
+        释放——旧实现只吞 Exception，会话退出抛 CancelledError 会跳过传输层
+        退出，留下未关闭的连接/子进程。
+
+        参数：
+            exc_info: tuple，透传给底层会话与传输层关闭逻辑的异常信息三元组
+
+        返回：
+            None，就地释放资源（会话与连接上下文置为 None）
+        """
+        if self._session is not None:
+            try:
+                await self._session.__aexit__(*exc_info)
+            except BaseException:
+                pass
+            self._session = None
+        if self._ctx is not None:
+            try:
+                await self._ctx.__aexit__(*exc_info)
+            except BaseException:
+                pass
+            self._ctx = None
+
     async def _close_impl(self, exc_info: tuple) -> None:
-        """在 runner 任务内释放会话与底层连接/子进程（原 __aexit__ 清理逻辑）。
+        """在 runner 任务内释放会话与底层连接/子进程（正常关闭入口，幂等）。
 
         参数：
             exc_info: tuple，调用方 async with 退出时的异常信息三元组，原样透传给
@@ -378,18 +420,7 @@ class McpSession:
         返回：
             None，就地释放资源（会话与连接上下文置为 None）；清理中的异常被吞掉
         """
-        if self._session is not None:
-            try:
-                await self._session.__aexit__(*exc_info)
-            except Exception:
-                pass
-            self._session = None
-        if self._ctx is not None:
-            try:
-                await self._ctx.__aexit__(*exc_info)
-            except Exception:
-                pass
-            self._ctx = None
+        await self._close_safely(exc_info)
 
     async def _shutdown(self, exc_info: tuple) -> None:
         """投递清理工作项与停止哨兵后等待 runner 退出；超时强制取消 runner。
@@ -404,8 +435,10 @@ class McpSession:
                 自身超时兜底（软上限，非严格 5 秒硬截止）
 
         异常：
-            asyncio.CancelledError：调用方在关闭期间被外部取消时原样抛出
-                （runner 已被强制取消；runner 隔离后此处取消只可能来自调用方）
+            asyncio.CancelledError：仅当取消确实属于调用方（本任务取消计数 > 0）
+                时原样抛出（runner 已被强制取消）；runner 自身带取消死亡
+                （黏滞取消漏网）按已放弃处理，不再误判为调用方取消重抛——
+                旧实现不做区分，曾把 runner 死亡取消打穿整轮研报
         """
         if self._runner is None:
             return
@@ -419,7 +452,12 @@ class McpSession:
             self._runner.cancel()
             self._runner = None
             self._queue = None
-            if isinstance(exc, asyncio.CancelledError):
+            task = asyncio.current_task()
+            if (
+                isinstance(exc, asyncio.CancelledError)
+                and task is not None
+                and task.cancelling() > 0
+            ):
                 raise
             return
         self._runner = None
