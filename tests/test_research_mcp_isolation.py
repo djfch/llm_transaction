@@ -354,3 +354,306 @@ async def test_abandoned_runner_still_drains_close_work() -> None:
 
     await asyncio.wait_for(runner, timeout=2)  # runner 不被 None 毒死：喝完清理项与哨兵
     assert fake.closed  # 清理工作项实际执行
+
+
+async def test_connect_poisoned_by_anyio_cancel_scope(monkeypatch) -> None:
+    """复现 2026-08-27 生产事故：initialize 期间 anyio 取消作用域开火且作用域未退出。
+
+    取消作用域会每个事件循环周期向 runner 反复重投递 CancelledError（黏滞取消），
+    曾落在 runner 主循环的 queue.get() 上杀死 runner，_shutdown 又误判为调用方
+    取消重抛——整轮研报被打死。修复后：连接失败就地回卷作用域（止重投递源头），
+    __aenter__ 只抛 ResearchSourceError，关闭序列干净完成。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，替换 SDK 工厂注入中毒会话
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+    import anyio
+
+    class _PoisonedSession:
+        """initialize 进入真实 anyio 任务组并取消其作用域（作用域保持打开，模拟 SDK 病理）。"""
+
+        def __init__(self) -> None:
+            """初始化中毒会话的表演状态。
+
+            参数：无
+
+            返回：
+                None，就地写入实例属性
+            """
+            self._tg = None
+            self.closed = False
+            self.scope_exited = False
+
+        async def __aenter__(self) -> "_PoisonedSession":
+            """伪会话进入：直接返回自身。
+
+            参数：无
+
+            返回：
+                _PoisonedSession，会话自身
+            """
+            return self
+
+        async def initialize(self) -> None:
+            """在 runner 任务上进入 anyio 任务组并取消其作用域，随后检查点抛 CancelledError。
+
+            参数：无
+
+            返回：
+                None，无正常返回（检查点必抛 CancelledError，任务组故意保持打开）
+            """
+            self._tg = anyio.create_task_group()
+            await self._tg.__aenter__()
+            self._tg.cancel_scope.cancel()
+            await anyio.sleep(0)  # 检查点：抛 CancelledError，取消的任务组仍开在 runner 任务上
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """伪会话关闭：退出任务组（回卷作用域），允许底层再抛取消（由调用方吞）。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，透传给任务组退出
+
+            返回：
+                None，就地写入 closed/scope_exited 标记
+            """
+            self.closed = True
+            if self._tg is not None:
+                try:
+                    await self._tg.__aexit__(*exc_info)
+                except BaseException:
+                    pass
+                self.scope_exited = True
+
+    class _FakeCtx:
+        """伪传输层上下文：记录 __aexit__ 是否被调用。"""
+
+        def __init__(self) -> None:
+            """初始化伪传输层上下文。
+
+            参数：无
+
+            返回：
+                None，就地写入实例属性
+            """
+            self.closed = False
+
+        async def __aenter__(self) -> tuple:
+            """伪传输层进入：返回占位读写流。
+
+            参数：无
+
+            返回：
+                tuple，占位的 (read, write) 二元组
+            """
+            return (object(), object())
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """伪传输层关闭：标记已关闭。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，就地把 closed 置为 True
+            """
+            self.closed = True
+
+    from src.research.providers import mcp_client as mcp_client_module
+
+    poisoned = _PoisonedSession()
+    ctx = _FakeCtx()
+    monkeypatch.setattr(mcp_client_module.httpx2, "AsyncClient", lambda **kwargs: object())
+    monkeypatch.setattr(mcp_client_module, "streamable_http_client", lambda url, http_client: ctx)
+    monkeypatch.setattr(mcp_client_module, "ClientSession", lambda *a, **k: poisoned)
+
+    session = McpSession(kind="http", url="http://localhost", token="t")
+    with pytest.raises(ResearchSourceError, match="传输层内部取消"):
+        async with session:
+            pass
+    assert session._runner is None  # 关闭序列完成，runner 已停止
+    assert poisoned.closed and poisoned.scope_exited  # 连接失败就地回卷作用域（止重投递源头）
+    assert ctx.closed
+
+
+async def test_stray_cancel_on_idle_runner_does_not_break_shutdown() -> None:
+    """黏滞取消重投递落在空闲 runner 的 queue.get() 上：runner 不死，关闭不误判。
+
+    回归（2026-08-27 生产事故的另一半）：runner 主循环原先对 queue.get() 无防护，
+    重投递直接杀死 runner；_shutdown 又把 runner 的死亡取消误判为调用方取消重抛。
+    修复后 runner 对重投递免疫，会话继续可用，关闭后 runner 正常结束。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+
+    async def ok(name, args):
+        """返回正常文本结果的伪工具行为。
+
+        参数：
+            name: str，工具名
+            args: dict，工具调用参数
+
+        返回：
+            SimpleNamespace，带 content/is_error 字段的伪调用结果
+        """
+        return _ok_text("ok")
+
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, _FakeSession(ok))
+    runner = session._runner
+    await asyncio.sleep(0.02)  # 让 runner 进入空闲等待（queue.get()）
+    runner.cancel("simulated anyio re-delivery")  # 黏滞取消的重投递
+    await asyncio.sleep(0.02)
+    assert not runner.done()  # 重投递被主循环免疫，runner 存活
+    assert await session.call_tool("get_flash") == "ok"  # 会话仍可用
+    await session.__aexit__(None, None, None)
+    assert runner.done() and not runner.cancelled()
+    assert session._runner is None
+
+
+async def test_poisoned_call_leaves_session_disposable() -> None:
+    """工具调用期间 anyio 作用域开火且未退出：runner 在取消风暴中仍干净关闭。
+
+    黏滞取消在调用后持续重投递（作用域未退出），runner 必须继续喝完清理项与
+    哨兵；关闭后 runner 正常结束、不泄漏、关闭过程不再抛 CancelledError。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+    import anyio
+
+    async def poison(name, args):
+        """在 runner 任务上进入 anyio 任务组并取消其作用域（故意不退出）。
+
+        参数：
+            name: str，工具名
+            args: dict，工具调用参数
+
+        返回：
+            SimpleNamespace，永不正常返回（检查点必抛 CancelledError）
+        """
+        tg = anyio.create_task_group()
+        await tg.__aenter__()
+        tg.cancel_scope.cancel()
+        await anyio.sleep(0)
+
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, _FakeSession(poison))
+    with pytest.raises(ResearchSourceError, match="传输层内部取消"):
+        await session.call_tool("get_flash")
+    runner = session._runner
+    await asyncio.wait_for(session.__aexit__(None, None, None), timeout=2)
+    assert runner.done() and not runner.cancelled()
+    assert session._runner is None
+
+
+async def test_caller_cancel_during_shutdown_still_propagates() -> None:
+    """防过度修复：关闭期间调用方真被取消，CancelledError 必须原样传播。
+
+    _shutdown 按"调用方取消计数 > 0"区分真取消与 runner 死亡取消；本测试钉住
+    真取消路径不被吞，且被抛弃的 runner 喝完哨兵正常退出。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+
+    class _HangCloseSession(_FakeSession):
+        """关闭时挂起的伪底层会话（拖住 _shutdown 的等待窗口）。"""
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """挂起 60 秒的伪关闭（等待测试取消）。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，无正常返回（测试在挂起期间取消）
+            """
+            await asyncio.sleep(60)
+
+    fake = _HangCloseSession(lambda name, args: None)
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, fake)
+    runner = session._runner
+    closing = asyncio.create_task(session.__aexit__(None, None, None))
+    await asyncio.sleep(0.02)  # 让 _shutdown 进入 wait_for（runner 卡在关闭工作项）
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert session._runner is None  # 实例属性已放弃
+    await asyncio.wait_for(runner, timeout=2)  # runner 喝完哨兵正常退出，不泄漏
+
+
+async def test_close_swallows_leaked_cancel_and_still_closes_transport() -> None:
+    """回归（审查缺口）：会话退出抛泄漏取消时，传输层退出不被跳过。
+
+    _close_safely 逐步吞 BaseException（含 anyio 泄漏取消）；旧实现只吞
+    Exception，会话退出抛取消会直接逃逸出 _close_impl，传输层 __aexit__
+    被跳过——留下未关闭的连接/子进程。本测试钉住"取消被吞且传输层仍关闭"，
+    若把 BaseException 改回 Exception 则本测试变红（旧代码 ctx 不被关闭）。
+
+    参数：无
+
+    返回：
+        None，通过断言验证上述行为，无返回值
+    """
+
+    class _CancelExitSession(_FakeSession):
+        """退出时先标记关闭再抛泄漏取消的伪底层会话（模拟 anyio 风暴落在关闭期）。"""
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """标记已关闭后抛 CancelledError（模拟 anyio 泄漏取消）。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，无正常返回
+
+            异常：
+                asyncio.CancelledError：模拟黏滞取消重投递落在关闭期，总是抛出
+            """
+            self.closed = True
+            raise asyncio.CancelledError("storm during exit")
+
+    class _RecordingCtx:
+        """记录 __aexit__ 是否被调用的伪传输层上下文。"""
+
+        def __init__(self) -> None:
+            """初始化关闭标记。
+
+            参数：无
+
+            返回：
+                None，就地写入实例属性
+            """
+            self.closed = False
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            """标记传输层已关闭。
+
+            参数：
+                exc_info: object，async with 退出时传入的异常信息，本 fake 忽略
+
+            返回：
+                None，就地把 closed 置为 True
+            """
+            self.closed = True
+
+    fake = _CancelExitSession(lambda name, args: None)
+    ctx = _RecordingCtx()
+    session = McpSession(kind="http", url="http://localhost")
+    _start_detached(session, fake)
+    session._ctx = ctx
+    await session.__aexit__(None, None, None)  # 泄漏取消被吞，不向外抛
+    assert fake.closed and ctx.closed  # 传输层退出未被取消跳过
+    assert session._runner is None
