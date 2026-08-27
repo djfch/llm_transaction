@@ -200,9 +200,18 @@ def test_prompt_templates_match_current_agent_contracts():
     assert "实时数值、指标参数和历史事实只能来自本轮上下文或工具结果" in research
     assert "因果链先暂存" not in research
     assert "书中概率" not in research
+    assert "近期研报复盘记录" in research
+    assert "不是当前行情的方向信号" in research
+    assert "改进建议不会自动生效" in research
+    assert "及验证结果" not in research  # 判断史渲染无验证结果字段，提示词须与实际注入一致
     assert "五层归因" in review
     assert "不能证明策略有效或失效" in review
-    assert "只能通过工具提交完整的新策略书或指标短名单" in review
+    assert "只能通过工具提交完整的新策略书、指标短名单、研报复盘批改或研报提示词修订" in review
+    assert "研报复盘门禁" in review
+    assert "list_research_review_candidates" in review
+    assert "方向错误不代表推理荒谬" in review
+    assert "submit_research_prompt_revision" in review
+    assert "单次复盘不修订提示词" in review
     assert "版本化修订" not in review
     assert "版本化维护" not in review
     assert "最终文本就是存档报告" not in review

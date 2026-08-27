@@ -847,6 +847,7 @@ async def test_build_preinjection_sections(deps) -> None:
     assert "事件时间线" in text and "暂无记录" in text
     assert "历史研报结论" in text and "首次研报" in text
     assert "待跟踪因果链" in text and "（暂无）" in text  # 无待跟踪链空态
+    assert "近期研报复盘记录" in text  # 复盘记录段空态也在
     # 事实层已写入：日历 2 条（含低星）+ 快讯 2 条（金十/律动各一）
     rows = await deps.repo.research.list_timeline(0.0, None)
     assert len(rows) == 4
@@ -904,6 +905,37 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
     assert "关税结论" not in text  # 结论链排除
     assert "旧链" not in text  # 被替代链排除
     assert "supersedes_id" in text  # 提示跟进修订方式
+
+
+async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
+    """预注入复盘记录段：同一研报多次复盘全保留、按时间正序、上限 20 条。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
+    now = time.time()
+    for i in range(21):
+        await repo.research_review.save_review(
+            review_report_id=100 + i,
+            report_id=42 if i % 2 == 0 else 43,
+            contract="BTC_USDT",
+            direction_relation=f"方向关系{i}",
+            reasoning_quality="推理合理",
+            confidence_assessment="置信度合规",
+            improvement_advice=f"建议{i}",
+            created_at=now - (21 - i) * 60,
+        )
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    assert "近期研报复盘记录（最近 20 条" in text
+    assert "方向关系0" not in text  # 最旧一条被 20 条上限截掉
+    assert "方向关系20" in text and "建议20" in text
+    assert text.count("研报#42/BTC_USDT") == 10  # 同一研报多次复盘全保留（i=2..20 偶数）
+    assert text.index("方向关系1") < text.index("方向关系20")  # 按时间正序
 
 
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:

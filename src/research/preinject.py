@@ -1,4 +1,4 @@
-"""预注入组装：冻结白名单与七类研报上下文（时间→日历→指标→快讯→时间线→判断史→因果链）。
+"""预注入组装：冻结白名单与八类研报上下文（时间→日历→指标→快讯→时间线→判断史→因果链→复盘记录）。
 
 数据源失败段标注不可用（不中断研报轮）；返回 Markdown 文本。
 从 tool_handlers 复用 ResearchToolDeps / 时间格式化 / 日期标记（单向依赖，无循环）。
@@ -202,6 +202,35 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
     return "\n".join(lines)
 
 
+async def _section_recent_reviews(deps: ResearchToolDeps) -> str:
+    """近期研报复盘记录段：最近 20 条正式复盘批改，按时间正序。
+
+    不依附原研报是否在近 7 天窗口；同一研报被多次复盘时全部保留，
+    供研报 agent 识别反复出现的偏差（复盘记录是历史反馈，不是方向信号）。
+
+    参数：
+        deps: ResearchToolDeps，提供研报复盘仓库的共享依赖
+
+    返回：
+        str，近期复盘记录 Markdown 段落；无记录时返回空态说明
+    """
+    reviews = await deps.repo.research_review.list_reviews(limit=20)
+    if not reviews:
+        return "## 近期研报复盘记录\n（暂无）"
+    lines = [f"## 近期研报复盘记录（最近 {len(reviews)} 条，按时间正序）"]
+    for r in reviews:
+        lines.append(
+            f"- [{_fmt_ts(r.created_at)}] 复盘#{r.review_report_id} → "
+            f"研报#{r.report_id}/{r.contract}：方向关系={r.direction_relation or '未评'} "
+            f"推理质量={r.reasoning_quality or '未评'}"
+        )
+        if r.confidence_assessment:
+            lines.append(f"  置信度合规：{r.confidence_assessment}")
+        if r.improvement_advice:
+            lines.append(f"  改进建议：{r.improvement_advice}")
+    return "\n".join(lines)
+
+
 def _section_watchlist(deps: ResearchToolDeps) -> str:
     """渲染本轮已冻结合约白名单与逐标的市场工具调用约束。
 
@@ -223,7 +252,7 @@ def _section_watchlist(deps: ResearchToolDeps) -> str:
 
 
 async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
-    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→待跟踪因果链）。
+    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→待跟踪因果链→复盘记录）。
 
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
     首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源
@@ -247,5 +276,6 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
             await _section_timeline(deps, hours),
             await _section_judgments(deps),
             await _section_pending_links(deps),
+            await _section_recent_reviews(deps),
         ]
     )
