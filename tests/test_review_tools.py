@@ -1,4 +1,4 @@
-"""src/review 工具层测试：12 个工具经 ReviewToolRegistry.execute 逐一验证。
+"""src/review 工具层测试：16 个工具经 ReviewToolRegistry.execute 逐一验证。
 
 覆盖：正常返回文本、参数非法转错误文本、未知工具、截断行为、limit 钳制、
 calc 计算、submit 成功置 created_version_id、submit 校验拒绝返回原因文本。
@@ -300,7 +300,7 @@ async def test_calc_tool(registry):
     """
     assert await registry.execute("calc", {"expression": "2*(3-1)^2"}) == "8"
     assert "参数错误" in await registry.execute("calc", {})
-    assert len(registry.specs) == 12
+    assert len(registry.specs) == 16
 
 
 # ---------- list_trades ----------

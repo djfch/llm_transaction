@@ -1,9 +1,9 @@
 """复盘工具的 JSON Schema 定义（中性格式，provider 各自转换为厂商格式）。
 
-10 个只读工具 + 2 个写工具（submit_strategy_revision / submit_indicator_config
-为唯二写出口），无任何交易工具。
+13 个只读工具 + 3 个写工具（submit_strategy_revision / submit_indicator_config /
+submit_research_review 为写出口），无任何交易工具。
 schema 只描述参数形状供 LLM 参考；真正的校验在执行函数内完成
-（校验失败返回错误文本而非抛异常，见 tool_handlers / tool_indicators）。
+（校验失败返回错误文本而非抛异常，见 tool_handlers / tool_indicators / tool_research）。
 """
 
 from __future__ import annotations
@@ -206,6 +206,104 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             },
             "required": ["shortlist", "reason"],
+        },
+    },
+    "list_research_review_candidates": {
+        "description": (
+            "列出已到期且尚未复盘的研报逐标的结论候选（按到期时刻升序）："
+            "report_id、contract、方向、置信度、horizon、研报时间与到期时刻"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "条数上限（1-100），默认 20"},
+            },
+        },
+    },
+    "get_research_review_case": {
+        "description": (
+            "读取单个研报复盘案例的完整材料：逐标的结论原文与逐条依据、当时市场快照、"
+            "研报轮上下文快照、代码归一化记录（policy_adjustments）、代码按历史 K 线计算的"
+            "客观行情结果（仅供参考）。提交批改（submit_research_review）前必须先读案例"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "report_id": {"type": "integer", "description": "研报编号（候选列表中的研报#N）"},
+                "contract": {"type": "string", "description": "合约代码，如 BTC_USDT"},
+            },
+            "required": ["report_id", "contract"],
+        },
+    },
+    "list_research_reviews": {
+        "description": (
+            "查询历史研报复盘记录（完整评价五段+客观结果摘要），可按时间窗/合约过滤；"
+            "修订研报提示词前用它核对同类问题是否重复出现"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_ts": {"type": "number", "description": "时间窗起点（Unix 秒，含），可空"},
+                "end_ts": {"type": "number", "description": "时间窗终点（Unix 秒，不含），可空"},
+                "contract": {"type": "string", "description": "按合约过滤，如 BTC_USDT，可空"},
+                "limit": {"type": "integer", "description": "条数上限（1-100），默认 20"},
+            },
+        },
+    },
+    "submit_research_review": {
+        "description": (
+            "提交对单个研报逐标的结论的复盘批改（研报复盘写出口）：方向关系/推理质量/"
+            "置信度合规/改进建议四段评价 + evidence_reviews 逐条依据评价（与原研报依据"
+            "一一对应，index 不重不漏覆盖 0..N-1）。客观行情结果由代码附加，不得提交 "
+            "outcome 字段。须先用 get_research_review_case 读取案例；通过则暂存草稿，"
+            "随本轮复盘报告落库统一生效"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "report_id": {"type": "integer", "description": "研报编号"},
+                "contract": {"type": "string", "description": "合约代码，如 BTC_USDT"},
+                "direction_relation": {
+                    "type": "string",
+                    "description": "方向关系评价（研报方向与实际走势的关系：兑现/背离/震荡消化等）",
+                },
+                "reasoning_quality": {
+                    "type": "string",
+                    "description": "推理质量评价（因果链是否成立、论据是否支撑结论）",
+                },
+                "evidence_reviews": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {
+                                "type": "integer",
+                                "description": "原研报依据序号（从 0 开始）",
+                            },
+                            "comment": {"type": "string", "description": "对该条依据的评价"},
+                        },
+                        "required": ["index", "comment"],
+                    },
+                    "description": "逐条依据评价列表，数量与 index 必须与案例材料的依据一一对应",
+                },
+                "confidence_assessment": {
+                    "type": "string",
+                    "description": "置信度合规评价（置信度是否与证据强度匹配、是否违反归一化规则）",
+                },
+                "improvement_advice": {
+                    "type": "string",
+                    "description": "改进建议（下一轮研报应如何改进；无实质建议时说明理由）",
+                },
+            },
+            "required": [
+                "report_id",
+                "contract",
+                "direction_relation",
+                "reasoning_quality",
+                "evidence_reviews",
+                "confidence_assessment",
+                "improvement_advice",
+            ],
         },
     },
 }

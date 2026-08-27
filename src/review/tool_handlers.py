@@ -60,6 +60,13 @@ class ReviewToolDeps:
     # 生效失败的草稿 id（磁盘满等持久性失败）：随 review_round 事件暴露给前端
     # （issue #100：报告成功但文件未更新必须可观察）
     apply_failed_ids: list[int] = dataclass_field(default_factory=list)
+    # 研报复盘（issue #113）：已读案例缓存（(report_id, contract) → outcome/evidence_count），
+    # submit_research_review 的前置校验与 outcome 附加来源
+    loaded_research_cases: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
+    # 研报复盘暂存区：submit 校验通过的草稿随复盘报告单事务落库（C4 bundle），报告失败随 deps 丢弃
+    pending_research_reviews: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
+    # K 线只读来源（CandleSource 窄协议，Gateway/paper 引擎结构满足）；None 时案例客观结果降级为 unavailable
+    candle_source: Any | None = None
 
 
 # ---------- 参数校验辅助 ----------

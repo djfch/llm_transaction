@@ -13,7 +13,7 @@ from functools import partial
 from typing import Any
 
 from src.audit.logger import get_logger
-from src.review import tool_handlers, tool_indicators
+from src.review import tool_handlers, tool_indicators, tool_research
 from src.review.tool_handlers import ReviewToolDeps, ToolArgError
 from src.review.tool_schemas import SCHEMAS
 
@@ -33,6 +33,10 @@ _HANDLERS: dict[str, Callable[[ReviewToolDeps, dict], Awaitable[str]]] = {
     "get_indicators": tool_indicators.get_indicators,
     "get_indicator_config": tool_indicators.get_indicator_config,
     "submit_indicator_config": tool_indicators.submit_indicator_config,
+    "list_research_review_candidates": tool_research.list_research_review_candidates,
+    "get_research_review_case": tool_research.get_research_review_case,
+    "list_research_reviews": tool_research.list_research_reviews,
+    "submit_research_review": tool_research.submit_research_review,
 }
 
 
