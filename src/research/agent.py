@@ -172,7 +172,9 @@ class ResearchAgent:
 
         异常：
             asyncio.CancelledError：外部取消研报任务时完成收尾后原样抛出；
-            成功报告已落库时按成功语义收尾（禁止双写失败报告），否则按失败语义收尾
+            成功报告已落库时按成功语义收尾（禁止双写失败报告），否则按失败语义收尾。
+            其余 BaseException（如 ExceptionGroup）按失败语义收尾后返回失败结果，
+            不再向上抛——保证任何漏网异常下轮次必闭合
         """
         if self._provider is None:
             logger.warning("LLM 未配置，跳过本次研报")
@@ -277,7 +279,9 @@ class ResearchAgent:
                     remaining_links, report_id, round_id, raw_parts, audit_closed
                 )
             raise
-        except Exception as e:
+        except BaseException as e:
+            # 漏网 BaseException（如 ExceptionGroup）：与 Exception 同口径收尾，
+            # 保证轮次必闭合、绝不向上抛（CancelledError 分支在前优先生效）
             round_id, committed_id = await self._recover_round_and_committed_id(
                 preallocated, round_id, report_id
             )
@@ -679,7 +683,7 @@ class ResearchAgent:
         round_id: str,
         raw_parts: list[str],
         report_type: str,
-        exc: Exception,
+        exc: BaseException,
         *,
         preallocated: str = "",
     ) -> dict:
@@ -693,7 +697,7 @@ class ResearchAgent:
             round_id: str，关联的审计轮次编号；空串表示审计轮尚未开启
             raw_parts: list[str]，累计保存 LLM 原始输出的列表
             report_type: str，研报盘口类型
-            exc: Exception，捕获到的原始异常
+            exc: BaseException，捕获到的原始异常（含 ExceptionGroup 等漏网 BaseException）
             preallocated: str，调度器手动点火时预分配的轮次编号；仅用于 begin_round
                 前失败的报告落库（审计与事件仍以真实 round_id 为准）
 

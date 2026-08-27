@@ -108,7 +108,7 @@ def _market_calendar_date(calendar: str, fire: datetime) -> date:
 
 
 class ResearchScheduler:
-    """严格命中目标分钟的研报调度器；错过、忙碌或休市均不补跑。"""
+    """严格命中目标分钟的研报调度器；点火即返回（后台任务内执行）；错过、忙碌或休市均不补跑。"""
 
     def __init__(
         self,
@@ -119,7 +119,7 @@ class ResearchScheduler:
         calendar: CalendarLike | None = None,
         cache_path: Path | None = None,
     ) -> None:
-        """保存共享配置、Agent、仓储与官方日历，并创建防重入锁、手动点火预留标志与后台任务引用。
+        """保存共享配置、Agent、仓储与官方日历，并创建防重入锁、后台执行预留标志与后台任务引用。
 
         参数：
             settings: Settings，共享运行配置，保存后原地热更新
@@ -137,13 +137,14 @@ class ResearchScheduler:
         path = cache_path or ROOT / "data" / "market_calendar_cache.json"
         self._calendar = calendar or MarketCalendarProvider(path)
         self._lock = asyncio.Lock()
-        # 手动点火预留：start_now 同步置位、后台任务 done 回调清位；
-        # 覆盖点火到任务取锁之间的窗口，替代已废弃的调用方持锁跨任务转移
-        self._manual_reserved = False
-        self._manual_task: asyncio.Task[None] | None = None
-        # 手动点火的预分配轮次编号与研报类型：shutdown 补记「首次执行前被取消」终态用
-        self._manual_round_id: str | None = None
-        self._manual_report_type: str | None = None
+        # 后台执行预留：点火方（tick/start_now）同步置位、后台任务 done 回调清位；
+        # 覆盖点火到任务取锁之间的窗口，替代已废弃的调用方持锁跨任务转移。
+        # 自动与手动共用同一预留：同一时刻最多一个后台研报，互斥口径唯一
+        self._run_reserved = False
+        self._run_task: asyncio.Task[None] | None = None
+        # 点火的预分配轮次编号与研报类型：shutdown 补记「首次执行前被取消」终态用
+        self._run_round_id: str | None = None
+        self._run_report_type: str | None = None
         self._last_refresh_at: datetime | None = None
         self._next_refresh_at: datetime | None = None
         self._refresh_failures = 0
@@ -167,16 +168,21 @@ class ResearchScheduler:
             await self._safe_tick()
 
     async def _safe_tick(self) -> None:
-        """执行一次巡检并吞掉异常，保护长期任务。
+        """执行一次巡检并吞掉异常（含漏网 BaseException），保护长期任务不被单次巡检带走。
 
         参数：无
 
         返回：
-            None：异常仅记录日志
+            None：除停机取消外的一切异常仅记录日志，调度循环继续
+
+        异常：
+            asyncio.CancelledError：停机取消原样传播（巡检循环必须能被停掉）
         """
         try:
             await self.tick()
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
             logger.exception("研报调度巡检异常")
 
     async def _safe_refresh(self, current: datetime) -> bool:
@@ -223,13 +229,17 @@ class ResearchScheduler:
         return self._next_refresh_at is None or current >= self._next_refresh_at
 
     async def tick(self, now: float | None = None) -> None:
-        """检查当前绝对分钟，命中一个启用调度且当日未执行时生成研报。
+        """检查当前绝对分钟，命中一个启用调度且当日未执行时点火后台研报任务，立即返回。
+
+        点火即返回：自动研报与手动 start_now 共用同一后台执行机制（预留 + 任务内
+        自取锁），本方法只在预留保护下做当日认领与热变更重检，不持锁等待生成——
+        调度循环永不阻塞，单次运行的异常（含漏网 BaseException）不再带走调度器。
 
         参数：
             now: float | None，可注入 Unix 秒；省略时使用当前时间
 
         返回：
-            None：最多触发一次研报；错过不补跑
+            None：最多点火一次后台研报；错过、忙碌或休市不补跑
         """
         cfg = self._settings.research
         if not cfg.enabled:
@@ -244,25 +254,21 @@ class ResearchScheduler:
                 "多个研报调度同时到期，仅执行首项：%s", ",".join(item.id for item in due)
             )
         schedule = due[0]
-        if self._manual_reserved or self._lock.locked():
-            logger.info("研报调度命中但 Agent 正忙，按不补跑规则跳过：%s", schedule.id)
+        # 预留在首次 await 前同步取得：手动点火看到预留即 busy，不会抢在自动认领
+        # 之前插队形成补跑（与原「持锁跨认领窗口」等价，但锁只留在后台任务内）
+        if not self._reserve_run():
+            logger.info("研报调度命中但已有生成进行中，按不补跑规则跳过：%s", schedule.id)
             return
-        # asyncio.Lock 在未占用时会同步取得锁；必须在首次 await 前占有执行权，
-        # 否则手动任务可在数据库查询期间抢锁，自动任务随后排队形成补跑。
-        await self._lock.acquire()
         try:
+            claimed = await self._repo.research.claim_schedule_run(schedule.id, local.date())
             current = next((item for item in cfg.schedules if item.id == schedule.id), None)
-            if not cfg.enabled or current is None or not self._is_due(current, local):
+            if claimed and cfg.enabled and current is not None and self._is_due(current, local):
+                self._fire_background(current.id, 24)  # 后台任务接管预留（done 回调释放）
                 return
-            claimed = await self._repo.research.claim_schedule_run(current.id, local.date())
-            if not claimed:
-                return
-            current = next((item for item in cfg.schedules if item.id == schedule.id), None)
-            if not cfg.enabled or current is None or not self._is_due(current, local):
-                return
-            await self._agent.run(report_type=current.id, hours=24)
-        finally:
-            self._lock.release()
+        except BaseException:
+            self._release_run_reservation()
+            raise
+        self._release_run_reservation()
 
     def _is_due(self, schedule: ResearchSchedule, now: datetime) -> bool:
         """判断启用项是否在当前分钟到期且符合日期规则。
@@ -338,9 +344,9 @@ class ResearchScheduler:
         """手动触发研报（点火即返回）：同步校验后点火后台任务，调用方被取消不影响生成。
 
         不受自动开关和交易日限制；生成进度与结果经 WS 事件、/live 轮询与报告列表呈现，
-        不在本调用中等待。执行权采用「预留标志 + 任务内自取锁」两段式：本方法只同步
-        校验并置预留标志，自身不做任何 await 锁操作——锁不再由调用方任务持有后转移给
-        后台任务，杜绝点火后、任务首次执行前被取消导致的锁永久占用。
+        不在本调用中等待。执行权与自动调度共用「预留标志 + 任务内自取锁」两段式：
+        本方法只同步校验并置预留标志，自身不做任何 await 锁操作——锁不再由调用方
+        任务持有后转移给后台任务，杜绝点火后、任务首次执行前被取消导致的锁永久占用。
 
         参数：
             report_type: str，研报类型
@@ -354,20 +360,12 @@ class ResearchScheduler:
             error_code 为 llm_not_configured（未配置 LLM）或 busy（已有生成进行中）
         """
         if not self._agent.llm_configured:
+            logger.warning("手动触发研报被拒绝：LLM 未配置（report_type=%s）", report_type)
             return {"started": False, "error": "LLM 未配置", "error_code": "llm_not_configured"}
-        if self._manual_reserved or self._lock.locked():
+        if not self._reserve_run():
+            logger.warning("手动触发研报被拒绝：已有研报生成中（report_type=%s）", report_type)
             return {"started": False, "error": "研报生成中", "error_code": "busy"}
-        # busy 判定与置预留在同一同步段内完成（同一事件循环内原子，不让出执行权）：
-        # 自动调度的 tick 看到预留即跳过，不会在预留与后台任务取锁之间插队，
-        # 不排队语义与原先的持锁模式等价。
-        self._manual_reserved = True
-        round_id = uuid.uuid4().hex  # 预分配：点火响应与轮始事件携带同一身份
-        self._manual_round_id = round_id  # 供 shutdown 补记「首次执行前被取消」终态
-        self._manual_report_type = report_type
-        task = asyncio.create_task(self._run_manual(report_type, hours, round_id))
-        # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
-        task.add_done_callback(self._release_manual_reservation)
-        self._manual_task = task
+        round_id = self._fire_background(report_type, hours)
         return {
             "started": True,
             "report_type": report_type,
@@ -375,23 +373,56 @@ class ResearchScheduler:
             "round_id": round_id,
         }
 
-    def _release_manual_reservation(self, _task: asyncio.Task[None]) -> None:
-        """手动后台任务完成回调：无条件清除点火预留标志。
+    def _reserve_run(self) -> bool:
+        """同步检查执行权并置预留标志（自动/手动共用；同一事件循环内原子，不让出执行权）。
 
-        参数：
-            _task: asyncio.Task[None]，已结束（含异常/取消）的手动后台任务，本回调不读取
+        参数：无
 
         返回：
-            None：就地清除预留标志；任务以任何方式结束事件循环都会触发本回调，
+            bool：取得执行权为 True（预留已置位）；已有生成进行中为 False
+        """
+        if self._run_reserved or self._lock.locked():
+            return False
+        self._run_reserved = True
+        return True
+
+    def _release_run_reservation(self, _task: asyncio.Task[None] | None = None) -> None:
+        """清除后台执行预留标志：点火方放弃路径直接调用，后台任务经 done 回调调用。
+
+        参数：
+            _task: asyncio.Task[None] | None，已结束（含异常/取消）的后台任务
+                （done 回调传入，本方法不读取）；点火方放弃路径为 None
+
+        返回：
+            None：就地清除预留标志；任务以任何方式结束事件循环都会触发 done 回调，
             预留标志永不泄漏
         """
-        self._manual_reserved = False
+        self._run_reserved = False
 
-    async def _run_manual(self, report_type: str, hours: int, round_id: str) -> None:
-        """后台执行手动研报：任务内自取锁包住 agent.run；取消原样抛出，意外异常记日志就地取回。
+    def _fire_background(self, report_type: str, hours: int) -> str:
+        """在已持有预留的前提下点火后台研报任务：预分配轮次、创建任务、登记关机引用。
+
+        参数：
+            report_type: str，研报类型（自动为调度项 id，手动为调用方给定）
+            hours: int，回看小时数
+
+        返回：
+            str：预分配的审计轮次编号（32 位 hex），点火响应/WS 轮始事件/关机补记同一身份
+        """
+        round_id = uuid.uuid4().hex
+        self._run_round_id = round_id  # 供 shutdown 补记「首次执行前被取消」终态
+        self._run_report_type = report_type
+        task = asyncio.create_task(self._run_guarded(report_type, hours, round_id))
+        # done 回调无条件清预留：任务正常结束、异常或首次执行前被取消，回调都会执行
+        task.add_done_callback(self._release_run_reservation)
+        self._run_task = task
+        return round_id
+
+    async def _run_guarded(self, report_type: str, hours: int, round_id: str) -> None:
+        """后台执行研报（自动/手动共用）：任务内自取锁包住 agent.run；取消原样抛出，其余异常记日志就地取回。
 
         锁只在协程体内由本任务持有：任务在首次执行前被取消时协程体根本不进入，
-        锁从未持有、无需释放（点火预留标志由 start_now 注册的 done 回调清理）。
+        锁从未持有、无需释放（点火预留标志由 done 回调清理）。
 
         参数：
             report_type: str，研报类型
@@ -399,8 +430,8 @@ class ResearchScheduler:
             round_id: str，点火时预分配的审计轮次编号，透传给 agent.run
 
         返回：
-            None：意外异常记 logger.exception 就地取回，任务异常永远被取回，
-            杜绝 never-retrieved 噪音
+            None：意外异常（含漏网 BaseException）记 logger.exception 就地取回，
+            任务异常永远被取回，杜绝 never-retrieved 噪音
 
         异常：
             asyncio.CancelledError：执行中被取消（如停机 shutdown）记日志后原样抛出，
@@ -412,13 +443,13 @@ class ResearchScheduler:
             async with self._lock:
                 await self._agent.run(report_type=report_type, hours=hours, round_id=round_id)
         except asyncio.CancelledError:
-            logger.info("手动研报后台任务被取消（report_type=%s）", report_type)
+            logger.info("研报后台任务被取消（report_type=%s）", report_type)
             raise
-        except Exception:
-            logger.exception("手动研报后台任务异常（report_type=%s）", report_type)
+        except BaseException:
+            logger.exception("研报后台任务异常（report_type=%s）", report_type)
 
     async def shutdown(self) -> None:
-        """取消进行中的手动后台任务并等待其收尾（停机序列调用，须在数据库关闭前）。
+        """取消进行中的后台研报任务（自动/手动）并等待其收尾（停机序列调用，须在数据库关闭前）。
 
         任务从未首次执行时 begin_round 从未运行、agent 取消收尾也未进入，预分配
         round_id 查无任何记录——gather 之后由 _record_prestart_cancellation 补写
@@ -430,7 +461,7 @@ class ResearchScheduler:
             None：无进行中任务时立即返回；否则取消任务并 gather 取回结果，
             随后按需补记关机取消终态
         """
-        task = self._manual_task
+        task = self._run_task
         if task is None or task.done():
             return
         task.cancel()
@@ -438,7 +469,7 @@ class ResearchScheduler:
         await self._record_prestart_cancellation()
 
     async def _record_prestart_cancellation(self) -> None:
-        """关机补记：手动任务在首次执行前被取消时，为预分配轮次补写取消终态失败报告。
+        """关机补记：后台任务在首次执行前被取消时，为预分配轮次补写取消终态失败报告。
 
         判重两道闸：审计轮已存在（begin_round 已跑，agent 取消收尾已负责终态）或
         该轮已有报告记录（begin_round 前失败已落失败报告，报告行带预分配 round_id）
@@ -449,7 +480,7 @@ class ResearchScheduler:
         返回：
             None：就地写入取消终态失败报告；无需补记或补记失败时无副作用/仅记日志
         """
-        round_id = self._manual_round_id
+        round_id = self._run_round_id
         if not round_id:
             return
         try:
@@ -458,9 +489,9 @@ class ResearchScheduler:
             if await self._repo.research.find_report_by_round_id(round_id) is not None:
                 return  # begin_round 前失败已落失败报告（报告行带预分配 round_id）
             await self._repo.research.save_failed_report(
-                report_type=self._manual_report_type or "manual",
-                error="手动研报在开始执行前被关机取消",
+                report_type=self._run_report_type or "manual",
+                error="研报在开始执行前被关机取消",
                 round_id=round_id,
             )
         except Exception:
-            logger.exception("关机补记手动研报取消终态失败（round_id=%s）", round_id)
+            logger.exception("关机补记研报取消终态失败（round_id=%s）", round_id)

@@ -2,15 +2,23 @@
 
 mcp 2.0 SDK：streamable_http_client / stdio_client + ClientSession；
 连接或调用失败抛 ResearchSourceError（工具层转中文哨兵，不中断研报轮）。
+
+runner 隔离：anyio 任务组在网络抖动/超时时会把内部取消以 CancelledError
+（非 Exception 子类）漏进调用协程，并在后续每次 await 反复再抛，曾打穿研报
+收尾并杀死调度循环。McpSession 因此把连接/调用/关闭全部投递给一个专属
+runner 任务执行——anyio 作用域整个活在 runner 内，泄漏取消在 runner 边界
+就地转成 ResearchSourceError；调用方真被外部取消（shutdown）时其 await 点
+由事件循环正常抛 CancelledError，原样传播，取消语义不变。
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import sys
-from collections.abc import AsyncIterator
-from typing import Literal
+from collections.abc import AsyncIterator, Awaitable
+from typing import Literal, TypeVar
 
 from src.research.providers.base import ResearchSourceError
 
@@ -34,6 +42,8 @@ _SENSITIVE_ENV_PREFIXES = (
     "TELEGRAM_",
 )
 _SENSITIVE_ENV_KEYS = frozenset({"API_KEY", "API_SECRET", "TOKEN", "PASSWORD", "SECRET", "AUTH"})
+
+_T = TypeVar("_T")
 
 
 def _minimal_env() -> dict[str, str]:
@@ -79,10 +89,39 @@ def _stdio_command(cmd: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
+def _fmt_exc(exc: BaseException) -> str:
+    """格式化底层异常供错误信息使用：异常组取首个子异常，其余取 str。
+
+    参数：
+        exc: BaseException，底层抛出的异常
+
+    返回：
+        str，可读的单行异常描述（异常组避免只显示 'N sub-exception' 外壳）
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return str(exc.exceptions[0])
+    return str(exc)
+
+
+def _consume_result(fut: asyncio.Future) -> None:
+    """消费调用方被取消后才完成的工作项结果，防 'exception was never retrieved' 警告。
+
+    参数：
+        fut: asyncio.Future，调用方取消时无人再 await 的工作项结果 Future
+
+    返回：
+        None，就地取回异常（已取消的 Future 无异常可取，直接跳过）
+    """
+    if not fut.cancelled():
+        fut.exception()
+
+
 class McpSession:
     """一个 MCP 会话：async with 块内可多次 call_tool，退出时释放连接/子进程。
 
     kind='http'：金十（Bearer token）；kind='stdio'：律动（npx 子进程 + API key）。
+    所有底层操作投递给专属 runner 任务执行：anyio 泄漏的 CancelledError/异常组
+    在 runner 边界转成 ResearchSourceError，不再漏进调用方协程。
     """
 
     def __init__(
@@ -126,14 +165,149 @@ class McpSession:
         self._timeout = timeout
         self._session: ClientSession | None = None
         self._ctx: AsyncIterator | None = None
+        self._queue: asyncio.Queue | None = None
+        self._runner: asyncio.Task | None = None
 
     async def __aenter__(self) -> "McpSession":
-        """按配置建立 MCP 连接并完成初始化握手，返回就绪会话；失败先清理资源再抛错。
+        """启动 runner 任务并在其内建立 MCP 连接，返回就绪会话；失败先停 runner 再抛错。
 
         参数：无
 
         返回：
             McpSession：已建立连接的会话自身，供 async with 语句绑定使用
+
+        异常：
+            ResearchSourceError：连接、会话建立或初始化任一步骤失败时抛出，
+                原始异常保留在 __cause__ 中
+        """
+        self._queue = asyncio.Queue()
+        self._runner = asyncio.create_task(self._runner_loop(), name=f"mcp-runner-{self._kind}")
+        try:
+            await self._dispatch(self._connect())
+        except BaseException:
+            await self._shutdown((None, None, None))
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """经 runner 释放 MCP 会话与底层连接/子进程并停止 runner；清理中的普通异常不再外抛。
+
+        参数：
+            exc_info: object，async with 退出时传入的异常信息（异常类型、值、追溯），
+                仅原样透传给底层会话与传输层的关闭逻辑
+
+        返回：
+            None，就地释放资源（会话、连接上下文与 runner 置为 None）
+
+        异常：
+            asyncio.CancelledError：调用方在关闭期间被外部取消时原样抛出
+        """
+        await self._shutdown(exc_info)
+
+    async def call_tool(self, name: str, args: dict | None = None) -> str:
+        """调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError。
+
+        参数：
+            name: str，工具名或参数名
+            args: dict | None，工具调用参数
+
+        返回：
+            str，调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError
+
+        异常：
+            ResearchSourceError，会话未建立、工具返回错误标记或调用过程失败时抛出
+        """
+        if self._session is None:
+            raise ResearchSourceError("MCP 会话未建立")
+        return await self._dispatch(self._call_impl(name, args))
+
+    async def list_tools(self) -> list[str]:
+        """列出可用工具名（连通性自检用）。
+
+        参数：无
+
+        返回：
+            list[str]，列出可用工具名（连通性自检用）
+
+        异常：
+            ResearchSourceError，MCP 会话尚未建立时抛出
+        """
+        if self._session is None:
+            raise ResearchSourceError("MCP 会话未建立")
+        return await self._dispatch(self._list_tools_impl())
+
+    async def _runner_loop(self) -> None:
+        """runner 主循环：顺序执行投递的工作项，结果/异常经 Future 回传调用方。
+
+        anyio 任务组整个活在本任务内（进出同任务，满足 anyio 约束）；工作项逃逸的
+        任何 BaseException（含泄漏取消、异常组）就地转成 ResearchSourceError，
+        runner 自身不因此死亡，仅由停止哨兵结束。
+
+        参数：无
+
+        返回：
+            None，收到停止哨兵后结束（工作项结果经各自 Future 回传）
+        """
+        queue = self._queue  # 抓局部引用：_shutdown 放弃路径（关闭期间被取消/超时）
+        # 会把实例属性置 None——runner 若抑制取消继续收尾，回读属性会拿到 None
+        # 死于 AttributeError，已投递的清理项也再无人 await
+        while True:
+            work, fut = await queue.get()
+            if work is None:
+                return
+            try:
+                result = await work
+            except BaseException as exc:
+                if not fut.done():
+                    fut.set_exception(self._contained_error(exc))
+            else:
+                if not fut.done():
+                    fut.set_result(result)
+
+    async def _dispatch(self, work: Awaitable[_T]) -> _T:
+        """把协程工作项投递给 runner 执行并等待结果；调用方真被取消时原样传播。
+
+        参数：
+            work: Awaitable[_T]，待 runner 执行的协程工作项
+
+        返回：
+            _T，工作项的执行结果
+
+        异常：
+            ResearchSourceError：工作项失败（含 runner 边界转换的泄漏取消/异常组）时抛出；
+            asyncio.CancelledError：调用方被外部取消（shutdown）时原样抛出
+        """
+        fut: asyncio.Future[_T] = asyncio.get_running_loop().create_future()
+        self._queue.put_nowait((work, fut))
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            fut.add_done_callback(_consume_result)
+            raise
+
+    def _contained_error(self, exc: BaseException) -> ResearchSourceError:
+        """把逃逸出工作项的异常统一转成 ResearchSourceError（泄漏取消不再越界）。
+
+        参数：
+            exc: BaseException，runner 内工作项逃逸的异常
+
+        返回：
+            ResearchSourceError：已是 ResearchSourceError 的原样返回；CancelledError
+                按传输层内部取消转写；异常组取首个子异常；其余按调用失败转写
+        """
+        if isinstance(exc, ResearchSourceError):
+            return exc
+        if isinstance(exc, asyncio.CancelledError):
+            return ResearchSourceError(f"MCP 传输层内部取消（{self._kind}）：已按数据源失败隔离")
+        return ResearchSourceError(f"MCP 调用失败（{self._kind}）：{_fmt_exc(exc)}")
+
+    async def _connect(self) -> None:
+        """在 runner 任务内按配置建立 MCP 连接并完成初始化握手（原 __aenter__ 连接逻辑）。
+
+        参数：无
+
+        返回：
+            None，就地写入 _session/_ctx（连接关闭逻辑由 _close_impl 在同任务内执行）
 
         异常：
             ResearchSourceError：连接、会话建立或初始化任一步骤失败时抛出，
@@ -156,20 +330,53 @@ class McpSession:
             self._session = ClientSession(read, write, read_timeout_seconds=self._timeout)
             await self._session.__aenter__()
             await self._session.initialize()
-            return self
         except Exception as exc:
-            await self.__aexit__(None, None, None)
-            raise ResearchSourceError(f"MCP 连接失败（{self._kind}）：{exc}") from exc
+            raise ResearchSourceError(f"MCP 连接失败（{self._kind}）：{_fmt_exc(exc)}") from exc
 
-    async def __aexit__(self, *exc_info: object) -> None:
-        """释放 MCP 会话与底层连接/子进程资源；清理中的异常被吞掉，保证退出不再抛错。
+    async def _call_impl(self, name: str, args: dict | None) -> str:
+        """在 runner 任务内执行一次 MCP 工具调用（原 call_tool 调用逻辑）。
 
         参数：
-            exc_info: object，async with 退出时传入的异常信息（异常类型、值、追溯），
-                仅原样透传给底层会话与传输层的关闭逻辑
+            name: str，工具名或参数名
+            args: dict | None，工具调用参数
 
         返回：
-            None，就地释放资源（会话与连接上下文置为 None）
+            str，调用一次 MCP 工具，返回拼接后的文本
+
+        异常：
+            ResearchSourceError，工具返回错误标记或调用过程失败时抛出
+        """
+        try:
+            result = await self._session.call_tool(name, args or {})
+            text = "".join(c.text or "" for c in result.content)
+            if result.is_error:  # mcp 2.0 字段名（旧版为 isError）
+                raise ResearchSourceError(f"MCP 工具 {name} 报错：{text[:200]}")
+            return text
+        except ResearchSourceError:
+            raise
+        except Exception as exc:
+            raise ResearchSourceError(f"MCP 工具 {name} 调用失败：{_fmt_exc(exc)}") from exc
+
+    async def _list_tools_impl(self) -> list[str]:
+        """在 runner 任务内查询底层会话可用工具名（原 list_tools 查询逻辑）。
+
+        参数：无
+
+        返回：
+            list[str]，底层会话报告的工具名列表
+        """
+        tools = await self._session.list_tools()
+        return [t.name for t in tools.tools]
+
+    async def _close_impl(self, exc_info: tuple) -> None:
+        """在 runner 任务内释放会话与底层连接/子进程（原 __aexit__ 清理逻辑）。
+
+        参数：
+            exc_info: tuple，调用方 async with 退出时的异常信息三元组，原样透传给
+                底层会话与传输层的关闭逻辑
+
+        返回：
+            None，就地释放资源（会话与连接上下文置为 None）；清理中的异常被吞掉
         """
         if self._session is not None:
             try:
@@ -184,44 +391,36 @@ class McpSession:
                 pass
             self._ctx = None
 
-    async def call_tool(self, name: str, args: dict | None = None) -> str:
-        """调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError。
+    async def _shutdown(self, exc_info: tuple) -> None:
+        """投递清理工作项与停止哨兵后等待 runner 退出；超时强制取消 runner。
 
         参数：
-            name: str，工具名或参数名
-            args: dict | None，工具调用参数
+            exc_info: tuple，调用方 async with 退出时的异常信息三元组
 
         返回：
-            str，调用一次 MCP 工具，返回拼接后的文本；失败抛 ResearchSourceError
+            None，就地停止 runner 并将其与队列置为 None；正常路径下清理工作项
+                已在 runner 内执行完毕（哨兵排在清理之后）；超时路径取消 runner
+                并等待其终止——若 runner 内工作项抑制取消，终止时点由底层操作
+                自身超时兜底（软上限，非严格 5 秒硬截止）
 
         异常：
-            ResearchSourceError，会话未建立、工具返回错误标记或调用过程失败时抛出
+            asyncio.CancelledError：调用方在关闭期间被外部取消时原样抛出
+                （runner 已被强制取消；runner 隔离后此处取消只可能来自调用方）
         """
-        if self._session is None:
-            raise ResearchSourceError("MCP 会话未建立")
+        if self._runner is None:
+            return
+        close_fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        close_fut.add_done_callback(_consume_result)
+        self._queue.put_nowait((self._close_impl(exc_info), close_fut))
+        self._queue.put_nowait((None, None))
         try:
-            result = await self._session.call_tool(name, args or {})
-            text = "".join(c.text or "" for c in result.content)
-            if result.is_error:  # mcp 2.0 字段名（旧版为 isError）
-                raise ResearchSourceError(f"MCP 工具 {name} 报错：{text[:200]}")
-            return text
-        except ResearchSourceError:
-            raise
-        except Exception as exc:
-            raise ResearchSourceError(f"MCP 工具 {name} 调用失败：{exc}") from exc
-
-    async def list_tools(self) -> list[str]:
-        """列出可用工具名（连通性自检用）。
-
-        参数：无
-
-        返回：
-            list[str]，列出可用工具名（连通性自检用）
-
-        异常：
-            ResearchSourceError，MCP 会话尚未建立时抛出
-        """
-        if self._session is None:
-            raise ResearchSourceError("MCP 会话未建立")
-        tools = await self._session.list_tools()
-        return [t.name for t in tools.tools]
+            await asyncio.wait_for(self._runner, timeout=5)
+        except BaseException as exc:
+            self._runner.cancel()
+            self._runner = None
+            self._queue = None
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return
+        self._runner = None
+        self._queue = None

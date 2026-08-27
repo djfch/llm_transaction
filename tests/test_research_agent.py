@@ -1927,6 +1927,57 @@ async def test_deps_construction_failure_lands_failed_report(
     assert events == []  # round_id 为空：零事件
 
 
+async def test_preinjection_base_exception_group_closes_round(
+    repo: Repo, settings: Settings, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预注入抛 BaseExceptionGroup（含 CancelledError，非 Exception 子类）：兜底收尾轮次必闭合。
+
+    修复前 run() 只有 CancelledError 与 Exception 两个分支：BaseExceptionGroup
+    （成员为 CancelledError 时不归 Exception）漏网即打穿收尾——无失败报告、
+    审计轮 ended_at 永久为 null（孤儿轮）、异常冲出点火方。BaseException 兜底后
+    与 Exception 同口径：_fail 落失败报告 + end_round 闭合 + 轮末 ok=False 事件。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，替换预注入注入漏网 BaseException
+
+    返回：
+        None，断言失败报告带轮次编号、审计轮闭合、事件序列完整、不向上抛
+    """
+    events: list[dict] = []
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, events.append)
+
+    async def _broken_preinject(deps, hours):
+        """模拟预注入数据层抛含取消的异常组（anyio 混合失败的最坏形态）。
+
+        参数：
+            deps: ResearchToolDeps，工具依赖（本桩不使用）
+            hours: int，回溯小时数（本桩不使用）
+
+        返回：
+            str，永不返回；固定抛 BaseExceptionGroup
+
+        异常：
+            BaseExceptionGroup：成员为 CancelledError，except Exception 接不住
+        """
+        raise BaseExceptionGroup("数据层混合失败", [asyncio.CancelledError("传输中止")])
+
+    monkeypatch.setattr("src.research.agent.build_preinjection", _broken_preinject)
+    result = await agent.run(report_type="asia")
+    assert result["ok"] is False and "数据层混合失败" in result["error"]
+    items, total = await repo.research.list_reports_page(10, 0)
+    assert total == 1
+    assert items[0].error.startswith("BaseExceptionGroup: 数据层混合失败")
+    assert items[0].round_id != ""  # begin_round 后失败：失败报告带真实轮次编号
+    audit_round = await repo.get_audit_round(items[0].round_id)
+    assert audit_round is not None and audit_round.ended_at is not None  # 轮次闭合，不孤儿
+    assert audit_round.error.startswith("BaseExceptionGroup:")
+    assert [e["type"] for e in events] == ["research_round_start", "research_round"]
+    assert events[-1]["data"] == {"round_id": items[0].round_id, "ok": False}
+
+
 # ---------- 成功落库后被打断的补全收尾（_complete_interrupted） ----------
 
 
