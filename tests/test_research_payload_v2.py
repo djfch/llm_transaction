@@ -184,3 +184,31 @@ def test_v2_payload_rejects_invalid_asset_contract_fields() -> None:
         )
         is None
     )
+
+
+def test_v2_payload_rejects_horizon_outside_enum() -> None:
+    """验证研报 v2 拒绝枚举外的 horizon（复盘到期依赖固定枚举，issue #113）。
+
+    参数：无
+
+    返回：
+        None，断言非法 horizon（如 24h/两周）解析失败，三个合法枚举值均通过
+    """
+    for bad in ("24h", "两周", "", "明天"):
+        view = _view("BTC_USDT")
+        view["horizon"] = bad
+        assert (
+            _parse_payload(
+                _payload([view]), expected_contracts=("BTC_USDT",), queried_contracts={"BTC_USDT"}
+            )
+            is None
+        )
+    for good in ("当日", "3日", "周"):
+        view = _view("BTC_USDT")
+        view["horizon"] = good
+        assert (
+            _parse_payload(
+                _payload([view]), expected_contracts=("BTC_USDT",), queried_contracts={"BTC_USDT"}
+            )
+            is not None
+        )

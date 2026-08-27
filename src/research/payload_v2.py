@@ -9,6 +9,10 @@ _CONFIDENCE = frozenset(("高", "中", "低"))
 _REGIMES = frozenset(("上涨趋势", "下跌趋势", "震荡", "转折观察"))
 _CONFIRMATIONS = frozenset(("确认", "冲突", "中性", "不可用"))
 _BASIS_TYPES = frozenset(("事件驱动", "宏观驱动", "结构延续", "混合"))
+# horizon 枚举：研报复盘按 horizon 到期触发（issue #113），枚举外的存量/非法值不进复盘候选
+_HORIZONS = frozenset(("当日", "3日", "周"))
+# horizon → 窗口秒数（复盘到期判定与客观结果计算共用的唯一映射源）
+HORIZON_SECONDS: dict[str, int] = {"当日": 86400, "3日": 259200, "周": 604800}
 _VIEW_FIELDS = (
     "contract",
     "direction",
@@ -71,8 +75,8 @@ def _valid_view(view: object) -> bool:
         view: object，待校验的单个标的结论（LLM 输出 asset_views 中的一项）
 
     返回：
-        bool：必需字段全部存在，方向、置信度、市场状态、技术确认、依据类型
-        均在允许枚举内，horizon 与 narrative 为字符串，证据列表与风险列表
+        bool：必需字段全部存在，方向、置信度、市场状态、技术确认、依据类型、
+        horizon 均在允许枚举内，narrative 为字符串，证据列表与风险列表
         结构合法时为 True，否则为 False
     """
     if not isinstance(view, dict) or not all(field in view for field in _VIEW_FIELDS):
@@ -87,7 +91,7 @@ def _valid_view(view: object) -> bool:
         return False
     if view["basis_type"] not in _BASIS_TYPES:
         return False
-    if not isinstance(view["horizon"], str) or not isinstance(view["narrative"], str):
+    if view["horizon"] not in _HORIZONS or not isinstance(view["narrative"], str):
         return False
     if not _valid_evidence(view["evidence"]):
         return False

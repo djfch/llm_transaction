@@ -300,3 +300,20 @@ class ResearchPromptVersion(BaseModel):
     review_report_id: int | None = None
     created_at: float
     status: str = "applied"
+
+
+class ResearchReviewCandidate(BaseModel):
+    """研报复盘候选：一份研报中已到期且尚未被正式复盘的单条逐标的结论（issue #113）。
+
+    由 research_review_repo.list_review_candidates 的联表查询构造（非数据表行）；
+    due_at 为报告创建时间 + horizon 窗口秒数（到期时刻），按它升序返回。
+    """
+
+    report_id: int
+    contract: str
+    direction: str
+    confidence: str
+    horizon: str
+    report_type: str
+    report_created_at: float
+    due_at: float

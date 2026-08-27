@@ -45,7 +45,7 @@ def _report_json(contracts: tuple[str, ...]) -> str:
         contracts: tuple[str, ...]，本轮白名单合约名，逐个生成一条中性立场的标的观点
 
     返回：
-        str：schema_version=2 的研报 JSON 字符串，各字段均为固定 mock 内容
+        str：schema_version=3 的研报 JSON 字符串，各字段均为固定 mock 内容
     """
     asset_views = [
         {
@@ -64,7 +64,7 @@ def _report_json(contracts: tuple[str, ...]) -> str:
     ]
     return json.dumps(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "summary": "mock 研报总览",
             "cross_market_view": "mock 跨标的观察",
             "global_risks": ["mock 模式不代表真实行情"],
