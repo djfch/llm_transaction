@@ -49,7 +49,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "get_macro_series": {
-        "description": "获取 FRED 宏观历史序列（趋势判断用）：最新值+窗口变化+最近观测表格。别名：cpi/pce/fed_funds_rate/10y_treasury/m2/dollar_index/vix/unemployment/nonfarm_payrolls 等，或直接传 FRED series ID",
+        "description": "获取 FRED 宏观历史序列（趋势判断用）：最新值+窗口变化+最近观测表格。别名：cpi/pce/fed_funds_rate/10y_treasury/m2/dollar_index/vix/unemployment/nonfarm_payrolls 等，或直接传 FRED series ID。默认回溯近一年；复盘回看历史区间时用 start_ts/end_ts 指定窗口",
         "parameters": {
             "type": "object",
             "properties": {
@@ -57,7 +57,18 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "指标别名或 FRED series ID，如 cpi / DGS10",
                 },
-                "look_back": {"type": "integer", "description": "回溯天数（30-1825），默认 365"},
+                "look_back": {
+                    "type": "integer",
+                    "description": "回溯天数（30-1825），默认 365；提供 start_ts 后失效",
+                },
+                "start_ts": {
+                    "type": "number",
+                    "description": "窗口起点 Unix 秒（可选；提供后按 start_ts 至 end_ts/当前时间 取数）",
+                },
+                "end_ts": {
+                    "type": "number",
+                    "description": "窗口终点 Unix 秒（可选，缺省为当前时间；须大于 start_ts）",
+                },
             },
             "required": ["indicator"],
         },
@@ -93,12 +104,32 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "read_timeline": {
-        "description": "读取事件时间线（事实层，近 N 天客观记录：时间+事件+来源），看跨天因果链",
+        "description": "读取事件时间线（事实层客观记录：时间+事件+来源），看跨天因果链。默认近 N 天；复盘回看历史区间时用 start_ts/end_ts 精确窗口，可按关键词/类型/来源过滤",
         "parameters": {
             "type": "object",
             "properties": {
-                "days": {"type": "integer", "description": "回溯天数（1-30），默认 7"},
+                "days": {
+                    "type": "integer",
+                    "description": "回溯天数（1-30），默认 7；提供 start_ts 后失效",
+                },
                 "limit": {"type": "integer", "description": "条数上限（1-500），默认 200"},
+                "start_ts": {
+                    "type": "number",
+                    "description": "窗口起点 Unix 秒（可选；提供后按精确窗口取数）",
+                },
+                "end_ts": {
+                    "type": "number",
+                    "description": "窗口终点 Unix 秒（可选；须大于 start_ts）",
+                },
+                "keyword": {"type": "string", "description": "标题关键词过滤（可选）"},
+                "kind": {
+                    "type": "string",
+                    "description": "记录类型过滤（可选）：flash 快讯 / calendar 日历事件 / indicator 指标快照",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "来源过滤（可选）：jin10 / blockbeats",
+                },
             },
             "required": [],
         },

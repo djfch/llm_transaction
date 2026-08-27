@@ -3,7 +3,8 @@
 不变量：
 - provider 为 None（LLM 未配置）→ 直接返回失败，不落审计、不落报告；
 - 正常路径：wake_source='review' 开审计轮 → 中文简报（区间 + 当前策略全文 +
-  代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本落 review_reports →
+  代码侧预统计 + 引导语）→ ≤max_turns 工具循环 → 最终文本经 bundle 单事务落
+  review_reports（含代码计算的研报复盘统计段）+ research_reviews →
   有修订则版本↔报告互相关联（策略书与指标短名单各自判空关联）→ 结束审计轮 → on_alert 摘要（html.escape 且 ≤500 字符）；
 - WS 事件（notify_event 注入时）：begin_round 后广播 review_round_start，
   结束审计轮后广播 review_round（成功 ok=True / _fail 路径 ok=False）；
@@ -41,6 +42,7 @@ from src.config import Settings
 from src.market.indicator_service import IndicatorService
 from src.memory.models import ReviewReport
 from src.memory.repo import Repo
+from src.review.bundle import save_review_bundle
 from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader, render_tool_docs
 from src.review.stats import compute_review_stats, format_stats_text
@@ -140,6 +142,7 @@ class ReviewAgent:
         indicator_service: IndicatorService | None = None,
         indicator_config_store: IndicatorConfigStore | None = None,
         watchlist: Iterable[str] | None = None,
+        candle_source: Any | None = None,
     ) -> None:
         """组装复盘 agent：全部依赖构造期注入，保存为实例属性。
 
@@ -160,6 +163,9 @@ class ReviewAgent:
                 省略时指标短名单工具降级
             watchlist: Iterable[str] | None，监控合约名单，保留活引用、每轮 run 拍快照
                 以跟随热更新；省略时视为空名单
+            candle_source: Any | None，K 线只读来源（CandleSource 窄协议，生产装配
+                RecentWindowCandleSource 包网关）；省略时研报复盘案例的客观结果降级
+                为 unavailable（不拖垮复盘）
 
         返回：
             None，仅把依赖保存为实例属性（构造期装配，无其他副作用）
@@ -179,6 +185,7 @@ class ReviewAgent:
         # watchlist 保留活引用（装配传入与执行 agent 共享的同一 list，前端改名单原地生效），
         # 每轮 run 构造 deps 时才拍快照，避免固化启动时名单（热更新后复盘看不到新合约）
         self._watchlist = watchlist
+        self._candle_source = candle_source  # None（未装配）时案例客观结果降级 unavailable
 
     def set_provider(self, provider: _ProviderProtocol) -> None:
         """热替换复盘使用的 LLM provider。
@@ -239,6 +246,7 @@ class ReviewAgent:
                 indicator_service=self._indicator_service,
                 indicator_config_store=self._indicator_config_store,
                 watchlist=tuple(self._watchlist or ()),  # 每轮对活名单拍快照，跟随热更新
+                candle_source=self._candle_source,  # 研报复盘案例客观行情的 K 线来源
             )
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
@@ -256,13 +264,14 @@ class ReviewAgent:
             text = await self._chat_loop(full_prompt, briefing, registry, round_id, raw_parts)
             report_md = text.strip() or "（复盘未产出报告）"
             action = "rewrite" if deps.created_version_id is not None else "none"
-            report = await self._repo.review.save_review_report(
-                period_start,
-                period_end,
-                stats_json,
-                report_md,
-                action,
-                new_version_id=deps.created_version_id,
+            report = await save_review_bundle(
+                self._repo,
+                deps,
+                period_start=period_start,
+                period_end=period_end,
+                stats_json=stats_json,
+                report_md=report_md,
+                strategy_action=action,
                 round_id=round_id,
             )
             report_id = report.id
@@ -585,7 +594,7 @@ class ReviewAgent:
         """成功报告 COMMIT 后、保存函数返回前抛普通异常的恢复：按成功语义补全收尾并组装成功结果。
 
         补全与取消窗口同口径（版本关联幂等重放 + 成功闭合审计 + ok=True 事件）；
-        结果中的 report 用反查得到的报告对象替代（该路径没有 save_review_report
+        结果中的 report 用反查得到的报告对象替代（该路径没有 save_review_bundle
         的返回对象）；结果组装失败只记日志，退回最小成功结果（报告确已落库，
         不得因组装失败改写失败）。
 
@@ -654,6 +663,8 @@ class ReviewAgent:
                 "（list_decision_rounds / get_decision_detail / get_tool_call_chain /"
                 " get_round_context / list_trades）；",
                 "- 结论必须引用证据（round_id、数字），统计数字以工具返回为准；",
+                "- 有已到期研报复盘候选时逐案例批改：list_research_review_candidates 看候选，"
+                "get_research_review_case 读案例材料，submit_research_review 提交批改；",
                 "- 没有实质收获不要调用 submit_strategy_revision；确需修订时提交全文与理由。",
             ]
         )

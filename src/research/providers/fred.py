@@ -85,12 +85,16 @@ class FredSource:
         """
         return os.environ.get("FRED_API_KEY", "")
 
-    async def get_macro_series(self, indicator: str, look_back: int = DEFAULT_LOOKBACK) -> str:
+    async def get_macro_series(
+        self, indicator: str, look_back: int = DEFAULT_LOOKBACK, end_ts: float | None = None
+    ) -> str:
         """取一条宏观序列，返回 Markdown（最新值 + 窗口变化 + 最近观测表格）。
 
         参数：
             indicator: str，宏观指标名称或别名
             look_back: int，回看天数
+            end_ts: float | None，窗口终点 Unix 秒；缺省为当前时间
+                （复盘类场景回看历史区间用）
 
         返回：
             str，取一条宏观序列，返回 Markdown（最新值 + 窗口变化 + 最近观测表格）
@@ -113,7 +117,7 @@ class FredSource:
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 meta = await self._series_meta(client, series_id)
-                observations = await self._observations(client, series_id, look_back)
+                observations = await self._observations(client, series_id, look_back, end_ts)
         except httpx.HTTPError as exc:
             # 只透出状态码/异常类名：异常字符串含带 API key 的完整 URL，禁止外泄
             raise ResearchSourceError(f"FRED 请求失败：{_describe_http_error(exc)}") from exc
@@ -164,14 +168,15 @@ class FredSource:
         return rows[0] if rows else {}
 
     async def _observations(
-        self, client: httpx.AsyncClient, series_id: str, look_back: int
+        self, client: httpx.AsyncClient, series_id: str, look_back: int, end_ts: float | None = None
     ) -> list[tuple[str, str]]:
         """拉取序列在回溯窗口内的观测值并剔除缺失点。
 
         参数：
             client: httpx.AsyncClient，用于发请求的异步 HTTP 客户端
             series_id: str，FRED 序列 ID
-            look_back: int，从当前日期向前回溯的天数
+            look_back: int，从窗口终点向前回溯的天数
+            end_ts: float | None，窗口终点 Unix 秒；None 时取当前时间
 
         返回：
             list[tuple[str, str]]：按日期升序的（日期, 数值）观测点列表，
@@ -182,7 +187,7 @@ class FredSource:
         """
         from datetime import datetime, timedelta
 
-        end = datetime.now()
+        end = datetime.fromtimestamp(end_ts) if end_ts is not None else datetime.now()
         start = end - timedelta(days=look_back)
         resp = await client.get(
             f"{self._base}/series/observations",

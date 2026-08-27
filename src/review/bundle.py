@@ -1,0 +1,91 @@
+"""复盘报告 bundle 组装：代码确定性统计段 + 报告与研报复盘的单事务落库编排（issue #113）。
+
+LLM 只产出报告文本与各条批改内容；研报复盘条数、客观结果数据状态分布等
+可枚举计数一律由代码从本轮暂存草稿（deps.pending_research_reviews）计算，
+追加为报告末尾的「## 研报复盘统计」段，LLM 不可伪造。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from src.memory.models import ReviewReport
+from src.memory.repo import Repo
+from src.review.tool_handlers import ReviewToolDeps
+
+
+def render_research_review_stats(pending: list[dict[str, Any]]) -> str:
+    """由本轮研报复盘草稿确定性计算统计段文本；无草稿时返回空串（不追加段落）。
+
+    参数：
+        pending: list[dict[str, Any]]，本轮暂存的研报复盘草稿（含
+            report_id/contract/outcome_json 等代码可枚举字段）
+
+    返回：
+        str：「## 研报复盘统计」Markdown 段；空列表时返回空串
+    """
+    if not pending:
+        return ""
+    contracts: dict[str, int] = {}
+    statuses: dict[str, int] = {}
+    report_ids: set[int] = set()
+    for item in pending:
+        contracts[item["contract"]] = contracts.get(item["contract"], 0) + 1
+        report_ids.add(item["report_id"])
+        try:
+            status = json.loads(item["outcome_json"]).get("data_status") or "unknown"
+        except json.JSONDecodeError:
+            status = "unknown"
+        statuses[status] = statuses.get(status, 0) + 1
+    lines = [
+        "## 研报复盘统计（代码计算，非 LLM 产出）",
+        f"批改条数：{len(pending)}（涉及研报 {len(report_ids)} 份）",
+        "合约分布：" + "；".join(f"{c} {n} 条" for c, n in sorted(contracts.items())),
+        "客观结果数据状态：" + "；".join(f"{s} {n} 条" for s, n in sorted(statuses.items())),
+    ]
+    return "\n".join(lines)
+
+
+async def save_review_bundle(
+    repo: Repo,
+    deps: ReviewToolDeps,
+    *,
+    period_start: float,
+    period_end: float,
+    stats_json: str,
+    report_md: str,
+    strategy_action: str,
+    round_id: str,
+) -> ReviewReport:
+    """组装最终报告文本（追加代码计算的研报复盘统计段）并单事务落库。
+
+    研报复盘草稿（deps.pending_research_reviews）随报告同事务写入；草稿为空时
+    退化为纯报告落库（与 save_review_report 成功路径等价）。
+
+    参数：
+        repo: Repo，持久化仓库
+        deps: ReviewToolDeps，本轮工具依赖（读取研报复盘草稿与新建策略版本编号）
+        period_start: float，复盘区间起点时间戳
+        period_end: float，复盘区间终点时间戳
+        stats_json: str，代码预统计 JSON 文本
+        report_md: str，LLM 产出的复盘报告正文
+        strategy_action: str，策略书处理动作（rewrite/none）
+        round_id: str，关联的审计轮次编号
+
+    返回：
+        ReviewReport：已提交的复盘报告（report_md 为含统计段的最终文本）
+    """
+    pending = list(deps.pending_research_reviews.values())
+    stats_section = render_research_review_stats(pending)
+    final_md = f"{report_md}\n\n{stats_section}" if stats_section else report_md
+    return await repo.review.save_review_bundle(
+        period_start,
+        period_end,
+        stats_json,
+        final_md,
+        strategy_action,
+        new_version_id=deps.created_version_id,
+        round_id=round_id,
+        research_reviews=pending,
+    )

@@ -79,6 +79,7 @@ async def build_review(
     indicator_service: IndicatorService | None = None,
     indicator_config_store: IndicatorConfigStore | None = None,
     watchlist: Iterable[str] | None = None,
+    candle_source: Any | None = None,
 ) -> ReviewComponents:
     """创建复盘子系统组件：策略版本库播种 v1；复盘 agent 复用同一 provider/audit/repo。
 
@@ -98,6 +99,8 @@ async def build_review(
         indicator_service: IndicatorService | None，技术指标查询服务
         indicator_config_store: IndicatorConfigStore | None，指标短名单版本存储
         watchlist: Iterable[str] | None，允许复盘工具查询的合约集合
+        candle_source: Any | None，K 线只读来源（CandleSource 窄协议）；缺省 None 时
+            研报复盘案例的客观行情结果降级为 unavailable
 
     返回：
         ReviewComponents，已播种并完成接线的策略存储、复盘代理和调度器
@@ -120,6 +123,7 @@ async def build_review(
         indicator_service=indicator_service,
         indicator_config_store=indicator_config_store,
         watchlist=watchlist,
+        candle_source=candle_source,
     )
     scheduler = ReviewScheduler(settings, agent, repo)
     return ReviewComponents(store=store, agent=agent, scheduler=scheduler)

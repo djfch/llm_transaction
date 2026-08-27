@@ -3,8 +3,9 @@
 按研报结论的 horizon 窗口拉取历史 1h K 线，计算方向批改所需的客观指标
 （起止价、区间最高最低、涨跌幅、最大有利/不利变动）。纯函数
 （outcome_from_candles）与 IO（compute_outcome）分离：K 线拉取走
-CandleSource 窄协议（Gateway 真实实现与 paper 撮合引擎均结构满足），
-复盘侧不持有完整 Gateway。
+CandleSource 窄协议，复盘侧不持有完整 Gateway。注意 Gate 网关 from/to
+区间路径当前不可用（见 gate_rest docstring），生产装配应包一层
+RecentWindowCandleSource（最近 N 根 + 客户端窗口过滤）而非直传网关。
 
 data_status 四态：pending（窗口未到期）/ unavailable（窗口内无 K 线或
 horizon 非法、拉取失败）/ partial（有 K 线但不足窗口期望根数）/
@@ -206,3 +207,58 @@ def compute_outcome(
             error=f"K 线拉取失败：{exc}",
         )
     return outcome_from_candles(candles, created_at, horizon)
+
+
+class RecentWindowCandleSource:
+    """CandleSource 窗口适配器：from/to 历史窗口改走「最近 N 根 + 客户端过滤」。
+
+    存在原因：Gate 网关的 from/to 区间参数当前未正确映射（见
+    gate_rest.get_candlesticks docstring，传历史区间会被 gate-api 拒绝），
+    而 limit 路径稳定可用。复盘最长窗口为「周」（7 天）加调度延迟，默认
+    回拉最近 300 根（1h 约 12.5 天）覆盖；更早的窗口以实际覆盖根数表达
+    （partial/unavailable），不向调用方抛异常。paper 引擎同路径生效。
+    """
+
+    def __init__(self, gateway: CandleSource, *, recent_limit: int = 300) -> None:
+        """绑定底层 K 线来源与回拉根数。
+
+        参数：
+            gateway: CandleSource，实际 K 线来源（真实网关或 paper 引擎）
+            recent_limit: int，from/to 查询时回拉的最近 K 线根数（钳制 1~2000，
+                与网关单次上限一致）
+
+        返回：
+            None，仅保存依赖与配置，不触发任何 IO
+        """
+        self._gateway = gateway
+        self._recent_limit = min(max(1, recent_limit), 2000)
+
+    def get_candlesticks(
+        self,
+        contract: str,
+        interval: str = "1m",
+        limit: int | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> list[Candle]:
+        """读取 K 线：纯 limit 查询直通底层；from/to 窗口以最近 N 根过滤实现。
+
+        参数：
+            contract: str，合约名
+            interval: str，K 线周期（透传底层）
+            limit: int | None，最近 N 根；未传 from/to 时直通底层
+            from_ts: int | None，窗口起始秒级时间戳（含）
+            to_ts: int | None，窗口结束秒级时间戳（不含）
+
+        返回：
+            list[Candle]：窗口内（[from_ts, to_ts)）的 K 线；窗口超出回拉
+            范围时只返回实际覆盖部分
+        """
+        if from_ts is None and to_ts is None:
+            return self._gateway.get_candlesticks(contract, interval=interval, limit=limit)
+        candles = self._gateway.get_candlesticks(
+            contract, interval=interval, limit=self._recent_limit
+        )
+        lo = float("-inf") if from_ts is None else from_ts
+        hi = float("inf") if to_ts is None else to_ts
+        return [c for c in candles if lo <= c.t < hi]

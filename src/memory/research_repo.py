@@ -101,14 +101,27 @@ class ResearchRepo(ResearchAssetRepoMixin):
         return self._conn.total_changes - before
 
     async def list_timeline(
-        self, start_ts: float = 0.0, end_ts: float | None = None, limit: int = 500
+        self,
+        start_ts: float = 0.0,
+        end_ts: float | None = None,
+        limit: int = 500,
+        *,
+        kind: str | None = None,
+        source: str | None = None,
+        keyword: str | None = None,
     ) -> list[Timeline]:
         """按时间范围查询事实记录（[start, end)），取窗口内**最新** limit 条按正序返回。
+
+        kind/source/keyword 为可选过滤（issue #113：复盘按窗口与主题回看事实层）；
+        keyword 匹配 title 子串（LIKE 通配符已转义，按字面匹配）。
 
         参数：
             start_ts: float，查询区间起始时间戳
             end_ts: float | None，查询区间结束时间戳；为空时不限制上界
             limit: int，每页最多返回的记录数量
+            kind: str | None，记录类型过滤（flash/calendar/indicator）；空不过滤
+            source: str | None，来源过滤（jin10/blockbeats）；空不过滤
+            keyword: str | None，标题子串过滤；空不过滤
 
         返回：
             list[Timeline]：按时间范围查询事实记录（[start, end)），取窗口内**最新** limit 条按正序返回
@@ -118,6 +131,16 @@ class ResearchRepo(ResearchAssetRepoMixin):
         if end_ts is not None:
             sql += " AND published_at < ?"
             params.append(end_ts)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if source is not None:
+            sql += " AND source = ?"
+            params.append(source)
+        if keyword:
+            sql += " AND title LIKE ? ESCAPE '\\'"
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
         sql += " ORDER BY published_at DESC LIMIT ?"
         params.append(limit)
         cur = await self._conn.execute(sql, params)

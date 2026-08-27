@@ -283,7 +283,7 @@ async def test_search_news(deps) -> None:
 
 
 async def test_read_timeline_empty(deps) -> None:
-    """事实层无记录时返回提示。
+    """事实层无记录时返回提示（含默认回溯窗口文案）。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -292,7 +292,7 @@ async def test_read_timeline_empty(deps) -> None:
         None：通过断言校验目标场景，无返回值
     """
     text = await _run(deps, "read_timeline")
-    assert "无记录" in text
+    assert "无符合条件的记录" in text and "近 7 天" in text
 
 
 async def test_read_judgments_empty(deps) -> None:
@@ -980,3 +980,186 @@ async def test_preinject_dedup_key_second_normalized(repo: Repo) -> None:
     assert len(rows) == 1
     ts_part = rows[0].dedup_key.split("|")[1]
     assert "." not in ts_part  # 按秒取整，无小数
+
+
+# ---------- 历史时间窗与过滤（issue #113 C4） ----------
+
+
+class _RecFred:
+    """记录调用参数的 FRED 桩（满足 _FredLike 结构协议）。"""
+
+    def __init__(self) -> None:
+        """初始化空的调用记录列表。
+
+        参数：无
+
+        返回：
+            None，初始化实例属性 calls
+        """
+        self.calls: list[tuple[str, int, float | None]] = []
+
+    async def get_macro_series(self, indicator, look_back, end_ts=None):
+        """记录调用参数并返回固定文本。
+
+        参数：
+            indicator: str，宏观指标名
+            look_back: int，回溯天数
+            end_ts: float | None，窗口终点时间戳
+
+        返回：
+            str：固定的宏观序列文本
+        """
+        self.calls.append((indicator, look_back, end_ts))
+        return "宏观序列文本"
+
+
+def _deps_with_fred(repo: Repo, fred: _RecFred) -> ResearchToolDeps:
+    """组装带记录型 FRED 桩的研报工具依赖。
+
+    参数：
+        repo: Repo，测试数据库仓储
+        fred: _RecFred，记录调用的 FRED 桩
+
+    返回：
+        ResearchToolDeps：绑定双假数据源与 FRED 桩的工具依赖
+    """
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb(), fred=fred)
+    return ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+
+
+async def test_get_macro_series_explicit_window(repo) -> None:
+    """宏观序列指定历史窗口：look_back 由窗口跨度向上取整天数推导，end_ts 透传 FRED。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None：断言窗口推导与透传参数
+    """
+    fred = _RecFred()
+    deps = _deps_with_fred(repo, fred)
+    text = await _run(
+        deps, "get_macro_series", {"indicator": "cpi", "start_ts": 1_000_000, "end_ts": 1_100_000}
+    )
+    assert text == "宏观序列文本"
+    assert fred.calls == [("cpi", 2, 1_100_000.0)]  # ceil(100000/86400)=2 天
+
+
+async def test_get_macro_series_window_arg_validation(repo) -> None:
+    """宏观序列窗口参数校验：end<=start、非数值、布尔均被拒且不触数据源。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None：断言三类非法输入返回参数错误且 FRED 桩零调用
+    """
+    fred = _RecFred()
+    deps = _deps_with_fred(repo, fred)
+    bad_end = await _run(
+        deps, "get_macro_series", {"indicator": "cpi", "start_ts": 2000, "end_ts": 1000}
+    )
+    bad_type = await _run(deps, "get_macro_series", {"indicator": "cpi", "start_ts": "昨天"})
+    bad_bool = await _run(deps, "get_macro_series", {"indicator": "cpi", "start_ts": True})
+    assert "end_ts 须大于 start_ts" in bad_end
+    assert "秒级时间戳数值" in bad_type
+    assert "秒级时间戳数值" in bad_bool
+    assert fred.calls == []  # 参数错误不触数据源
+
+
+def _tl_item(source: str, kind: str, title: str, ts: float, dedup: str) -> dict:
+    """构造事实层时间线测试条目。
+
+    参数：
+        source: str，来源（jin10/blockbeats）
+        kind: str，类型（flash/calendar/indicator）
+        title: str，条目标题
+        ts: float，发布时间戳
+        dedup: str，去重键
+
+    返回：
+        dict：append_timeline_many 可消费的条目字典
+    """
+    return {
+        "source": source,
+        "kind": kind,
+        "title": title,
+        "url": "",
+        "published_at": ts,
+        "meta_json": "{}",
+        "dedup_key": dedup,
+        "fetched_at": ts,
+    }
+
+
+async def _seed_timeline(repo: Repo) -> None:
+    """造四条事实层记录：窗口内三条（两来源两类型）+ 窗口外旧闻一条。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None，写入事实层时间线
+    """
+    await repo.research.append_timeline_many(
+        [
+            _tl_item("jin10", "flash", "旧闻美联储", 100.0, "k0"),
+            _tl_item("jin10", "flash", "美联储降息", 1500.0, "k1"),
+            _tl_item("blockbeats", "flash", "ETF 净流入", 1600.0, "k2"),
+            _tl_item("jin10", "calendar", "CPI 公布", 1700.0, "k3"),
+        ]
+    )
+
+
+async def test_read_timeline_explicit_window_and_filters(deps) -> None:
+    """事实层精确窗口与 kind/source/keyword 过滤：窗口外剔除，过滤回显进头部。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言窗口半开区间、各过滤维度与回显文案
+    """
+    await _seed_timeline(deps.repo)
+    window = {"start_ts": 1000, "end_ts": 2000}
+    text = await _run(deps, "read_timeline", window)
+    assert "3 条" in text and "旧闻美联储" not in text  # 窗口 [start, end) 外剔除
+
+    by_kind = await _run(deps, "read_timeline", {**window, "kind": "flash"})
+    assert "2 条" in by_kind and "CPI 公布" not in by_kind and "kind=flash" in by_kind
+
+    by_source = await _run(deps, "read_timeline", {**window, "source": "blockbeats"})
+    assert "1 条" in by_source and "ETF 净流入" in by_source
+
+    by_keyword = await _run(deps, "read_timeline", {**window, "keyword": "美联储"})
+    assert "1 条" in by_keyword and "美联储降息" in by_keyword
+
+
+async def test_read_timeline_window_arg_validation(deps) -> None:
+    """事实层窗口与过滤参数校验：非法 kind/source、end<=start 均返回参数错误。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言三类非法输入的参数错误文本
+    """
+    assert "kind 须为" in await _run(deps, "read_timeline", {"kind": "bad"})
+    assert "source 须为" in await _run(deps, "read_timeline", {"source": "x"})
+    assert "end_ts 须大于 start_ts" in await _run(
+        deps, "read_timeline", {"start_ts": 2000, "end_ts": 1000}
+    )
+
+
+async def test_read_timeline_keyword_wildcard_escaped(deps) -> None:
+    """事实层关键词按字面匹配：LIKE 通配符被转义，% 不会匹配全部记录。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言通配符关键词查不到任何记录
+    """
+    await _seed_timeline(deps.repo)
+    text = await _run(deps, "read_timeline", {"start_ts": 1000, "end_ts": 2000, "keyword": "%"})
+    assert "无符合条件的记录" in text  # % 被转义为字面字符，不匹配任何标题

@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import time
 from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader
 from src.review.strategy import StrategyStore
 from src.utils import LLMIdentity
+from tests.research_helpers import save_report_fixture
 
 _INIT = "初始策略书：" + "稳健交易，控制回撤。" * 10
 _PERIOD = (1000.0, 2000.0)
@@ -723,22 +725,22 @@ async def test_cancel_between_commit_and_return_rechecks_success(env, monkeypatc
 
     参数：
         env: SimpleNamespace，包含测试依赖的环境对象
-        monkeypatch: pytest.MonkeyPatch，替换 save_review_report 注入落库后取消
+        monkeypatch: pytest.MonkeyPatch，替换 save_review_bundle 注入落库后取消
 
     返回：
         None，断言取消传播、仅一份成功报告、审计成功闭合、ok=True 收尾、不告警
     """
     provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
     agent = _make_agent(env, provider)
-    real_save = env.repo.review.save_review_report
+    real_save = env.repo.review.save_review_bundle
     state = {"fired": False}
 
     async def committed_then_cancelled(*args, **kwargs):
         """首次调用真实落库成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
 
         参数：
-            args: tuple，save_review_report 的位置参数，原样透传真实方法
-            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+            args: tuple，save_review_bundle 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_bundle 的关键字参数，原样透传真实方法
 
         返回：
             ReviewReport：首次调用不返回（抛取消）；其后调用委托真实方法返回落库报告
@@ -752,7 +754,7 @@ async def test_cancel_between_commit_and_return_rechecks_success(env, monkeypatc
             raise asyncio.CancelledError()
         return await real_save(*args, **kwargs)
 
-    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_cancelled)
+    monkeypatch.setattr(env.repo.review, "save_review_bundle", committed_then_cancelled)
     task = asyncio.create_task(agent.run(*_PERIOD))
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -791,15 +793,15 @@ async def test_cancel_recheck_db_failure_falls_back_to_fail(env, monkeypatch, ca
     """
     provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
     agent = _make_agent(env, provider)
-    real_save = env.repo.review.save_review_report
+    real_save = env.repo.review.save_review_bundle
     state = {"fired": False}
 
     async def committed_then_cancelled(*args, **kwargs):
         """首次调用真实落库成功后抛取消（模拟 COMMIT 已执行、调用方收到取消的窗口）。
 
         参数：
-            args: tuple，save_review_report 的位置参数，原样透传真实方法
-            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+            args: tuple，save_review_bundle 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_bundle 的关键字参数，原样透传真实方法
 
         返回：
             ReviewReport：首次调用不返回（抛取消）；其后调用委托真实方法返回落库报告
@@ -827,7 +829,7 @@ async def test_cancel_recheck_db_failure_falls_back_to_fail(env, monkeypatch, ca
         """
         raise RuntimeError("db gone")
 
-    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_cancelled)
+    monkeypatch.setattr(env.repo.review, "save_review_bundle", committed_then_cancelled)
     monkeypatch.setattr(env.repo.review, "find_report_by_round_id", broken_find)
     task = asyncio.create_task(agent.run(*_PERIOD))
     with caplog.at_level("ERROR", logger="src.review.agent"), pytest.raises(asyncio.CancelledError):
@@ -1199,22 +1201,22 @@ async def test_save_post_commit_exception_recovers_success(env, monkeypatch):
 
     参数：
         env: SimpleNamespace，包含测试依赖的环境对象
-        monkeypatch: pytest.MonkeyPatch，替换 save_review_report 注入落库后普通异常
+        monkeypatch: pytest.MonkeyPatch，替换 save_review_bundle 注入落库后普通异常
 
     返回：
         None，断言恰好一份成功报告、审计成功闭合、返回成功语义结果、零告警
     """
     provider = StubProvider([LLMResponse(text="# 复盘结论\n提交成功但未返回。", raw="raw-1")])
     agent = _make_agent(env, provider)
-    real_save = env.repo.review.save_review_report
+    real_save = env.repo.review.save_review_bundle
     state = {"fired": False}
 
     async def committed_then_raise(*args, **kwargs):
         """首次调用真实落库成功后抛普通异常（模拟 COMMIT 已执行、保存函数未返回的窗口）。
 
         参数：
-            args: tuple，save_review_report 的位置参数，原样透传真实方法
-            kwargs: dict，save_review_report 的关键字参数，原样透传真实方法
+            args: tuple，save_review_bundle 的位置参数，原样透传真实方法
+            kwargs: dict，save_review_bundle 的关键字参数，原样透传真实方法
 
         返回：
             ReviewReport：首次调用不返回（抛普通异常）；其后调用委托真实方法返回落库报告
@@ -1228,7 +1230,7 @@ async def test_save_post_commit_exception_recovers_success(env, monkeypatch):
             raise RuntimeError("post-commit failure")
         return await real_save(*args, **kwargs)
 
-    monkeypatch.setattr(env.repo.review, "save_review_report", committed_then_raise)
+    monkeypatch.setattr(env.repo.review, "save_review_bundle", committed_then_raise)
     result = await agent.run(*_PERIOD)
 
     assert result["ok"] is True
@@ -1381,3 +1383,88 @@ async def test_apply_failure_alerts_and_marks_not_applied(env):
     final_event = env.events[-1]["data"]
     assert final_event["applied"] is False  # 生效失败随事件暴露
     assert any("复盘告警" in a and "未生效" in a for a in env.alerts)  # TG 告警已发
+
+
+async def test_run_research_review_end_to_end(env):
+    """研报复盘全流程集成：读案例 → 提交批改 → 随复盘报告单事务落库并附代码统计段。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象（无 candle_source，客观结果降级 unavailable）
+
+    返回：
+        None，断言研报复盘落库关联、统计段注入与简报引导文案
+    """
+    report = await save_report_fixture(
+        env.repo,
+        report_type="us_open",
+        contract="BTC_USDT",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        evidence_json=json.dumps([{"point": "美联储转鸽", "source": "金十"}], ensure_ascii=False),
+    )
+    ts = time.time() - 25 * 3600  # 回拨创建时间使 horizon=当日窗口到期
+    await env.repo._conn.execute(
+        "UPDATE research_reports SET created_at=? WHERE id=?", (ts, report.id)
+    )
+    await env.repo._conn.execute(
+        "UPDATE research_asset_views SET created_at=? WHERE report_id=?", (ts, report.id)
+    )
+    await env.repo._conn.commit()
+
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="get_research_review_case",
+                        args={"report_id": report.id, "contract": "BTC_USDT"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(
+                text="",
+                raw="raw-2",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_research_review",
+                        args={
+                            "report_id": report.id,
+                            "contract": "BTC_USDT",
+                            "direction_relation": "方向兑现",
+                            "reasoning_quality": "推理链完整",
+                            "evidence_reviews": [{"index": 0, "comment": "依据成立"}],
+                            "confidence_assessment": "置信度合理",
+                            "improvement_advice": "无",
+                        },
+                        call_id="c2",
+                    )
+                ],
+            ),
+            LLMResponse(text="# 复盘结论\n本轮含研报复盘。", raw="raw-3"),
+        ]
+    )
+    agent = _make_agent(env, provider)
+    result = await agent.run(*_PERIOD)
+
+    assert result["ok"] is True
+    reports, total = await env.repo.review.list_review_reports_page(10, 0)
+    assert total == 1
+    assert "## 研报复盘统计" in reports[0].report_md  # 代码确定性统计段已追加
+    assert "批改条数：1" in reports[0].report_md
+
+    reviews = await env.repo.research_review.list_reviews()
+    assert len(reviews) == 1
+    assert reviews[0].review_report_id == reports[0].id  # 与复盘报告同事务关联
+    assert reviews[0].report_id == report.id
+    assert reviews[0].contract == "BTC_USDT"
+    outcome = json.loads(reviews[0].outcome_json)
+    assert outcome["data_status"] == "unavailable"  # 未装配 K 线来源时降级
+
+    round_row = await env.repo.latest_audit_round("paper")
+    assert round_row is not None
+    assert "研报复盘" in (round_row.context_snapshot or "")  # 简报含研报复盘工作引导

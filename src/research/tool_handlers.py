@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -97,6 +98,24 @@ def _today_markers() -> tuple[str, str]:
     """
     now = datetime.now(BEIJING_TZ)
     return now.strftime("%Y-%m-%d"), (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _parse_ts(args: dict, key: str) -> tuple[float | None, str | None]:
+    """解析可选秒级时间戳参数：缺失返回 (None, None)；非数值返回错误文本。
+
+    参数：
+        args: dict，调用方传入的工具参数字典
+        key: str，要读取的参数键
+
+    返回：
+        tuple[float | None, str | None]：(时间戳, 错误文本)；缺失或合法时错误文本为 None
+    """
+    raw = args.get(key)
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None, f"参数错误：{key} 必须为秒级时间戳数值"
+    return float(raw), None
 
 
 # ---------- 只读工具 ----------
@@ -215,7 +234,7 @@ async def fetch_indicators(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
-    """FRED 宏观序列。
+    """FRED 宏观序列；可用 start_ts/end_ts 指定历史窗口（复盘回看用）。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -230,8 +249,20 @@ async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
     look_back, err = _parse_int(args, "look_back", 365, 30, 1825)
     if err:
         return err
+    start_ts, err = _parse_ts(args, "start_ts")
+    if err:
+        return err
+    end_ts, err = _parse_ts(args, "end_ts")
+    if err:
+        return err
+    if start_ts is not None:
+        # 指定历史窗口：look_back 由窗口跨度推导（向上取整天数），end_ts 透传 FRED
+        end = end_ts if end_ts is not None else time.time()
+        if end <= start_ts:
+            return "参数错误：end_ts 须大于 start_ts"
+        look_back = max(1, math.ceil((end - start_ts) / 86400))
     try:
-        return await deps.provider.get_macro_series(indicator, look_back)
+        return await deps.provider.get_macro_series(indicator, look_back, end_ts=end_ts)
     except ResearchSourceError as exc:
         return f"FRED 数据不可用：{exc}"
 
@@ -307,7 +338,7 @@ async def search_news(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
-    """事实层近 N 天（客观记录）。
+    """事实层事件时间线：days 快捷回溯或 start_ts/end_ts 精确窗口，可按关键词/类型/来源过滤。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -322,10 +353,42 @@ async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
     limit, err = _parse_int(args, "limit", 200, 1, 500)
     if err:
         return err
-    rows = await deps.repo.research.list_timeline(time.time() - days * 86400, limit=limit)
+    start_ts, err = _parse_ts(args, "start_ts")
+    if err:
+        return err
+    end_ts, err = _parse_ts(args, "end_ts")
+    if err:
+        return err
+    explicit_window = start_ts is not None
+    if explicit_window:
+        if end_ts is not None and end_ts <= start_ts:
+            return "参数错误：end_ts 须大于 start_ts"
+    else:
+        start_ts = time.time() - days * 86400
+    kind = str(args.get("kind") or "").strip() or None
+    if kind is not None and kind not in ("flash", "calendar", "indicator"):
+        return "参数错误：kind 须为 flash/calendar/indicator"
+    source = str(args.get("source") or "").strip() or None
+    if source is not None and source not in ("jin10", "blockbeats"):
+        return "参数错误：source 须为 jin10/blockbeats"
+    keyword = str(args.get("keyword") or "").strip() or None
+    rows = await deps.repo.research.list_timeline(
+        start_ts, end_ts=end_ts, limit=limit, kind=kind, source=source, keyword=keyword
+    )
+    filters = "；".join(
+        f"{k}={v}"
+        for k, v in (("kind", kind), ("source", source), ("keyword", keyword))
+        if v is not None
+    )
+    suffix = f"（过滤：{filters}）" if filters else ""
+    window_txt = (
+        f"{_fmt_ts(start_ts)} 起" + (f" 至 {_fmt_ts(end_ts)}" if end_ts is not None else "")
+        if explicit_window
+        else f"近 {days} 天"
+    )
     if not rows:
-        return f"近 {days} 天事实层无记录"
-    lines = [f"## 事件时间线（近 {days} 天，{len(rows)} 条）"]
+        return f"{window_txt}事实层无符合条件的记录{suffix}"
+    lines = [f"## 事件时间线（{window_txt}，{len(rows)} 条）{suffix}"]
     for r in rows:
         lines.append(f"- [{_fmt_ts(r.published_at)}] [{r.source}] {r.title}")
     return "\n".join(lines)

@@ -14,6 +14,7 @@ import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersion, Trade
+from src.memory.research_review_repo import _insert_review
 
 
 def _now() -> float:
@@ -243,6 +244,7 @@ class ReviewRepo:
         """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。
 
         round_id 为产生本报告的审计轮 id；省略默认 ''（无关联）。
+        实现上委托 save_review_bundle（无研报复盘记录），保持单一写入路径。
 
         参数：
             period_start: float，复盘区间起点时间戳
@@ -257,26 +259,82 @@ class ReviewRepo:
         返回：
             ReviewReport：落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）
         """
-        ts = _now()
-        cur = await self._conn.execute(
-            "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
-            "strategy_action,new_version_id,error,round_id,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (
-                period_start,
-                period_end,
-                stats_json,
-                report_md,
-                strategy_action,
-                new_version_id,
-                error,
-                round_id,
-                ts,
-            ),
+        return await self.save_review_bundle(
+            period_start,
+            period_end,
+            stats_json,
+            report_md,
+            strategy_action,
+            new_version_id=new_version_id,
+            error=error,
+            round_id=round_id,
         )
-        await self._conn.commit()
+
+    async def save_review_bundle(
+        self,
+        period_start: float,
+        period_end: float,
+        stats_json: str,
+        report_md: str,
+        strategy_action: str,
+        new_version_id: int | None = None,
+        error: str = "",
+        round_id: str = "",
+        research_reviews: list[dict] | None = None,
+    ) -> ReviewReport:
+        """单事务落库一份复盘报告及其全部研报复盘记录；任一步失败整体回滚。
+
+        报告与研报复盘是同一逻辑提交单元（issue #113）：不允许出现"报告已落库
+        而批改丢失"的中间态；研报复盘为空时等价于原单报告落库。失败复盘
+        （error 非空）不应携带研报复盘记录。
+
+        参数：
+            period_start: float，复盘区间起点时间戳
+            period_end: float，复盘区间终点时间戳
+            stats_json: str，复盘统计 JSON 文本
+            report_md: str，复盘报告 Markdown 正文（成功路径含代码计算的统计段）
+            strategy_action: str，策略书处理动作
+            new_version_id: int | None，复盘生成的新策略版本编号
+            error: str，需要记录的错误文本
+            round_id: str，关联的审计轮次编号
+            research_reviews: list[dict] | None，研报复盘草稿列表；元素键与
+                research_review_repo._insert_review 的关键字参数一致（不含
+                review_report_id/created_at，由本方法统一回填）
+
+        返回：
+            ReviewReport：已提交的复盘报告
+
+        异常：
+            Exception：INSERT 失败或唯一约束冲突（如同目标重复批改）时
+                回滚整批（报告与批改都不残留）并原样上抛
+        """
+        ts = _now()
+        try:
+            cur = await self._conn.execute(
+                "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
+                "strategy_action,new_version_id,error,round_id,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    period_start,
+                    period_end,
+                    stats_json,
+                    report_md,
+                    strategy_action,
+                    new_version_id,
+                    error,
+                    round_id,
+                    ts,
+                ),
+            )
+            report_id = cur.lastrowid or 0
+            for item in research_reviews or []:
+                await _insert_review(self._conn, review_report_id=report_id, created_at=ts, **item)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
         return ReviewReport(
-            id=cur.lastrowid or 0,
+            id=report_id,
             period_start=period_start,
             period_end=period_end,
             stats_json=stats_json,
