@@ -376,3 +376,17 @@ async def test_list_research_reviews_returns_full_records(
 
     none = await registry.execute("list_research_reviews", {"contract": "ETH_USDT"})
     assert "无符合条件" in none
+
+
+def test_review_registry_has_no_causal_link_write(registry) -> None:
+    """复盘注册表不含因果链写工具：因果链生命周期归研报侧，复盘侧只读复盘记录。
+
+    参数：
+        registry: ReviewToolRegistry，复盘工具注册表夹具
+
+    返回：
+        None：断言注册表无 submit_causal_links 等因果链写工具
+    """
+    names = {spec.name for spec in registry.specs}
+    assert "submit_causal_links" not in names
+    assert not any("causal" in name for name in names)  # 复盘侧无任何因果链工具

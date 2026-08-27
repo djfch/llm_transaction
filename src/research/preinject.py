@@ -173,7 +173,7 @@ async def _section_judgments(deps: ResearchToolDeps) -> str:
 
 
 async def _section_pending_links(deps: ResearchToolDeps) -> str:
-    """未闭合因果链段：前 10 条待验证当前版，带链 id 供 supersedes_id 引用。
+    """待跟踪因果链段：前 10 条待跟踪当前版，带链 id 供 supersedes_id 引用。
 
     不按时间淘汰（事件发展需要时间）；提示 LLM 事件有新进展时提交修正版。
 
@@ -181,14 +181,14 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
         deps: ResearchToolDeps，提供因果链仓库的共享依赖
 
     返回：
-        str，最多十条待验证当前版因果链及其编号的 Markdown 段落
+        str，最多十条待跟踪当前版因果链及其编号的 Markdown 段落
     """
     links = await deps.repo.research.list_pending_causal_links(limit=10)
     if not links:
-        return "## 未闭合因果链\n（暂无）"
+        return "## 待跟踪因果链\n（暂无）"
     lines = [
-        "## 未闭合因果链"
-        f"（前 {len(links)} 条，待验证中；事件有新进展请提交修正版并声明 supersedes_id）"
+        "## 待跟踪因果链"
+        f"（前 {len(links)} 条，跟踪中；事件有新进展请提交修正版并声明 supersedes_id）"
     ]
     for link in links:
         try:
@@ -223,7 +223,7 @@ def _section_watchlist(deps: ResearchToolDeps) -> str:
 
 
 async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
-    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→未闭合因果链）。
+    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→待跟踪因果链）。
 
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
     首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源

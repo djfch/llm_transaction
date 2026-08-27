@@ -328,7 +328,7 @@ async def test_submit_causal_links_staged(deps) -> None:
     """回归（H1）：合法因果链校验通过即暂存（无需 report_id），不直接落库。
 
     本轮研报 id 在工具循环结束后才生成，LLM 无法预知；提交先暂存 deps，
-    由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待验证。
+    由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待跟踪。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -378,7 +378,7 @@ async def test_submit_causal_links_invalid(deps) -> None:
             "chain": [{"node": "a"}],
             "confidence": 0.5,
             "topic": "关税",
-            "await_verification": False,  # 结论链须 2-6 节点
+            "concluded": True,  # 结论链须 2-6 节点
         },
     )
     assert "参数错误" in await _run(
@@ -413,7 +413,7 @@ async def test_submit_causal_links_evidence_not_list(deps) -> None:
 
 
 async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
-    """待验证中间态：1 节点半成品（事件未走完的观察）放行。
+    """待跟踪中间态：1 节点半成品（事件未走完的观察）放行。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -434,8 +434,8 @@ async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
     assert deps.pending_causal_links[0]["status"] == "tracking"
 
 
-async def test_submit_causal_links_await_verification_parsing(deps) -> None:
-    """await_verification 解析：false 字符串/数字 0 → 结论链；非法值报错。
+async def test_submit_causal_links_concluded_parsing(deps) -> None:
+    """concluded 解析：true 字符串 → 结论链；非法值报错。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -450,7 +450,7 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
             "chain": [{"node": "a"}, {"node": "b"}],
             "confidence": 0.6,
             "topic": "关税",
-            "await_verification": "false",
+            "concluded": "true",
         },
     )
     assert "已暂存" in text and "结论" in text
@@ -462,7 +462,7 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
             "chain": [{"node": "a"}, {"node": "b"}],
             "confidence": 0.6,
             "topic": "关税",
-            "await_verification": "也许",
+            "concluded": "也许",
         },
     )
     assert "参数错误" in text
@@ -658,8 +658,8 @@ async def test_read_causal_links_arg_boundaries(deps) -> None:
     assert "无已提交因果链" in await _run(deps, "read_causal_links", {"days": 1, "limit": 50})
 
 
-async def test_submit_causal_links_await_verification_shapes(deps) -> None:
-    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别（映射 tracking/concluded）。
+async def test_submit_causal_links_concluded_shapes(deps) -> None:
+    """concluded 全形态：数字 0/1、true/是/否 字符串均识别（映射 concluded/tracking）。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -667,8 +667,8 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    cases = [(1, "tracking"), (0, "concluded"), ("true", "tracking"), ("是", "tracking")]
-    for raw, expected in cases + [("否", "concluded")]:
+    cases = [(1, "concluded"), (0, "tracking"), ("true", "concluded"), ("是", "concluded")]
+    for raw, expected in cases + [("否", "tracking")]:
         text = await _run(
             deps,
             "submit_causal_links",
@@ -676,7 +676,7 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
                 "chain": [{"node": "a"}, {"node": "b"}],
                 "confidence": 0.6,
                 "topic": "关税",
-                "await_verification": raw,
+                "concluded": raw,
             },
         )
         assert "已暂存" in text
@@ -697,7 +697,7 @@ async def test_read_causal_links_empty(deps) -> None:
 
 
 async def test_read_causal_links_lists_family(repo: Repo) -> None:
-    """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。
+    """read_causal_links：列出链族（含历史版与状态标注、待跟踪/结论标记）。
 
     参数：
         repo: Repo，临时数据库仓储夹具
@@ -726,20 +726,32 @@ async def test_read_causal_links_lists_family(repo: Repo) -> None:
         topic="关税",
         status="concluded",
     )
+    old = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "远古推断"}]',
+        confidence=0.4,
+        topic="非农",
+    )
+    await repo._conn.execute(
+        "UPDATE causal_links SET created_at=? WHERE id=?", (time.time() - 30 * 86400, old.id)
+    )
+    await repo._conn.commit()
     deps = ResearchToolDeps(
         provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
         repo=repo,
         mode="paper",
     )
     text = await _run(deps, "read_causal_links", {"topic": "非农", "days": 7})
-    assert "已提交因果链" in text
+    assert "已提交因果链" in text and "全历史" in text  # 指定主题查族谱不受 days 窗口限制
     assert f"[链#{v1.id}]" in text
+    assert f"[链#{old.id}]" in text  # 30 天前的同主题旧链也被族谱覆盖
     assert "[非农]" in text
     assert f"替代链#{v1.id}" in text  # 修正版标注替代目标（方向：本链替代了旧链）
     assert "[已被替代]" in text  # 被替代的旧链中文标注
-    assert "[待验证]" in text
+    assert "[待跟踪]" in text
     text_all = await _run(deps, "read_causal_links")
     assert "[关税]" in text_all and "[结论]" in text_all  # 结论链标注
+    assert f"[链#{old.id}]" not in text_all  # 无主题时 days 窗口仍然生效
 
 
 # ---------- 审查补齐：T9 参数边界 ----------
@@ -816,7 +828,7 @@ async def test_source_failure_returns_sentinel(repo: Repo) -> None:
 
 
 async def test_build_preinjection_sections(deps) -> None:
-    """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。
+    """预注入六段齐全：日历/指标/快讯/时间线/判断史/待跟踪因果链；快讯与日历已落事实层。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -834,7 +846,7 @@ async def test_build_preinjection_sections(deps) -> None:
     assert "快讯" in text and "金十新闻" in text and "律动新闻" in text
     assert "事件时间线" in text and "暂无记录" in text
     assert "历史研报结论" in text and "首次研报" in text
-    assert "未闭合因果链" in text and "（暂无）" in text  # 无未闭合链空态
+    assert "待跟踪因果链" in text and "（暂无）" in text  # 无待跟踪链空态
     # 事实层已写入：日历 2 条（含低星）+ 快讯 2 条（金十/律动各一）
     rows = await deps.repo.research.list_timeline(0.0, None)
     assert len(rows) == 4

@@ -430,21 +430,25 @@ class ResearchRepo(ResearchAssetRepoMixin):
     ) -> list[CausalLink]:
         """近 days 天因果链（含历史版与全部状态），按创建时间正序。
 
-        topic 非空时只取该主题的链（read_causal_links 工具按主题查族谱用）。
+        topic 非空时只取该主题的链且不受 days 窗口限制（read_causal_links
+        工具按主题查族谱用，族谱追溯须完整覆盖历史版本）。
 
         参数：
-            days: int，向前查询的自然日数
+            days: int，向前查询的自然日数（topic 非空时失效）
             topic: str | None，因果链主题
             limit: int，每页最多返回的记录数量
 
         返回：
             list[CausalLink]：近 days 天因果链（含历史版与全部状态），按创建时间正序
         """
-        sql = "SELECT * FROM causal_links WHERE created_at >= ?"
-        params: list = [_now() - days * 86400]
+        sql = "SELECT * FROM causal_links"
+        params: list = []
         if topic:
-            sql += " AND topic = ?"
+            sql += " WHERE topic = ?"
             params.append(topic)
+        else:
+            sql += " WHERE created_at >= ?"
+            params.append(_now() - days * 86400)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         cur = await self._conn.execute(sql, params)

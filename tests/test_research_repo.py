@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pytest
@@ -314,6 +315,31 @@ async def test_list_causal_links_topic_filter(repo: Repo) -> None:
     # limit 截取：最新 1 条
     top1 = await repo.research.list_causal_links(days=7, limit=1)
     assert [link.id for link in top1] == [a2.id]
+
+
+async def test_list_causal_links_topic_ignores_days(repo: Repo) -> None:
+    """指定主题查族谱不受 days 窗口限制：窗口外同主题旧链仍返回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
+    old = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "旧链"}]', confidence=0.6, topic="关税"
+    )
+    new = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "新链"}]', confidence=0.6, topic="关税"
+    )
+    await repo._conn.execute(
+        "UPDATE causal_links SET created_at=? WHERE id=?", (time.time() - 30 * 86400, old.id)
+    )
+    await repo._conn.commit()
+    family = await repo.research.list_causal_links(days=7, topic="关税")
+    assert [link.id for link in family] == [old.id, new.id]  # 族谱含 30 天前旧链
+    recent = await repo.research.list_causal_links(days=7)
+    assert [link.id for link in recent] == [new.id]  # 无主题时窗口仍然生效
 
 
 async def test_list_reports_page(repo: Repo) -> None:

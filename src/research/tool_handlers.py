@@ -417,6 +417,8 @@ async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
 async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     """读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版。
 
+    指定 topic 时查该主题全历史族谱（不受 days 窗口限制，族谱追溯须完整）。
+
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
         args: dict，调用方传入的工具参数字典
@@ -433,17 +435,18 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     topic = str(args.get("topic") or "").strip() or None
     links = await deps.repo.research.list_causal_links(days=days, topic=topic, limit=limit)
     if not links:
-        scope = f"主题 {topic!r} " if topic else ""
-        return f"近 {days} 天{scope}无已提交因果链"
-    scope = f"，主题 {topic}" if topic else ""
-    lines = [f"## 已提交因果链（近 {days} 天{scope}，{len(links)} 条）"]
+        if topic:
+            return f"主题 {topic!r} 无已提交因果链"
+        return f"近 {days} 天无已提交因果链"
+    window = f"主题 {topic} 全历史" if topic else f"近 {days} 天"
+    lines = [f"## 已提交因果链（{window}，{len(links)} 条）"]
     for link in links:
         try:
             chain = json.loads(link.chain_json)
         except (TypeError, ValueError):
             chain = []
         nodes = " → ".join(str(n.get("node", ""))[:25] for n in chain if isinstance(n, dict))
-        tag = "待验证" if link.status == "tracking" else "结论"
+        tag = "待跟踪" if link.status == "tracking" else "结论"
         if link.supersedes_id is not None:
             status = f"替代链#{link.supersedes_id}"  # 本链替代了旧链 X
         else:
@@ -458,17 +461,17 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
 # ---------- 写工具 ----------
 
 
-def _parse_await_verification(raw: Any) -> bool | None:
-    """解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None。
+def _parse_concluded(raw: Any) -> bool | None:
+    """解析 concluded（是否已定论）：缺省 False；布尔/数字/常见字符串均可，非法返回 None。
 
     参数：
-        raw: Any，待解析或保留的原始数据
+        raw: Any，待解析的原始参数值
 
     返回：
-        bool | None：解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None
+        bool | None：解析出的布尔值；缺失时 False（默认待跟踪），非法值 None
     """
     if raw is None:
-        return True
+        return False
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, (int, float)):
@@ -529,8 +532,8 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     本轮研报失败时暂存链随 deps 丢弃，不会错挂历史研报。
 
     版本化（V1）：topic 必填（同主题聚合成族）；supersedes_id 声明替代旧链
-    （须同主题当前版），落库时旧链标记 superseded；await_verification 声明
-    待验证中间态（默认 true，允许 1 节点半成品观察）或结论链（须 2-6 节点）。
+    （须同主题当前版），落库时旧链标记 superseded；concluded 声明事件已定论
+    （默认 false：待跟踪中间态，允许 1 节点半成品观察；true：结论链，须 2-6 节点）。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -544,10 +547,10 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     topic = str(args.get("topic") or "").strip()
     if not topic:
         return "参数错误：topic 必填（事件主题，如 非农/关税/美联储）"
-    await_verification = _parse_await_verification(args.get("await_verification"))
-    if await_verification is None:
-        return "参数错误：await_verification 必须为布尔值"
-    min_nodes, max_nodes = (1, 6) if await_verification else (2, 6)
+    concluded = _parse_concluded(args.get("concluded"))
+    if concluded is None:
+        return "参数错误：concluded 必须为布尔值"
+    min_nodes, max_nodes = (2, 6) if concluded else (1, 6)
     if not isinstance(chain, list) or not min_nodes <= len(chain) <= max_nodes:
         return f"参数错误：chain 必须为 {min_nodes}-{max_nodes} 个节点的有序数组"
     for node in chain:
@@ -572,9 +575,9 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
             "topic": topic,
             "supersedes_id": supersedes_id,
-            "status": "tracking" if await_verification else "concluded",
+            "status": "concluded" if concluded else "tracking",
         }
     )
     nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain)
-    tag = "待验证" if await_verification else "结论"
+    tag = "结论" if concluded else "待跟踪"
     return f"因果链已暂存（{len(chain)} 节点，{tag}）：{nodes}（将随本轮研报自动关联落库）"
