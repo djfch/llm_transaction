@@ -266,6 +266,9 @@ class ReviewAgent:
                 research_prompt_store=self._research_prompt_store,  # 研报提示词版本存储
                 research_data_provider=self._research_data_provider,  # 复盘回看宏观序列数据源
             )
+            # 轮初盖基线章（issue #113 CAS）：在 LLM 开始工作前冻结三通道当前生效内容
+            # md5，此后人工变更与本轮草稿的竞态由轮末生效时的基线比对兜底
+            await self._sample_base_md5s(deps)
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
             round_id = await self._audit.begin_round(
@@ -605,6 +608,28 @@ class ReviewAgent:
                 "已提交复盘报告的成功结果组装失败（report_id=%s，返回最小成功结果）", report_id
             )
         return {"ok": True, "report_id": report_id, "round_id": round_id}
+
+    async def _sample_base_md5s(self, deps: ReviewToolDeps) -> None:
+        """轮初采样三通道「当前生效内容」md5 存入 deps，给本轮草稿盖基线章（issue #113 CAS）。
+
+        优先取最新 applied 版本的 md5，无 applied 版本时用当前文件内容 md5
+        （实现收口在各 store 的 current_base_md5）；未装配的可选通道跳过。
+
+        参数：
+            deps: ReviewToolDeps，本轮工具依赖（采样结果就地写入 base_md5_by_channel）
+
+        返回：
+            None，就地写入 deps.base_md5_by_channel（键为通道键）
+        """
+        deps.base_md5_by_channel["strategy"] = await self._store.current_base_md5()
+        if self._indicator_config_store is not None:
+            deps.base_md5_by_channel[
+                "indicator_config"
+            ] = await self._indicator_config_store.current_base_md5()
+        if self._research_prompt_store is not None:
+            deps.base_md5_by_channel[
+                "research_prompt"
+            ] = await self._research_prompt_store.current_base_md5()
 
     async def _pre_stats(self, period_start: float, period_end: float) -> tuple[str, str]:
         """计算指定复盘区间的成交统计并生成两种表示。

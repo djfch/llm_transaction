@@ -481,6 +481,10 @@ class Database:
         - research_reports.research_prompt_version_id（issue #113 R5-4）：构建 prompt
           时点解析的版本 id；历史研报无此归因可循，保持 NULL（复盘侧回退 md5 反解），
           不回填。
+        - strategy_versions/indicator_config_versions/research_prompt_versions.base_md5
+          （issue #113 CAS）：草稿的基线内容 md5（轮初采样），生效时与最新 applied
+          版本比对，防止「草稿 id 更大但基线更旧」的陈旧草稿覆盖人工变更；历史行与
+          人工即时生效行无基线可循，保持 NULL（生效判定回退旧 id 比较），不回填。
 
         参数：
             无
@@ -522,6 +526,8 @@ class Database:
         # 版本状态列（issue #62/#73）：复盘改写先落 draft 草稿、报告成功才置 applied
         # 生效；失败/取消置 discarded。历史行默认 applied 与既有语义一致。
         await self._ensure_version_status_columns()
+        # 草稿基线列（issue #113 CAS）：三张版本表统一补 base_md5，历史行 NULL 回退旧行为
+        await self._ensure_version_base_md5_columns()
         # 模型身份四列（跨模型效果对比）：历史轮次无法可靠推断当时所用模型，保持默认 ''，不回填
         await self._ensure_audit_llm_identity_columns()
         # 权益曲线按模式+时间的窗口扫描索引（issue #79）
@@ -584,6 +590,20 @@ class Database:
                 await self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'applied'"
                 )
+
+    async def _ensure_version_base_md5_columns(self) -> None:
+        """为三张版本表补 base_md5 列（幂等）：草稿基线 CAS 的比较键（issue #113）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（无基线可循，
+            生效判定回退旧 id 比较行为），不回填
+        """
+        for table in ("strategy_versions", "indicator_config_versions", "research_prompt_versions"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
+            if "base_md5" not in {row["name"] for row in await cur.fetchall()}:
+                await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN base_md5 TEXT")
 
     async def _ensure_audit_llm_identity_columns(self) -> None:
         """为审计主表补模型身份四列（幂等）：开轮快照落库，供跨模型效果对比。

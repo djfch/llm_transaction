@@ -425,3 +425,116 @@ async def test_rollback_and_apply_interleave_keeps_file_consistent(
     latest = await repo.indicator_config.latest_applied_version()
     assert latest is not None
     assert config_path.read_text(encoding="utf-8") == latest.content
+
+
+# ---------- 草稿基线 CAS（issue #113） ----------
+
+
+async def test_cas_discards_stale_draft_after_human_intervenes(store, repo, config_path, caplog):
+    """交错复现竞态：人工短名单生效后，基于旧内容的 agent 草稿被 CAS 废弃不覆盖。
+
+    人工路径是两步（revise 落草稿 + apply_version 生效）：人工草稿 C(v2) 生效后，
+    轮末再生效基于 v1 基线的 agent 草稿 B(v3)；无 CAS 时旧 id 比较（v3 > v2）
+    不会判取代，陈旧 B 会覆盖人工 C（PR #114 R6）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线取代告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留人工内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")
+    agent_draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    human = await store.apply_version(human_draft.id)
+    assert human is not None and human.status == "applied"
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(agent_draft.id)
+    assert applied is None  # 基线已被人工变更取代
+    assert (await store.get_version(agent_draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == ["adx14"]  # 文件保留人工内容
+    assert any("基线已被人工变更取代" in r.message for r in caplog.records)
+
+
+async def test_cas_applies_draft_when_base_matches(store, repo, config_path):
+    """草稿基线与最新 applied 内容一致时正常生效（CAS 正路径）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言草稿生效、文件替换、版本行 base_md5 落库
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    assert draft.base_md5 == v1.md5
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+
+
+async def test_cas_null_base_falls_back_to_id_compare(store, repo, config_path):
+    """base_md5 为 NULL 的历史/人工行回退旧 id 比较：id 更大的草稿照常生效。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言无基线草稿按旧行为生效覆盖、文件为新短名单
+    """
+    await store.seed_if_empty()
+    v2 = await store.revise(["adx14"], "human", "人工换指标")
+    await store.apply_version(v2.id)
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进")  # 不盖基线章
+    assert draft.base_md5 is None
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"  # id 更大，按旧行为生效
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+
+
+async def test_cas_replay_of_applied_draft_is_idempotent(store, repo, config_path):
+    """已生效草稿的幂等重放不被 CAS 误判：latest 即本版本自身时跳过比对。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言二次 apply 仍返回生效版本、文件与状态保持不变
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    first = await store.apply_version(draft.id)
+    assert first is not None and first.status == "applied"
+    second = await store.apply_version(draft.id)  # 幂等重放
+    assert second is not None and second.status == "applied"
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+    assert (await store.get_version(draft.id)).status == "applied"
+
+
+async def test_current_base_md5_sampling(store, repo, config_path):
+    """轮初基线采样：有 applied 取最新 applied 的 md5，无 applied 取当前文件内容 md5。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言无文件、有文件无版本、有 applied 三种状态下的采样值
+    """
+    assert await store.current_base_md5() == content_md5("")  # 无文件：空串 md5
+    config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")
+    assert await store.current_base_md5() == content_md5("shortlist:\n- adx14\n")  # 按文件
+    v1 = await store.seed_if_empty()
+    assert await store.current_base_md5() == v1.md5  # 有 applied：按最新 applied

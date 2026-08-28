@@ -123,6 +123,9 @@ class StrategyVersion(BaseModel):
     report_id: int | None = None
     created_at: float
     status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
+    # 草稿基线 md5（issue #113 CAS）：复盘轮初采样的「当前生效内容」摘要，生效时与最新
+    # applied 版本比对防陈旧草稿覆盖人工变更；None = 历史行/人工即时生效行，回退旧 id 比较
+    base_md5: str | None = None
 
 
 class IndicatorConfigVersion(BaseModel):
@@ -140,6 +143,8 @@ class IndicatorConfigVersion(BaseModel):
     report_id: int | None = None
     created_at: float
     status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
+    # 草稿基线 md5（issue #113 CAS）：语义同 StrategyVersion.base_md5
+    base_md5: str | None = None
 
 
 class ReviewReport(BaseModel):
@@ -332,6 +337,8 @@ class ResearchPromptVersion(BaseModel):
     review_report_id: int | None = None
     created_at: float
     status: str = "applied"
+    # 草稿基线 md5（issue #113 CAS）：语义同 StrategyVersion.base_md5
+    base_md5: str | None = None
 
 
 class ResearchReviewCandidate(BaseModel):

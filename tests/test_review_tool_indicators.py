@@ -592,3 +592,28 @@ async def test_build_review_passes_notify_event_to_agent(tmp_path, repo):
         "ok": True,
         "applied": True,
     }
+
+
+async def test_submit_indicator_config_stamps_base_md5(registry, deps, repo):
+    """轮初采样基线写入 deps 后，指标配置修订草稿盖 base_md5 章且端到端正常生效。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合（含 indicator_config_store）
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，断言草稿版本行 base_md5 等于轮初基线、apply 按 CAS 正路径生效
+    """
+    v1 = await deps.indicator_config_store.seed_if_empty()
+    deps.base_md5_by_channel["indicator_config"] = v1.md5  # 模拟轮初采样
+    new_list = ["rsi14", "boll"]
+    text = await registry.execute(
+        "submit_indicator_config", {"shortlist": new_list, "reason": "复盘改进指标组合"}
+    )
+    assert "校验通过" in text
+    version = await repo.indicator_config.get_version(deps.indicator_config_version_id)
+    assert version.base_md5 == v1.md5
+    applied = await deps.indicator_config_store.apply_version(deps.indicator_config_version_id)
+    assert applied is not None and applied.status == "applied"
+    assert deps.indicator_config_store.load_current().shortlist == new_list

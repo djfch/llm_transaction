@@ -79,6 +79,11 @@ class ReviewToolDeps:
     research_prompt_store: Any | None = None
     research_prompt_version_id: int | None = None
     research_prompt_draft_ids: list[int] = dataclass_field(default_factory=list)
+    # 本轮三通道草稿基线 md5（issue #113 CAS）：轮初采样的「当前生效内容」摘要，
+    # 键为通道键（strategy/indicator_config/research_prompt）；三个修订工具落草稿时
+    # 取本通道值盖章，轮末生效按基线比对防陈旧草稿覆盖人工变更；空字典（未采样，
+    # 如测试直接构造 deps）时草稿 base_md5 落 NULL，回退旧 id 比较行为
+    base_md5_by_channel: dict[str, str] = dataclass_field(default_factory=dict)
 
 
 # ---------- 参数校验辅助 ----------
@@ -477,7 +482,13 @@ async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
     try:
-        version = await deps.store.revise(new_prompt_md, reason, created_by="review_agent")
+        # 草稿盖基线章（issue #113 CAS）：轮末生效时按基线比对，防陈旧草稿覆盖人工变更
+        version = await deps.store.revise(
+            new_prompt_md,
+            reason,
+            created_by="review_agent",
+            base_md5=deps.base_md5_by_channel.get("strategy"),
+        )
     except StrategyValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原策略书未改动，修正后可重新提交）"
     deps.created_version_id = version.id

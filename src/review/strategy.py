@@ -4,7 +4,10 @@
 - 写前校验：strip 后 ≥100 字符、UTF-8 体积 ≤32KB、与当前版本有差异；
   任一不过即拒绝（StrategyValidationError 携带全部原因），原文件不动、不落版本；
 - 文件替换走 .tmp 临时文件 + os.replace 原子提交，避免写一半的策略书被决策循环读到；
-- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）。
+- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）；
+- 草稿基线 CAS（issue #113）：复盘草稿落库时盖章轮初采样的生效内容 md5（base_md5），
+  生效锁内发现最新 applied 内容已偏离基线（人工中途变更）即废弃草稿——id 只代表
+  落库先后，不代表分析基线新旧；base_md5 为 NULL 的历史/人工行回退旧 id 比较。
 """
 
 from __future__ import annotations
@@ -136,8 +139,29 @@ class StrategyStore:
         except FileNotFoundError:
             return ""
 
+    async def current_base_md5(self) -> str:
+        """轮初草稿基线采样：最新 applied 版本的 md5；无 applied 版本时用当前文件内容 md5。
+
+        供复盘轮初给本轮草稿盖基线章（issue #113 CAS）：轮末生效时若最新 applied
+        内容已偏离此基线（人工中途改过），草稿废弃不生效。
+
+        参数：无
+
+        返回：
+            str：当前生效内容的 md5（无 applied 版本且文件不存在时为空串的 md5）
+        """
+        latest = await self._repo.review.latest_applied_strategy_version()
+        if latest is not None:
+            return latest.md5
+        return content_md5(self.current())
+
     async def revise(
-        self, content: str, reason: str, created_by: str, report_id: int | None = None
+        self,
+        content: str,
+        reason: str,
+        created_by: str,
+        report_id: int | None = None,
+        base_md5: str | None = None,
     ) -> StrategyVersion:
         """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
@@ -146,6 +170,9 @@ class StrategyStore:
             reason: str，清空或变更原因
             created_by: str，版本创建来源
             report_id: int | None，关联报告标识
+            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
+                issue #113 CAS）；人工即时生效路径（revise_applied）锁内落库即生效、
+                无竞态窗口，不传（None 回退旧 id 比较）
         返回：
             StrategyVersion，校验通过后落库的 draft 版本（策略书文件未改动，
             issue #62/#73：先记账后生效）；校验失败抛 StrategyValidationError
@@ -159,6 +186,7 @@ class StrategyStore:
             reason,
             report_id,
             status="draft",
+            base_md5=base_md5,
         )
 
     async def revise_applied(
@@ -194,15 +222,17 @@ class StrategyStore:
     async def apply_version(self, version_id: int) -> StrategyVersion | None:
         """把草稿（或历史）版本原子写入策略书文件并置为 applied——统一生效入口。
 
-        全程在生效锁内；锁内重读最新 applied 版本，存在 id 更大的 applied 版本时
-        本版本已被取代——置 discarded 并返回 None，不覆盖人工新内容（issue #113 F11）。
+        全程在生效锁内；锁内重读最新 applied 版本：草稿 base_md5 非空且与最新
+        applied 内容不一致时基线已被人工变更取代（issue #113 CAS），否则存在 id
+        更大的 applied 版本时本版本已被取代——均置 discarded 并返回 None，
+        不覆盖人工新内容（issue #113 F11）。
 
         参数：
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效的版本对象；已被更高 applied 版本取代时
-            返回 None（本版本已置 discarded）
+            StrategyVersion | None：已生效的版本对象；基线被人工变更取代或已被
+            更高 applied 版本取代时返回 None（本版本已置 discarded）
 
         异常：
             StrategyValidationError，目标版本不存在时抛出
@@ -217,7 +247,8 @@ class StrategyStore:
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效版本；被更高 applied 版本取代时返回 None
+            StrategyVersion | None：已生效版本；草稿基线被人工变更取代（CAS）或
+            被更高 applied 版本取代时返回 None
 
         异常：
             StrategyValidationError，目标版本不存在时抛出
@@ -226,6 +257,26 @@ class StrategyStore:
         if version is None:
             raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法生效"])
         latest = await self._repo.review.latest_applied_strategy_version()
+        # 草稿基线 CAS（issue #113）：id 只代表落库先后，不代表分析基线新旧——人工
+        # revise_applied 持锁落库让出事件循环期间，复盘草稿仍能以更大 id 插队；基线
+        # 非空且与最新 applied 内容不一致时，本草稿基于旧内容生成，废弃不生效。
+        # latest.id == version_id 时跳过比对：该版本自身即最新生效（轮末生效成功后
+        # 被打断的幂等重放），其内容本来就异于基线，重放只是重写同内容文件
+        if (
+            version.base_md5
+            and latest is not None
+            and latest.id != version_id
+            and latest.md5 != version.base_md5
+        ):
+            await self._repo.review.set_version_status(version_id, "discarded")
+            logger.warning(
+                "策略草稿 v%d 的基线已被人工变更取代（基线 md5=%s，当前生效 v%d md5=%s），废弃不生效",
+                version_id,
+                version.base_md5[:8],
+                latest.id,
+                latest.md5[:8],
+            )
+            return None
         if latest is not None and latest.id > version_id:
             await self._repo.review.set_version_status(version_id, "discarded")
             logger.warning(

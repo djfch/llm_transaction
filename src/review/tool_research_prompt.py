@@ -64,7 +64,13 @@ async def submit_research_prompt_revision(deps: ReviewToolDeps, args: dict) -> s
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
     try:
-        version = await store.revise(new_prompt_md, reason, created_by="review_agent")
+        # 草稿盖基线章（issue #113 CAS）：轮末生效时按基线比对，防陈旧草稿覆盖人工变更
+        version = await store.revise(
+            new_prompt_md,
+            reason,
+            created_by="review_agent",
+            base_md5=deps.base_md5_by_channel.get("research_prompt"),
+        )
     except ResearchPromptValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原研报提示词未改动，修正后可重新提交）"
     deps.research_prompt_version_id = version.id
