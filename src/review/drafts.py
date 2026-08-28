@@ -93,14 +93,18 @@ async def apply_drafts(deps: ReviewToolDeps) -> None:
     取代判定在 store 生效锁内完成（apply_version 返回 None）：store 已把被取代
     草稿置 discarded 并告警，此处只跳过、不计入失败；单个 apply 抛异常不中断
     其余草稿，失败按 (通道键, 草稿 id) 记入 deps.apply_failed_ids 供事件与告警
-    按通道指明文件（issue #113 R9）。
+    按通道指明文件（issue #113 R9）。每次生效尝试开头先清空失败集合重算：
+    _complete_interrupted 的补全收尾会对同一 deps 重试生效，残留的旧失败记录
+    会让告警/事件把已生效的草稿误报为失败、并重复累计（V4）。
 
     参数：
         deps: ReviewToolDeps，本轮工具依赖
 
     返回：
-        None，生效/废弃就地完成；失败 (通道键, id) 就地记入 deps.apply_failed_ids
+        None，生效/废弃就地完成；失败 (通道键, id) 就地重算记入
+        deps.apply_failed_ids
     """
+    deps.apply_failed_ids.clear()  # 每次生效尝试重算失败集合，杜绝重试残留
     for store, draft_ids, channel, label in _channels(deps):
         for draft_id in draft_ids:
             try:
