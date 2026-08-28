@@ -36,6 +36,11 @@ from src.review.tool_handlers import (
 )
 
 _CASE_SNAPSHOT_LIMIT = 3000  # 案例内市场快照/上下文快照的截断长度
+# 候选扫描预算（V5）：单次 list_research_review_candidates 调用最多预检的候选数
+# （= 最多发起的 K 线请求数）。每候选预检是一次 from/to 窗口 K 线拉取，不设上限
+# 时大量数据不可用候选会把单次工具调用拖成数百次网关请求；预算用尽时返回
+# offset 续扫游标，由复盘方下一轮或显式续扫接力。
+MAX_CANDIDATE_SCAN = 200
 
 # 复盘枚举（值 → 中文释义）：schema 描述、工具校验与预注入渲染共用同一来源，改动须同步
 DIRECTION_RELATIONS = {
@@ -281,8 +286,21 @@ def _format_candidate_line(c: ResearchReviewCandidate) -> str:
     )
 
 
+def _skipped_names(skipped: list[ResearchReviewCandidate]) -> str:
+    """把被跳过的候选渲染成身份串（最多列 5 条，超出以「等 N 条」收尾）。
+
+    参数：
+        skipped: list[ResearchReviewCandidate]，被跳过候选列表
+
+    返回：
+        str：研报#id/contract 顿号串；超 5 条时追加「等 N 条」
+    """
+    names = "、".join(f"研报#{c.report_id}/{c.contract}" for c in skipped[:5])
+    return f"{names} 等 {len(skipped)} 条" if len(skipped) > 5 else names
+
+
 async def _candidate_usable(deps: ReviewToolDeps, c: ResearchReviewCandidate) -> bool:
-    """快速计算候选的客观行情结果，判定其数据是否足以支撑批改。
+    """快速计算候选的客观行情结果，以提交侧同一 partial_acceptable 门槛判定可用性。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（用其 candle_source 拉取窗口 K 线，
@@ -290,72 +308,123 @@ async def _candidate_usable(deps: ReviewToolDeps, c: ResearchReviewCandidate) ->
         c: ResearchReviewCandidate，候选行
 
     返回：
-        bool：data_status 非 pending/unavailable 时 True（complete/partial 均保留，
-        partial 是否够批改由提交侧覆盖率门槛把关）
+        bool：True 表示数据足以支撑批改（complete 或达标 partial）；pending/
+        unavailable/不达门槛的 partial 一律 False——预检口径与提交门禁一致，
+        避免列出提交时必然被拒的候选（V2）
     """
     outcome = await compute_outcome(c.contract, c.report_created_at, c.horizon, deps.candle_source)
-    return outcome.get("data_status") not in ("pending", "unavailable")
+    return partial_acceptable(outcome)
+
+
+async def _list_candidates_unchecked(deps: ReviewToolDeps, now: float, limit: int) -> str:
+    """K 线来源未装配时的降级列出：不做可用性预检，全量列出并附说明（R10）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        now: float，当前时间戳
+        limit: int，条数上限
+
+    返回：
+        str：候选清单文本；无候选时返回提示
+    """
+    candidates = await deps.repo.research_review.list_review_candidates(now, limit)
+    if not candidates:
+        return "当前无已到期的研报复盘候选"
+    lines = [
+        f"已到期待复盘候选共 {len(candidates)} 条（按到期时刻升序；"
+        "K线来源未装配，未做客观数据可用性预检）："
+    ]
+    lines.extend(_format_candidate_line(c) for c in candidates)
+    return "\n".join(lines)
+
+
+async def _scan_usable_candidates(
+    deps: ReviewToolDeps, now: float, limit: int, offset: int
+) -> tuple[list[ResearchReviewCandidate], list[ResearchReviewCandidate], int, int]:
+    """分页扫描候选并逐条预检可用性（受 MAX_CANDIDATE_SCAN 预算约束）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        now: float，当前时间戳
+        limit: int，要凑满的可用候选条数
+        offset: int，扫描起点游标（只在实际预检过的候选上推进，不漏扫）
+
+    返回：
+        tuple：可用候选列表、被跳过候选列表、已预检条数、推进后的游标
+    """
+    usable: list[ResearchReviewCandidate] = []
+    skipped: list[ResearchReviewCandidate] = []
+    scanned = 0  # 已预检候选数（= 已发起的 K 线请求数），受扫描预算约束
+    while len(usable) < limit and scanned < MAX_CANDIDATE_SCAN:
+        page = min(limit, MAX_CANDIDATE_SCAN - scanned)
+        batch = await deps.repo.research_review.list_review_candidates(now, page, offset)
+        if not batch:
+            break
+        for c in batch:
+            if len(usable) >= limit:
+                break
+            scanned += 1
+            offset += 1
+            if await _candidate_usable(deps, c):
+                usable.append(c)
+            else:
+                skipped.append(c)
+        if len(batch) < page:
+            break
+    return usable, skipped, scanned, offset
 
 
 async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> str:
-    """列出已到期、未被正式复盘且客观行情可批改的逐标的结论候选（按到期时刻升序）。
+    """列出已到期、未被正式复盘且客观行情达提交门槛的逐标的结论候选（按到期时刻升序）。
 
-    K线来源装配时对每候选快速计算客观结果，跳过 data_status 为
-    pending/unavailable 的不可用候选（统计跳过数），经 repo offset 分页
-    扫描凑满 limit 或扫完为止；来源未装配时不做可用性预检、全量列出并附
-    说明（issue #113 R10）。
+    K线来源装配时对每候选快速计算客观结果，以提交侧同一 partial_acceptable
+    门槛做可用性预检（complete 或达标 partial 才保留），跳过数据不达门槛的
+    候选并列出其身份（V2）；扫描有界——单次调用最多预检 MAX_CANDIDATE_SCAN
+    条候选（= K 线请求数上限），预算用尽而未凑满 limit 时在结果中给出 offset
+    续扫游标（V5）；来源未装配时不做可用性预检、全量列出并附说明
+    （issue #113 R10）。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_review 分页取数、
             candle_source 做可用性预检）
-        args: dict，工具参数：limit（可选，默认 20，限制在 1~100）
+        args: dict，工具参数：limit（可选，默认 20，限制在 1~100）、offset
+            （可选，默认 0；续扫游标，上轮预算用尽时按其提示传入）
 
     返回：
-        str：候选清单文本（含 report_id/contract/方向/horizon/到期时刻与跳过计数）；
-        无候选或无可用候选时返回提示
+        str：候选清单文本（含 report_id/contract/方向/horizon/到期时刻、跳过
+        候选身份与续扫提示）；无候选或无可用候选时返回提示
     """
     limit = _clamp(_opt_int(args, "limit", 20), 1, 100)
     now = time.time()
     if deps.candle_source is None:
-        candidates = await deps.repo.research_review.list_review_candidates(now, limit)
-        if not candidates:
-            return "当前无已到期的研报复盘候选"
-        lines = [
-            f"已到期待复盘候选共 {len(candidates)} 条（按到期时刻升序；"
-            "K线来源未装配，未做客观数据可用性预检）："
-        ]
-        lines.extend(_format_candidate_line(c) for c in candidates)
-        return "\n".join(lines)
-    usable: list[ResearchReviewCandidate] = []
-    skipped = 0
-    offset = 0
-    while len(usable) < limit:
-        batch = await deps.repo.research_review.list_review_candidates(now, limit, offset)
-        if not batch:
-            break
-        offset += len(batch)
-        for c in batch:
-            if len(usable) >= limit:
-                break
-            if await _candidate_usable(deps, c):
-                usable.append(c)
-            else:
-                skipped += 1
-        if len(batch) < limit:
-            break
+        return await _list_candidates_unchecked(deps, now, limit)
+    offset = max(0, _opt_int(args, "offset", 0))
+    usable, skipped, scanned, offset = await _scan_usable_candidates(deps, now, limit, offset)
+    budget_hint = ""
+    if scanned >= MAX_CANDIDATE_SCAN and len(usable) < limit:
+        budget_hint = (
+            f"（本轮扫描预算 {MAX_CANDIDATE_SCAN} 条已用尽，传 offset={offset} "
+            "继续扫描，或留待下一轮复盘）"
+        )
     if not usable:
         if skipped:
             return (
-                f"已到期待复盘候选共 {skipped} 条，但客观行情数据均不可用"
-                "（pending/unavailable），留待后续轮次"
+                f"已到期待复盘候选共 {len(skipped)} 条，但客观行情数据均不达提交门槛"
+                f"（{_skipped_names(skipped)}），留待后续轮次；若逐条核对后确认行情"
+                "数据不可恢复，可用 get_research_review_case 读案例后以 "
+                f"reasoning_quality=unreviewable 结案{budget_hint}"
             )
         return "当前无已到期的研报复盘候选"
     lines = [f"已到期待复盘候选共 {len(usable)} 条（按到期时刻升序）："]
     lines.extend(_format_candidate_line(c) for c in usable)
     if skipped:
         lines.append(
-            f"（另跳过 {skipped} 条客观行情数据不可用（pending/unavailable）的候选，留待后续轮次）"
+            f"（另跳过 {len(skipped)} 条客观行情数据不达提交门槛的候选："
+            f"{_skipped_names(skipped)}；留待后续轮次，若逐条核对后确认行情数据"
+            "不可恢复，可读案例后以 reasoning_quality=unreviewable 结案）"
         )
+    if budget_hint:
+        lines.append(budget_hint)
     return "\n".join(lines)
 
 

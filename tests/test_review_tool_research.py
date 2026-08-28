@@ -14,6 +14,7 @@ import pytest
 
 from src.gateway.base import Candle
 from src.memory import Database, Repo
+from src.review import tool_research as tool_research_module
 from src.review.strategy import StrategyStore
 from src.review.tool_handlers import ReviewToolDeps
 from src.review.tool_research import REASONING_QUALITIES
@@ -284,12 +285,13 @@ async def test_candidates_skip_unavailable_and_page(
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言返回含可用候选行与跳过计数、不含不可用候选行
+        None，断言返回含可用候选行与跳过计数；不可用候选不作为候选行列出
+        （仅在跳过说明中点名身份）
     """
     deps.candle_source = _PerContractCandles({"BTC_USDT"})
     # BTC_USDT 到期更早（25h 前）排序靠前但 K 线为空 → unavailable 被跳过；
     # ETH_USDT 到期稍晚（24.5h 前）K 线完整 → complete 被列出
-    await _seed_reviewable_report(deps)
+    btc_id = await _seed_reviewable_report(deps)
     eth = await save_report_fixture(
         deps.repo,
         report_type="us_open",
@@ -311,8 +313,85 @@ async def test_candidates_skip_unavailable_and_page(
 
     text = await registry.execute("list_research_review_candidates", {"limit": 1})
     assert f"研报#{eth.id}/ETH_USDT" in text
-    assert "BTC_USDT" not in text
+    assert f"- 研报#{btc_id}/BTC_USDT" not in text  # 不作为候选行列出（仅在跳过说明中点名）
     assert "另跳过 1 条" in text
+
+
+async def test_candidates_skip_unqualified_partial(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """V2：候选预检与提交门禁同口径——不达 partial_acceptable 门槛的 partial 也被跳过。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言缺尾段候选被跳过、身份被列出且附 unreviewable 结案提示
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _TruncatedWindowCandles(80)  # 覆盖 82.3% 但尾部缺 16 根（V1 端点约束）
+    text = await registry.execute("list_research_review_candidates", {})
+    assert "均不达提交门槛" in text
+    assert f"研报#{report_id}/BTC_USDT" in text  # 跳过者身份列出
+    assert "unreviewable" in text  # 提示确认数据不可恢复后的结案逃生口
+
+
+async def test_candidates_scan_budget_exhausted_gives_offset_cursor(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V5：扫描预算用尽而未凑满 limit 时给出 offset 续扫游标，续扫接力取到后续候选。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        monkeypatch: pytest.MonkeyPatch，把扫描预算钳小为 2 条
+
+    返回：
+        None，断言首轮预算提示与游标值、续扫列出第 3 条（可用）候选
+    """
+    monkeypatch.setattr(tool_research_module, "MAX_CANDIDATE_SCAN", 2)
+    # BTC/ETH 数据不可用（空 K 线），SOL 完整可用；到期时刻 BTC 最早、SOL 最晚
+    deps.candle_source = _PerContractCandles({"BTC_USDT", "ETH_USDT"})
+    await _seed_reviewable_report(deps)
+    eth = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        contract="ETH_USDT",
+        direction="偏空",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向下。",
+        round_id="round-research-2",
+    )
+    sol = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        contract="SOL_USDT",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        round_id="round-research-3",
+    )
+    for rid, hours in ((eth.id, 24.5), (sol.id, 24.0)):
+        ts = time.time() - hours * 3600
+        await deps.repo._conn.execute(
+            "UPDATE research_reports SET created_at=? WHERE id=?", (ts, rid)
+        )
+        await deps.repo._conn.execute(
+            "UPDATE research_asset_views SET created_at=? WHERE report_id=?", (ts, rid)
+        )
+    await deps.repo._conn.commit()
+
+    first = await registry.execute("list_research_review_candidates", {"limit": 5})
+    assert "扫描预算 2 条已用尽" in first
+    assert "offset=2" in first
+    assert "SOL_USDT" not in first
+
+    resumed = await registry.execute("list_research_review_candidates", {"limit": 5, "offset": 2})
+    assert f"研报#{sol.id}/SOL_USDT" in resumed
+    assert "扫描预算" not in resumed
 
 
 async def test_get_case_full_material_and_registration(

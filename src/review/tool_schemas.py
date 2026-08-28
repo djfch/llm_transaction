@@ -241,14 +241,20 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "list_research_review_candidates": {
         "description": (
-            "列出已到期、尚未复盘且客观行情数据可批改的研报逐标的结论候选"
-            "（按到期时刻升序，数据不可用者自动跳过并计数）："
+            "列出已到期、尚未复盘且客观行情数据达提交门槛的研报逐标的结论候选"
+            "（按到期时刻升序；数据不达门槛者自动跳过并列出身份，确认数据不可恢复"
+            "者可读案例后以 reasoning_quality=unreviewable 结案；单次最多扫描 200 条，"
+            "预算用尽时结果会给出续扫 offset）："
             "report_id、contract、方向、置信度、horizon、研报时间与到期时刻"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "条数上限（1-100），默认 20"},
+                "offset": {
+                    "type": "integer",
+                    "description": "续扫游标（默认 0；上轮提示扫描预算用尽时按其给出的值传入）",
+                },
             },
         },
     },
