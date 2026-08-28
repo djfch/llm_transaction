@@ -255,3 +255,18 @@ def test_review_prompt_research_case_window_tools():
     assert "read_timeline" in review
     assert "get_macro_series" in review
     assert "越界请求会被工具拒绝" in review
+
+
+def test_review_prompt_manual_rereview_discipline():
+    """校验复盘模板写明人工重评入口与追加语义（V6）。
+
+    参数：无
+
+    返回：
+        None，断言复盘模板含 manual_rereview 开关、理由要求与追加不覆盖语义
+    """
+    review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
+    assert "已被正式复盘过的结论不得重复提交" in review
+    assert "manual_rereview=true" in review
+    assert "rereview_reason 写明理由" in review
+    assert "重评追加新记录而不覆盖原记录" in review

@@ -297,7 +297,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "逐条依据评价（与原研报依据一一对应，evidence_index 不重不漏覆盖 0..N-1，"
             "每条含事实核对与推理支撑双枚举及写明核对来源的说明）。客观行情结果由代码附加，"
             "不得提交 outcome 字段。须先用 get_research_review_case 读取案例；通过则暂存草稿，"
-            "随本轮复盘报告落库统一生效"
+            "随本轮复盘报告落库统一生效。已被正式复盘过的目标默认拒绝，人工重评须 "
+            "manual_rereview=true 并用 rereview_reason 写明理由（重评追加新记录，不覆盖原复盘）"
         ),
         "parameters": {
             "type": "object",
@@ -391,6 +392,17 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "improvement_advice": {
                     "type": "string",
                     "description": "改进建议（下一轮研报应如何改进；无实质建议时说明理由）",
+                },
+                "manual_rereview": {
+                    "type": "boolean",
+                    "description": (
+                        "人工重评开关（默认 false）：目标已被正式复盘过时须显式传 true "
+                        "并用 rereview_reason 写明理由才会追加新记录；自动候选查重不变"
+                    ),
+                },
+                "rereview_reason": {
+                    "type": "string",
+                    "description": "人工重评理由（manual_rereview=true 时必填非空；随工具调用入审计）",
                 },
             },
             "required": [

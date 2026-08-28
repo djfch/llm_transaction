@@ -861,6 +861,56 @@ async def test_submit_rejects_already_reviewed(
     assert deps.pending_research_reviews == {}
 
 
+async def test_submit_manual_rereview(deps: ReviewToolDeps, registry: ReviewToolRegistry) -> None:
+    """人工重评四态：默认拒绝、非布尔开关报错、缺理由报错、开关加理由放行追加（V6）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言四态文本与草稿暂存结果
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=999, report_id=report_id, contract="BTC_USDT"
+    )
+    # ① 无开关默认拒绝，文案须指引人工重评入口
+    rejected = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已被正式复盘批改过" in rejected
+    assert "manual_rereview=true" in rejected
+    assert deps.pending_research_reviews == {}
+    # ② 字符串 "true" 不是真布尔，报错
+    bad_type = await registry.execute(
+        "submit_research_review",
+        {**_valid_review_args(report_id), "manual_rereview": "true"},
+    )
+    assert "manual_rereview 必须是布尔值" in bad_type
+    assert deps.pending_research_reviews == {}
+    # ③ 显式开关但缺重评理由，报错
+    no_reason = await registry.execute(
+        "submit_research_review",
+        {**_valid_review_args(report_id), "manual_rereview": True},
+    )
+    assert "rereview_reason" in no_reason
+    assert deps.pending_research_reviews == {}
+    # ④ 开关加理由齐全，放行暂存草稿（重评追加新记录，不覆盖原复盘）
+    ok = await registry.execute(
+        "submit_research_review",
+        {
+            **_valid_review_args(report_id),
+            "manual_rereview": True,
+            "rereview_reason": "原复盘把震荡误判为背离，人工复核后重评",
+        },
+    )
+    assert "已暂存" in ok
+    assert (report_id, "BTC_USDT") in deps.pending_research_reviews
+
+
 class _TruncatedWindowCandles:
     """截尾窗口 K 线桩：只返回窗口前 max_bars 根 15m K 线（模拟行情稀疏）。"""
 

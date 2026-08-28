@@ -679,24 +679,27 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     """提交对单个逐标的结论的复盘批改（暂存内存草稿，随本轮报告落库生效）。
 
     校验：须先经 get_research_review_case 读过案例；后端自查案例仍存在、
-    horizon 窗口已到期且未被正式复盘过（不依赖已读缓存的陈旧状态）；方向关系/
-    推理质量/置信度合规为枚举（非法取值拒绝），各自必须配独立理由文本；已读
-    案例缓存的客观结果须过 partial_acceptable 门槛——complete 放行，partial 须
-    起止价/涨跌幅齐全、覆盖率 ≥80% 且两个价格时点贴近窗口端点（缺头/缺尾段的
-    partial 不放行），pending/unavailable 与不达标 partial 一律拒绝并留待后续
-    轮次（R1）；数据不足的候选不得闭合为正常复盘，仅当复盘方核对案例后确认
-    行情数据不可恢复时，可显式以 reasoning_quality=unreviewable 结案逃生；
-    outcome 由代码从已读案例缓存附加，LLM 携带 outcome 字段一律拒绝；
-    evidence_reviews 与原研报依据强制 1:1（数量相等且 evidence_index 不重不漏
-    覆盖 0..N-1），每条须含事实核对与推理支撑双枚举及写明核对来源的
-    explanation。同轮对同一目标重复提交时更新内存草稿。
+    horizon 窗口已到期（不依赖已读缓存的陈旧状态）；已被正式复盘过的目标默认
+    拒绝重复提交，人工重评须显式传 manual_rereview=true（必须是真布尔值）并用
+    rereview_reason 写明理由（理由随工具调用入审计），放行后追加新记录而非覆盖
+    原复盘（V6）；方向关系/推理质量/置信度合规为枚举（非法取值拒绝），各自必须
+    配独立理由文本；已读案例缓存的客观结果须过 partial_acceptable 门槛——
+    complete 放行，partial 须起止价/涨跌幅齐全、覆盖率 ≥80% 且两个价格时点贴近
+    窗口端点（缺头/缺尾段的 partial 不放行），pending/unavailable 与不达标
+    partial 一律拒绝并留待后续轮次（R1）；数据不足的候选不得闭合为正常复盘，
+    仅当复盘方核对案例后确认行情数据不可恢复时，可显式以
+    reasoning_quality=unreviewable 结案逃生；outcome 由代码从已读案例缓存附加，
+    LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报依据强制 1:1（数量
+    相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双
+    枚举及写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读写 loaded_research_cases 与
             pending_research_reviews）
         args: dict，工具参数：report_id/contract/direction_relation/direction_reason/
             reasoning_quality/reasoning_review/evidence_reviews/confidence_assessment/
-            confidence_reason/improvement_advice（均必填）
+            confidence_reason/improvement_advice（均必填）、manual_rereview/
+            rereview_reason（可选；人工重评开关与理由，后者在开关为 true 时必填）
 
     返回：
         str：提交结果文本；校验失败返回具体原因且不落草稿
@@ -723,8 +726,18 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
             f"参数错误：研报#{report_id}/{contract} 的 horizon 窗口未到期"
             "（或 horizon 非法），暂不可复盘"
         )
-    if await deps.repo.research_review.has_review(report_id, contract):
-        return f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交"
+    # 人工重评开关必须是真布尔值（防字符串 "true" 蒙混）；已被正式复盘过的目标
+    # 默认拒绝，仅显式人工重评放行追加新记录（理由随工具调用入审计，V6）
+    manual_rereview = args.get("manual_rereview", False)
+    if not isinstance(manual_rereview, bool):
+        raise ToolArgError("参数 manual_rereview 必须是布尔值（true/false）")
+    if await deps.repo.research_review.has_review(report_id, contract) and not manual_rereview:
+        return (
+            f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交；"
+            "确需人工重评（如发现原复盘误判）时，须显式传 manual_rereview=true "
+            "并用 rereview_reason 写明理由（重评追加新记录，不覆盖原复盘）"
+        )
+    rereview_reason = _need_str(args, "rereview_reason") if manual_rereview else ""
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
     confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
@@ -764,7 +777,8 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
         "outcome_json": json.dumps(case["outcome"], ensure_ascii=False),
     }
     verb = "已更新同目标草稿" if existed else "已暂存"
+    suffix = f"；人工重评理由（{rereview_reason}）已随调用入审计" if manual_rereview else ""
     return (
-        f"研报复盘{verb}：研报#{report_id}/{contract}（依据评价 {len(ordered)}/{expected} 条）；"
-        "将随本轮复盘报告落库统一生效，报告失败则自动丢弃"
+        f"研报复盘{verb}：研报#{report_id}/{contract}（依据评价 {len(ordered)}/{expected} 条）"
+        f"{suffix}；将随本轮复盘报告落库统一生效，报告失败则自动丢弃"
     )
