@@ -14,8 +14,10 @@ import pytest
 
 from src.gateway.base import Candle
 from src.memory import Database, Repo
+from src.review import tool_research as tool_research_module
 from src.review.strategy import StrategyStore
 from src.review.tool_handlers import ReviewToolDeps
+from src.review.tool_research import REASONING_QUALITIES
 from src.review.tools import ReviewToolRegistry
 from tests.research_helpers import save_report_fixture
 
@@ -283,12 +285,13 @@ async def test_candidates_skip_unavailable_and_page(
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言返回含可用候选行与跳过计数、不含不可用候选行
+        None，断言返回含可用候选行与跳过计数；不可用候选不作为候选行列出
+        （仅在跳过说明中点名身份）
     """
     deps.candle_source = _PerContractCandles({"BTC_USDT"})
     # BTC_USDT 到期更早（25h 前）排序靠前但 K 线为空 → unavailable 被跳过；
     # ETH_USDT 到期稍晚（24.5h 前）K 线完整 → complete 被列出
-    await _seed_reviewable_report(deps)
+    btc_id = await _seed_reviewable_report(deps)
     eth = await save_report_fixture(
         deps.repo,
         report_type="us_open",
@@ -310,8 +313,85 @@ async def test_candidates_skip_unavailable_and_page(
 
     text = await registry.execute("list_research_review_candidates", {"limit": 1})
     assert f"研报#{eth.id}/ETH_USDT" in text
-    assert "BTC_USDT" not in text
+    assert f"- 研报#{btc_id}/BTC_USDT" not in text  # 不作为候选行列出（仅在跳过说明中点名）
     assert "另跳过 1 条" in text
+
+
+async def test_candidates_skip_unqualified_partial(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """V2：候选预检与提交门禁同口径——不达 partial_acceptable 门槛的 partial 也被跳过。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言缺尾段候选被跳过、身份被列出且附 unreviewable 结案提示
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _TruncatedWindowCandles(80)  # 覆盖 82.3% 但尾部缺 16 根（V1 端点约束）
+    text = await registry.execute("list_research_review_candidates", {})
+    assert "均不达提交门槛" in text
+    assert f"研报#{report_id}/BTC_USDT" in text  # 跳过者身份列出
+    assert "unreviewable" in text  # 提示确认数据不可恢复后的结案逃生口
+
+
+async def test_candidates_scan_budget_exhausted_gives_offset_cursor(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V5：扫描预算用尽而未凑满 limit 时给出 offset 续扫游标，续扫接力取到后续候选。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        monkeypatch: pytest.MonkeyPatch，把扫描预算钳小为 2 条
+
+    返回：
+        None，断言首轮预算提示与游标值、续扫列出第 3 条（可用）候选
+    """
+    monkeypatch.setattr(tool_research_module, "MAX_CANDIDATE_SCAN", 2)
+    # BTC/ETH 数据不可用（空 K 线），SOL 完整可用；到期时刻 BTC 最早、SOL 最晚
+    deps.candle_source = _PerContractCandles({"BTC_USDT", "ETH_USDT"})
+    await _seed_reviewable_report(deps)
+    eth = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        contract="ETH_USDT",
+        direction="偏空",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向下。",
+        round_id="round-research-2",
+    )
+    sol = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        contract="SOL_USDT",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        round_id="round-research-3",
+    )
+    for rid, hours in ((eth.id, 24.5), (sol.id, 24.0)):
+        ts = time.time() - hours * 3600
+        await deps.repo._conn.execute(
+            "UPDATE research_reports SET created_at=? WHERE id=?", (ts, rid)
+        )
+        await deps.repo._conn.execute(
+            "UPDATE research_asset_views SET created_at=? WHERE report_id=?", (ts, rid)
+        )
+    await deps.repo._conn.commit()
+
+    first = await registry.execute("list_research_review_candidates", {"limit": 5})
+    assert "扫描预算 2 条已用尽" in first
+    assert "offset=2" in first
+    assert "SOL_USDT" not in first
+
+    resumed = await registry.execute("list_research_review_candidates", {"limit": 5, "offset": 2})
+    assert f"研报#{sol.id}/SOL_USDT" in resumed
+    assert "扫描预算" not in resumed
 
 
 async def test_get_case_full_material_and_registration(
@@ -602,6 +682,38 @@ async def test_submit_enforces_evidence_one_to_one(
     assert deps.pending_research_reviews == {}
 
 
+async def test_reasoning_quality_enum_finalized_set(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """总体推理质量枚举为 issue #113 定稿 sound/partial/flawed/unreviewable（V7 回归）。
+
+    逐条依据层的 reasoning_status 枚举（含 unsupported/unverifiable）不受影响；
+    总体层旧取值 unsupported/unverifiable 已非法，定稿取值可正常提交。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言枚举集合、旧取值拒绝与定稿取值 partial 提交成功
+    """
+    assert set(REASONING_QUALITIES) == {"sound", "partial", "flawed", "unreviewable"}
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    for stale in ("unsupported", "unverifiable"):
+        args = _valid_review_args(report_id) | {"reasoning_quality": stale}
+        result = await registry.execute("submit_research_review", args)
+        assert "reasoning_quality 取值非法" in result
+    ok = await registry.execute(
+        "submit_research_review", _valid_review_args(report_id) | {"reasoning_quality": "partial"}
+    )
+    assert "已暂存" in ok
+    assert deps.pending_research_reviews[(report_id, "BTC_USDT")]["reasoning_quality"] == "partial"
+
+
 async def test_submit_rejects_invalid_enums_and_empty_explanation(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
@@ -749,6 +861,56 @@ async def test_submit_rejects_already_reviewed(
     assert deps.pending_research_reviews == {}
 
 
+async def test_submit_manual_rereview(deps: ReviewToolDeps, registry: ReviewToolRegistry) -> None:
+    """人工重评四态：默认拒绝、非布尔开关报错、缺理由报错、开关加理由放行追加（V6）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言四态文本与草稿暂存结果
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=999, report_id=report_id, contract="BTC_USDT"
+    )
+    # ① 无开关默认拒绝，文案须指引人工重评入口
+    rejected = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已被正式复盘批改过" in rejected
+    assert "manual_rereview=true" in rejected
+    assert deps.pending_research_reviews == {}
+    # ② 字符串 "true" 不是真布尔，报错
+    bad_type = await registry.execute(
+        "submit_research_review",
+        {**_valid_review_args(report_id), "manual_rereview": "true"},
+    )
+    assert "manual_rereview 必须是布尔值" in bad_type
+    assert deps.pending_research_reviews == {}
+    # ③ 显式开关但缺重评理由，报错
+    no_reason = await registry.execute(
+        "submit_research_review",
+        {**_valid_review_args(report_id), "manual_rereview": True},
+    )
+    assert "rereview_reason" in no_reason
+    assert deps.pending_research_reviews == {}
+    # ④ 开关加理由齐全，放行暂存草稿（重评追加新记录，不覆盖原复盘）
+    ok = await registry.execute(
+        "submit_research_review",
+        {
+            **_valid_review_args(report_id),
+            "manual_rereview": True,
+            "rereview_reason": "原复盘把震荡误判为背离，人工复核后重评",
+        },
+    )
+    assert "已暂存" in ok
+    assert (report_id, "BTC_USDT") in deps.pending_research_reviews
+
+
 class _TruncatedWindowCandles:
     """截尾窗口 K 线桩：只返回窗口前 max_bars 根 15m K 线（模拟行情稀疏）。"""
 
@@ -799,10 +961,60 @@ class _TruncatedWindowCandles:
         return full[: self._max_bars]
 
 
+class _GappedWindowCandles:
+    """中段断档窗口 K 线桩：满窗口 K 线抽掉指定序号（端点保留，模拟中段稀疏）。"""
+
+    def __init__(self, drop_indexes: set[int]) -> None:
+        """保存待抽掉的 K 线序号（自窗口起点起每 900 秒一根的序号）。
+
+        参数：
+            drop_indexes: set[int]，要剔除的 K 线序号集合
+
+        返回：
+            None，仅保存断档配置
+        """
+        self._drop = drop_indexes
+
+    async def get_candlesticks(
+        self,
+        contract: str,
+        interval: str = "1m",
+        limit: int | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> list[Candle]:
+        """返回满窗口 K 线中未被抽掉的部分（序号按 from_ts 起每 900 秒递增）。
+
+        参数：
+            contract: str，合约名
+            interval: str，K 线周期
+            limit: int | None，最近 N 根
+            from_ts: int | None，窗口起始时间戳
+            to_ts: int | None，窗口结束时间戳
+
+        返回：
+            list[Candle]：剔除指定序号后的窗口 K 线
+        """
+        if from_ts is None or to_ts is None:
+            return []
+        return [
+            Candle(
+                t=t,
+                o=Decimal("100"),
+                h=Decimal("110"),
+                l=Decimal("90"),
+                c=Decimal("105"),
+                v=Decimal("1"),
+            )
+            for i, t in enumerate(range(from_ts, to_ts, 900))
+            if i not in self._drop
+        ]
+
+
 async def test_submit_allows_qualified_partial(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
-    """partial 达标（覆盖 77/96 ≈ 80.2% 且起止价齐全）放行提交（R1）。
+    """partial 达标（覆盖 77/96 ≈ 80.2%、起止价齐全、端点贴窗）放行提交（R1）。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
@@ -812,8 +1024,9 @@ async def test_submit_allows_qualified_partial(
         None，断言提交暂存成功且 outcome 以 partial 落草稿
     """
     report_id = await _seed_reviewable_report(deps)
-    # 截尾 78 根：首根与 created_at 非整点对齐被剔，完整落窗 77 根（77/96 ≥ 80%）
-    deps.candle_source = _TruncatedWindowCandles(78)
+    # 中段抽掉 18 根（i=40..57）：首根与 created_at 非整点对齐被剔，完整落窗
+    # 77 根（77/96 ≥ 80%），两端 K 线保留故价格时点贴窗（V1 端点约束放行）
+    deps.candle_source = _GappedWindowCandles(set(range(40, 58)))
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -847,6 +1060,58 @@ async def test_submit_rejects_sparse_partial(
     result = await registry.execute("submit_research_review", _valid_review_args(report_id))
     assert "data_status=partial" in result and "80%" in result
     assert deps.pending_research_reviews == {}
+
+
+async def test_submit_rejects_tail_gapped_partial(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """缺尾段的 partial 不得闭合为正常复盘（V1：覆盖 82.3% 达标但尾部缺 16 根 > 端点容忍）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本含数据不足说明与 unreviewable 逃生口提示，且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _TruncatedWindowCandles(80)  # 剔首根后完整落窗 79 根，尾部缺 16 根
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    outcome = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
+    assert outcome["data_status"] == "partial" and outcome["candles_actual"] == 79
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已暂存" not in result
+    assert "数据不足" in result and "unreviewable" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_submit_allows_unreviewable_escape_when_data_unrecoverable(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """数据不足候选可显式以 reasoning_quality=unreviewable 结案（V1 逃生口）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言提交暂存成功且草稿以 unreviewable 落库
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _TruncatedWindowCandles(80)  # 同缺尾场景
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    args = _valid_review_args(report_id) | {
+        "reasoning_quality": "unreviewable",
+        "reasoning_review": "窗口尾部行情数据确认不可恢复，无法评价推理兑现",
+    }
+    result = await registry.execute("submit_research_review", args)
+    assert "已暂存" in result
+    draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
+    assert draft["reasoning_quality"] == "unreviewable"
 
 
 async def test_list_research_reviews_returns_full_records(

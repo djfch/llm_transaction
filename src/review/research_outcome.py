@@ -17,11 +17,17 @@ created_at 不超过 1 个 interval、末根完整 K 线终点距 window_end 不
 data_status 四态：pending（窗口未到期）/ unavailable（窗口内无 K 线或
 horizon 非法、拉取失败）/ partial（有完整 K 线但窗口覆盖不达标）/
 complete（覆盖完整窗口）。金额与百分比一律 Decimal 计算，JSON 落库前转 str。
+
+outcome 同时持久化 price_start_at/price_end_at（实际首/末根完整 K 线的价格
+时点，UTC ISO 字符串；无数据为 None）：partial 放行除覆盖率门槛外还要求
+两个价格时点分别贴近 window_start/window_end（端点约束），缺头/缺尾段的
+partial 不得闭合为正常复盘。
 """
 
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -40,6 +46,14 @@ _PAGE_LIMIT = 2000  # 网关单次 from/to 窗口的最大 K 线根数上限
 # 后续轮次行情回补（或覆盖达标）仍可复盘。80% 在"零星缺根仍可利用"
 # 与"样本足以代表窗口走势"之间取折中。
 PARTIAL_MIN_COVERAGE_PCT = 80
+
+# partial 放行的端点缺口容忍（单位：interval 个数）：首根完整 K 线起点距
+# window_start、末根完整 K 线终点距 window_end 均不得超过 2 个 interval
+# （15m×2=30 分钟）。研报时间非整点对齐或交易所发布延迟时，首尾各缺 1-2 根
+# 属常态；缺口更大则说明窗口头部/尾部走势整体缺失，起止价不再代表窗口端点，
+# 据此批改会把窗口外走势误当结论兑现。缺头/缺尾段的 partial 不得闭合为正常
+# 复盘——留候选待行情回补重试，或由复盘方显式以 unreviewable 结案。
+PARTIAL_MAX_ENDPOINT_GAP_INTERVALS = 2
 
 
 class AsyncCandleSource(Protocol):
@@ -66,6 +80,18 @@ class AsyncCandleSource(Protocol):
             list[Candle]：K 线列表；无数据时返回空列表
         """
         ...
+
+
+def _iso_utc(ts: float) -> str:
+    """把 Unix 秒时间戳转成 UTC ISO 字符串（价格时点持久化格式）。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        str：UTC ISO 字符串（如 2023-11-14T22:15:00+00:00）
+    """
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
 
 def _empty_outcome(
@@ -95,6 +121,8 @@ def _empty_outcome(
         "data_status": data_status,
         "window_start": window_start,
         "window_end": window_end,
+        "price_start_at": None,
+        "price_end_at": None,
         "candles_expected": expected,
         "candles_actual": actual,
         "start_price": None,
@@ -178,6 +206,10 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
         "data_status": "complete" if complete else "partial",
         "window_start": created_at,
         "window_end": window_end,
+        # 价格时点：起价时点=首根完整 K 线开盘时刻，止价时点=末根完整 K 线收盘
+        # 时刻（末根起点 + 900 秒），供端点缺口判定与人工复核定位
+        "price_start_at": _iso_utc(inside[0].t),
+        "price_end_at": _iso_utc(inside[-1].t + _CANDLE_SECONDS),
         "candles_expected": expected,
         "candles_actual": len(inside),
         "start_price": str(start),
@@ -191,13 +223,46 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
     }
 
 
+def _endpoint_gap_ok(outcome: dict[str, Any]) -> bool:
+    """校验两个价格时点贴近窗口端点（端点约束：缺头/缺尾段的 partial 不放行）。
+
+    price_start_at 距 window_start、price_end_at 距 window_end 均不得超过
+    PARTIAL_MAX_ENDPOINT_GAP_INTERVALS 个 interval。字段缺失、类型不对或
+    ISO 解析失败（如无价格时点字段的旧落库记录）一律判不合格——宁缺毋滥，
+    杜绝把窗口头部/尾部整体缺失的走势当作结论兑现依据。
+
+    参数：
+        outcome: dict[str, Any]，compute_outcome/outcome_from_candles 的结果字典
+
+    返回：
+        bool：True 表示两个价格时点均在端点容忍缺口内
+    """
+    start_at = outcome.get("price_start_at")
+    end_at = outcome.get("price_end_at")
+    window_start = outcome.get("window_start")
+    window_end = outcome.get("window_end")
+    if not isinstance(start_at, str) or not isinstance(end_at, str):
+        return False
+    if not isinstance(window_start, (int, float)) or not isinstance(window_end, (int, float)):
+        return False
+    try:
+        start_ts = datetime.fromisoformat(start_at).timestamp()
+        end_ts = datetime.fromisoformat(end_at).timestamp()
+    except ValueError:
+        return False
+    gap = PARTIAL_MAX_ENDPOINT_GAP_INTERVALS * _CANDLE_SECONDS
+    return start_ts - window_start <= gap and window_end - end_ts <= gap
+
+
 def partial_acceptable(outcome: dict[str, Any]) -> bool:
     """判断客观结果是否达到可批改门槛（纯函数，R1：partial 不再无条件放行）。
 
-    complete 一律放行；partial 须同时满足：start_price/end_price/return_pct
-    全非空，且完整落窗 K 线覆盖时长达到窗口时长的 PARTIAL_MIN_COVERAGE_PCT
-    （以 candles_actual/candles_expected 折算，二者同乘 900 秒约去）。
-    pending/unavailable 与不达标 partial 一律不可批改，留待后续轮次。
+    complete 一律放行（其构造口径已保证两端缺口 ≤1 个 interval，天然满足
+    端点约束）；partial 须同时满足：start_price/end_price/return_pct 全非空、
+    完整落窗 K 线覆盖时长达到窗口时长的 PARTIAL_MIN_COVERAGE_PCT（以
+    candles_actual/candles_expected 折算，二者同乘 900 秒约去），且两个价格
+    时点通过 _endpoint_gap_ok 端点约束（缺头/缺尾段的 partial 不得闭合为正常
+    复盘）。pending/unavailable 与不达标 partial 一律不可批改，留待后续轮次。
 
     参数：
         outcome: dict[str, Any]，compute_outcome/outcome_from_candles 的结果字典
@@ -214,7 +279,9 @@ def partial_acceptable(outcome: dict[str, Any]) -> bool:
         return False
     expected = outcome.get("candles_expected") or 0
     actual = outcome.get("candles_actual") or 0
-    return expected > 0 and actual * 100 >= expected * PARTIAL_MIN_COVERAGE_PCT
+    if not (expected > 0 and actual * 100 >= expected * PARTIAL_MIN_COVERAGE_PCT):
+        return False
+    return _endpoint_gap_ok(outcome)
 
 
 async def compute_outcome(

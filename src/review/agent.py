@@ -430,7 +430,8 @@ class ReviewAgent:
         attach_report_to_version 是幂等 UPDATE，打断点可能落在任一 attach 之前/之中/之后，
         无法也无须区分，两个版本关联无条件重放；重放失败只记日志（版本 report_id 留空
         可由下轮复盘重新关联），绝不反写失败报告。草稿生效同样幂等重放（issue #62/#73）：
-        apply_version 对已 applied 版本只是重写同内容文件。
+        apply_version 对已 applied 版本只是重写同内容文件；失败集合由 apply_drafts 每次
+        生效尝试开头清空重算，重试不会残留/重复累计旧失败记录（V4）。
 
         参数：
             deps: ReviewToolDeps，本轮工具依赖（读取其创建的策略/指标版本 id）

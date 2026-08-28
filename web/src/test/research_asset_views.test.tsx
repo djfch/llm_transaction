@@ -78,6 +78,7 @@ describe('逐标的研报展示', () => {
         improvementAdvice: '宏观依据须注明兑现窗口',
         outcome: {
           data_status: 'complete', candles_actual: 6, candles_expected: 6,
+          price_start_at: '2026-08-06T17:00:00+00:00', price_end_at: '2026-08-06T18:30:00+00:00',
           start_price: 67400, end_price: 70800, return_pct: 5.04,
           high: 71500, max_up_pct: 6.1, low: 66600, max_down_pct: -1.2,
         },
@@ -100,8 +101,9 @@ describe('逐标的研报展示', () => {
     expect(screen.getByText('宏观依据须注明兑现窗口')).toBeInTheDocument()
     // 逐条依据评价（序号从 0 开始，含事实/推理双枚举释义）
     expect(screen.getByText(/#0 事实：已证实 · 推理：支撑结论 —— 引用准确/)).toBeInTheDocument()
-    // 客观结果摘要（与后端 _format_outcome 同口径，数据状态只保留中文）
+    // 客观结果摘要（与后端 _format_outcome 同口径，数据状态只保留中文；含首/末价格时点）
     expect(screen.getByText(/客观结果：数据状态 完整（K线 6\/6） \| 起价 67400 → 止价 70800 \| 涨跌 5.04%/)).toBeInTheDocument()
+    expect(screen.getByText(/价格时点 .+ → .+/)).toBeInTheDocument()
     // ETH 无复盘：不出现第二个复盘块
     expect(screen.getAllByText(/复盘 · /)).toHaveLength(1)
   })

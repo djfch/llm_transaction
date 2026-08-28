@@ -241,14 +241,20 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "list_research_review_candidates": {
         "description": (
-            "列出已到期、尚未复盘且客观行情数据可批改的研报逐标的结论候选"
-            "（按到期时刻升序，数据不可用者自动跳过并计数）："
+            "列出已到期、尚未复盘且客观行情数据达提交门槛的研报逐标的结论候选"
+            "（按到期时刻升序；数据不达门槛者自动跳过并列出身份，确认数据不可恢复"
+            "者可读案例后以 reasoning_quality=unreviewable 结案；单次最多扫描 200 条，"
+            "预算用尽时结果会给出续扫 offset）："
             "report_id、contract、方向、置信度、horizon、研报时间与到期时刻"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "条数上限（1-100），默认 20"},
+                "offset": {
+                    "type": "integer",
+                    "description": "续扫游标（默认 0；上轮提示扫描预算用尽时按其给出的值传入）",
+                },
             },
         },
     },
@@ -291,7 +297,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "逐条依据评价（与原研报依据一一对应，evidence_index 不重不漏覆盖 0..N-1，"
             "每条含事实核对与推理支撑双枚举及写明核对来源的说明）。客观行情结果由代码附加，"
             "不得提交 outcome 字段。须先用 get_research_review_case 读取案例；通过则暂存草稿，"
-            "随本轮复盘报告落库统一生效"
+            "随本轮复盘报告落库统一生效。已被正式复盘过的目标默认拒绝，人工重评须 "
+            "manual_rereview=true 并用 rereview_reason 写明理由（重评追加新记录，不覆盖原复盘）"
         ),
         "parameters": {
             "type": "object",
@@ -313,10 +320,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "reasoning_quality": {
                     "type": "string",
-                    "enum": ["sound", "flawed", "unsupported", "unverifiable"],
+                    "enum": ["sound", "partial", "flawed", "unreviewable"],
                     "description": (
                         "推理质量枚举（只评价当时推理方法，不评价因果链内容正确性）："
-                        "sound=成立、flawed=有缺陷、unsupported=缺乏依据、unverifiable=无法核对"
+                        "sound=推理基本成立、partial=推理部分成立、flawed=推理存在明显问题、"
+                        "unreviewable=无法评价（客观数据不足等原因无法复盘时用于结案）"
                     ),
                 },
                 "reasoning_review": {
@@ -384,6 +392,17 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "improvement_advice": {
                     "type": "string",
                     "description": "改进建议（下一轮研报应如何改进；无实质建议时说明理由）",
+                },
+                "manual_rereview": {
+                    "type": "boolean",
+                    "description": (
+                        "人工重评开关（默认 false）：目标已被正式复盘过时须显式传 true "
+                        "并用 rereview_reason 写明理由才会追加新记录；自动候选查重不变"
+                    ),
+                },
+                "rereview_reason": {
+                    "type": "string",
+                    "description": "人工重评理由（manual_rereview=true 时必填非空；随工具调用入审计）",
                 },
             },
             "required": [

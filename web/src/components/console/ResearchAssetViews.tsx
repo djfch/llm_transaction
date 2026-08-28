@@ -51,6 +51,11 @@ const DATA_STATUS_TEXT: Record<string, string> = {
 function outcomeSummary(outcome: Record<string, unknown>): string {
   const rawStatus = String(outcome.data_status ?? 'unknown')
   const status = DATA_STATUS_TEXT[rawStatus] ?? rawStatus
+  // 价格时点（首/末根完整 K 线的价格时点，ISO 字符串）：旧落库记录无此字段则不展示
+  const points =
+    typeof outcome.price_start_at === 'string' && typeof outcome.price_end_at === 'string'
+      ? ` | 价格时点 ${fmtTime(outcome.price_start_at)} → ${fmtTime(outcome.price_end_at)}`
+      : ''
   if (outcome.start_price == null) {
     const error = String(outcome.error ?? '')
     return `数据状态 ${status}（${error !== '' ? error : '无价格数据'}）`
@@ -60,7 +65,7 @@ function outcomeSummary(outcome: Record<string, unknown>): string {
     ` | 起价 ${String(outcome.start_price)}`
   const tail =
     ` | 区间最高 ${String(outcome.high)}（${String(outcome.max_up_pct)}%）` +
-    ` | 区间最低 ${String(outcome.low)}（${String(outcome.max_down_pct)}%）`
+    ` | 区间最低 ${String(outcome.low)}（${String(outcome.max_down_pct)}%）${points}`
   if (outcome.end_price == null) {
     // 窗口末端无完整 K 线：止价与涨跌幅缺失，只呈现起价与区间高低
     const error = String(outcome.error ?? '') || '止价缺失'
@@ -76,6 +81,7 @@ const REVIEW_ENUM_TEXT: Record<string, string> = {
   digested: '震荡消化',
   invalidated: '失效',
   sound: '成立',
+  partial: '部分成立',
   flawed: '有缺陷',
   unsupported: '不支撑',
   counterevidence: '构成反证',

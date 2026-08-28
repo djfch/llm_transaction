@@ -1387,6 +1387,60 @@ async def test_apply_failure_alerts_and_marks_not_applied(env):
     assert final_event["apply_failed_files"] == ["system_prompt.md"]  # 按通道指明文件（R9）
     assert any("复盘告警" in a and "未生效" in a for a in env.alerts)  # TG 告警已发
     assert any("system_prompt.md 草稿 v" in a for a in env.alerts)  # 告警指明文件名（R9）
+    # 失败集合每次生效尝试重算（V4）：持久故障下重试不会把同一草稿重复累计进告警
+    alert = next(a for a in env.alerts if "复盘告警" in a)
+    assert alert.count("system_prompt.md 草稿 v") == 1
+
+
+async def test_apply_retry_after_interrupt_recomputes_failures(env):
+    """生效失败集合每次生效尝试重算：瞬时故障经补全收尾重试成功后不再误报失败（V4）。
+
+    参数：
+        env: SimpleNamespace，包含测试依赖的环境对象
+
+    返回：
+        None，断言 fail-once 生效故障下最终结果 ok/applied=True、无复盘告警、
+        文件已更新为新内容
+    """
+    await _seed_trades(env.repo)
+    new_prompt = "重试生效策略书：" + "顺势加仓，严格止损。" * 10
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_strategy_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "首次生效故障"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-2"),
+        ]
+    )
+    agent = _make_agent(env, provider)
+    original_apply = env.store.apply_version
+    calls = {"n": 0}
+
+    async def fail_once_apply(version_id: int):
+        """首次调用抛错（模拟瞬时生效故障），之后恢复正常。"""
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient disk error")
+        return await original_apply(version_id)
+
+    env.store.apply_version = fail_once_apply
+    result = await agent.run(*_PERIOD)
+    assert result["ok"] is True
+    # _finalize_success 首次生效失败（向上抛）→ 成功落库后收尾异常分支重试成功
+    assert calls["n"] == 2
+    final_event = env.events[-1]["data"]
+    assert final_event["ok"] is True and final_event["applied"] is True
+    assert "apply_failed_files" not in final_event
+    assert not any("复盘告警" in a for a in env.alerts)
+    assert env.store.current() == new_prompt  # 重试生效成功，文件已更新
 
 
 async def test_run_research_review_end_to_end(env):
