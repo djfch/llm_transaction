@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from decimal import Decimal
 
 import pytest
 
@@ -22,7 +23,7 @@ _INIT = "初始策略书：" + "稳健交易，控制回撤。" * 10
 
 
 class _StubCandles:
-    """内存 K 线桩：满足 CandleSource 结构协议。"""
+    """内存 K 线桩：满足 AsyncCandleSource 异步结构协议。"""
 
     def __init__(self, candles: list[Candle]) -> None:
         """保存固定返回的 K 线列表。
@@ -32,7 +33,7 @@ class _StubCandles:
         """
         self._candles = candles
 
-    def get_candlesticks(
+    async def get_candlesticks(
         self,
         contract: str,
         interval: str = "1m",
@@ -237,6 +238,39 @@ async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> 
     assert deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]["data_status"] == (
         "unavailable"
     )
+
+
+async def test_get_case_renders_missing_end_price(deps: ReviewToolDeps) -> None:
+    """窗口内只有相交不完整的 K 线：案例文本渲染止价缺失说明，而非「止价 None」。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+
+    返回：
+        None，断言文本含止价缺失说明、outcome 为 partial 且 end_price 为 None
+    """
+    # K 线起点在窗口起点前 300 秒：与窗口相交但不完整 → 止价缺失
+    deps.candle_source = _StubCandles(
+        [
+            Candle(
+                t=int(time.time() - 25 * 3600) - 300,
+                o=Decimal("100"),
+                h=Decimal("105"),
+                l=Decimal("95"),
+                c=Decimal("101"),
+                v=Decimal(1),
+            )
+        ]
+    )
+    registry = ReviewToolRegistry(deps)
+    report_id = await _seed_reviewable_report(deps)
+    text = await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    assert "止价缺失" in text
+    outcome = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
+    assert outcome["data_status"] == "partial"
+    assert outcome["end_price"] is None
 
 
 async def test_submit_requires_loaded_case(registry: ReviewToolRegistry) -> None:

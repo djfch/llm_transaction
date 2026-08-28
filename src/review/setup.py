@@ -100,7 +100,7 @@ async def build_review(
         indicator_service: IndicatorService | None，技术指标查询服务
         indicator_config_store: IndicatorConfigStore | None，指标短名单版本存储
         watchlist: Iterable[str] | None，允许复盘工具查询的合约集合
-        candle_source: Any | None，K 线只读来源（CandleSource 窄协议）；缺省 None 时
+        candle_source: Any | None，K 线只读来源（AsyncCandleSource 异步窄协议）；缺省 None 时
             研报复盘案例的客观行情结果降级为 unavailable
         research_prompt_store: Any | None，研报提示词版本存储（issue #113）；
             缺省 None 时复盘 agent 的研报提示词工具降级为中文提示

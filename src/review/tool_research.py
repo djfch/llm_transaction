@@ -203,13 +203,18 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
     if outcome.get("start_price") is None:
         error = outcome.get("error") or ""
         return f"data_status={status}（{error or '无价格数据'}）"
-    return (
+    head = (
         f"data_status={status}（K线 {outcome['candles_actual']}/{outcome['candles_expected']}）"
-        f" | 起价 {outcome['start_price']} → 止价 {outcome['end_price']}"
-        f" | 涨跌 {outcome['return_pct']}%"
+        f" | 起价 {outcome['start_price']}"
+    )
+    tail = (
         f" | 区间最高 {outcome['high']}（{outcome['max_up_pct']}%）"
         f" | 区间最低 {outcome['low']}（{outcome['max_down_pct']}%）"
     )
+    if outcome.get("end_price") is None:
+        # 窗口末端无完整 K 线：止价与涨跌幅缺失，只呈现起价与区间高低
+        return f"{head} → {outcome.get('error') or '止价缺失'}{tail}"
+    return f"{head} → 止价 {outcome['end_price']} | 涨跌 {outcome['return_pct']}%{tail}"
 
 
 def _format_review_row(row: ResearchReview) -> str:
@@ -292,7 +297,7 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     if case is None:
         return f"未找到研报#{report_id}/{contract} 的逐标的结论（请用 list_research_review_candidates 核对）"
     report, view = case
-    outcome = _case_outcome(deps, report, view, contract)
+    outcome = await _case_outcome(deps, report, view, contract)
     policy_adjustments, evidence, risks = _parse_case_jsons(report, view)
     deps.loaded_research_cases[(report_id, contract)] = {
         "outcome": outcome,
@@ -305,11 +310,13 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     return "\n".join(lines)
 
 
-def _case_outcome(deps: ReviewToolDeps, report: Any, view: Any, contract: str) -> dict[str, Any]:
+async def _case_outcome(
+    deps: ReviewToolDeps, report: Any, view: Any, contract: str
+) -> dict[str, Any]:
     """计算案例的客观行情结果；K线来源未装配时以 unavailable 降级。
 
     参数：
-        deps: ReviewToolDeps，复盘工具依赖（用其 candle_source）
+        deps: ReviewToolDeps，复盘工具依赖（用其 candle_source，异步窄协议）
         report: 研报报告行（取 created_at 作窗口起点）
         view: 逐标的结论行（取 horizon 作窗口长度）
         contract: str，合约代码
@@ -319,7 +326,7 @@ def _case_outcome(deps: ReviewToolDeps, report: Any, view: Any, contract: str) -
     """
     if deps.candle_source is None:
         return {"data_status": "unavailable", "error": "K线来源未配置"}
-    return compute_outcome(contract, report.created_at, view.horizon, deps.candle_source)
+    return await compute_outcome(contract, report.created_at, view.horizon, deps.candle_source)
 
 
 def _parse_case_jsons(report: Any, view: Any) -> tuple[list, list, list]:

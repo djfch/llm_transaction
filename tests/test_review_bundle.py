@@ -1,24 +1,22 @@
-"""复盘 bundle 与 K 线窗口适配器测试（issue #113 C4）。
+"""复盘 bundle 测试（issue #113 C4）。
 
 覆盖：render_research_review_stats 代码计数口径；save_review_bundle 单事务
 （成功全落 / 中途失败整体回滚无残留 / 共享连接外部 commit 不破坏整批回滚 /
-无草稿退化为纯报告）；RecentWindowCandleSource 的 from/to 窗口过滤与 limit 直通。
+无草稿退化为纯报告）。K 线窗口适配器（GatewayAsyncCandleSource）的测试在
+tests/test_research_outcome.py。
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 import src.memory.review_repo as review_repo_mod
-from src.gateway.base import Candle
 from src.memory import Database, Repo
 from src.review.bundle import render_research_review_stats, save_review_bundle
-from src.review.research_outcome import RecentWindowCandleSource
 
 
 @pytest.fixture
@@ -301,95 +299,3 @@ async def test_bundle_without_reviews_keeps_plain_report(repo: Repo) -> None:
     )
     assert report.report_md == "# 仅正文"
     assert await repo.research_review.list_reviews() == []
-
-
-# ---------- RecentWindowCandleSource（from/to 窗口 → limit 路径适配） ----------
-
-
-def _candle(t: int) -> Candle:
-    """构造一根只有时间戳有意义的测试 K 线。
-
-    参数：
-        t: int，K 线秒级时间戳
-
-    返回：
-        Candle：价格字段全为占位值的 K 线
-    """
-    return Candle(t=t, o=Decimal(1), h=Decimal(2), l=Decimal(0), c=Decimal(1), v=Decimal(0))
-
-
-class _FakeGateway:
-    """记录调用参数并回放固定 K 线列表的网关替身。"""
-
-    def __init__(self, candles: list[Candle]) -> None:
-        """保存回放数据并初始化调用记录。
-
-        参数：
-            candles: list[Candle]，get_candlesticks 固定回放的 K 线列表
-
-        返回：
-            None，仅初始化实例属性
-        """
-        self._candles = candles
-        self.calls: list[dict] = []
-
-    def get_candlesticks(self, contract, interval="1m", limit=None, from_ts=None, to_ts=None):
-        """记录参数并回放 K 线列表。
-
-        参数：
-            contract: str，合约名（仅对齐接口签名）
-            interval: str，K 线周期（仅对齐接口签名）
-            limit: int | None，最近 N 根
-            from_ts: int | None，窗口起点
-            to_ts: int | None，窗口终点
-
-        返回：
-            list[Candle]：构造时注入的固定 K 线列表副本
-        """
-        self.calls.append({"limit": limit, "from_ts": from_ts, "to_ts": to_ts})
-        return list(self._candles)
-
-
-def test_adapter_window_filters_client_side() -> None:
-    """from/to 查询：底层只走 limit 路径（网关 from/to 不可用），窗口 [from,to) 客户端过滤。
-
-    参数：无
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    gateway = _FakeGateway([_candle(t) for t in (90, 100, 110, 200)])
-    source = RecentWindowCandleSource(gateway, recent_limit=300)
-    got = source.get_candlesticks("BTC_USDT", interval="1h", from_ts=100, to_ts=200)
-    assert [c.t for c in got] == [100, 110]  # 90 在窗外、200 为不含端点
-    assert gateway.calls == [{"limit": 300, "from_ts": None, "to_ts": None}]
-
-
-def test_adapter_passthrough_without_window() -> None:
-    """纯 limit 查询直通底层（不参与窗口过滤）。
-
-    参数：无
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    gateway = _FakeGateway([_candle(1), _candle(2)])
-    source = RecentWindowCandleSource(gateway)
-    got = source.get_candlesticks("BTC_USDT", interval="1h", limit=10)
-    assert [c.t for c in got] == [1, 2]
-    assert gateway.calls == [{"limit": 10, "from_ts": None, "to_ts": None}]
-
-
-def test_adapter_returns_covered_part_when_window_exceeds_recent() -> None:
-    """窗口早于回拉范围时只返回实际覆盖部分（由上层以 partial/unavailable 表达）。
-
-    参数：无
-
-    返回：
-        None：通过断言校验目标场景，无返回值
-    """
-    gateway = _FakeGateway([_candle(t) for t in (500, 600)])
-    source = RecentWindowCandleSource(gateway)
-    assert source.get_candlesticks("BTC_USDT", from_ts=100, to_ts=200) == []  # 完全窗外
-    got = source.get_candlesticks("BTC_USDT", from_ts=100, to_ts=550)  # 部分覆盖
-    assert [c.t for c in got] == [500]

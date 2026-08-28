@@ -65,7 +65,8 @@ class ReviewToolDeps:
     loaded_research_cases: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
     # 研报复盘暂存区：submit 校验通过的草稿随复盘报告单事务落库（C4 bundle），报告失败随 deps 丢弃
     pending_research_reviews: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
-    # K 线只读来源（CandleSource 窄协议，Gateway/paper 引擎结构满足）；None 时案例客观结果降级为 unavailable
+    # K 线只读来源（AsyncCandleSource 异步窄协议，生产为 GatewayAsyncCandleSource 包网关）；
+    # None 时案例客观结果降级为 unavailable
     candle_source: Any | None = None
     # 研报提示词版本存储（issue #113 草稿模式同策略书）：None（未装配）时
     # submit_research_prompt_revision / get_research_prompt_versions 返回「未装配」降级提示；

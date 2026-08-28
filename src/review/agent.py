@@ -165,8 +165,8 @@ class ReviewAgent:
                 省略时指标短名单工具降级
             watchlist: Iterable[str] | None，监控合约名单，保留活引用、每轮 run 拍快照
                 以跟随热更新；省略时视为空名单
-            candle_source: Any | None，K 线只读来源（CandleSource 窄协议，生产装配
-                RecentWindowCandleSource 包网关）；省略时研报复盘案例的客观结果降级
+            candle_source: Any | None，K 线只读来源（AsyncCandleSource 异步窄协议，生产装配
+                GatewayAsyncCandleSource 包网关）；省略时研报复盘案例的客观结果降级
                 为 unavailable（不拖垮复盘）
             research_prompt_store: Any | None，研报提示词版本存储（ResearchPromptStore
                 窄协议：revise/apply_version/discard_draft/current/list_versions/

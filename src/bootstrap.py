@@ -46,7 +46,7 @@ from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import funding_loop
 from src.market.candles import stale_watchdog
 from src.paper.setup import build_paper_gateway
-from src.review.research_outcome import RecentWindowCandleSource
+from src.review.research_outcome import GatewayAsyncCandleSource
 from src.review.setup import ReviewComponents, build_review
 from src.research.prompt_store import ResearchPromptStore
 from src.research.setup import ResearchComponents, build_research
@@ -452,8 +452,8 @@ async def build_app(
             indicator_service=indicators.service,
             indicator_config_store=indicators.store,
             watchlist=watchlist.contracts,
-            # Gate 网关 from/to 区间路径不可用，包一层最近 N 根+窗口过滤适配器（issue #113）
-            candle_source=RecentWindowCandleSource(gateway),
+            # K 线窗口适配器：同步网关 → 异步真窗口源（from/to 透传 + 超宽分段，issue #113）
+            candle_source=GatewayAsyncCandleSource(gateway),
             research_prompt_store=research_prompt_store,
         ),
         research=build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）

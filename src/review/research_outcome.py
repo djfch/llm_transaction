@@ -1,11 +1,15 @@
 """研报复盘的客观行情结果计算（issue #113）。
 
-按研报结论的 horizon 窗口拉取历史 1h K 线，计算方向批改所需的客观指标
+按研报结论的 horizon 窗口拉取历史 15m K 线，计算方向批改所需的客观指标
 （起止价、区间最高最低、涨跌幅、最大有利/不利变动）。纯函数
 （outcome_from_candles）与 IO（compute_outcome）分离：K 线拉取走
-CandleSource 窄协议，复盘侧不持有完整 Gateway。注意 Gate 网关 from/to
-区间路径当前不可用（见 gate_rest docstring），生产装配应包一层
-RecentWindowCandleSource（最近 N 根 + 客户端窗口过滤）而非直传网关。
+AsyncCandleSource 异步窄协议，复盘侧不持有完整 Gateway；生产装配用
+GatewayAsyncCandleSource 包同步网关（run_gateway_io 卸载 + 真 from/to
+窗口透传 + 超 2000 根分段拉取）。
+
+窗口边界纪律（15m K 线）：与窗口相交的 K 线都参与起价/最高/最低；
+止价只取完整落在窗口内的最后一根收盘价，避免把窗口终点之后的走势算进
+批改依据。
 
 data_status 四态：pending（窗口未到期）/ unavailable（窗口内无 K 线或
 horizon 非法、拉取失败）/ partial（有 K 线但不足窗口期望根数）/
@@ -18,17 +22,20 @@ import time
 from decimal import Decimal
 from typing import Any, Protocol
 
+from src.gateway.async_io import run_gateway_io
 from src.gateway.base import Candle
+from src.market.intervals import interval_seconds
 from src.research.payload_v2 import HORIZON_SECONDS
 
-_CANDLE_INTERVAL = "1h"
-_CANDLE_SECONDS = 3600
+_CANDLE_INTERVAL = "15m"
+_CANDLE_SECONDS = 900
+_PAGE_LIMIT = 2000  # 网关单次 from/to 窗口的最大 K 线根数上限
 
 
-class CandleSource(Protocol):
-    """K 线只读来源窄协议：与 Gateway.get_candlesticks 同签名，结构子类型满足。"""
+class AsyncCandleSource(Protocol):
+    """K 线只读来源异步窄协议：与 Gateway.get_candlesticks 同参数的协程版本。"""
 
-    def get_candlesticks(
+    async def get_candlesticks(
         self,
         contract: str,
         interval: str = "1m",
@@ -36,11 +43,11 @@ class CandleSource(Protocol):
         from_ts: int | None = None,
         to_ts: int | None = None,
     ) -> list[Candle]:
-        """读取合约历史 K 线（签名与 Gateway 协议一致，便于直接透传网关实例）。
+        """读取合约历史 K 线（参数口径与 Gateway 协议一致）。
 
         参数：
             contract: str，合约名（如 BTC_USDT）
-            interval: str，K 线周期；本模块固定传 1h
+            interval: str，K 线周期；本模块固定传 15m
             limit: int | None，最近 N 根；与 from_ts/to_ts 互斥
             from_ts: int | None，起始秒级时间戳
             to_ts: int | None，结束秒级时间戳
@@ -66,7 +73,7 @@ def _empty_outcome(
         data_status: str，数据状态（pending/unavailable）
         window_start: float，窗口起始时间戳
         window_end: float，窗口结束时间戳
-        expected: int，窗口期望 1h K 线根数
+        expected: int，窗口期望 15m K 线根数
         actual: int，实际拿到的窗口内 K 线根数
         error: str，补充说明（如 horizon 非法、拉取异常）；无则为空串
 
@@ -108,8 +115,11 @@ def _pct(part: Decimal, base: Decimal) -> str:
 def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str) -> dict[str, Any]:
     """纯函数：给定 K 线列表，过滤出 horizon 窗口内的部分并计算客观结果。
 
-    边界纪律：窗口 [created_at, created_at + 窗口秒数) 之外的 K 线一律丢弃，
-    起止价/最高最低只来自窗口内行情。
+    边界纪律：与窗口 [created_at, created_at + 窗口秒数) 相交的 K 线
+    （c.t < window_end 且 c.t + 900 > created_at）参与起价/最高/最低；
+    止价只取完整落在窗口内（created_at <= c.t 且 c.t + 900 <= window_end）的
+    最后一根收盘价——窗口终点之后的走势不得进入批改依据；无完整 K 线时
+    end_price/return_pct 为 None 并降级 partial。
 
     参数：
         candles: list[Candle]，候选 K 线列表（允许含窗口外数据，函数内过滤）
@@ -118,12 +128,15 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
 
     返回：
         dict[str, Any]：客观结果字典；窗口内无 K 线时 data_status=unavailable，
-        不足期望根数时 partial，否则 complete
+        不足期望根数或缺完整止价时 partial，否则 complete
     """
     seconds = HORIZON_SECONDS[horizon]
     window_end = created_at + seconds
     expected = seconds // _CANDLE_SECONDS
-    window = sorted((c for c in candles if created_at <= c.t < window_end), key=lambda c: c.t)
+    window = sorted(
+        (c for c in candles if c.t < window_end and c.t + _CANDLE_SECONDS > created_at),
+        key=lambda c: c.t,
+    )
     if not window:
         return _empty_outcome(
             "unavailable",
@@ -133,34 +146,36 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
             error="窗口内无 K 线数据",
         )
     start = window[0].o
-    end = window[-1].c
     high = max(c.h for c in window)
     low = min(c.l for c in window)
+    inside = [c for c in window if c.t >= created_at and c.t + _CANDLE_SECONDS <= window_end]
+    end = inside[-1].c if inside else None
+    complete = len(window) >= expected and end is not None
     return {
-        "data_status": "complete" if len(window) >= expected else "partial",
+        "data_status": "complete" if complete else "partial",
         "window_start": created_at,
         "window_end": window_end,
         "candles_expected": expected,
         "candles_actual": len(window),
         "start_price": str(start),
-        "end_price": str(end),
+        "end_price": str(end) if end is not None else None,
         "high": str(high),
         "low": str(low),
-        "return_pct": _pct(end - start, start),
+        "return_pct": _pct(end - start, start) if end is not None else None,
         "max_up_pct": _pct(high - start, start),
         "max_down_pct": _pct(low - start, start),
-        "error": "",
+        "error": "" if end is not None else "窗口末端无完整 K 线，止价缺失",
     }
 
 
-def compute_outcome(
+async def compute_outcome(
     contract: str,
     created_at: float,
     horizon: str,
-    candle_source: CandleSource,
+    candle_source: AsyncCandleSource,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """IO 层：按 horizon 窗口拉取历史 1h K 线并计算客观结果。
+    """IO 层：按 horizon 窗口拉取历史 15m K 线并计算客观结果。
 
     窗口未到期直接返回 pending（不拉取）；horizon 非法或拉取异常返回
     unavailable 并附 error 说明——单候选数据问题不向调用方抛异常，由
@@ -170,7 +185,7 @@ def compute_outcome(
         contract: str，合约名
         created_at: float，研报创建时间戳（窗口起点）
         horizon: str，结论时间范围（当日/3日/周）
-        candle_source: CandleSource，K 线只读来源（网关或 paper 引擎）
+        candle_source: AsyncCandleSource，K 线只读来源（异步协议）
         now: float | None，当前时间戳（测试可注入）；None 时取真实当前时间
 
     返回：
@@ -195,7 +210,7 @@ def compute_outcome(
             error="horizon 窗口未到期",
         )
     try:
-        candles = candle_source.get_candlesticks(
+        candles = await candle_source.get_candlesticks(
             contract, interval=_CANDLE_INTERVAL, from_ts=int(created_at), to_ts=int(window_end)
         )
     except Exception as exc:  # 网关/网络异常不拖垮整轮复盘，以 unavailable 表达
@@ -209,31 +224,30 @@ def compute_outcome(
     return outcome_from_candles(candles, created_at, horizon)
 
 
-class RecentWindowCandleSource:
-    """CandleSource 窗口适配器：from/to 历史窗口改走「最近 N 根 + 客户端过滤」。
+class GatewayAsyncCandleSource:
+    """AsyncCandleSource 生产适配器：同步网关 → 异步真窗口 K 线源。
 
-    存在原因：Gate 网关的 from/to 区间参数当前未正确映射（见
-    gate_rest.get_candlesticks docstring，传历史区间会被 gate-api 拒绝），
-    而 limit 路径稳定可用。复盘最长窗口为「周」（7 天）加调度延迟，默认
-    回拉最近 300 根（1h 约 12.5 天）覆盖；更早的窗口以实际覆盖根数表达
-    （partial/unavailable），不向调用方抛异常。paper 引擎同路径生效。
+    所有底层调用经 run_gateway_io 卸载（不占事件循环线程）；from/to 窗口
+    真实透传网关；窗口跨距超过单次上限（2000 根 × 周期秒数）时按上限分段
+    循环拉取并按时间戳去重拼合。paper 引擎同为同步实现，走同一卸载路径。
     """
 
-    def __init__(self, gateway: CandleSource, *, recent_limit: int = 300) -> None:
-        """绑定底层 K 线来源与回拉根数。
+    def __init__(self, gateway: Any, *, page_limit: int = _PAGE_LIMIT) -> None:
+        """绑定底层同步 K 线来源与单段根数上限。
 
         参数：
-            gateway: CandleSource，实际 K 线来源（真实网关或 paper 引擎）
-            recent_limit: int，from/to 查询时回拉的最近 K 线根数（钳制 1~2000，
+            gateway: Any，同步 K 线来源（真实网关或 paper 引擎，结构满足
+                Gateway.get_candlesticks）
+            page_limit: int，from/to 窗口单段拉取的最大根数（钳制 1~2000，
                 与网关单次上限一致）
 
         返回：
             None，仅保存依赖与配置，不触发任何 IO
         """
         self._gateway = gateway
-        self._recent_limit = min(max(1, recent_limit), 2000)
+        self._page_limit = min(max(1, page_limit), _PAGE_LIMIT)
 
-    def get_candlesticks(
+    async def get_candlesticks(
         self,
         contract: str,
         interval: str = "1m",
@@ -241,24 +255,44 @@ class RecentWindowCandleSource:
         from_ts: int | None = None,
         to_ts: int | None = None,
     ) -> list[Candle]:
-        """读取 K 线：纯 limit 查询直通底层；from/to 窗口以最近 N 根过滤实现。
+        """读取 K 线：纯 limit 查询直通底层；from/to 窗口真实透传，超宽窗口分段拼合。
 
         参数：
             contract: str，合约名
-            interval: str，K 线周期（透传底层）
+            interval: str，K 线周期（透传底层；分段宽度按 interval_seconds 换算）
             limit: int | None，最近 N 根；未传 from/to 时直通底层
-            from_ts: int | None，窗口起始秒级时间戳（含）
-            to_ts: int | None，窗口结束秒级时间戳（不含）
+            from_ts: int | None，窗口起始秒级时间戳
+            to_ts: int | None，窗口结束秒级时间戳
 
         返回：
-            list[Candle]：窗口内（[from_ts, to_ts)）的 K 线；窗口超出回拉
-            范围时只返回实际覆盖部分
+            list[Candle]：窗口内的 K 线，按时间升序去重拼合
         """
-        if from_ts is None and to_ts is None:
-            return self._gateway.get_candlesticks(contract, interval=interval, limit=limit)
-        candles = self._gateway.get_candlesticks(
-            contract, interval=interval, limit=self._recent_limit
-        )
-        lo = float("-inf") if from_ts is None else from_ts
-        hi = float("inf") if to_ts is None else to_ts
-        return [c for c in candles if lo <= c.t < hi]
+        if from_ts is None or to_ts is None:
+            return await run_gateway_io(
+                self._gateway.get_candlesticks, contract, interval=interval, limit=limit
+            )
+        span = interval_seconds(interval)
+        step = self._page_limit * span
+        if to_ts - from_ts <= step:
+            return await run_gateway_io(
+                self._gateway.get_candlesticks,
+                contract,
+                interval=interval,
+                from_ts=from_ts,
+                to_ts=to_ts,
+            )
+        merged: dict[int, Candle] = {}
+        seg_start = from_ts
+        while seg_start < to_ts:
+            seg_end = min(to_ts, seg_start + step)
+            batch = await run_gateway_io(
+                self._gateway.get_candlesticks,
+                contract,
+                interval=interval,
+                from_ts=seg_start,
+                to_ts=seg_end,
+            )
+            for candle in batch:
+                merged[candle.t] = candle
+            seg_start = seg_end
+        return [merged[t] for t in sorted(merged)]

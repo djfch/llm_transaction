@@ -55,13 +55,18 @@ function outcomeSummary(outcome: Record<string, unknown>): string {
     const error = String(outcome.error ?? '')
     return `数据状态 ${status}（${error !== '' ? error : '无价格数据'}）`
   }
-  return (
+  const head =
     `数据状态 ${status}（K线 ${String(outcome.candles_actual)}/${String(outcome.candles_expected)}）` +
-    ` | 起价 ${String(outcome.start_price)} → 止价 ${String(outcome.end_price)}` +
-    ` | 涨跌 ${String(outcome.return_pct)}%` +
+    ` | 起价 ${String(outcome.start_price)}`
+  const tail =
     ` | 区间最高 ${String(outcome.high)}（${String(outcome.max_up_pct)}%）` +
     ` | 区间最低 ${String(outcome.low)}（${String(outcome.max_down_pct)}%）`
-  )
+  if (outcome.end_price == null) {
+    // 窗口末端无完整 K 线：止价与涨跌幅缺失，只呈现起价与区间高低
+    const error = String(outcome.error ?? '') || '止价缺失'
+    return `${head} → ${error}${tail}`
+  }
+  return `${head} → 止价 ${String(outcome.end_price)} | 涨跌 ${String(outcome.return_pct)}%${tail}`
 }
 
 /** 复盘枚举 → 中文释义（用户可见只显示中文；未知/空值原样透出便于排查） */

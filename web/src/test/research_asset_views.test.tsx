@@ -139,4 +139,44 @@ describe('逐标的研报展示', () => {
     // 评价全空时不渲染对应标签
     expect(screen.queryByText('方向关系：')).not.toBeInTheDocument()
   })
+
+  it('复盘客观结果止价缺失时只呈现起价与区间高低', () => {
+    render(
+      <ResearchAssetDetails
+        summary=""
+        crossMarketView=""
+        globalRisks={[]}
+        assets={[{
+          ...asset,
+          evidence: [],
+          risks: [],
+          narrative: '',
+          time: new Date(0).toISOString(),
+          researchReviews: [{
+            id: 4,
+            reviewReportId: 9,
+            directionRelation: '',
+            directionReason: '',
+            reasoningQuality: '',
+            reasoningReview: '',
+            evidenceReviews: [],
+            confidenceAssessment: '',
+            confidenceReason: '',
+            improvementAdvice: '',
+            outcome: {
+              data_status: 'partial', candles_actual: 1, candles_expected: 96,
+              start_price: 67400, end_price: null, return_pct: null,
+              high: 68000, max_up_pct: 0.89, low: 67000, max_down_pct: -0.59,
+              error: '窗口末端无完整 K 线，止价缺失',
+            },
+            createdAt: '2026-08-07T01:05:00.000Z',
+          }],
+        }]}
+      />,
+    )
+    // 止价/涨跌缺失：渲染 error 说明而非「止价 null」，区间高低仍呈现
+    expect(screen.getByText(/起价 67400 → 窗口末端无完整 K 线，止价缺失/)).toBeInTheDocument()
+    expect(screen.getByText(/区间最高 68000（0.89%）/)).toBeInTheDocument()
+    expect(screen.queryByText(/涨跌 null/)).not.toBeInTheDocument()
+  })
 })
