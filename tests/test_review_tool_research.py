@@ -328,15 +328,15 @@ async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> 
 
 
 async def test_get_case_renders_missing_end_price(deps: ReviewToolDeps) -> None:
-    """窗口内只有相交不完整的 K 线：案例文本渲染止价缺失说明，而非「止价 None」。
+    """窗口内只有相交不完整的 K 线：案例文本渲染无完整落窗说明，价格字段全缺（R3）。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
 
     返回：
-        None，断言文本含止价缺失说明、outcome 为 partial 且 end_price 为 None
+        None，断言文本含无完整落窗说明、outcome 为 partial 且价格字段为 None
     """
-    # K 线起点在窗口起点前 300 秒：与窗口相交但不完整 → 止价缺失
+    # K 线起点在窗口起点前 300 秒：与窗口相交但不完整 → 不参与计算，价格全缺
     deps.candle_source = _StubCandles(
         [
             Candle(
@@ -354,9 +354,10 @@ async def test_get_case_renders_missing_end_price(deps: ReviewToolDeps) -> None:
     text = await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
-    assert "止价缺失" in text
+    assert "无完整落窗" in text
     outcome = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
     assert outcome["data_status"] == "partial"
+    assert outcome["start_price"] is None
     assert outcome["end_price"] is None
 
 
@@ -590,6 +591,106 @@ async def test_submit_rejects_already_reviewed(
     )
     result = await registry.execute("submit_research_review", _valid_review_args(report_id))
     assert "已被正式复盘批改过" in result
+    assert deps.pending_research_reviews == {}
+
+
+class _TruncatedWindowCandles:
+    """截尾窗口 K 线桩：只返回窗口前 max_bars 根 15m K 线（模拟行情稀疏）。"""
+
+    def __init__(self, max_bars: int) -> None:
+        """保存截断根数。
+
+        参数：
+            max_bars: int，窗口内最多返回的 K 线根数
+
+        返回：
+            None，仅保存截断配置
+        """
+        self._max_bars = max_bars
+
+    async def get_candlesticks(
+        self,
+        contract: str,
+        interval: str = "1m",
+        limit: int | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> list[Candle]:
+        """返回窗口前 max_bars 根连续 15m K 线。
+
+        参数：
+            contract: str，合约名
+            interval: str，K 线周期
+            limit: int | None，最近 N 根
+            from_ts: int | None，窗口起始时间戳
+            to_ts: int | None，窗口结束时间戳
+
+        返回：
+            list[Candle]：截断后的窗口 K 线
+        """
+        if from_ts is None or to_ts is None:
+            return []
+        full = [
+            Candle(
+                t=t,
+                o=Decimal("100"),
+                h=Decimal("110"),
+                l=Decimal("90"),
+                c=Decimal("105"),
+                v=Decimal("1"),
+            )
+            for t in range(from_ts, to_ts, 900)
+        ]
+        return full[: self._max_bars]
+
+
+async def test_submit_allows_qualified_partial(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """partial 达标（覆盖 77/96 ≈ 80.2% 且起止价齐全）放行提交（R1）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言提交暂存成功且 outcome 以 partial 落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    # 截尾 78 根：首根与 created_at 非整点对齐被剔，完整落窗 77 根（77/96 ≥ 80%）
+    deps.candle_source = _TruncatedWindowCandles(78)
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    outcome = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
+    assert outcome["data_status"] == "partial" and outcome["candles_actual"] == 77
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已暂存" in result
+    draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
+    assert json.loads(draft["outcome_json"])["data_status"] == "partial"
+
+
+async def test_submit_rejects_sparse_partial(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """partial 过稀（覆盖 9/96 ≈ 9.4% < 80%）拒绝提交并留待后续轮次（R1）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本含覆盖率门槛说明且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _TruncatedWindowCandles(10)  # 剔首根后完整落窗 9 根
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    outcome = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
+    assert outcome["data_status"] == "partial" and outcome["candles_actual"] == 9
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "data_status=partial" in result and "80%" in result
     assert deps.pending_research_reviews == {}
 
 

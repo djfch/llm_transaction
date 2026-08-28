@@ -7,12 +7,15 @@ AsyncCandleSource 异步窄协议，复盘侧不持有完整 Gateway；生产装
 GatewayAsyncCandleSource 包同步网关（run_gateway_io 卸载 + 真 from/to
 窗口透传 + 超 2000 根分段拉取）。
 
-窗口边界纪律（15m K 线）：与窗口相交的 K 线都参与起价/最高/最低；
-止价只取完整落在窗口内的最后一根收盘价，避免把窗口终点之后的走势算进
-批改依据。
+窗口边界纪律（15m K 线）：只有完整落在窗口内的 K 线参与全部指标
+（起价 open/止价 close/最高/最低），相交但不完整的 K 线一概不参与计算
+——严格不用窗口外任何价格，避免起始/末端部分 K 线把窗口外走势带进
+批改依据（R3）。complete 判定用时间戳覆盖口径：首根完整 K 线起点距
+created_at 不超过 1 个 interval、末根完整 K 线终点距 window_end 不超过
+1 个 interval、中间无断档，否则 partial。
 
 data_status 四态：pending（窗口未到期）/ unavailable（窗口内无 K 线或
-horizon 非法、拉取失败）/ partial（有 K 线但不足窗口期望根数）/
+horizon 非法、拉取失败）/ partial（有完整 K 线但窗口覆盖不达标）/
 complete（覆盖完整窗口）。金额与百分比一律 Decimal 计算，JSON 落库前转 str。
 """
 
@@ -30,6 +33,13 @@ from src.research.payload_v2 import HORIZON_SECONDS
 _CANDLE_INTERVAL = "15m"
 _CANDLE_SECONDS = 900
 _PAGE_LIMIT = 2000  # 网关单次 from/to 窗口的最大 K 线根数上限
+
+# partial 放行覆盖率下限（R1）：完整落窗 K 线覆盖时长须 ≥ 窗口时长的 80%。
+# 窗口已到期但 K 线过稀时，少数样本算出的起止价/涨跌幅不具批改代表性，
+# 用过稀数据落库会把候选永久闭合在低质量结论上；拒绝后候选留在队列里，
+# 后续轮次行情回补（或覆盖达标）仍可复盘。80% 在"零星缺根仍可利用"
+# 与"样本足以代表窗口走势"之间取折中。
+PARTIAL_MIN_COVERAGE_PCT = 80
 
 
 class AsyncCandleSource(Protocol):
@@ -70,7 +80,8 @@ def _empty_outcome(
     """构造无行情数据时的结果骨架（价格类字段一律 None）。
 
     参数：
-        data_status: str，数据状态（pending/unavailable）
+        data_status: str，数据状态（pending/unavailable；窗口有相交 K 线但
+            无完整落窗 K 线时为 partial）
         window_start: float，窗口起始时间戳
         window_end: float，窗口结束时间戳
         expected: int，窗口期望 15m K 线根数
@@ -113,13 +124,15 @@ def _pct(part: Decimal, base: Decimal) -> str:
 
 
 def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str) -> dict[str, Any]:
-    """纯函数：给定 K 线列表，过滤出 horizon 窗口内的部分并计算客观结果。
+    """纯函数：只用完整落在 horizon 窗口内的 K 线计算客观结果。
 
-    边界纪律：与窗口 [created_at, created_at + 窗口秒数) 相交的 K 线
-    （c.t < window_end 且 c.t + 900 > created_at）参与起价/最高/最低；
-    止价只取完整落在窗口内（created_at <= c.t 且 c.t + 900 <= window_end）的
-    最后一根收盘价——窗口终点之后的走势不得进入批改依据；无完整 K 线时
-    end_price/return_pct 为 None 并降级 partial。
+    边界纪律（严格不用窗口外任何价格）：仅完整落窗 K 线
+    （created_at <= c.t 且 c.t + 900 <= window_end）参与全部指标——起价取
+    首根完整 K 线开盘、止价取末根完整 K 线收盘、最高/最低取完整 K 线极值；
+    相交但不完整的 K 线一概不参与计算（R3）。complete 判定为时间戳覆盖
+    口径：首根完整 K 线起点距 created_at ≤1 个 interval、末根完整 K 线
+    终点距 window_end ≤1 个 interval、中间相邻起点间距均 ≤1 个 interval
+    （无断档），三者同时满足才 complete，否则 partial。
 
     参数：
         candles: list[Candle]，候选 K 线列表（允许含窗口外数据，函数内过滤）
@@ -127,17 +140,13 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
         horizon: str，结论时间范围（当日/3日/周，须在 HORIZON_SECONDS 内）
 
     返回：
-        dict[str, Any]：客观结果字典；窗口内无 K 线时 data_status=unavailable，
-        不足期望根数或缺完整止价时 partial，否则 complete
+        dict[str, Any]：客观结果字典；窗口内零相交 K 线时 unavailable，
+        有相交但无完整落窗 K 线时 partial 且价格字段全 None
     """
     seconds = HORIZON_SECONDS[horizon]
     window_end = created_at + seconds
     expected = seconds // _CANDLE_SECONDS
-    window = sorted(
-        (c for c in candles if c.t < window_end and c.t + _CANDLE_SECONDS > created_at),
-        key=lambda c: c.t,
-    )
-    if not window:
+    if not any(c.t < window_end and c.t + _CANDLE_SECONDS > created_at for c in candles):
         return _empty_outcome(
             "unavailable",
             window_start=created_at,
@@ -145,27 +154,67 @@ def outcome_from_candles(candles: list[Candle], created_at: float, horizon: str)
             expected=expected,
             error="窗口内无 K 线数据",
         )
-    start = window[0].o
-    high = max(c.h for c in window)
-    low = min(c.l for c in window)
-    inside = [c for c in window if c.t >= created_at and c.t + _CANDLE_SECONDS <= window_end]
-    end = inside[-1].c if inside else None
-    complete = len(window) >= expected and end is not None
+    inside = sorted(
+        (c for c in candles if created_at <= c.t and c.t + _CANDLE_SECONDS <= window_end),
+        key=lambda c: c.t,
+    )
+    if not inside:
+        return _empty_outcome(
+            "partial",
+            window_start=created_at,
+            window_end=window_end,
+            expected=expected,
+            error="窗口内有相交 K 线但无完整落窗 K 线",
+        )
+    start, end = inside[0].o, inside[-1].c
+    high = max(c.h for c in inside)
+    low = min(c.l for c in inside)
+    complete = (
+        inside[0].t - created_at <= _CANDLE_SECONDS
+        and window_end - (inside[-1].t + _CANDLE_SECONDS) <= _CANDLE_SECONDS
+        and all(inside[i + 1].t - inside[i].t <= _CANDLE_SECONDS for i in range(len(inside) - 1))
+    )
     return {
         "data_status": "complete" if complete else "partial",
         "window_start": created_at,
         "window_end": window_end,
         "candles_expected": expected,
-        "candles_actual": len(window),
+        "candles_actual": len(inside),
         "start_price": str(start),
-        "end_price": str(end) if end is not None else None,
+        "end_price": str(end),
         "high": str(high),
         "low": str(low),
-        "return_pct": _pct(end - start, start) if end is not None else None,
+        "return_pct": _pct(end - start, start),
         "max_up_pct": _pct(high - start, start),
         "max_down_pct": _pct(low - start, start),
-        "error": "" if end is not None else "窗口末端无完整 K 线，止价缺失",
+        "error": "" if complete else f"窗口覆盖不完整（完整落窗 {len(inside)}/{expected} 根）",
     }
+
+
+def partial_acceptable(outcome: dict[str, Any]) -> bool:
+    """判断客观结果是否达到可批改门槛（纯函数，R1：partial 不再无条件放行）。
+
+    complete 一律放行；partial 须同时满足：start_price/end_price/return_pct
+    全非空，且完整落窗 K 线覆盖时长达到窗口时长的 PARTIAL_MIN_COVERAGE_PCT
+    （以 candles_actual/candles_expected 折算，二者同乘 900 秒约去）。
+    pending/unavailable 与不达标 partial 一律不可批改，留待后续轮次。
+
+    参数：
+        outcome: dict[str, Any]，compute_outcome/outcome_from_candles 的结果字典
+
+    返回：
+        bool：True 表示数据足以支撑批改提交
+    """
+    status = outcome.get("data_status")
+    if status == "complete":
+        return True
+    if status != "partial":
+        return False
+    if not all(outcome.get(k) for k in ("start_price", "end_price", "return_pct")):
+        return False
+    expected = outcome.get("candles_expected") or 0
+    actual = outcome.get("candles_actual") or 0
+    return expected > 0 and actual * 100 >= expected * PARTIAL_MIN_COVERAGE_PCT
 
 
 async def compute_outcome(

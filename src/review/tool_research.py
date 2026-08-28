@@ -18,7 +18,11 @@ from typing import Any
 
 from src.memory.models import ResearchReview
 from src.research.payload_v2 import HORIZON_SECONDS
-from src.review.research_outcome import compute_outcome
+from src.review.research_outcome import (
+    PARTIAL_MIN_COVERAGE_PCT,
+    compute_outcome,
+    partial_acceptable,
+)
 from src.review.tool_handlers import (
     ReviewToolDeps,
     ToolArgError,
@@ -204,18 +208,14 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
     if outcome.get("start_price") is None:
         error = outcome.get("error") or ""
         return f"data_status={status}（{error or '无价格数据'}）"
-    head = (
+    # R3 后 start/end/高/低要么齐全（有完整落窗 K 线）要么全缺，无需分支止价缺失
+    return (
         f"data_status={status}（K线 {outcome['candles_actual']}/{outcome['candles_expected']}）"
-        f" | 起价 {outcome['start_price']}"
-    )
-    tail = (
+        f" | 起价 {outcome['start_price']} → 止价 {outcome['end_price']}"
+        f" | 涨跌 {outcome['return_pct']}%"
         f" | 区间最高 {outcome['high']}（{outcome['max_up_pct']}%）"
         f" | 区间最低 {outcome['low']}（{outcome['max_down_pct']}%）"
     )
-    if outcome.get("end_price") is None:
-        # 窗口末端无完整 K 线：止价与涨跌幅缺失，只呈现起价与区间高低
-        return f"{head} → {outcome.get('error') or '止价缺失'}{tail}"
-    return f"{head} → 止价 {outcome['end_price']} | 涨跌 {outcome['return_pct']}%{tail}"
 
 
 def _format_review_row(row: ResearchReview) -> str:
@@ -488,10 +488,11 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
 
     校验：须先经 get_research_review_case 读过案例；后端自查案例仍存在、
     horizon 窗口已到期且未被正式复盘过（不依赖已读缓存的陈旧状态）；已读案例
-    缓存的客观结果 data_status 仅 complete/partial 放行（unavailable/pending
-    数据不足以支撑批改）；outcome 由代码从已读案例缓存附加，LLM 携带 outcome
-    字段一律拒绝；方向关系/推理质量/置信度合规为枚举（非法取值拒绝），各自
-    必须配独立理由文本；evidence_reviews 与原研报依据强制 1:1（数量相等且
+    缓存的客观结果须过 partial_acceptable 门槛——complete 放行，partial 须
+    起止价/涨跌幅齐全且覆盖率 ≥80%，pending/unavailable 与过稀 partial 一律
+    拒绝并留待后续轮次（R1）；outcome 由代码从已读案例缓存附加，LLM 携带
+    outcome 字段一律拒绝；方向关系/推理质量/置信度合规为枚举（非法取值拒绝），
+    各自必须配独立理由文本；evidence_reviews 与原研报依据强制 1:1（数量相等且
     evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双枚举及
     写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
 
@@ -529,11 +530,14 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
         )
     if await deps.repo.research_review.has_review(report_id, contract):
         return f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交"
-    outcome_status = case["outcome"].get("data_status")
-    if outcome_status not in ("complete", "partial"):
+    outcome = case["outcome"]
+    if not partial_acceptable(outcome):
         return (
-            f"参数错误：案例客观行情数据不可用（data_status={outcome_status}），"
-            "不足以支撑批改；请核对 K 线来源装配或稍后再试"
+            f"参数错误：案例客观行情数据不足（data_status={outcome.get('data_status')}，"
+            f"完整落窗 K 线 {outcome.get('candles_actual', 0)}/"
+            f"{outcome.get('candles_expected', 0)} 根；partial 放行门槛为起止价/涨跌幅"
+            f"齐全且覆盖率 ≥{PARTIAL_MIN_COVERAGE_PCT}%），不足以支撑批改；"
+            "请核对 K 线来源装配或留待后续轮次"
         )
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)

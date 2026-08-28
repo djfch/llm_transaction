@@ -15,9 +15,11 @@ import pytest
 from src.gateway.base import Candle
 from src.research.payload_v2 import HORIZON_SECONDS
 from src.review.research_outcome import (
+    PARTIAL_MIN_COVERAGE_PCT,
     GatewayAsyncCandleSource,
     compute_outcome,
     outcome_from_candles,
+    partial_acceptable,
 )
 
 _BASE_TS = 1_700_000_100.0  # 固定窗口起点（900 的整数倍，与 15m K 线对齐）
@@ -211,51 +213,70 @@ def test_outcome_ignores_candles_outside_window() -> None:
     assert result["high"] == "200"
 
 
-def test_outcome_unaligned_created_at_uses_intersecting_bounds() -> None:
-    """非整点 created_at：相交 K 线参与起价与高低，止价只取完整落在窗口内的末根。
+def test_outcome_unaligned_created_at_excludes_partial_bounds() -> None:
+    """非整点 created_at：相交但不完整的首末 K 线不参与任何指标（R3）。
 
-    created_at 落在第 1 根 K 线中段：该根相交但不完整（参与起价/高低、不作
-    止价）；窗口终点切断最后一根（参与高低、不作止价），止价取倒数第二根
-    （最后一根完整 K 线）收盘。
+    created_at 落在第 1 根 K 线中段：i=0 相交不完整（剔除），窗口终点切断
+    i=96（剔除）；全部指标只取完整落窗的 i=1..95——起点距 created_at
+    600s、末根终点距 window_end 300s，均在 1 个 interval 内且无断档，
+    仍判 complete。
 
     参数：无
 
     返回：
-        None，断言起价/止价/高低的来源根与 complete 判定
+        None，断言起价/止价/高低只来自完整落窗根、actual 不计相交根
     """
     created_at = _BASE_TS + 300  # 窗口起点在第 1 根 K 线中段
     candles = _window_candles(97)  # i=0..96：首末根均只与窗口相交
     result = outcome_from_candles(candles, created_at, "当日")
 
     assert result["candles_expected"] == 96
-    assert result["candles_actual"] == 97  # 首末相交根都计入
-    assert result["start_price"] == "100"  # 第 1 根（相交不完整）开盘价
-    assert result["end_price"] == "196"  # i=95（最后一根完整 K 线）收盘
-    assert result["high"] == "201"  # i=96（相交不完整）最高仍参与
-    assert result["low"] == "95"
-    assert result["data_status"] == "complete"  # 根数足且有完整止价
-    assert Decimal(result["return_pct"]) == pytest.approx(Decimal(96))
+    assert result["candles_actual"] == 95  # 只计完整落窗的 i=1..95
+    assert result["start_price"] == "101"  # i=1（首根完整 K 线）开盘价
+    assert result["end_price"] == "196"  # i=95（末根完整 K 线）收盘
+    assert result["high"] == "200"  # i=95 最高；i=96 的 201 在窗口外，不得参与
+    assert result["low"] == "96"  # i=1 最低 = 100 + 1 - 5
+    assert result["data_status"] == "complete"  # 时间戳覆盖达标：首尾间隙 ≤1 根且无断档
+    assert Decimal(result["return_pct"]) == pytest.approx(
+        Decimal(95) / Decimal(101) * 100
+    )  # (196-101)/101
 
 
-def test_outcome_partial_when_no_complete_end_candle() -> None:
-    """窗口内只有相交但不完整的 K 线：止价/涨跌幅缺失，partial 并附说明。
+def test_outcome_mid_window_gap_is_partial() -> None:
+    """中间断档（抽掉一根）即使首尾贴边也判 partial（时间戳覆盖口径，R3）。
 
     参数：无
 
     返回：
-        None，断言 end_price/return_pct 为 None、error 说明止价缺失
+        None，断言断档窗口 data_status=partial 且 error 提示覆盖不完整
+    """
+    candles = [c for i, c in enumerate(_window_candles(96)) if i != 40]  # 抽掉 i=40
+    result = outcome_from_candles(candles, _BASE_TS, "当日")
+
+    assert result["data_status"] == "partial"
+    assert result["candles_actual"] == 95
+    assert "覆盖不完整" in result["error"]
+
+
+def test_outcome_no_complete_candle_yields_all_none() -> None:
+    """窗口内只有相交但不完整的 K 线：价格字段全 None，partial 并附说明（R3）。
+
+    参数：无
+
+    返回：
+        None，断言起价/止价/高低/涨跌幅全为 None、actual=0
     """
     created_at = _BASE_TS + 300  # 第 1 根 K 线中段的窗口起点
     result = outcome_from_candles([_window_candles(1)[0]], created_at, "当日")
 
     assert result["data_status"] == "partial"
-    assert result["candles_actual"] == 1
-    assert result["start_price"] == "100"  # 相交根仍给出起价与区间高低
-    assert result["high"] == "105"
-    assert result["low"] == "95"
+    assert result["candles_actual"] == 0  # 相交但不完整的 K 线不参与计算
+    assert result["start_price"] is None
+    assert result["high"] is None
+    assert result["low"] is None
     assert result["end_price"] is None
     assert result["return_pct"] is None
-    assert "止价缺失" in result["error"]
+    assert "无完整落窗" in result["error"]
 
 
 def test_outcome_partial_and_unavailable() -> None:
@@ -410,3 +431,56 @@ async def test_adapter_offloads_sync_gateway_off_event_loop() -> None:
 
     assert gateway.thread_ids != []
     assert all(ident != loop_ident for ident in gateway.thread_ids)
+
+
+# ---------- partial 放行门槛（R1） ----------
+
+
+def _outcome_dict(status: str, actual: int = 96, **overrides) -> dict:
+    """构造 partial_acceptable 测试用的最小客观结果字典（当日窗口期望 96 根）。
+
+    参数：
+        status: str，data_status 取值
+        actual: int，完整落窗 K 线根数
+        overrides: dict，需要覆盖默认值的字段
+
+    返回：
+        dict：含 data_status/计数/价格字段的结果字典
+    """
+    base = {
+        "data_status": status,
+        "candles_expected": 96,
+        "candles_actual": actual,
+        "start_price": "100",
+        "end_price": "196",
+        "return_pct": "96",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_partial_acceptable_status_matrix() -> None:
+    """complete 一律放行；pending/unavailable 一律拒绝。
+
+    参数：无
+
+    返回：
+        None，断言四种 data_status 的门槛判定
+    """
+    assert partial_acceptable(_outcome_dict("complete")) is True
+    assert partial_acceptable(_outcome_dict("pending")) is False
+    assert partial_acceptable(_outcome_dict("unavailable")) is False
+
+
+def test_partial_acceptable_requires_prices_and_coverage() -> None:
+    """partial 须起止价/涨跌幅齐全且覆盖率 ≥80%：缺价或过稀一律拒绝。
+
+    参数：无
+
+    返回：
+        None，断言缺止价、80.2% 达标、10.4% 过稀三种 partial 的门槛判定
+    """
+    assert partial_acceptable(_outcome_dict("partial", end_price=None, return_pct=None)) is False
+    assert partial_acceptable(_outcome_dict("partial", actual=77)) is True  # 77/96 ≈ 80.2%
+    assert partial_acceptable(_outcome_dict("partial", actual=10)) is False  # 10/96 ≈ 10.4%
+    assert PARTIAL_MIN_COVERAGE_PCT == 80
