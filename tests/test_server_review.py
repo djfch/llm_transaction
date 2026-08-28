@@ -8,7 +8,8 @@
 - GET /api/strategy/diff：200 纯文本、版本不存在 404、参数非法 422；
 - POST /api/strategy/rollback/{id}：成功 200、版本不存在 404、未接线 503；
 - PUT /api/strategy 走 strategy_save（响应保持 PlainText 原文、422 路径、无差异幂等路径）；
-- PUT /api/config 的 review.enabled/daily_time/interval_days 热写回运行时（_RUNTIME_KEYS）。
+- PUT /api/config 的 review.enabled/daily_time/interval_days 热写回运行时（_RUNTIME_KEYS）；
+- POST /api/review/research/rereview：人工重评授权登记（404/409/422/200 与幂等复用，R5-2）。
 """
 
 from collections.abc import AsyncIterator
@@ -569,3 +570,61 @@ async def test_put_config_review_keys_hot_applied(repo: Repo, tmp_path: Path):
         r = await c.put("/api/config", json={"review": {"interval_days": 0}})
         assert r.status_code == 422
         assert runtime.review.interval_days == 3
+
+
+# ---------- POST /api/review/research/rereview（人工重评授权登记，R5-2） ----------
+
+
+async def test_research_rereview_endpoint(repo: Repo, tmp_path: Path):
+    """人工重评授权端点：404 目标不存在、409 未复盘、422 空理由、200 登记与幂等复用。
+
+    参数：
+        repo: Repo，临时数据库仓储
+        tmp_path: Path，pytest 临时目录
+
+    返回：
+        None，通过断言验证四种状态码与幂等语义（重复登记返回既有授权同 id）
+    """
+    from tests.research_helpers import save_report_fixture
+
+    report = await save_report_fixture(repo, report_type="us_open", horizon="当日")
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        missing = await c.post(
+            "/api/review/research/rereview",
+            json={"report_id": 999999, "contract": "BTC_USDT", "reason": "复核"},
+        )
+        assert missing.status_code == 404
+
+        not_reviewed = await c.post(
+            "/api/review/research/rereview",
+            json={"report_id": report.id, "contract": "BTC_USDT", "reason": "复核"},
+        )
+        assert not_reviewed.status_code == 409  # 未复盘目标由自动路径覆盖，无需授权
+
+        empty_reason = await c.post(
+            "/api/review/research/rereview",
+            json={"report_id": report.id, "contract": "BTC_USDT", "reason": "  "},
+        )
+        assert empty_reason.status_code == 422
+
+        await repo.research_review.save_review(
+            review_report_id=1, report_id=report.id, contract="BTC_USDT"
+        )
+        created = await c.post(
+            "/api/review/research/rereview",
+            json={"report_id": report.id, "contract": "BTC_USDT", "reason": "原复盘误判"},
+        )
+        assert created.status_code == 200
+        body = created.json()
+        assert body["reused"] is False
+        assert body["reason"] == "原复盘误判" and body["requested_by"] == "human"
+        assert body["consumed_round_id"] == ""
+
+        again = await c.post(
+            "/api/review/research/rereview",
+            json={"report_id": report.id, "contract": "BTC_USDT", "reason": "换个理由"},
+        )
+        assert again.status_code == 200
+        body2 = again.json()
+        assert body2["reused"] is True
+        assert body2["id"] == body["id"] and body2["reason"] == "原复盘误判"  # 幂等命中不覆盖

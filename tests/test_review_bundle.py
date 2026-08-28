@@ -2,7 +2,8 @@
 
 覆盖：render_research_review_stats 代码计数口径；save_review_bundle 单事务
 （成功全落 / 中途失败整体回滚无残留 / 共享连接外部 commit 不破坏整批回滚 /
-无草稿退化为纯报告）。K 线窗口适配器（GatewayAsyncCandleSource）的测试在
+无草稿退化为纯报告）；R5-2 增：草稿带授权内部键时同事务消费授权并绑定轮次、
+中途失败回滚授权不被半消费。K 线窗口适配器（GatewayAsyncCandleSource）的测试在
 tests/test_research_outcome.py。
 """
 
@@ -299,3 +300,121 @@ async def test_bundle_without_reviews_keeps_plain_report(repo: Repo) -> None:
     )
     assert report.report_md == "# 仅正文"
     assert await repo.research_review.list_reviews() == []
+
+
+# ---------- R5-2：人工授权重评的授权消费（与批改同生共死） ----------
+
+
+def _manual_pending(report_id: int, contract: str, request_id: int, previous_id: int) -> dict:
+    """构造一条人工授权重评草稿（自动草稿字段 + manual 身份与授权内部键）。
+
+    参数：
+        report_id: int，被重评的研报编号
+        contract: str，被重评的合约
+        request_id: int，命中的授权编号（rereview_request_id 内部键，落库时被弹出消费）
+        previous_id: int，被替代的上一条复盘记录 id（rereview_of_id）
+
+    返回：
+        dict：带 review_kind/rereview_reason/rereview_of_id/rereview_request_id 的草稿
+    """
+    return _pending(report_id, contract, "complete") | {
+        "review_kind": "manual",
+        "rereview_reason": "人工复核原结论",
+        "rereview_of_id": previous_id,
+        "rereview_request_id": request_id,
+    }
+
+
+async def test_bundle_consumes_rereview_request(repo: Repo) -> None:
+    """草稿带授权内部键时：授权随 bundle 同事务被消费并绑定轮次，manual 三列落库。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言复盘行 review_kind/rereview_reason/rereview_of_id 正确、
+        授权 consumed_round_id 绑定 bundle 轮次且不再 pending
+    """
+    seeded = await repo.research_review.save_review(
+        review_report_id=999, report_id=1, contract="BTC_USDT"
+    )
+    req, _ = await repo.research_review.create_rereview_request(1, "BTC_USDT", "人工复核原结论")
+
+    draft = _manual_pending(1, "BTC_USDT", req.id, seeded.id)
+    report = await save_review_bundle(
+        repo,
+        _deps([draft]),
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 正文",
+        strategy_action="none",
+        round_id="rr-manual",
+    )
+
+    rows = await repo.research_review.list_reviews()
+    manual_row = [r for r in rows if r.review_kind == "manual"]
+    assert len(manual_row) == 1
+    assert manual_row[0].review_report_id == report.id
+    assert manual_row[0].rereview_reason == "人工复核原结论"
+    assert manual_row[0].rereview_of_id == seeded.id
+    assert await repo.research_review.get_pending_rereview_request(1, "BTC_USDT") is None
+    cur = await repo._conn.execute(
+        "SELECT consumed_round_id FROM research_rereview_requests WHERE id=?", (req.id,)
+    )
+    row = await cur.fetchone()
+    assert row["consumed_round_id"] == "rr-manual"  # 授权与批改同事务绑定轮次
+
+
+async def test_bundle_failure_keeps_rereview_request_pending(repo: Repo, monkeypatch) -> None:
+    """bundle 中途失败整体回滚时，授权消费一并回滚：授权保持待处理（不被半消费）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        monkeypatch: pytest.MonkeyPatch，替换 _insert_review 注入中途失败
+
+    返回：
+        None，断言失败后复盘行无残留且授权仍未消费
+    """
+    req, _ = await repo.research_review.create_rereview_request(1, "BTC_USDT", "人工复核原结论")
+    real_insert = review_repo_mod._insert_review
+    state = {"n": 0}
+
+    async def fail_on_second(*args, **kwargs):
+        """第二条插入抛错（第一条为带授权的 manual 草稿，其后失败触发整批回滚）。
+
+        参数：
+            args: tuple，_insert_review 的位置参数，原样透传真实函数
+            kwargs: dict，_insert_review 的关键字参数，原样透传真实函数
+
+        返回：
+            int：第一条调用返回的真实插入行 id
+
+        异常：
+            RuntimeError：第二条调用固定抛出，模拟中途失败
+        """
+        state["n"] += 1
+        if state["n"] == 2:
+            raise RuntimeError("模拟中途失败")
+        return await real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(review_repo_mod, "_insert_review", fail_on_second)
+    pending = [
+        _manual_pending(1, "BTC_USDT", req.id, 7),
+        _pending(2, "ETH_USDT", "partial"),
+    ]
+    with pytest.raises(RuntimeError):
+        await save_review_bundle(
+            repo,
+            _deps(pending),
+            period_start=1000.0,
+            period_end=2000.0,
+            stats_json="{}",
+            report_md="# 正文",
+            strategy_action="none",
+            round_id="rr-fail",
+        )
+
+    assert await repo.research_review.list_reviews() == []  # 批改无残留
+    pending_req = await repo.research_review.get_pending_rereview_request(1, "BTC_USDT")
+    assert pending_req is not None and pending_req.id == req.id  # 授权未被消费

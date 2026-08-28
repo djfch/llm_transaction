@@ -238,7 +238,10 @@ function ReportItem({
             <>
               {detail.researchPromptMd5 && (
                 <p className="mb-2 text-[10px] text-zinc-600">
-                  研报提示词：md5 {detail.researchPromptMd5.slice(0, 8)}…
+                  研报提示词：
+                  {detail.researchPromptVersionId != null &&
+                    `v${detail.researchPromptVersionId} · `}
+                  md5 {detail.researchPromptMd5.slice(0, 8)}…
                 </p>
               )}
               <ResearchAssetDetails
@@ -246,6 +249,7 @@ function ReportItem({
                 crossMarketView={detail.crossMarketView}
                 globalRisks={detail.globalRisks}
                 assets={detail.assetViews}
+                reportId={detail.id}
               />
               {detail.causalLinks.length > 0 && (
                 <div className="mt-3">

@@ -201,7 +201,10 @@ class ResearchReport(BaseModel):
     schema_version 取值：2（历史代际）/ 3（当前代际，issue #113 起写入）；error 非空表示
     本次研报失败且没有逐标的结论；round_id 为产生本研报的审计轮 id；
     research_prompt_md5 为生成本研报所用的 research_prompt.md 正文 md5（与
-    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）。
+    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）；
+    research_prompt_version_id 为构建 prompt 时点解析到的版本 id（R5-4 起写入，
+    消除复盘侧按 md5+时点反解的歧义；NULL = 历史研报或构建时版本表无对应 applied
+    版本，不回填，复盘侧回退 md5 反解）。
     """
 
     id: int
@@ -215,6 +218,7 @@ class ResearchReport(BaseModel):
     round_id: str = ""
     created_at: float
     research_prompt_md5: str = ""
+    research_prompt_version_id: int | None = None
 
 
 class ResearchAssetView(BaseModel):
@@ -269,6 +273,9 @@ class ResearchReview(BaseModel):
     evidence_reviews_json 为逐条依据评价列表（与原研报 evidence 一一对应，后端强制
     1:1 校验，每条含 evidence_index/fact_status/reasoning_status/explanation）；
     outcome_json 为代码按历史 K 线计算的客观行情结果（LLM 不可写）。
+    review_kind 取值：auto（自动复盘）/ manual（人工授权重评，issue #113 R5-2）；
+    rereview_reason 为人工授权理由原文（自动复盘为空串）；rereview_of_id 指向被
+    本条重评替代的上一条复盘记录（首次复盘为 None）。
     """
 
     id: int
@@ -285,6 +292,27 @@ class ResearchReview(BaseModel):
     improvement_advice: str = ""
     outcome_json: str = "{}"
     created_at: float
+    review_kind: str = "auto"
+    rereview_reason: str = ""
+    rereview_of_id: int | None = None
+
+
+class ResearchRereviewRequest(BaseModel):
+    """人工重评授权（issue #113 R5-2）：人工在研报详情页登记的复权重评许可。
+
+    同一 (report_id, contract) 最多一条未消费授权（部分唯一索引强制）；复盘
+    submit 命中未消费授权才放行人工重评记录，落库同事务把 consumed_round_id
+    绑定为消费它的复盘轮次编号（空串 = 待消费）。授权行本身即创建审计记录
+    （reason/requested_by/created_at），不另走审计层。
+    """
+
+    id: int
+    report_id: int
+    contract: str
+    reason: str
+    requested_by: str = "human"
+    created_at: float
+    consumed_round_id: str = ""
 
 
 class ResearchPromptVersion(BaseModel):

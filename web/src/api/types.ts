@@ -552,6 +552,8 @@ export interface ResearchReviewItem {
   improvementAdvice: string // 改进建议
   outcome: Record<string, unknown> // 代码按历史 K 线计算的客观行情结果（LLM 不可写）
   createdAt: string // 复盘时间（ISO 字符串，由 created_at(Unix秒) 适配）
+  reviewKind?: string // 复盘种类：auto 自动复盘 / manual 人工授权重评（旧契约缺省视为 auto）
+  rereviewReason?: string // 人工重评授权理由（仅 manual 记录有值，auto 为空串）
 }
 
 /** 逐标的结论详情；marketContext(市场快照)只保存在后端，不进入 API。 */
@@ -575,11 +577,17 @@ export interface ResearchReportSummary extends LLMIdentityInfo {
   error: string
   roundId: string
   researchPromptMd5?: string // 生成本研报所用 research_prompt.md 正文 md5（旧数据缺省）
+  researchPromptVersionId?: number // 构建时点精确归因的提示词版本 id（R5-4；旧数据缺省/为 null）
   time: string
 }
+/** 人工重评授权登记响应（POST /api/review/research/rereview，R5-2）：只需 id 与幂等标记，其余为请求回显 */
+export interface ResearchRereviewAck {
+  id: number // 授权记录 ID（界面用于回显授权编号）
+  reused: boolean // true = 幂等命中既有未消费授权（未新建，理由保持首次登记值）
+}
+
 /** 因果链节点：chain 已解析为有序数组（timeline_id 溯源事实层 timeline 条目，可缺省） */
-export interface ChainNode {
-  node: string // 节点内容（事件/数据/判断的描述文本）
+export interface ChainNode {  node: string // 节点内容（事件/数据/判断的描述文本）
   kind: string // 节点类型（中文自由文本：事件/推断/市场反应/标的结论；空串降级）
   timeline_id?: number // 溯源 timeline 条目 ID（有值时小字标注）
 }
@@ -770,6 +778,12 @@ export interface ApiClient {
   getResearchReport(id: number): Promise<ResearchReportDetail>
   /** 手动触发研报；409=生成中、503=LLM 未配置、422=hours 越界（ApiError.detail 可读）。 */
   runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
+  /** 登记人工重评授权（R5-2）；404=目标不存在、409=目标未被正式复盘、422=理由为空（ApiError.detail 可读）。 */
+  requestResearchRereview(
+    reportId: number,
+    contract: string,
+    reason: string,
+  ): Promise<ResearchRereviewAck>
   /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null；带 roundId 时按该轮直查（查无此轮/他类轮回 round null）。 */
   getResearchLive(roundId?: string): Promise<ResearchLive>
   /** 自动研报的下次执行时间与官方日历状态。 */

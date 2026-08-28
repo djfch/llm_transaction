@@ -53,6 +53,7 @@ async def test_pre_research_database_creates_only_current_research_schema(tmp_pa
         "round_id",
         "created_at",
         "research_prompt_md5",
+        "research_prompt_version_id",
     }
     await db.close()
 
@@ -268,6 +269,97 @@ CREATE TABLE causal_links (
     created_at REAL NOT NULL
 )
 """
+
+
+# R5-4 前的 v3 终态：research_reports 有 research_prompt_md5 但无版本归因列
+_PRE_R5_RESEARCH_REPORTS_DDL = """
+CREATE TABLE research_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_type TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 3,
+    summary TEXT NOT NULL DEFAULT '',
+    cross_market_view TEXT NOT NULL DEFAULT '',
+    global_risks_json TEXT NOT NULL DEFAULT '[]',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    round_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    research_prompt_md5 TEXT NOT NULL DEFAULT ''
+)
+"""
+
+_V3_RESEARCH_ASSET_VIEWS_DDL = """
+CREATE TABLE research_asset_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    horizon TEXT NOT NULL DEFAULT '',
+    market_regime TEXT NOT NULL DEFAULT '',
+    technical_confirmation TEXT NOT NULL DEFAULT '',
+    basis_type TEXT NOT NULL DEFAULT '',
+    data_status TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    risks_json TEXT NOT NULL DEFAULT '[]',
+    narrative TEXT NOT NULL DEFAULT '',
+    market_context_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    UNIQUE(report_id, contract)
+)
+"""
+
+_V3_CAUSAL_LINKS_DDL = """
+CREATE TABLE causal_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    chain_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'tracking',
+    topic TEXT NOT NULL DEFAULT '',
+    supersedes_id INTEGER,
+    created_at REAL NOT NULL
+)
+"""
+
+
+async def test_pre_r5_database_gains_prompt_version_column(tmp_path):
+    """R5-4 前的库（有 md5 无 version_id）open 后补列；历史行保持 NULL 不回填。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，断言列集校验放行该形态、补列幂等且历史行不回填
+    """
+    path = tmp_path / "pre-r5.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(_PRE_R5_RESEARCH_REPORTS_DDL)
+    await conn.execute(_V3_RESEARCH_ASSET_VIEWS_DDL)
+    await conn.execute(_V3_CAUSAL_LINKS_DDL)
+    await conn.execute(
+        "INSERT INTO research_reports(report_type,summary,created_at,research_prompt_md5)"
+        " VALUES('manual','旧研报',1.0,'0123456789abcdef0123456789abcdef')"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)  # PRE_R5 列集须通过结构校验并被补列
+    cur = await db.conn.execute("PRAGMA table_info(research_reports)")
+    assert "research_prompt_version_id" in {row["name"] for row in await cur.fetchall()}
+    cur = await db.conn.execute(
+        "SELECT research_prompt_md5, research_prompt_version_id FROM research_reports WHERE id=1"
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    assert row["research_prompt_md5"] == "0123456789abcdef0123456789abcdef"
+    assert row["research_prompt_version_id"] is None  # 历史研报无版本归因可循，不回填
+    await db.close()
+
+    db2 = Database()
+    await db2.open(path)  # 重复 open 幂等
+    await db2.close()
 
 
 async def _make_v2_db(path) -> aiosqlite.Connection:

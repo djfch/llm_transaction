@@ -41,6 +41,9 @@ REVIEW_RESEARCH_REVIEW_GATE_V1 = """## 强制复盘附录：REVIEW_RESEARCH_REVI
   为准，不得自行计算涨跌幅，也不得自行提交 outcome 字段。
 - 客观数据不足（窗口未到期、行情不可用或 K 线覆盖过稀）的结论本轮不提交批改，留待
   后续轮次；不得编造结果强行闭合候选。
+- 目标存在人工重评授权时例外：可按授权对数据不可恢复的结论结案，此时
+  reasoning_quality 取 unreviewable、direction_relation 取 unverifiable、
+  confidence_assessment 取 unreviewable，三者必须一致，结案理由以授权理由为准。
 - 不得评价具体因果链内容的正确或错误；只允许指出因果链提取与表达方法上的反复问题。
   具体链的创建、跟踪与替代由 Research Agent 自行负责，不由复盘评价裁决。
 - 逐条依据评价必须与原研报依据一一对应；每条的 explanation 必须写明核对来源（哪个

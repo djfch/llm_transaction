@@ -257,16 +257,49 @@ def test_review_prompt_research_case_window_tools():
     assert "越界请求会被工具拒绝" in review
 
 
-def test_review_prompt_manual_rereview_discipline():
-    """校验复盘模板写明人工重评入口与追加语义（V6）。
+def test_review_prompt_rereview_discipline():
+    """校验复盘模板写明研报复盘查重、人工授权重评与数据不足纪律（R5-1/R5-2）。
 
     参数：无
 
     返回：
-        None，断言复盘模板含 manual_rereview 开关、理由要求与追加不覆盖语义
+        None，断言复盘模板含重复提交禁令、人工授权重评口径（授权来源、可见渠道、
+        unreviewable 结案的三枚举约束）与数据不足留待后续轮次纪律，
+        且不再出现 LLM 侧 manual_rereview 开关文案
     """
     review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
     assert "已被正式复盘过的结论不得重复提交" in review
-    assert "manual_rereview=true" in review
-    assert "rereview_reason 写明理由" in review
-    assert "重评追加新记录而不覆盖原记录" in review
+    assert "留待后续轮次" in review
+    assert "unreviewable 闭合结案" in review
+    assert "manual_rereview" not in review
+    # R5-2：人工授权重评口径（授权只能由人工发起，经候选清单尾部对复盘方可见）
+    assert "人工重评授权" in review
+    assert "人工在研报详情页" in review
+    assert "你不可自行发起或伪造授权" in review
+    assert "direction_relation 必须取" in review
+    assert "confidence_assessment 必须取 unreviewable" in review
+
+
+def test_gate_appendix_allows_authorized_unreviewable_closure(tmp_path):
+    """校验复盘门禁附录含人工授权结案豁免（R5-2 复审必修：消除附录与授权契约冲突）。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，用于写入自定义 review_prompt.md
+
+    返回：
+        None，断言附录常量与拼装后的完整提示词均含授权结案豁免的关键语义标记：
+        豁免锚定在人工重评授权、结案三枚举一致约束与理由以授权理由为准
+    """
+    # 附录常量本体：数据不足留待后续为默认纪律，人工重评授权为唯一结案豁免
+    assert "留待" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "人工重评授权时例外" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "reasoning_quality 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "direction_relation 取 unverifiable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "confidence_assessment 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "结案理由以授权理由为准" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    # 拼装后的完整提示词同样携带豁免（固定附录强制追加，正文不可覆盖）
+    path = tmp_path / "review_prompt.md"
+    path.write_text("自定义复盘正文：数据不足一律留待，不承认任何豁免", encoding="utf-8")
+    prompt, _ = ReviewPromptLoader(path).system_prompt("## 可用工具")
+    assert "人工重评授权时例外" in prompt
+    assert "结案理由以授权理由为准" in prompt

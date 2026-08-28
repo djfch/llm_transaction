@@ -142,6 +142,27 @@ class ResearchPromptRepo:
         row = await cur.fetchone()
         return ResearchPromptVersion(**dict(row)) if row else None
 
+    async def latest_applied_by_md5(self, md5: str) -> ResearchPromptVersion | None:
+        """按正文 md5 解析当前最新生效的版本（研报构建时点归因用，issue #113 R5-4）。
+
+        与 get_version_by_md5 的区别：不带 as_of 时点——构建 prompt 的当下，
+        "该 md5 最新 applied 版本"就是研报实际使用的版本，直接落库为
+        research_reports.research_prompt_version_id，消除复盘侧 md5+时点反解的歧义。
+
+        参数：
+            md5: str，提示词正文摘要（构建 prompt 时点取样的 body_md5）
+
+        返回：
+            ResearchPromptVersion | None：该 md5 最新生效的版本；无 applied 记录时 None
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM research_prompt_versions "
+            "WHERE md5=? AND status='applied' ORDER BY id DESC LIMIT 1",
+            (md5,),
+        )
+        row = await cur.fetchone()
+        return ResearchPromptVersion(**dict(row)) if row else None
+
     async def set_version_status(self, version_id: int, status: str) -> None:
         """更新版本状态（draft→applied 生效、draft→discarded 废弃）。
 

@@ -620,6 +620,7 @@ export const mockApi: ApiClient = {
   getResearchReports: researchMock.handlers.getResearchReports,
   getResearchReport: researchMock.handlers.getResearchReport,
   runResearch: researchMock.handlers.runResearch,
+  requestResearchRereview: researchMock.handlers.requestResearchRereview,
   getResearchLive: researchMock.handlers.getResearchLive,
   // 研报提示词（在线编辑 + 版本历史/diff/回滚）同样由 mockResearch.ts 实现
   getResearchPrompt: researchMock.handlers.getResearchPrompt,

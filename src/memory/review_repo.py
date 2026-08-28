@@ -14,7 +14,7 @@ import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersion, Trade
-from src.memory.research_review_repo import _insert_review
+from src.memory.research_review_repo import _consume_rereview_request, _insert_review
 
 
 def _now() -> float:
@@ -302,7 +302,9 @@ class ReviewRepo:
             round_id: str，关联的审计轮次编号
             research_reviews: list[dict] | None，研报复盘草稿列表；元素键与
                 research_review_repo._insert_review 的关键字参数一致（不含
-                review_report_id/created_at，由本方法统一回填）
+                review_report_id/created_at，由本方法统一回填）；人工授权重评
+                草稿可携带内部键 rereview_request_id（授权编号），本方法弹出后
+                在同事务内把该授权标记为已消费并绑定 round_id（R5-2）
 
         返回：
             ReviewReport：已提交的复盘报告
@@ -333,7 +335,12 @@ class ReviewRepo:
             )
             report_id = cur.lastrowid or 0
             for item in research_reviews or []:
+                # rereview_request_id 是授权消费的内部键（R5-2），不是复盘列：
+                # 弹出后在同事务内把授权标记为已消费并绑定本轮 round_id
+                request_id = item.pop("rereview_request_id", None)
                 await _insert_review(conn, review_report_id=report_id, created_at=ts, **item)
+                if request_id is not None:
+                    await _consume_rereview_request(conn, request_id, round_id)
             await conn.commit()
         except Exception:
             await conn.rollback()

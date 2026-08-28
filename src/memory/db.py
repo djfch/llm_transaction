@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS research_reports (
     error TEXT NOT NULL DEFAULT '',
     round_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
-    research_prompt_md5 TEXT NOT NULL DEFAULT ''
+    research_prompt_md5 TEXT NOT NULL DEFAULT '',
+    research_prompt_version_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS research_schedule_runs (
     schedule_id TEXT NOT NULL,
@@ -192,7 +193,9 @@ CREATE TABLE IF NOT EXISTS causal_links (
 );
 -- 研报复盘记录（issue #113）：复盘 agent 对逐标的结论的批改；方向/推理/置信度为枚举 +
 -- 对应 *_reason 理由文本；outcome_json 由代码按历史 K 线计算（LLM 不可写）；
--- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘
+-- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘；
+-- review_kind=manual 的行为人工授权重评（R5-2），rereview_reason 存授权理由原文，
+-- rereview_of_id 指向被替代的上一条复盘记录
 CREATE TABLE IF NOT EXISTS research_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     review_report_id INTEGER NOT NULL,
@@ -208,7 +211,30 @@ CREATE TABLE IF NOT EXISTS research_reviews (
     improvement_advice TEXT NOT NULL DEFAULT '',
     outcome_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
+    review_kind TEXT NOT NULL DEFAULT 'auto',
+    rereview_reason TEXT NOT NULL DEFAULT '',
+    rereview_of_id INTEGER,
     UNIQUE(review_report_id, report_id, contract)
+);
+-- 研报复盘候选扫描游标（issue #113 R5）：单行表，记录 keyset 续扫位置
+-- （last_due_at/last_report_id/last_contract 三元组）；扫到候选集尾部时重置为全 NULL，
+-- 下轮从头重扫（被跳过的数据不足候选才有机会复检）
+CREATE TABLE IF NOT EXISTS research_review_scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_due_at REAL,
+    last_report_id INTEGER,
+    last_contract TEXT
+);
+-- 人工重评授权（issue #113 R5-2）：同一目标最多一条未消费授权（部分唯一索引
+-- idx_rereview_pending 强制）；consumed_round_id 空串 = 待消费，消费时绑定复盘轮次
+CREATE TABLE IF NOT EXISTS research_rereview_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_by TEXT NOT NULL DEFAULT 'human',
+    created_at REAL NOT NULL,
+    consumed_round_id TEXT NOT NULL DEFAULT ''
 );
 -- 研报提示词版本（issue #113）：research_prompt.md 正文版本化存证，状态机同 strategy_versions
 CREATE TABLE IF NOT EXISTS research_prompt_versions (
@@ -235,6 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_research_asset_contract ON research_asset_views(c
 CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id);
 CREATE INDEX IF NOT EXISTS idx_research_reviews_target ON research_reviews(report_id, contract);
 CREATE INDEX IF NOT EXISTS idx_research_reviews_created ON research_reviews(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rereview_pending
+    ON research_rereview_requests(report_id, contract) WHERE consumed_round_id='';
 CREATE INDEX IF NOT EXISTS idx_research_prompt_versions_md5 ON research_prompt_versions(md5);
 """
 
@@ -250,6 +278,7 @@ _RESEARCH_REPORT_COLUMNS = {
     "round_id",
     "created_at",
     "research_prompt_md5",
+    "research_prompt_version_id",
 }
 _RESEARCH_ASSET_COLUMNS = {
     "id",
@@ -268,9 +297,11 @@ _RESEARCH_ASSET_COLUMNS = {
     "market_context_json",
     "created_at",
 }
-# 上一代（schema_version=2）列集：可自动迁移形态（由 migrate_v3 重建/加列）；
-# 除此之外的列集既非当前代际也不可迁移，校验拒绝启动
-_RESEARCH_REPORT_COLUMNS_LEGACY = _RESEARCH_REPORT_COLUMNS - {"research_prompt_md5"}
+# 可自动迁移的旧列集：R5-4 前（有 md5 无 version_id，由 _migrate 补列）与上一代
+# （schema_version=2，由 migrate_v3 重建/加列）；除此之外的列集既非当前代际也
+# 不可迁移，校验拒绝启动
+_RESEARCH_REPORT_COLUMNS_PRE_R5 = _RESEARCH_REPORT_COLUMNS - {"research_prompt_version_id"}
+_RESEARCH_REPORT_COLUMNS_LEGACY = _RESEARCH_REPORT_COLUMNS_PRE_R5 - {"research_prompt_md5"}
 _RESEARCH_ASSET_COLUMNS_LEGACY = _RESEARCH_ASSET_COLUMNS | {"verify_result"}
 
 
@@ -359,7 +390,11 @@ class Database:
         if await cur.fetchone() is None:
             return
         report_columns = await self._table_columns("research_reports")
-        if report_columns not in (_RESEARCH_REPORT_COLUMNS, _RESEARCH_REPORT_COLUMNS_LEGACY):
+        if report_columns not in (
+            _RESEARCH_REPORT_COLUMNS,
+            _RESEARCH_REPORT_COLUMNS_PRE_R5,
+            _RESEARCH_REPORT_COLUMNS_LEGACY,
+        ):
             raise RuntimeError(
                 "研报表结构未知：research_reports 字段不符合当前协议且无法自动迁移，"
                 "请先备份数据库并按部署文档重建研报数据"
@@ -439,6 +474,13 @@ class Database:
           research_asset_views 去 verify_result 死字段、causal_links 双字段合并为
           tracking/concluded/superseded 三态（均重建表）；迁移前做异常值检查，
           有未知数据即拒绝启动并提示备份，不静默丢弃。
+        - research_reviews.review_kind/rereview_reason/rereview_of_id（issue #113 R5-2）：
+          历史批改均为自动复盘产物，review_kind 默认 'auto'、授权理由与替代指向无旧档
+          可循（'' / NULL），不回填；research_rereview_requests 为新增表，由
+          CREATE TABLE IF NOT EXISTS 覆盖。
+        - research_reports.research_prompt_version_id（issue #113 R5-4）：构建 prompt
+          时点解析的版本 id；历史研报无此归因可循，保持 NULL（复盘侧回退 md5 反解），
+          不回填。
 
         参数：
             无
@@ -507,6 +549,10 @@ class Database:
             )
         # 研报表 v3 结构迁移（issue #113）：加列/重建表/三态映射，含异常值前置检查
         await migrate_research_v3(self._conn)
+        # 研报复盘重评三列（issue #113 R5-2）：历史批改全为自动复盘产物
+        await self._ensure_research_rereview_columns()
+        # 研报提示词版本归因列（issue #113 R5-4）：构建时点精确归因，历史行 NULL
+        await self._ensure_research_prompt_version_column()
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_causal_links_supersedes ON causal_links(supersedes_id)"
         )
@@ -554,3 +600,42 @@ class Database:
                 await self._conn.execute(  # 列名为代码常量
                     f"ALTER TABLE audit_rounds ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+
+    async def _ensure_research_rereview_columns(self) -> None:
+        """为研报复盘表补人工重评三列（幂等，issue #113 R5-2）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行 review_kind 默认 'auto'、
+            rereview_reason 默认 ''、rereview_of_id 默认 NULL，均与既有语义一致
+        """
+        cur = await self._conn.execute("PRAGMA table_info(research_reviews)")
+        review_cols = {row["name"] for row in await cur.fetchall()}
+        if "review_kind" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN review_kind TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "rereview_reason" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_reason TEXT NOT NULL DEFAULT ''"
+            )
+        if "rereview_of_id" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_of_id INTEGER"
+            )
+
+    async def _ensure_research_prompt_version_column(self) -> None:
+        """为 research_reports 补提示词版本归因列（幂等，issue #113 R5-4）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（复盘侧回退 md5 反解），
+            不回填
+        """
+        cur = await self._conn.execute("PRAGMA table_info(research_reports)")
+        if "research_prompt_version_id" not in {row["name"] for row in await cur.fetchall()}:
+            await self._conn.execute(
+                "ALTER TABLE research_reports ADD COLUMN research_prompt_version_id INTEGER"
+            )

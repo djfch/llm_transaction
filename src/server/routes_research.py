@@ -115,6 +115,8 @@ def _report_item(
         "error": report.error,
         "round_id": report.round_id,
         "research_prompt_md5": report.research_prompt_md5,
+        # R5-4 新增契约键：构建时点精确归因的提示词版本 id（历史研报为 null）
+        "research_prompt_version_id": report.research_prompt_version_id,
         "created_at": report.created_at,
         **_llm_identity_fields(audit),
         "asset_views": [_asset_summary(view) for view in views],
@@ -170,7 +172,9 @@ def _research_review_item(review: ResearchReview) -> dict[str, Any]:
     返回：
         dict[str, Any]：复盘记录响应项；evidence_reviews（逐条依据评价）与
         outcome（客观行情结果）已由 *_json 字段解析为对象，不含 contract/report_id
-        （挂在对应逐标的详情键下，归属已由分组表达）
+        （挂在对应逐标的详情键下，归属已由分组表达）；review_kind（复盘种类：
+        auto 自动 / manual 人工授权重评）与 rereview_reason（授权理由，自动复盘
+        为空串）为 R5-2 新增契约键
     """
     return {
         "id": review.id,
@@ -185,6 +189,8 @@ def _research_review_item(review: ResearchReview) -> dict[str, Any]:
         "improvement_advice": review.improvement_advice,
         "outcome": _parse_json_field(review.outcome_json),
         "created_at": review.created_at,
+        "review_kind": review.review_kind,
+        "rereview_reason": review.rereview_reason,
     }
 
 

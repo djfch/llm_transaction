@@ -1,8 +1,11 @@
-"""复盘与策略版本端点：复盘报告只读/手动触发、复盘实时状态、策略版本列表/详情/diff/回滚。
+"""复盘与策略版本端点：复盘报告只读/手动触发、复盘实时状态、研报复盘人工重评授权、
+策略版本列表/详情/diff/回滚。
 
 写操作（手动复盘、策略回滚）全部经 ServerDeps 回调注入，None 时诚实 503；
+人工重评授权（POST /review/research/rereview）为纯持久化登记，直走
+deps.repo.research_review（repo 层方法调用，非路由内 SQL）；
 从 src.review.strategy 仅 import StrategyValidationError 异常契约做错误映射，
-行为不依赖复盘具体实现；路由内不直接 SQL（取数经 deps.repo）。
+行为不依赖复盘具体实现。
 """
 
 from __future__ import annotations
@@ -31,6 +34,14 @@ class _ReviewRunBody(BaseModel):
 
     start_ts: float
     end_ts: float
+
+
+class _RereviewRequestBody(BaseModel):
+    """POST /review/research/rereview 请求体：人工重评授权的目标与理由（issue #113 R5-2）。"""
+
+    report_id: int
+    contract: str
+    reason: str
 
 
 def _report_item(
@@ -211,6 +222,45 @@ def create_review_router(deps: ServerDeps) -> APIRouter:
         if error_code == "invalid_period":
             raise HTTPException(status_code=422, detail=result.get("error", ""))
         return result
+
+    @router.post("/review/research/rereview")
+    async def request_research_rereview(body: _RereviewRequestBody) -> dict[str, Any]:
+        """登记人工重评授权（幂等）：授权后下一轮复盘可对已复盘目标追加一条人工批改。
+
+        授权只对已被正式复盘过的目标开放（未复盘目标由自动复盘路径自然覆盖）；
+        同一目标已存在未消费授权时不新建，幂等返回既有记录（reused=true）。
+        授权行本身即审计记录（reason/requested_by/created_at），消费时由复盘
+        bundle 同事务绑定轮次编号。取数与写入均经 deps.repo.research_review。
+
+        参数：
+            body: _RereviewRequestBody，授权目标（report_id/contract）与重评理由
+
+        返回：
+            dict[str, Any]：授权记录回显（id/report_id/contract/reason/requested_by/
+            created_at）与 reused 幂等标记
+
+        异常：
+            HTTPException，目标逐标的结论不存在时以 404 响应；目标尚未被正式复盘时
+            以 409 响应；理由为空时以 422 响应
+        """
+        reason = body.reason.strip()
+        if not reason:
+            raise HTTPException(status_code=422, detail="重评理由不能为空")
+        case = await deps.repo.research_review.get_case(body.report_id, body.contract.strip())
+        if case is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"研报的逐标的结论不存在: {body.report_id}/{body.contract}",
+            )
+        if not await deps.repo.research_review.has_review(body.report_id, body.contract.strip()):
+            raise HTTPException(
+                status_code=409,
+                detail="该结论尚未被正式复盘，自动复盘路径会覆盖，无需授权重评",
+            )
+        request, reused = await deps.repo.research_review.create_rereview_request(
+            body.report_id, body.contract.strip(), reason
+        )
+        return {**request.model_dump(), "reused": reused}
 
     @router.get("/strategy/versions")
     async def list_strategy_versions() -> dict[str, Any]:

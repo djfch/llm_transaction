@@ -1,7 +1,9 @@
 """复盘侧研报复盘工具测试（issue #113）：候选/案例/历史/提交四工具契约。
 
 覆盖：未读案例提交被拒、LLM 提交 outcome 被拒、依据 1:1 校验（漏/重/越界）、
-同轮重复提交更新草稿、K 线来源未配置降级、案例材料完整性与已读登记。
+同轮重复提交更新草稿、K 线来源未配置降级、案例材料完整性与已读登记；
+R5-2 人工授权重评分派（无授权拒绝/授权放行 manual 草稿/unreviewable 结案三枚举约束/
+结案豁免数据门槛/非结案仍受门槛/窗口到期保留/候选清单尾部待办段）。
 """
 
 from __future__ import annotations
@@ -327,20 +329,22 @@ async def test_candidates_skip_unqualified_partial(
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言缺尾段候选被跳过、身份被列出且附 unreviewable 结案提示
+        None，断言缺尾段候选被跳过、身份被列出，且文案只指引留待后续轮次
+        （R5-1：不再引导 unreviewable 结案）
     """
     report_id = await _seed_reviewable_report(deps)
     deps.candle_source = _TruncatedWindowCandles(80)  # 覆盖 82.3% 但尾部缺 16 根（V1 端点约束）
     text = await registry.execute("list_research_review_candidates", {})
     assert "均不达提交门槛" in text
     assert f"研报#{report_id}/BTC_USDT" in text  # 跳过者身份列出
-    assert "unreviewable" in text  # 提示确认数据不可恢复后的结案逃生口
+    assert "留待后续轮次" in text
+    assert "unreviewable" not in text  # R5-1：自动复盘路径删除结案逃生口引导
 
 
-async def test_candidates_scan_budget_exhausted_gives_offset_cursor(
+async def test_candidates_scan_budget_exhausted_persists_keyset_cursor(
     deps: ReviewToolDeps, registry: ReviewToolRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """V5：扫描预算用尽而未凑满 limit 时给出 offset 续扫游标，续扫接力取到后续候选。
+    """R5-3：扫描预算用尽时 keyset 游标跨调用持久化，续扫不重扫不跳行，扫尾后重置。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
@@ -348,7 +352,9 @@ async def test_candidates_scan_budget_exhausted_gives_offset_cursor(
         monkeypatch: pytest.MonkeyPatch，把扫描预算钳小为 2 条
 
     返回：
-        None，断言首轮预算提示与游标值、续扫列出第 3 条（可用）候选
+        None，断言首轮预算提示（不再给 offset）、游标落库在推进位置、
+        第二次调用（不传游标参数）自动续扫到第 3 条可用候选、
+        扫到候选集尾部后游标重置为 None（下轮从头重扫）
     """
     monkeypatch.setattr(tool_research_module, "MAX_CANDIDATE_SCAN", 2)
     # BTC/ETH 数据不可用（空 K 线），SOL 完整可用；到期时刻 BTC 最早、SOL 最晚
@@ -386,12 +392,19 @@ async def test_candidates_scan_budget_exhausted_gives_offset_cursor(
 
     first = await registry.execute("list_research_review_candidates", {"limit": 5})
     assert "扫描预算 2 条已用尽" in first
-    assert "offset=2" in first
+    assert "已记住续扫位置" in first
+    assert "offset" not in first  # R5-3：不再暴露 offset 游标
     assert "SOL_USDT" not in first
+    # 游标已落库：推进到最后一条已预检候选（ETH_USDT 到期晚于 BTC_USDT）
+    cursor = await deps.repo.research_review.get_scan_cursor()
+    assert cursor is not None and cursor[1] == eth.id and cursor[2] == "ETH_USDT"
 
-    resumed = await registry.execute("list_research_review_candidates", {"limit": 5, "offset": 2})
+    # 第二次调用不传任何游标参数：自动从落库位置续扫取到 SOL_USDT；
+    # 其后无更多候选（批量不足页大小）→ 扫到尾部，游标重置为 None
+    resumed = await registry.execute("list_research_review_candidates", {"limit": 5})
     assert f"研报#{sol.id}/SOL_USDT" in resumed
     assert "扫描预算" not in resumed
+    assert await deps.repo.research_review.get_scan_cursor() is None
 
 
 async def test_get_case_full_material_and_registration(
@@ -539,6 +552,48 @@ async def test_get_case_shows_report_level_and_prompt_version(
         "get_research_review_case", {"report_id": legacy.id, "contract": "BTC_USDT"}
     )
     assert "研报提示词版本：（无记录）" in text3
+
+
+async def test_get_case_prefers_version_id_then_falls_back_to_md5(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R5-4：案例归因优先按 research_prompt_version_id；id 失效时回退 md5+时点反解。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言 id 优先（md5 指向别的版本也不篡改）与 id 失效回退两形态
+    """
+    md5_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    md5_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    version_a = await deps.repo.research_prompt.save_version("版本A正文", md5_a, "human", "A")
+    version_b = await deps.repo.research_prompt.save_version("版本B正文", md5_b, "human", "B")
+    # id 优先：md5 指向 B 但 version_id 指向 A（构建时点精确归因覆盖 md5 反解）
+    by_id = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        narrative="id 优先归因。",
+        research_prompt_md5=md5_b,
+        research_prompt_version_id=version_a.id,
+    )
+    text = await registry.execute(
+        "get_research_review_case", {"report_id": by_id.id, "contract": "BTC_USDT"}
+    )
+    assert f"研报提示词版本：v{version_a.id}（md5 bbbbbbbb…）" in text
+    # id 失效（版本已被清理）→ 回退 md5 反解出 B
+    stale = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        narrative="id 失效回退。",
+        research_prompt_md5=md5_b,
+        research_prompt_version_id=99999,
+    )
+    text2 = await registry.execute(
+        "get_research_review_case", {"report_id": stale.id, "contract": "BTC_USDT"}
+    )
+    assert f"研报提示词版本：v{version_b.id}（md5 bbbbbbbb…）" in text2
 
 
 async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> None:
@@ -861,15 +916,17 @@ async def test_submit_rejects_already_reviewed(
     assert deps.pending_research_reviews == {}
 
 
-async def test_submit_manual_rereview(deps: ReviewToolDeps, registry: ReviewToolRegistry) -> None:
-    """人工重评四态：默认拒绝、非布尔开关报错、缺理由报错、开关加理由放行追加（V6）。
+async def test_submit_rejects_rereview_switch_params(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """已复盘目标重复提交一律拒绝；旧版 LLM 侧 manual_rereview 开关已移除不再生效（R5-1）。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言四态文本与草稿暂存结果
+        None，断言重复提交（含携带旧开关参数）一律拒绝且不落草稿
     """
     report_id = await _seed_reviewable_report(deps)
     deps.candle_source = _WindowCandles()
@@ -879,27 +936,11 @@ async def test_submit_manual_rereview(deps: ReviewToolDeps, registry: ReviewTool
     await deps.repo.research_review.save_review(
         review_report_id=999, report_id=report_id, contract="BTC_USDT"
     )
-    # ① 无开关默认拒绝，文案须指引人工重评入口
     rejected = await registry.execute("submit_research_review", _valid_review_args(report_id))
     assert "已被正式复盘批改过" in rejected
-    assert "manual_rereview=true" in rejected
     assert deps.pending_research_reviews == {}
-    # ② 字符串 "true" 不是真布尔，报错
-    bad_type = await registry.execute(
-        "submit_research_review",
-        {**_valid_review_args(report_id), "manual_rereview": "true"},
-    )
-    assert "manual_rereview 必须是布尔值" in bad_type
-    assert deps.pending_research_reviews == {}
-    # ③ 显式开关但缺重评理由，报错
-    no_reason = await registry.execute(
-        "submit_research_review",
-        {**_valid_review_args(report_id), "manual_rereview": True},
-    )
-    assert "rereview_reason" in no_reason
-    assert deps.pending_research_reviews == {}
-    # ④ 开关加理由齐全，放行暂存草稿（重评追加新记录，不覆盖原复盘）
-    ok = await registry.execute(
+    # 旧版 LLM 侧重评开关不再生效：携带也不放行（V6 开关已移除，R5-1）
+    with_switch = await registry.execute(
         "submit_research_review",
         {
             **_valid_review_args(report_id),
@@ -907,8 +948,8 @@ async def test_submit_manual_rereview(deps: ReviewToolDeps, registry: ReviewTool
             "rereview_reason": "原复盘把震荡误判为背离，人工复核后重评",
         },
     )
-    assert "已暂存" in ok
-    assert (report_id, "BTC_USDT") in deps.pending_research_reviews
+    assert "已被正式复盘批改过" in with_switch
+    assert deps.pending_research_reviews == {}
 
 
 class _TruncatedWindowCandles:
@@ -1072,7 +1113,7 @@ async def test_submit_rejects_tail_gapped_partial(
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言拒绝文本含数据不足说明与 unreviewable 逃生口提示，且不落草稿
+        None，断言拒绝文本含数据不足说明、无 unreviewable 结案引导（R5-1），且不落草稿
     """
     report_id = await _seed_reviewable_report(deps)
     deps.candle_source = _TruncatedWindowCandles(80)  # 剔首根后完整落窗 79 根，尾部缺 16 根
@@ -1083,24 +1124,25 @@ async def test_submit_rejects_tail_gapped_partial(
     assert outcome["data_status"] == "partial" and outcome["candles_actual"] == 79
     result = await registry.execute("submit_research_review", _valid_review_args(report_id))
     assert "已暂存" not in result
-    assert "数据不足" in result and "unreviewable" in result
+    assert "数据不足" in result and "留待后续轮次" in result
+    assert "unreviewable" not in result  # R5-1：自动复盘路径删除结案逃生口引导
     assert deps.pending_research_reviews == {}
 
 
-async def test_submit_allows_unreviewable_escape_when_data_unrecoverable(
+async def test_submit_rejects_unreviewable_on_auto_path(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
-    """数据不足候选可显式以 reasoning_quality=unreviewable 结案（V1 逃生口）。
+    """R5-1：reasoning_quality=unreviewable 不属于自动复盘路径，数据不足也不许结案。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言提交暂存成功且草稿以 unreviewable 落库
+        None，断言 unreviewable 提交被拒（即使客观数据确实不足）且不落草稿
     """
     report_id = await _seed_reviewable_report(deps)
-    deps.candle_source = _TruncatedWindowCandles(80)  # 同缺尾场景
+    deps.candle_source = _TruncatedWindowCandles(80)  # 同缺尾场景：数据确实不足
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -1109,9 +1151,67 @@ async def test_submit_allows_unreviewable_escape_when_data_unrecoverable(
         "reasoning_review": "窗口尾部行情数据确认不可恢复，无法评价推理兑现",
     }
     result = await registry.execute("submit_research_review", args)
-    assert "已暂存" in result
+    assert "已暂存" not in result
+    assert "unreviewable 不属于自动复盘路径" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_submit_recomputes_outcome_at_submit_time(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R5-1：提交时点用 K 线来源重算客观结果，不信已读案例缓存的旧值（双向验证）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言读案例后 K 线数据变差时提交被拒（缓存 complete 不放行），
+        读案例后数据变好时提交放行且草稿 outcome 用重算值
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()  # 读案例时窗口完整
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    cached = deps.loaded_research_cases[(report_id, "BTC_USDT")]["outcome"]
+    assert cached["data_status"] == "complete"
+
+    # 方向一：提交前行情数据变差（尾部缺失）→ 重算不达门槛，拒绝
+    deps.candle_source = _TruncatedWindowCandles(80)
+    rejected = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已暂存" not in rejected and "数据不足" in rejected
+    assert deps.pending_research_reviews == {}
+
+    # 方向二：提交前行情回补完整 → 重算达标，放行且草稿 outcome 为重算的 complete
+    deps.candle_source = _WindowCandles()
+    ok = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已暂存" in ok
     draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
-    assert draft["reasoning_quality"] == "unreviewable"
+    assert json.loads(draft["outcome_json"])["data_status"] == "complete"
+
+
+async def test_submit_rejects_when_candle_source_missing(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R5-1：K 线来源未装配时提交一律拒绝（不再用已读缓存的 unavailable 走门禁）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本指出 K 线来源未装配且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    deps.candle_source = None  # 读案例后装配丢失（重启/配置变更场景）
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "K 线来源未装配" in result
+    assert deps.pending_research_reviews == {}
 
 
 async def test_list_research_reviews_returns_full_records(
@@ -1344,3 +1444,218 @@ async def test_get_research_prompt_versions(
     assert "v1" in detail and "全文" in detail
     missing = await registry.execute("get_research_prompt_versions", {"version_id": 99})
     assert "不存在" in missing
+
+
+# ---------- R5-2：人工授权重评分派（注册表入口在 tool_research_rereview） ----------
+
+
+async def _seed_reviewed_target(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> tuple[int, int]:
+    """造一份已到期、已读案例且已被正式复盘的研报目标，返回 (report_id, 首条复盘记录 id)。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（candle_source 被切换为完整窗口桩）
+        registry: ReviewToolRegistry，工具注册表（读案例登记已读缓存）
+
+    返回：
+        tuple[int, int]：研报编号与种子复盘记录编号（重评的 rereview_of_id 应指向它）
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    seeded = await deps.repo.research_review.save_review(
+        review_report_id=999, report_id=report_id, contract="BTC_USDT"
+    )
+    return report_id, seeded.id
+
+
+async def test_rereview_rejected_without_authorization(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """已复盘目标无人工授权时提交被拒，文案指引研报详情页授权入口（R5-2）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本与不落草稿
+    """
+    report_id, _ = await _seed_reviewed_target(deps, registry)
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已被正式复盘批改过" in result
+    assert "人工在研报详情页发起重评授权" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_rereview_authorized_stages_manual_draft(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """命中人工授权的重评放行：草稿带 manual 身份、授权理由、替代指向与授权编号（R5-2）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言暂存文案与草稿五要素（review_kind/rereview_reason/rereview_of_id/
+        rereview_request_id/重算 outcome）
+    """
+    report_id, first_review_id = await _seed_reviewed_target(deps, registry)
+    req, reused = await deps.repo.research_review.create_rereview_request(
+        report_id, "BTC_USDT", "原复盘把震荡误判为背离"
+    )
+    assert reused is False
+
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+
+    assert "人工授权重评已暂存" in result and f"授权#{req.id}" in result
+    draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
+    assert draft["review_kind"] == "manual"
+    assert draft["rereview_reason"] == "原复盘把震荡误判为背离"
+    assert draft["rereview_of_id"] == first_review_id  # 替代指向被重评的首条记录
+    assert draft["rereview_request_id"] == req.id
+    assert json.loads(draft["outcome_json"])["data_status"] == "complete"  # 提交时点重算
+
+
+async def test_rereview_unreviewable_closure_requires_consistent_enums(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """授权重评以 unreviewable 结案时三枚举须一致降级，否则拒绝（R5-2 结案约束）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言结案约束拒绝文本且不落草稿
+    """
+    report_id, _ = await _seed_reviewed_target(deps, registry)
+    await deps.repo.research_review.create_rereview_request(report_id, "BTC_USDT", "结案复核")
+    args = _valid_review_args(report_id) | {"reasoning_quality": "unreviewable"}
+
+    result = await registry.execute("submit_research_review", args)
+
+    assert "direction_relation 必须取" in result
+    assert "confidence_assessment 必须取 unreviewable" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_rereview_unreviewable_closure_bypasses_data_gate(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """unreviewable 结案不套数据门槛：提交时点行情不可用也放行，outcome 落 unavailable（R5-2）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（提交前切回空 K 线桩模拟数据缺口）
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言结案暂存成功且重算 outcome 为 unavailable
+    """
+    report_id, _ = await _seed_reviewed_target(deps, registry)
+    await deps.repo.research_review.create_rereview_request(report_id, "BTC_USDT", "数据缺失结案")
+    deps.candle_source = _StubCandles([])  # 结案提交时点行情不可用
+    args = _valid_review_args(report_id) | {
+        "direction_relation": "unverifiable",
+        "reasoning_quality": "unreviewable",
+        "confidence_assessment": "unreviewable",
+    }
+
+    result = await registry.execute("submit_research_review", args)
+
+    assert "人工授权重评已暂存" in result
+    draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
+    assert json.loads(draft["outcome_json"])["data_status"] == "unavailable"
+
+
+async def test_rereview_non_closure_still_gated_by_data(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """非结案的授权重评仍受数据门槛约束：提交时点数据不足拒绝（R5-2）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（提交前切回空 K 线桩）
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言数据不足拒绝文本且不落草稿
+    """
+    report_id, _ = await _seed_reviewed_target(deps, registry)
+    await deps.repo.research_review.create_rereview_request(report_id, "BTC_USDT", "补评")
+    deps.candle_source = _StubCandles([])
+
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+
+    assert "data_status=unavailable" in result
+    assert "unreviewable 结案" in result  # 指引改用结案口径
+    assert deps.pending_research_reviews == {}
+
+
+async def test_rereview_still_rejects_not_due(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """授权重评保留窗口到期检查：horizon 未到期即使有授权也拒绝（R5-2）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言窗口未到期拒绝文本且不落草稿
+    """
+    report = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        evidence_json=json.dumps(
+            [
+                {"point": "EMA向上", "source": "市场快照"},
+                {"point": "加息预期降温", "source": "金十快讯"},
+            ],
+            ensure_ascii=False,
+        ),
+    )  # 不回拨 created_at：窗口未到期
+    await registry.execute(
+        "get_research_review_case", {"report_id": report.id, "contract": "BTC_USDT"}
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=999, report_id=report.id, contract="BTC_USDT"
+    )
+    await deps.repo.research_review.create_rereview_request(report.id, "BTC_USDT", "过早重评")
+
+    result = await registry.execute("submit_research_review", _valid_review_args(report.id))
+
+    assert "窗口未到期" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_candidates_list_shows_pending_rereview_section(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """候选清单尾部列出待处理人工授权重评；无授权时无此段（R5-2：授权须对复盘方可见）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言授权登记前后清单尾部待办段的出现与内容（已复盘目标不进主候选，
+        仅以授权待办形式可见）
+    """
+    report_id, _ = await _seed_reviewed_target(deps, registry)
+    empty = await registry.execute("list_research_review_candidates", {})
+    assert "人工授权重评待处理" not in empty
+
+    await deps.repo.research_review.create_rereview_request(report_id, "BTC_USDT", "复核原结论")
+    text = await registry.execute("list_research_review_candidates", {})
+
+    assert "人工授权重评待处理 1 条" in text
+    assert f"- 研报#{report_id}/BTC_USDT | 授权理由=复核原结论" in text
+    assert "发起人=human" in text
