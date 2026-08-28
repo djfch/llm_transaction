@@ -21,6 +21,7 @@ from src.review import (
     tool_research,
     tool_research_data,
     tool_research_prompt,
+    tool_research_rereview,
 )
 from src.review.tool_handlers import ReviewToolDeps, ToolArgError
 from src.review.tool_schemas import SCHEMAS
@@ -44,7 +45,7 @@ _HANDLERS: dict[str, Callable[[ReviewToolDeps, dict], Awaitable[str]]] = {
     "list_research_review_candidates": tool_research.list_research_review_candidates,
     "get_research_review_case": tool_research.get_research_review_case,
     "list_research_reviews": tool_research.list_research_reviews,
-    "submit_research_review": tool_research.submit_research_review,
+    "submit_research_review": tool_research_rereview.submit_research_review,
     "get_research_prompt_versions": tool_research_prompt.get_research_prompt_versions,
     "submit_research_prompt_revision": tool_research_prompt.submit_research_prompt_revision,
     "read_timeline": tool_research_data.read_timeline,

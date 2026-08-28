@@ -347,8 +347,12 @@ async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
             "improvement_advice",
             "outcome",
             "created_at",
+            "review_kind",  # R5-2 新增契约键：auto 自动 / manual 人工授权重评
+            "rereview_reason",  # R5-2 新增契约键：授权理由（自动复盘为空串）
         }
         assert btc_reviews[0]["review_report_id"] == 1
+        assert btc_reviews[0]["review_kind"] == "auto"  # 默认值为 auto
+        assert btc_reviews[0]["rereview_reason"] == ""
         assert btc_reviews[0]["evidence_reviews"] == [
             {
                 "evidence_index": 1,

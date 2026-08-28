@@ -192,7 +192,9 @@ CREATE TABLE IF NOT EXISTS causal_links (
 );
 -- 研报复盘记录（issue #113）：复盘 agent 对逐标的结论的批改；方向/推理/置信度为枚举 +
 -- 对应 *_reason 理由文本；outcome_json 由代码按历史 K 线计算（LLM 不可写）；
--- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘
+-- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘；
+-- review_kind=manual 的行为人工授权重评（R5-2），rereview_reason 存授权理由原文，
+-- rereview_of_id 指向被替代的上一条复盘记录
 CREATE TABLE IF NOT EXISTS research_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     review_report_id INTEGER NOT NULL,
@@ -208,6 +210,9 @@ CREATE TABLE IF NOT EXISTS research_reviews (
     improvement_advice TEXT NOT NULL DEFAULT '',
     outcome_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
+    review_kind TEXT NOT NULL DEFAULT 'auto',
+    rereview_reason TEXT NOT NULL DEFAULT '',
+    rereview_of_id INTEGER,
     UNIQUE(review_report_id, report_id, contract)
 );
 -- 研报复盘候选扫描游标（issue #113 R5）：单行表，记录 keyset 续扫位置
@@ -218,6 +223,17 @@ CREATE TABLE IF NOT EXISTS research_review_scan_state (
     last_due_at REAL,
     last_report_id INTEGER,
     last_contract TEXT
+);
+-- 人工重评授权（issue #113 R5-2）：同一目标最多一条未消费授权（部分唯一索引
+-- idx_rereview_pending 强制）；consumed_round_id 空串 = 待消费，消费时绑定复盘轮次
+CREATE TABLE IF NOT EXISTS research_rereview_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_by TEXT NOT NULL DEFAULT 'human',
+    created_at REAL NOT NULL,
+    consumed_round_id TEXT NOT NULL DEFAULT ''
 );
 -- 研报提示词版本（issue #113）：research_prompt.md 正文版本化存证，状态机同 strategy_versions
 CREATE TABLE IF NOT EXISTS research_prompt_versions (
@@ -244,6 +260,8 @@ CREATE INDEX IF NOT EXISTS idx_research_asset_contract ON research_asset_views(c
 CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id);
 CREATE INDEX IF NOT EXISTS idx_research_reviews_target ON research_reviews(report_id, contract);
 CREATE INDEX IF NOT EXISTS idx_research_reviews_created ON research_reviews(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rereview_pending
+    ON research_rereview_requests(report_id, contract) WHERE consumed_round_id='';
 CREATE INDEX IF NOT EXISTS idx_research_prompt_versions_md5 ON research_prompt_versions(md5);
 """
 
@@ -448,6 +466,10 @@ class Database:
           research_asset_views 去 verify_result 死字段、causal_links 双字段合并为
           tracking/concluded/superseded 三态（均重建表）；迁移前做异常值检查，
           有未知数据即拒绝启动并提示备份，不静默丢弃。
+        - research_reviews.review_kind/rereview_reason/rereview_of_id（issue #113 R5-2）：
+          历史批改均为自动复盘产物，review_kind 默认 'auto'、授权理由与替代指向无旧档
+          可循（'' / NULL），不回填；research_rereview_requests 为新增表，由
+          CREATE TABLE IF NOT EXISTS 覆盖。
 
         参数：
             无
@@ -516,6 +538,8 @@ class Database:
             )
         # 研报表 v3 结构迁移（issue #113）：加列/重建表/三态映射，含异常值前置检查
         await migrate_research_v3(self._conn)
+        # 研报复盘重评三列（issue #113 R5-2）：历史批改全为自动复盘产物
+        await self._ensure_research_rereview_columns()
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_causal_links_supersedes ON causal_links(supersedes_id)"
         )
@@ -563,3 +587,27 @@ class Database:
                 await self._conn.execute(  # 列名为代码常量
                     f"ALTER TABLE audit_rounds ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+
+    async def _ensure_research_rereview_columns(self) -> None:
+        """为研报复盘表补人工重评三列（幂等，issue #113 R5-2）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行 review_kind 默认 'auto'、
+            rereview_reason 默认 ''、rereview_of_id 默认 NULL，均与既有语义一致
+        """
+        cur = await self._conn.execute("PRAGMA table_info(research_reviews)")
+        review_cols = {row["name"] for row in await cur.fetchall()}
+        if "review_kind" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN review_kind TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "rereview_reason" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_reason TEXT NOT NULL DEFAULT ''"
+            )
+        if "rereview_of_id" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_of_id INTEGER"
+            )

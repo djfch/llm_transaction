@@ -258,12 +258,13 @@ def test_review_prompt_research_case_window_tools():
 
 
 def test_review_prompt_rereview_discipline():
-    """校验复盘模板写明研报复盘查重与数据不足纪律（R5-1：LLM 侧重评开关已移除）。
+    """校验复盘模板写明研报复盘查重、人工授权重评与数据不足纪律（R5-1/R5-2）。
 
     参数：无
 
     返回：
-        None，断言复盘模板含重复提交禁令与数据不足留待后续轮次纪律，
+        None，断言复盘模板含重复提交禁令、人工授权重评口径（授权来源、可见渠道、
+        unreviewable 结案的三枚举约束）与数据不足留待后续轮次纪律，
         且不再出现 LLM 侧 manual_rereview 开关文案
     """
     review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
@@ -271,3 +272,9 @@ def test_review_prompt_rereview_discipline():
     assert "留待后续轮次" in review
     assert "unreviewable 闭合结案" in review
     assert "manual_rereview" not in review
+    # R5-2：人工授权重评口径（授权只能由人工发起，经候选清单尾部对复盘方可见）
+    assert "人工重评授权" in review
+    assert "人工在研报详情页" in review
+    assert "你不可自行发起或伪造授权" in review
+    assert "direction_relation 必须取" in review
+    assert "confidence_assessment 必须取 unreviewable" in review

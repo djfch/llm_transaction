@@ -246,6 +246,7 @@ function ReportItem({
                 crossMarketView={detail.crossMarketView}
                 globalRisks={detail.globalRisks}
                 assets={detail.assetViews}
+                reportId={detail.id}
               />
               {detail.causalLinks.length > 0 && (
                 <div className="mt-3">

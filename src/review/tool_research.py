@@ -7,10 +7,12 @@
   policy_adjustments 归一化记录+代码计算的客观行情），读后登记到
   deps.loaded_research_cases（submit 的前置）；
 - list_research_reviews：历史复盘记录查询（修订 prompt 前核对重复问题用）；
-- submit_research_review：唯一写出口。只暂存内存草稿（deps.pending_research_reviews），
-  报告落库成功才随同事务写入（见 C4 bundle）；outcome 由代码在提交时点用 K 线来源
-  重新计算（不信已读案例缓存的旧值，防读到提交之间行情数据变化，R5-1），
-  LLM 提交 outcome 字段一律拒绝。
+- submit_research_review：自动复盘路径的写出口。只暂存内存草稿
+  （deps.pending_research_reviews），报告落库成功才随同事务写入（见 C4 bundle）；
+  outcome 由代码在提交时点用 K 线来源重新计算（不信已读案例缓存的旧值，防读到
+  提交之间行情数据变化，R5-1），LLM 提交 outcome 字段一律拒绝。注册表中的
+  submit_research_review 入口由 tool_research_rereview 分派：已复盘目标命中
+  人工重评授权时走授权分支（R5-2），未复盘目标才进入本模块的自动路径。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from src.review.tool_handlers import (
     _clamp,
     _fmt_time,
     _need_str,
+    _one_line,
     _opt_int,
     _opt_str,
     _to_int,
@@ -398,6 +401,8 @@ async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> s
     条候选（= K 线请求数上限），扫描位置以 keyset 游标跨调用/跨轮持久化，
     预算用尽时可再次调用续扫，扫到候选集尾部自动重置、下轮从头重扫
     （R5-3）；来源未装配时不做可用性预检、全量列出并附说明（issue #113 R10）。
+    清单末尾追加待处理的人工授权重评段（R5-2：授权必须对复盘方可见，否则
+    已复盘目标永不进入候选，授权成为死信）。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_review 分页取数、
@@ -406,12 +411,29 @@ async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> s
 
     返回：
         str：候选清单文本（含 report_id/contract/方向/horizon/到期时刻、跳过
-        候选身份与续扫/重置提示）；无候选或无可用候选时返回提示
+        候选身份与续扫/重置提示，以及人工授权重评待办段）；无候选或无可用候选时
+        返回提示
     """
     limit = _clamp(_opt_int(args, "limit", 20), 1, 100)
     now = time.time()
     if deps.candle_source is None:
-        return await _list_candidates_unchecked(deps, now, limit)
+        text = await _list_candidates_unchecked(deps, now, limit)
+    else:
+        text = await _candidates_text_checked(deps, now, limit)
+    return text + await _pending_rereview_lines(deps)
+
+
+async def _candidates_text_checked(deps: ReviewToolDeps, now: float, limit: int) -> str:
+    """K 线来源已装配时的候选清单正文：可用性预检 + 扫描预算/扫尾提示。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        now: float，当前时间戳
+        limit: int，要凑满的可用候选条数
+
+    返回：
+        str：候选清单文本（不含人工授权重评段，由调用方追加）
+    """
     usable, skipped, scanned, tail = await _scan_usable_candidates(deps, now, limit)
     budget_hint = ""
     if scanned >= MAX_CANDIDATE_SCAN and len(usable) < limit:
@@ -441,6 +463,30 @@ async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> s
     if tail_hint:
         lines.append(tail_hint)
     return "\n".join(lines)
+
+
+async def _pending_rereview_lines(deps: ReviewToolDeps) -> str:
+    """待处理人工授权重评的展示段（候选清单尾部追加）；无待办时返回空串。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_review 取待办授权）
+
+    返回：
+        str：以换行起始的待办段文本；无待办授权时为空串
+    """
+    requests = await deps.repo.research_review.list_pending_rereview_requests()
+    if not requests:
+        return ""
+    lines = [
+        f"人工授权重评待处理 {len(requests)} 条（授权由人工在研报详情页登记；"
+        "须先用 get_research_review_case 读取案例后提交，结案口径见 submit 描述）："
+    ]
+    lines.extend(
+        f"- 研报#{r.report_id}/{r.contract} | 授权理由={_one_line(r.reason)}"
+        f" | 登记={_fmt_time(r.created_at)} | 发起人={r.requested_by}"
+        for r in requests
+    )
+    return "\n" + "\n".join(lines)
 
 
 async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
@@ -740,7 +786,12 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
             "（或 horizon 非法），暂不可复盘"
         )
     if await deps.repo.research_review.has_review(report_id, contract):
-        return f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交"
+        # 竞态防御：注册表入口已在 tool_research_rereview 分派过授权分支，
+        # 走到这里说明案例读取后被他人抢先复盘——维持拒绝，提示人工授权口径
+        return (
+            f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过；"
+            "如需重评，须由人工在研报详情页发起重评授权"
+        )
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
     confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)

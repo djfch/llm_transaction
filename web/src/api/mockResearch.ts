@@ -4,7 +4,8 @@
  *  runResearch 返回的 roundId 与随后 getResearchLive 进行中轮的 round_id 一致（模块级 liveRoundId 对齐）。
  *  研报提示词：模块级 researchPrompt（当前内容）+ researchPromptVersions（版本历史，最新在前）；
  *  保存/回滚都会前插新版本，diff 为 mock 级整体替换式 +/- 文本（同 mockReview 策略版本口径）。
- *  研报复盘：id=1 研报的 BTC 结论播种 researchReviews，演示详情页复盘块。 */
+ *  研报复盘：id=1 研报的 BTC 结论播种 researchReviews，演示详情页复盘块。
+ *  人工重评授权（R5-2）：requestResearchRereview 模拟 404/409 与幂等复用（模块级 Map 记待消费授权）。 */
 import { ApiError } from './http'
 import type {
   ApiClient,
@@ -21,6 +22,7 @@ type ResearchMockHandlers = Pick<
   | 'getResearchReports'
   | 'getResearchReport'
   | 'runResearch'
+  | 'requestResearchRereview'
   | 'getResearchLive'
   | 'getResearchPrompt'
   | 'putResearchPrompt'
@@ -248,6 +250,10 @@ let activePollsLeft = 0
 /** 进行中研报轮 ID：runResearch 点火时换成本轮的预分配 ID（与点火响应 roundId 一致） */
 let liveRoundId = 'rs-live-mock'
 
+/** 人工重评授权待办（R5-2）：键为 `${reportId}/${contract}`，值为授权 id（演示幂等复用） */
+const rereviewRequests = new Map<string, number>()
+let rereviewRequestSeq = 0
+
 /**
  * 实时研报审计轮样例（active=true 进行中 / false 已结束，工具链两种形态下都保留）。
  * 进行中：ended_at 为 null、llm_raw 空串（与 /api/research/live 同约定）；已结束：ended_at 非空、带结论 llm_raw。
@@ -387,6 +393,27 @@ export function createResearchMock(reply: <T>(value: T) => Promise<T>) {
       liveRoundActive = true
       activePollsLeft = ACTIVE_POLLS_AFTER_IGNITE
       return reply({ started: true, reportType, hours, roundId })
+    },
+    // 人工重评授权（R5-2）：404 目标不存在、409 未被正式复盘；同目标重复登记幂等复用既有授权
+    requestResearchRereview: (reportId, contract) => {
+      const report = researchReports.find((item) => item.id === reportId)
+      const view = report?.assetViews.find((asset) => asset.contract === contract)
+      if (report === undefined || view === undefined) {
+        return Promise.reject(
+          new ApiError(404, `研报的逐标的结论不存在: ${reportId}/${contract}`),
+        )
+      }
+      if ((view.researchReviews ?? []).length === 0) {
+        return Promise.reject(
+          new ApiError(409, '该结论尚未被正式复盘，自动复盘路径会覆盖，无需授权重评'),
+        )
+      }
+      const key = `${reportId}/${contract}`
+      const existing = rereviewRequests.get(key)
+      if (existing !== undefined) return reply({ id: existing, reused: true })
+      rereviewRequestSeq += 1
+      rereviewRequests.set(key, rereviewRequestSeq)
+      return reply({ id: rereviewRequestSeq, reused: false })
     },
     getResearchLive: (roundId) => {
       // 按 ID 直查：mock 只有一个实时轮，ID 不符即查无此轮（与后端契约一致：round null + 空工具链）

@@ -41,6 +41,7 @@ import type {
   ResearchReportDetail,
   ResearchReportsPage,
   ResearchReportSummary,
+  ResearchRereviewAck,
   ResearchScheduleStatus,
   ReviewLive,
   ReviewReport,
@@ -445,6 +446,8 @@ interface RawResearchReview {
   improvement_advice: string
   outcome?: unknown
   created_at: number
+  review_kind?: string // R5-2 新增契约键；旧数据缺省视为 auto
+  rereview_reason?: string
 }
 
 interface RawResearchAssetDetail extends RawResearchAssetSummary {
@@ -626,6 +629,8 @@ function adaptResearchReview(raw: RawResearchReview): ResearchReviewItem {
       ? (outcome as Record<string, unknown>)
       : {},
     createdAt: new Date((raw.created_at ?? 0) * 1000).toISOString(),
+    reviewKind: raw.review_kind ?? 'auto',
+    rereviewReason: raw.rereview_reason ?? '',
   }
 }
 
@@ -940,6 +945,13 @@ export const httpApi: ApiClient = {
         body: JSON.stringify({ report_type: reportType, hours }),
       }),
     ),
+  // 人工重评授权登记（R5-2）：404=目标不存在、409=未复盘、422=空理由，非 2xx 经 toApiError 抛 ApiError；
+  // 响应键 id/reused 无需 snake→camel 适配，直接透出
+  requestResearchRereview: (reportId, contract, reason): Promise<ResearchRereviewAck> =>
+    request<ResearchRereviewAck>('/review/research/rereview', {
+      method: 'POST',
+      body: JSON.stringify({ report_id: reportId, contract, reason }),
+    }),
   // 与 getReviewLive 同约定：响应契约即最终形态，无需适配；带 roundId 时按该轮直查，不带参返回最新一轮
   getResearchLive: (roundId?: string) =>
     request<ResearchLive>(roundId ? `/research/live?round_id=${encodeURIComponent(roundId)}` : '/research/live'),

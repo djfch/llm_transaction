@@ -244,7 +244,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "列出已到期、尚未复盘且客观行情数据达提交门槛的研报逐标的结论候选"
             "（按到期时刻升序；数据不达门槛者自动跳过并列出身份，留待后续轮次；"
             "单次最多扫描 200 条，扫描位置自动跨调用记住，预算用尽时可再次调用续扫，"
-            "扫到候选集末尾后自动重置为从头重扫）："
+            "扫到候选集末尾后自动重置为从头重扫）；清单末尾会列出待处理的人工授权"
+            "重评（含授权理由，由人工在研报详情页登记）："
             "report_id、contract、方向、置信度、horizon、研报时间与到期时刻"
         ),
         "parameters": {
@@ -294,8 +295,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "每条含事实核对与推理支撑双枚举及写明核对来源的说明）。客观行情结果由代码"
             "在提交时点按 K 线重新计算附加，不得提交 outcome 字段。须先用 "
             "get_research_review_case 读取案例；通过则暂存草稿，随本轮复盘报告落库"
-            "统一生效。已被正式复盘过的目标一律拒绝重复提交；客观行情数据不达门槛时"
-            "留待后续轮次，不得以 unreviewable 闭合结案"
+            "统一生效。已被正式复盘过的目标仅当存在人工重评授权时可再次提交（授权由"
+            "人工在研报详情页发起，你不可自行发起）；授权重评允许以 unreviewable 结案"
+            "（此时 direction_relation 必须取 unverifiable、confidence_assessment "
+            "必须取 unreviewable）。自动路径客观行情数据不达门槛时留待后续轮次，"
+            "不得以 unreviewable 闭合结案"
         ),
         "parameters": {
             "type": "object",
@@ -321,7 +325,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "description": (
                         "推理质量枚举（只评价当时推理方法，不评价因果链内容正确性）："
                         "sound=推理基本成立、partial=推理部分成立、flawed=推理存在明显问题、"
-                        "unreviewable=无法评价（自动复盘路径不接受此值，数据不足留待后续轮次）"
+                        "unreviewable=无法评价（仅命中人工重评授权时可用于结案；"
+                        "自动复盘路径不接受此值，数据不足留待后续轮次）"
                     ),
                 },
                 "reasoning_review": {

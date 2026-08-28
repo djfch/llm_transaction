@@ -112,6 +112,17 @@ describe('研报 v2 端点适配', () => {
               improvement_advice: '',
               outcome: { data_status: 'complete', start_price: 67400, end_price: 70800, return_pct: 5.04 },
               created_at: 1784595900,
+              review_kind: 'manual',
+              rereview_reason: '人工复核原结论',
+            }, {
+              // 旧契约缺省两新键：适配后 reviewKind 回退 auto、rereviewReason 空串（R5-2 兼容）
+              id: 3,
+              review_report_id: 7,
+              direction_relation: 'diverged',
+              reasoning_quality: 'partial',
+              confidence_assessment: 'too_high',
+              improvement_advice: '',
+              created_at: 1784595901,
             }],
           }],
           causal_links: [],
@@ -136,6 +147,47 @@ describe('研报 v2 端点适配', () => {
     }])
     expect(review?.outcome).toMatchObject({ data_status: 'complete', return_pct: 5.04 })
     expect(review?.createdAt).toBe(new Date(1784595900 * 1000).toISOString())
+    // R5-2：manual 两新键适配；旧契约缺省回退 auto/空串
+    expect(review?.reviewKind).toBe('manual')
+    expect(review?.rereviewReason).toBe('人工复核原结论')
+    const legacy = detail.assetViews?.[0].researchReviews?.[1]
+    expect(legacy?.reviewKind).toBe('auto')
+    expect(legacy?.rereviewReason).toBe('')
+  })
+
+  it('requestResearchRereview 发送 snake_case 授权请求体并透出 id/reused；非 2xx 透传 detail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/review/research/rereview') && init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({
+          report_id: 9,
+          contract: 'BTC_USDT',
+          reason: '原复盘误判',
+        })
+        return new Response(JSON.stringify({
+          id: 5,
+          report_id: 9,
+          contract: 'BTC_USDT',
+          reason: '原复盘误判',
+          requested_by: 'human',
+          created_at: 1784595900,
+          consumed_round_id: '',
+          reused: false,
+        }))
+      }
+      throw new Error('未打桩路径: ' + path)
+    }))
+    const ack = await httpApi.requestResearchRereview(9, 'BTC_USDT', '原复盘误判')
+    expect(ack).toMatchObject({ id: 5, reused: false })
+
+    // 409（目标未被正式复盘）经 ApiError 透出 detail
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ detail: '该结论尚未被正式复盘，自动复盘路径会覆盖，无需授权重评' }), { status: 409 }),
+    ))
+    const error: unknown = await httpApi
+      .requestResearchRereview(9, 'BTC_USDT', '复核')
+      .catch((item: unknown) => item)
+    expect(error).toMatchObject({ status: 409, detail: '该结论尚未被正式复盘，自动复盘路径会覆盖，无需授权重评' })
   })
 })
 

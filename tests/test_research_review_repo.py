@@ -1,6 +1,7 @@
 """研报复盘子仓库测试：候选到期过滤、已复盘排除、案例取数与复盘记录 CRUD。
 
 数据库用 tmp_path 隔离，不触真实数据文件；created_at 回拨模拟到期场景。
+R5-2 增：人工重评授权登记幂等、待消费生命周期与 manual 三列落库读回。
 """
 
 from __future__ import annotations
@@ -206,3 +207,97 @@ async def test_scan_cursor_roundtrip_and_reset(repo: Repo) -> None:
     assert await repo.research_review.get_scan_cursor() == (1700000000.5, 42, "BTC_USDT")
     await repo.research_review.save_scan_cursor(None)
     assert await repo.research_review.get_scan_cursor() is None
+
+
+# ---------- R5-2：人工重评授权（research_rereview_requests） ----------
+
+
+async def test_rereview_request_create_idempotent(repo: Repo) -> None:
+    """授权登记幂等：同目标重复登记返回既有记录（reused=True），不同合约各自新建。
+
+    参数：
+        repo: Repo，测试仓库
+
+    返回：
+        None，断言首次新建、重复登记幂等命中（理由保持首次值）、跨合约互不影响
+    """
+    report = await save_report_fixture(repo, report_type="us_open", horizon="当日")
+
+    req, reused = await repo.research_review.create_rereview_request(
+        report.id, "BTC_USDT", "首次理由"
+    )
+    assert reused is False
+    assert req.id > 0 and req.reason == "首次理由"
+    assert req.requested_by == "human" and req.consumed_round_id == ""
+
+    again, reused2 = await repo.research_review.create_rereview_request(
+        report.id, "BTC_USDT", "换个理由"
+    )
+    assert reused2 is True and again.id == req.id
+    assert again.reason == "首次理由"  # 幂等命中：既有授权不被覆盖
+
+    other, reused3 = await repo.research_review.create_rereview_request(
+        report.id, "ETH_USDT", "另一合约"
+    )
+    assert reused3 is False and other.id != req.id
+
+
+async def test_rereview_request_pending_lifecycle(repo: Repo) -> None:
+    """待消费查询随登记/消费变化；消费后同目标可再次登记（部分唯一索引只约束未消费行）。
+
+    参数：
+        repo: Repo，测试仓库
+
+    返回：
+        None，断言空态、登记后可见、消费后不可见、再登记新建成功
+    """
+    report = await save_report_fixture(repo, report_type="us_open", horizon="当日")
+    assert await repo.research_review.get_pending_rereview_request(report.id, "BTC_USDT") is None
+    assert await repo.research_review.list_pending_rereview_requests() == []
+
+    req, _ = await repo.research_review.create_rereview_request(report.id, "BTC_USDT", "复核")
+    got = await repo.research_review.get_pending_rereview_request(report.id, "BTC_USDT")
+    assert got is not None and got.id == req.id
+    assert [r.id for r in await repo.research_review.list_pending_rereview_requests()] == [req.id]
+
+    await repo._conn.execute(
+        "UPDATE research_rereview_requests SET consumed_round_id='rr-1' WHERE id=?", (req.id,)
+    )
+    await repo._conn.commit()
+    assert await repo.research_review.get_pending_rereview_request(report.id, "BTC_USDT") is None
+    assert await repo.research_review.list_pending_rereview_requests() == []
+
+    req2, reused = await repo.research_review.create_rereview_request(
+        report.id, "BTC_USDT", "再次复核"
+    )
+    assert reused is False and req2.id != req.id
+
+
+async def test_save_review_manual_columns_roundtrip(repo: Repo) -> None:
+    """复盘记录三新列（review_kind/rereview_reason/rereview_of_id）落库读回与替代指向查询。
+
+    参数：
+        repo: Repo，测试仓库
+
+    返回：
+        None，断言默认 auto 行三列为空、manual 行三列正确、latest_review_id 指向最新记录
+    """
+    first = await repo.research_review.save_review(
+        review_report_id=1, report_id=100, contract="BTC_USDT"
+    )
+    manual = await repo.research_review.save_review(
+        review_report_id=2,
+        report_id=100,
+        contract="BTC_USDT",
+        review_kind="manual",
+        rereview_reason="人工复核",
+        rereview_of_id=first.id,
+    )
+
+    rows = await repo.research_review.list_reviews()
+    assert [(r.review_kind, r.rereview_reason, r.rereview_of_id) for r in rows] == [
+        ("auto", "", None),
+        ("manual", "人工复核", first.id),
+    ]
+    assert await repo.research_review.latest_review_id(100, "BTC_USDT") == manual.id
+    assert await repo.research_review.latest_review_id(100, "SOL_USDT") is None
