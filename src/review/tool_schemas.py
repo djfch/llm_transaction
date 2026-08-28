@@ -313,10 +313,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "reasoning_quality": {
                     "type": "string",
-                    "enum": ["sound", "flawed", "unsupported", "unverifiable"],
+                    "enum": ["sound", "partial", "flawed", "unreviewable"],
                     "description": (
                         "推理质量枚举（只评价当时推理方法，不评价因果链内容正确性）："
-                        "sound=成立、flawed=有缺陷、unsupported=缺乏依据、unverifiable=无法核对"
+                        "sound=推理基本成立、partial=推理部分成立、flawed=推理存在明显问题、"
+                        "unreviewable=无法评价（客观数据不足等原因无法复盘时用于结案）"
                     ),
                 },
                 "reasoning_review": {

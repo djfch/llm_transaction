@@ -45,11 +45,13 @@ DIRECTION_RELATIONS = {
     "invalidated": "失效",
     "unverifiable": "无法核对",
 }
+# 总体推理质量枚举为 issue #113 定稿 sound/partial/flawed/unreviewable
+# （逐条依据层的 reasoning_status 枚举是另一套，见 EVIDENCE_REASONING_STATUSES，勿混淆）
 REASONING_QUALITIES = {
     "sound": "成立",
+    "partial": "部分成立",
     "flawed": "有缺陷",
-    "unsupported": "缺乏依据",
-    "unverifiable": "无法核对",
+    "unreviewable": "无法评价",
 }
 CONFIDENCE_ASSESSMENTS = {
     "appropriate": "匹配合理",

@@ -107,8 +107,8 @@ Agent 是否把背景误当成入场信号。只评价决策上下文中实际�
   - 方向关系 direction_relation 只能取 realized（兑现）/ diverged（背离）/
     digested（震荡消化）/ invalidated（失效）/ unverifiable（无法核对），
     并用 direction_reason 说明判定所依据的客观结果；
-  - 推理质量 reasoning_quality 只能取 sound（成立）/ flawed（有缺陷）/
-    unsupported（缺乏依据）/ unverifiable（无法核对），并用 reasoning_review 写明
+  - 推理质量 reasoning_quality 只能取 sound（推理基本成立）/ partial（推理部分成立）/
+    flawed（推理存在明显问题）/ unreviewable（无法评价），并用 reasoning_review 写明
     推理方法上的具体得失；
   - 置信度合规 confidence_assessment 只能取 appropriate（匹配合理）/ too_high（偏高）/
     too_low（偏低）/ unreviewable（无法评价），并用 confidence_reason 说明理由；

@@ -544,7 +544,7 @@ export interface ResearchReviewItem {
   reviewReportId: number // 产生本记录的复盘报告 ID（由 review_report_id 适配）
   directionRelation: string // 方向关系枚举：realized/diverged/digested/invalidated/unverifiable
   directionReason: string // 方向关系评价理由
-  reasoningQuality: string // 推理质量枚举：sound/flawed/unsupported/unverifiable
+  reasoningQuality: string // 推理质量枚举：sound/partial/flawed/unreviewable
   reasoningReview: string // 推理质量评价复核文本
   evidenceReviews: ResearchEvidenceReview[] // 逐条依据评价（与原研报 evidence 1:1）
   confidenceAssessment: string // 置信度合规枚举：appropriate/too_high/too_low/unreviewable

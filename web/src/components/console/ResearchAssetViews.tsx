@@ -76,6 +76,7 @@ const REVIEW_ENUM_TEXT: Record<string, string> = {
   digested: '震荡消化',
   invalidated: '失效',
   sound: '成立',
+  partial: '部分成立',
   flawed: '有缺陷',
   unsupported: '不支撑',
   counterevidence: '构成反证',

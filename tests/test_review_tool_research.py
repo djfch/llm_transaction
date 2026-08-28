@@ -16,6 +16,7 @@ from src.gateway.base import Candle
 from src.memory import Database, Repo
 from src.review.strategy import StrategyStore
 from src.review.tool_handlers import ReviewToolDeps
+from src.review.tool_research import REASONING_QUALITIES
 from src.review.tools import ReviewToolRegistry
 from tests.research_helpers import save_report_fixture
 
@@ -600,6 +601,38 @@ async def test_submit_enforces_evidence_one_to_one(
     duplicated["evidence_reviews"] = [_item(0, "a"), _item(0, "b")]
     assert "一一对应" in await registry.execute("submit_research_review", duplicated)
     assert deps.pending_research_reviews == {}
+
+
+async def test_reasoning_quality_enum_finalized_set(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """总体推理质量枚举为 issue #113 定稿 sound/partial/flawed/unreviewable（V7 回归）。
+
+    逐条依据层的 reasoning_status 枚举（含 unsupported/unverifiable）不受影响；
+    总体层旧取值 unsupported/unverifiable 已非法，定稿取值可正常提交。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言枚举集合、旧取值拒绝与定稿取值 partial 提交成功
+    """
+    assert set(REASONING_QUALITIES) == {"sound", "partial", "flawed", "unreviewable"}
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    for stale in ("unsupported", "unverifiable"):
+        args = _valid_review_args(report_id) | {"reasoning_quality": stale}
+        result = await registry.execute("submit_research_review", args)
+        assert "reasoning_quality 取值非法" in result
+    ok = await registry.execute(
+        "submit_research_review", _valid_review_args(report_id) | {"reasoning_quality": "partial"}
+    )
+    assert "已暂存" in ok
+    assert deps.pending_research_reviews[(report_id, "BTC_USDT")]["reasoning_quality"] == "partial"
 
 
 async def test_submit_rejects_invalid_enums_and_empty_explanation(
