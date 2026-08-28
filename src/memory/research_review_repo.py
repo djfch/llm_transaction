@@ -43,7 +43,10 @@ _HORIZON_CASE_SQL = (
     "CASE v.horizon WHEN '当日' THEN 86400 WHEN '3日' THEN 259200 WHEN '周' THEN 604800 END"
 )
 
-# 候选联表查询：内层算出到期时刻，外层按到期过滤并排除已复盘目标
+# 候选联表查询：内层算出到期时刻，外层按到期过滤、排除已复盘目标并按 keyset
+# 游标（due_at, report_id, contract 三元组严格大于）续扫；排序键与游标同序，
+# 页间不重复不遗漏（R5：替代 offset 分页，候选集在扫描期间随复盘落库收缩时
+# offset 会跳行/重扫，keyset 不受影响）
 _CANDIDATES_SQL = f"""
 SELECT * FROM (
     SELECT v.report_id, v.contract, v.direction, v.confidence, v.horizon,
@@ -58,9 +61,14 @@ WHERE c.due_at <= ?
       SELECT 1 FROM research_reviews rr
       WHERE rr.report_id = c.report_id AND rr.contract = c.contract
   )
+  AND (c.due_at, c.report_id, c.contract) > (?, ?, ?)
 ORDER BY c.due_at, c.report_id, c.contract
-LIMIT ? OFFSET ?
+LIMIT ?
 """
+
+# keyset 游标起点哨兵：真实候选的 due_at（Unix 秒）与 report_id 恒大于 0，
+# 故 (0.0, 0, '') 等价于"从头扫"，免去了有无游标两套 SQL
+_CURSOR_ORIGIN: tuple[float, int, str] = (0.0, 0, "")
 
 _REVIEW_COLUMNS = (
     "review_report_id,report_id,contract,direction_relation,direction_reason,"
@@ -154,21 +162,74 @@ class ResearchReviewRepo:
         return self._db.conn
 
     async def list_review_candidates(
-        self, as_of_ts: float, limit: int = 50, offset: int = 0
+        self,
+        as_of_ts: float,
+        limit: int = 50,
+        cursor: tuple[float, int, str] | None = None,
     ) -> list[ResearchReviewCandidate]:
         """已到期且未被正式复盘的逐标的结论，按到期时刻升序（最久未复盘优先）。
 
         参数：
             as_of_ts: float，到期判定基准时间戳（due_at ≤ as_of_ts 视为已到期）
             limit: int，最多返回的候选数量
-            offset: int，跳过的候选条数（调用方分页扫描用，issue #113 R10）
+            cursor: tuple[float, int, str] | None，keyset 续扫游标
+                （last_due_at, last_report_id, last_contract），只返回严格位于
+                游标之后的候选；None 表示从头扫（内部以 _CURSOR_ORIGIN 哨兵实现，
+                issue #113 R5）
 
         返回：
             list[ResearchReviewCandidate]：候选列表；失败研报无逐标的结论，
             被联表自然排除；非法 horizon 的存量行被 IN 过滤排除
         """
-        cur = await self._conn.execute(_CANDIDATES_SQL, (as_of_ts, limit, offset))
+        due_at, report_id, contract = cursor if cursor is not None else _CURSOR_ORIGIN
+        cur = await self._conn.execute(
+            _CANDIDATES_SQL, (as_of_ts, due_at, report_id, contract, limit)
+        )
         return [ResearchReviewCandidate(**dict(r)) for r in await cur.fetchall()]
+
+    async def get_scan_cursor(self) -> tuple[float, int, str] | None:
+        """读取候选扫描的 keyset 续扫游标（单行状态表 research_review_scan_state）。
+
+        参数：无
+
+        返回：
+            tuple[float, int, str] | None：已推进到的 (due_at, report_id, contract)；
+            无状态行或任一游标字段为 NULL（已扫到候选集尾部被重置）时返回 None，
+            表示下轮从头重扫
+        """
+        cur = await self._conn.execute(
+            "SELECT last_due_at, last_report_id, last_contract "
+            "FROM research_review_scan_state WHERE id=1"
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        due_at, report_id, contract = (
+            row["last_due_at"],
+            row["last_report_id"],
+            row["last_contract"],
+        )
+        if due_at is None or report_id is None or contract is None:
+            return None
+        return (due_at, report_id, contract)
+
+    async def save_scan_cursor(self, cursor: tuple[float, int, str] | None) -> None:
+        """持久化候选扫描游标（立即 commit）；None 表示重置（扫到候选集尾部）。
+
+        参数：
+            cursor: tuple[float, int, str] | None，已预检推进到的位置；
+                None 时三字段写 NULL（下轮从头重扫）
+
+        返回：
+            None：单行状态被就地更新并提交
+        """
+        due_at, report_id, contract = cursor if cursor is not None else (None, None, None)
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO research_review_scan_state"
+            "(id, last_due_at, last_report_id, last_contract) VALUES(1, ?, ?, ?)",
+            (due_at, report_id, contract),
+        )
+        await self._conn.commit()
 
     async def get_case(
         self, report_id: int, contract: str

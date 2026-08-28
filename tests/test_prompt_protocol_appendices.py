@@ -257,16 +257,17 @@ def test_review_prompt_research_case_window_tools():
     assert "越界请求会被工具拒绝" in review
 
 
-def test_review_prompt_manual_rereview_discipline():
-    """校验复盘模板写明人工重评入口与追加语义（V6）。
+def test_review_prompt_rereview_discipline():
+    """校验复盘模板写明研报复盘查重与数据不足纪律（R5-1：LLM 侧重评开关已移除）。
 
     参数：无
 
     返回：
-        None，断言复盘模板含 manual_rereview 开关、理由要求与追加不覆盖语义
+        None，断言复盘模板含重复提交禁令与数据不足留待后续轮次纪律，
+        且不再出现 LLM 侧 manual_rereview 开关文案
     """
     review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
     assert "已被正式复盘过的结论不得重复提交" in review
-    assert "manual_rereview=true" in review
-    assert "rereview_reason 写明理由" in review
-    assert "重评追加新记录而不覆盖原记录" in review
+    assert "留待后续轮次" in review
+    assert "unreviewable 闭合结案" in review
+    assert "manual_rereview" not in review

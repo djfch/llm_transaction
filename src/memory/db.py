@@ -210,6 +210,15 @@ CREATE TABLE IF NOT EXISTS research_reviews (
     created_at REAL NOT NULL,
     UNIQUE(review_report_id, report_id, contract)
 );
+-- 研报复盘候选扫描游标（issue #113 R5）：单行表，记录 keyset 续扫位置
+-- （last_due_at/last_report_id/last_contract 三元组）；扫到候选集尾部时重置为全 NULL，
+-- 下轮从头重扫（被跳过的数据不足候选才有机会复检）
+CREATE TABLE IF NOT EXISTS research_review_scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_due_at REAL,
+    last_report_id INTEGER,
+    last_contract TEXT
+);
 -- 研报提示词版本（issue #113）：research_prompt.md 正文版本化存证，状态机同 strategy_versions
 CREATE TABLE IF NOT EXISTS research_prompt_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

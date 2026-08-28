@@ -117,8 +117,8 @@ Agent 是否把背景误当成入场信号。只评价决策上下文中实际�
     （supported/partially_supported/unsupported/counterevidence/unverifiable）和
     explanation；explanation 必须写明核对来源（哪个工具结果或案例材料），不得空泛；
   - 证据不足时相应枚举取 unverifiable 并在改进建议中写明缺口，不得编造。
-- 已被正式复盘过的结论不得重复提交；确需人工重评（如发现原复盘误判）时须显式传
-  manual_rereview=true 并在 rereview_reason 写明理由，重评追加新记录而不覆盖原记录。
+- 已被正式复盘过的结论不得重复提交。客观行情数据不达提交门槛时不得提交批改，
+  留待后续轮次待行情回补；不得以 reasoning_quality=unreviewable 闭合结案。
 
 ## 研报提示词修订门禁
 

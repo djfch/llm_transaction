@@ -156,3 +156,53 @@ async def test_save_and_list_reviews_with_filters(repo: Repo) -> None:
 
     assert await repo.research_review.has_review(100, "BTC_USDT") is True
     assert await repo.research_review.has_review(100, "SOL_USDT") is False
+
+
+async def test_candidates_keyset_pagination_no_repeat_no_skip(repo: Repo) -> None:
+    """R5-3：keyset 游标分页遍历候选，页间不重复不遗漏；扫描期间候选集收缩不跳行。
+
+    参数：
+        repo: Repo，测试仓库
+
+    返回：
+        None，断言续扫页严格从游标之后开始：页首候选在扫描期间被复盘落库
+        （候选集收缩）后，游标续扫不重不漏（offset 分页在同场景会跳过候选）
+    """
+    reports = [
+        await save_report_fixture(repo, report_type="us_open", contract=c, horizon="当日")
+        for c in ("BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT")
+    ]
+    # 回拨越久创建越早、到期越早：到期升序为 reports[3] → reports[0]
+    for idx, r in enumerate(reports):
+        await _backdate(repo, r.id, (25 + idx) * 3600)
+    now = time.time()
+
+    page1 = await repo.research_review.list_review_candidates(now, limit=2)
+    assert [c.report_id for c in page1] == [reports[3].id, reports[2].id]
+    cursor = (page1[-1].due_at, page1[-1].report_id, page1[-1].contract)
+    # 模拟扫描期间候选集收缩：页首候选被复盘落库（offset 分页此时会跳过一条）
+    await repo.research_review.save_review(
+        review_report_id=1, report_id=page1[0].report_id, contract=page1[0].contract
+    )
+
+    page2 = await repo.research_review.list_review_candidates(now, limit=2, cursor=cursor)
+    assert [c.report_id for c in page2] == [reports[1].id, reports[0].id]
+    cursor = (page2[-1].due_at, page2[-1].report_id, page2[-1].contract)
+    page3 = await repo.research_review.list_review_candidates(now, limit=2, cursor=cursor)
+    assert page3 == []  # 游标之后无更多候选（扫描到尾部）
+
+
+async def test_scan_cursor_roundtrip_and_reset(repo: Repo) -> None:
+    """R5-3：扫描游标读写往返；None 重置后读回 None（下轮从头重扫）。
+
+    参数：
+        repo: Repo，测试仓库
+
+    返回：
+        None，断言初始为 None、写入后可读回、重置后为 None
+    """
+    assert await repo.research_review.get_scan_cursor() is None
+    await repo.research_review.save_scan_cursor((1700000000.5, 42, "BTC_USDT"))
+    assert await repo.research_review.get_scan_cursor() == (1700000000.5, 42, "BTC_USDT")
+    await repo.research_review.save_scan_cursor(None)
+    assert await repo.research_review.get_scan_cursor() is None
