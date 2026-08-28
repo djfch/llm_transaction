@@ -7,7 +7,13 @@ import type { ToolCall } from '../api/types'
 import { buildConversation, buildConversationTurns } from '../utils/conversation'
 
 /** 审计工具调用夹具（args 从简，断言不依赖它） */
-function auditCall(seq: number, tool: string, result: string, verdict = '', reason = ''): ToolCall {
+function auditCall(
+  seq: number,
+  tool: string,
+  result: ToolCall['result'],
+  verdict = '',
+  reason = '',
+): ToolCall {
   return { seq, tool, args: {}, risk_verdict: verdict, risk_reason: reason, result, duration_ms: 10 }
 }
 
@@ -187,6 +193,15 @@ describe('buildConversation（完整对话构建）', () => {
     expect(result?.riskVerdict).toBe('deny')
     expect(result?.riskReason).toBe('单仓超限')
     expect(result?.text).toBe('风控拒绝，未下单')
+  })
+
+  it('{text} 包装的工具结果（后端真实形态）：拆包为裸值，不带 JSON 外壳', () => {
+    const msgs = buildConversation('', [
+      auditCall(1, 'get_account', { text: 'equity=10842.36\navailable=5000' }),
+    ])
+    const result = msgs.find((m) => m.kind === 'tool_result')
+    expect(result?.text).toBe('equity=10842.36\navailable=5000')
+    expect(result?.text).not.toContain('{"text"')
   })
 
   it('仅展示三种供应商实际返回的明文思考，忽略签名、脱敏块与密文', () => {
