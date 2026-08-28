@@ -215,3 +215,27 @@ async def test_rollback_rejects_non_applied_version(env) -> None:
     assert env.store.current() == _INIT
     assert len(await env.repo.research_prompt.list_versions()) == 2  # v1 + 已废弃草稿，无新增
     assert env.events == []
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(env) -> None:
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言 apply 返回 None、文件保留人工内容、旧草稿状态为 discarded
+    """
+    await env.store.seed_if_empty()
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10, "复盘修订", "review_agent"
+    )
+    human = await env.store.revise_applied("人工提示词：" + "提高证据门槛。" * 20, "人工调优")
+    applied = await env.store.apply_version(draft.id)
+    assert applied is None  # 已被更高 applied 版本取代
+    assert env.store.current() == human.content  # 文件保留人工内容
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert (await env.store.get_version(human.id)).status == "applied"

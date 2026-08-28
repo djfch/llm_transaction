@@ -20,6 +20,7 @@ from src.agent.providers.base import LLMError, LLMParseError, LLMResponse, ToolC
 from src.agent.providers.retry import RetryingProvider
 from src.audit.trail import AuditTrail
 from src.config import AuditConfig, Settings
+from src.gateway.base import Candle
 from src.memory import Database, Repo
 from src.review.agent import ReviewAgent
 from src.review.indicator_config import IndicatorConfigStore
@@ -1389,11 +1390,49 @@ async def test_run_research_review_end_to_end(env):
     """研报复盘全流程集成：读案例 → 提交批改 → 随复盘报告单事务落库并附代码统计段。
 
     参数：
-        env: SimpleNamespace，包含测试依赖的环境对象（无 candle_source，客观结果降级 unavailable）
+        env: SimpleNamespace，包含测试依赖的环境对象
 
     返回：
         None，断言研报复盘落库关联、统计段注入与简报引导文案
     """
+
+    class _WindowCandles:
+        """按 from/to 窗口生成完整 15m K 线的桩（F2：submit 门禁要求数据可用）。"""
+
+        async def get_candlesticks(
+            self,
+            contract: str,
+            interval: str = "1m",
+            limit: int | None = None,
+            from_ts: int | None = None,
+            to_ts: int | None = None,
+        ) -> list[Candle]:
+            """返回覆盖 [from_ts, to_ts) 的连续 15m K 线。
+
+            参数：
+                contract: str，合约名
+                interval: str，K 线周期
+                limit: int | None，最近 N 根
+                from_ts: int | None，窗口起始时间戳
+                to_ts: int | None，窗口结束时间戳
+
+            返回：
+                list[Candle]：窗口内每 900 秒一根的上行 K 线
+            """
+            if from_ts is None or to_ts is None:
+                return []
+            return [
+                Candle(
+                    t=t,
+                    o=Decimal("100"),
+                    h=Decimal("110"),
+                    l=Decimal("90"),
+                    c=Decimal("105"),
+                    v=Decimal("1"),
+                )
+                for t in range(from_ts, to_ts, 900)
+            ]
+
     report = await save_report_fixture(
         env.repo,
         report_type="us_open",
@@ -1458,7 +1497,7 @@ async def test_run_research_review_end_to_end(env):
             LLMResponse(text="# 复盘结论\n本轮含研报复盘。", raw="raw-3"),
         ]
     )
-    agent = _make_agent(env, provider)
+    agent = _make_agent(env, provider, candle_source=_WindowCandles())
     result = await agent.run(*_PERIOD)
 
     assert result["ok"] is True
@@ -1473,7 +1512,7 @@ async def test_run_research_review_end_to_end(env):
     assert reviews[0].report_id == report.id
     assert reviews[0].contract == "BTC_USDT"
     outcome = json.loads(reviews[0].outcome_json)
-    assert outcome["data_status"] == "unavailable"  # 未装配 K 线来源时降级
+    assert outcome["data_status"] == "complete"  # 窗口 K 线桩覆盖完整窗口
 
     round_row = await env.repo.latest_audit_round("paper")
     assert round_row is not None

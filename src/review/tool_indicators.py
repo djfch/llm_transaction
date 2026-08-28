@@ -189,7 +189,10 @@ async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     except IndicatorConfigValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原短名单未改动，修正后可重新提交）"
     deps.indicator_config_version_id = version.id
-    deps.indicator_draft_ids.append(version.id)
+    # issue #113 F11：同轮重复提交先废弃旧草稿，保证本轮最多一份草稿待生效
+    for old_id in deps.indicator_draft_ids:
+        await deps.indicator_config_store.discard_draft(old_id)
+    deps.indicator_draft_ids = [version.id]
     # 展示去重保序后的名单（与 _validated 的生效口径一致）
     deduped = list(dict.fromkeys(shortlist))
     return (

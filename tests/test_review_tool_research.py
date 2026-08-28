@@ -56,6 +56,44 @@ class _StubCandles:
         return self._candles
 
 
+class _WindowCandles:
+    """按 from/to 窗口动态生成完整 15m K 线的桩：submit 门禁（F2）需要 complete 客观结果。"""
+
+    async def get_candlesticks(
+        self,
+        contract: str,
+        interval: str = "1m",
+        limit: int | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> list[Candle]:
+        """返回覆盖 [from_ts, to_ts) 的连续 15m K 线（纯 limit 查询返回空）。
+
+        参数：
+            contract: str，合约名
+            interval: str，K 线周期
+            limit: int | None，最近 N 根
+            from_ts: int | None，窗口起始时间戳
+            to_ts: int | None，窗口结束时间戳
+
+        返回：
+            list[Candle]：窗口内每 900 秒一根的上行 K 线
+        """
+        if from_ts is None or to_ts is None:
+            return []
+        return [
+            Candle(
+                t=t,
+                o=Decimal("100"),
+                h=Decimal("110"),
+                l=Decimal("90"),
+                c=Decimal("105"),
+                v=Decimal("1"),
+            )
+            for t in range(from_ts, to_ts, 900)
+        ]
+
+
 @pytest.fixture
 async def deps(tmp_path) -> ReviewToolDeps:
     """组装复盘工具依赖（临时数据库 + 策略 store + 空 K 线桩）。
@@ -348,6 +386,7 @@ async def test_submit_rejects_outcome_field(
         None，断言拒绝文本且草稿未落
     """
     report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -388,6 +427,7 @@ async def test_submit_enforces_evidence_one_to_one(
         }
 
     report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -419,6 +459,7 @@ async def test_submit_rejects_invalid_enums_and_empty_explanation(
         None，断言非法取值的拒绝文本且不落草稿
     """
     report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -455,6 +496,7 @@ async def test_submit_stores_draft_and_repeat_updates(
         None，断言草稿内容、outcome 附加与重复提交的更新语义
     """
     report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
@@ -464,7 +506,7 @@ async def test_submit_stores_draft_and_repeat_updates(
     draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
     assert draft["direction_relation"] == "realized"
     assert draft["direction_reason"] == "窗口内价格上行，与研报方向一致"
-    assert json.loads(draft["outcome_json"])["data_status"] == "unavailable"
+    assert json.loads(draft["outcome_json"])["data_status"] == "complete"
     evidence = json.loads(draft["evidence_reviews_json"])
     assert [item["evidence_index"] for item in evidence] == [0, 1]
     assert evidence[0]["fact_status"] == "confirmed"
@@ -477,6 +519,78 @@ async def test_submit_stores_draft_and_repeat_updates(
     assert deps.pending_research_reviews[(report_id, "BTC_USDT")]["direction_relation"] == (
         "diverged"
     )
+
+
+async def test_submit_rejects_unavailable_outcome(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """客观结果数据不可用（K 线缺失）时提交被拒（F2：数据不足以支撑批改）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（默认空 K 线桩 → outcome unavailable）
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "data_status=unavailable" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_submit_rejects_not_due(deps: ReviewToolDeps, registry: ReviewToolRegistry) -> None:
+    """horizon 窗口未到期时提交被拒（F2 后端自查，不依赖已读缓存的陈旧状态）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本且不落草稿
+    """
+    report = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+    )
+    await registry.execute(
+        "get_research_review_case", {"report_id": report.id, "contract": "BTC_USDT"}
+    )
+    result = await registry.execute("submit_research_review", _valid_review_args(report.id))
+    assert "窗口未到期" in result
+    assert deps.pending_research_reviews == {}
+
+
+async def test_submit_rejects_already_reviewed(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """已被正式复盘批改过的结论重复提交被拒（F2 后端查重）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言拒绝文本且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    deps.candle_source = _WindowCandles()
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=999, report_id=report_id, contract="BTC_USDT"
+    )
+    result = await registry.execute("submit_research_review", _valid_review_args(report_id))
+    assert "已被正式复盘批改过" in result
+    assert deps.pending_research_reviews == {}
 
 
 async def test_list_research_reviews_returns_full_records(

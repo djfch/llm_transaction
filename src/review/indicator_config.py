@@ -16,6 +16,7 @@ human（人工修改/初始播种）/ review_agent（复盘 agent 改写）/ rol
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Callable
@@ -98,6 +99,9 @@ class IndicatorConfigStore:
         self._valid_keys = valid_keys
         # 配置变更回调（revise/rollback 落版本后触发）；未接线为 None
         self._on_change = on_change
+        # 生效临界区锁（issue #113 F11）：apply_version 全收锁，锁内重读最新
+        # applied——旧草稿晚于人工更高版本到达时不覆盖人工内容（语义同 StrategyStore）
+        self._apply_lock = asyncio.Lock()
 
     def _notify_change(self) -> None:
         """在配置变更后调用已接线回调，未配置回调时静默跳过。
@@ -164,14 +168,33 @@ class IndicatorConfigStore:
             content, content_md5(content), created_by, reason.strip(), report_id, status="draft"
         )
 
-    async def apply_version(self, version_id: int) -> IndicatorConfigVersion:
+    async def apply_version(self, version_id: int) -> IndicatorConfigVersion | None:
         """把草稿（或历史）版本原子写入短名单文件并置为 applied——统一生效入口。
+
+        全程在生效锁内；锁内重读最新 applied 版本，存在 id 更大的 applied 版本时
+        本版本已被取代——置 discarded 并返回 None，不覆盖人工新内容（issue #113 F11）。
 
         参数：
             version_id: int，待生效的版本编号
 
         返回：
-            IndicatorConfigVersion：已生效（applied）的版本对象
+            IndicatorConfigVersion | None：已生效（applied）的版本对象；
+            已被更高 applied 版本取代时返回 None（本版本已置 discarded）
+
+        异常：
+            IndicatorConfigValidationError，目标版本不存在时抛出
+        """
+        async with self._apply_lock:
+            return await self._apply_version_locked(version_id)
+
+    async def _apply_version_locked(self, version_id: int) -> IndicatorConfigVersion | None:
+        """apply_version 的无锁核心（调用方必须已持有 _apply_lock）。
+
+        参数：
+            version_id: int，待生效的版本编号
+
+        返回：
+            IndicatorConfigVersion | None：已生效版本；被更高 applied 版本取代时返回 None
 
         异常：
             IndicatorConfigValidationError，目标版本不存在时抛出
@@ -179,6 +202,15 @@ class IndicatorConfigStore:
         version = await self._versions.get_version(version_id)
         if version is None:
             raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法生效"])
+        latest = await self._versions.latest_applied_version()
+        if latest is not None and latest.id > version_id:
+            await self._versions.set_version_status(version_id, "discarded")
+            logger.warning(
+                "指标配置版本 v%d 已被更高的 applied 版本 v%d 取代，废弃不生效",
+                version_id,
+                latest.id,
+            )
+            return None
         self._atomic_write(version.content)
         await self._versions.set_version_status(version_id, "applied")
         self._notify_change()

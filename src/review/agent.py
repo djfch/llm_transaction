@@ -357,7 +357,7 @@ class ReviewAgent:
         return _success_result(report, round_id)
 
     async def _apply_drafts(self, deps: ReviewToolDeps) -> None:
-        """统一生效本轮草稿：过期拒绝 + 失败收集（issue #100，实现见 review/drafts.py）。
+        """统一生效本轮草稿：失败收集 + 被取代草稿跳过（issue #100/#113，实现见 review/drafts.py）。
 
         参数：
             deps: ReviewToolDeps，本轮工具依赖
@@ -365,7 +365,7 @@ class ReviewAgent:
         返回：
             None，生效/废弃就地完成；失败 id 就地记入 deps.apply_failed_ids
         """
-        await apply_drafts(self._repo, deps)
+        await apply_drafts(deps)
 
     async def _discard_drafts(self, deps: ReviewToolDeps) -> None:
         """报告失败/取消时废弃本轮全部草稿版本；文件从未被动过，无需回滚（issue #73）。

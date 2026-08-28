@@ -368,3 +368,61 @@ async def test_on_change_absent_is_noop(store, repo):
     """
     v = await store.revise(_NEW, "改进", "review_agent")
     assert v.md5 == content_md5(_NEW)
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(store, repo, prompt_path):
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    串行模拟"复盘草稿与人工即时修改交错"的竞态：草稿 v2 落库后，人工
+    revise_applied 先生效 v3，轮末再 apply v2 时锁内重读到 v3，放弃生效。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言 apply 返回 None、文件保留人工内容、旧草稿状态为 discarded
+    """
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    human = await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
+    applied = await store.apply_version(draft.id)
+    assert applied is None  # 已被更高 applied 版本取代
+    assert store.current() == human.content  # 文件保留人工内容
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert (await store.get_version(human.id)).status == "applied"
+
+
+async def test_apply_drafts_skips_superseded_without_failure(store, repo, prompt_path):
+    """apply_drafts 遇被取代草稿（apply_version 返回 None）只跳过，不计入失败列表。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，当前策略书文件路径
+
+    返回：
+        None，断言 apply_failed_ids 为空、被取代草稿为 discarded、文件保留人工内容
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)
+    assert deps.apply_failed_ids == []  # 被取代不算失败
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current().startswith("人工策略书")

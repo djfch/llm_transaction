@@ -9,6 +9,9 @@
 两步重建前均做异常值检查：verify_result 非空、causal_links 出现 verified/failed 等
 未知状态或 broken_at 非空，均属当前版本无写入路径的未知数据——拒绝启动并提示备份，
 不静默丢弃。
+
+两段重建的 DDL→COPY→DROP→RENAME→INDEX 序列均以 SAVEPOINT 包裹：中途失败
+（如表锁、磁盘满）回滚到保存点后重抛，旧表保持完整，下次启动可安全重试。
 """
 
 from __future__ import annotations
@@ -148,17 +151,27 @@ async def _rebuild_asset_views(conn: aiosqlite.Connection) -> None:
             f"research_asset_views.verify_result 存在 {count} 条非空数据；"
             "当前版本将移除该死字段，请先备份数据库再启动以完成迁移"
         )
-    await conn.execute(_ASSET_VIEWS_V3_DDL)
-    await conn.execute(_ASSET_VIEWS_V3_COPY)
-    await conn.execute("DROP TABLE research_asset_views")
-    await conn.execute("ALTER TABLE research_asset_views_v3 RENAME TO research_asset_views")
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_research_asset_report ON research_asset_views(report_id)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_research_asset_contract "
-        "ON research_asset_views(contract, created_at DESC)"
-    )
+    # SAVEPOINT 包裹 DDL→COPY→DROP→RENAME→INDEX：中途失败回滚到保存点，
+    # 旧表保持完整，下次启动可安全重试（issue #113 F8）
+    await conn.execute("SAVEPOINT rebuild_asset_views_v3")
+    try:
+        await conn.execute(_ASSET_VIEWS_V3_DDL)
+        await conn.execute(_ASSET_VIEWS_V3_COPY)
+        await conn.execute("DROP TABLE research_asset_views")
+        await conn.execute("ALTER TABLE research_asset_views_v3 RENAME TO research_asset_views")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_research_asset_report "
+            "ON research_asset_views(report_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_research_asset_contract "
+            "ON research_asset_views(contract, created_at DESC)"
+        )
+    except Exception:
+        await conn.execute("ROLLBACK TO rebuild_asset_views_v3")
+        await conn.execute("RELEASE rebuild_asset_views_v3")
+        raise
+    await conn.execute("RELEASE rebuild_asset_views_v3")
 
 
 async def _rebuild_causal_links(conn: aiosqlite.Connection) -> None:
@@ -193,10 +206,19 @@ async def _rebuild_causal_links(conn: aiosqlite.Connection) -> None:
             f"causal_links.broken_at 存在 {broken} 条非空数据；"
             "当前版本将移除该列，请先备份数据库再启动以完成迁移"
         )
-    await conn.execute(_CAUSAL_LINKS_V3_DDL)
-    await conn.execute(_CAUSAL_LINKS_V3_COPY)
-    await conn.execute("DROP TABLE causal_links")
-    await conn.execute("ALTER TABLE causal_links_v3 RENAME TO causal_links")
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id)"
-    )
+    # SAVEPOINT 包裹 DDL→COPY→DROP→RENAME→INDEX：中途失败回滚到保存点，
+    # 旧表保持完整，下次启动可安全重试（issue #113 F8）
+    await conn.execute("SAVEPOINT rebuild_causal_links_v3")
+    try:
+        await conn.execute(_CAUSAL_LINKS_V3_DDL)
+        await conn.execute(_CAUSAL_LINKS_V3_COPY)
+        await conn.execute("DROP TABLE causal_links")
+        await conn.execute("ALTER TABLE causal_links_v3 RENAME TO causal_links")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id)"
+        )
+    except Exception:
+        await conn.execute("ROLLBACK TO rebuild_causal_links_v3")
+        await conn.execute("RELEASE rebuild_causal_links_v3")
+        raise
+    await conn.execute("RELEASE rebuild_causal_links_v3")

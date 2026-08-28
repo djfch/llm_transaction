@@ -481,6 +481,30 @@ async def test_submit_strategy_revision_rejected(registry, deps):
     assert deps.created_version_id is None  # 拒绝不置位
 
 
+async def test_submit_strategy_revision_twice_discards_older_draft(registry, deps):
+    """同轮重复提交策略修订时先废弃旧草稿，本轮只保留最新一份待生效（issue #113 F11）。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，断言旧草稿状态为 discarded、草稿列表只含新 id、最新生效内容为新提交
+    """
+    first = "策略书甲：" + "顺势加仓，严格止损。" * 10
+    second = "策略书乙：" + "轻仓试错，分批止盈。" * 10
+    await registry.execute("submit_strategy_revision", {"new_prompt_md": first, "reason": "第一版"})
+    old_id = deps.created_version_id
+    await registry.execute(
+        "submit_strategy_revision", {"new_prompt_md": second, "reason": "第二版"}
+    )
+    assert deps.strategy_draft_ids == [deps.created_version_id]
+    assert deps.created_version_id != old_id
+    assert (await deps.store.get_version(old_id)).status == "discarded"
+    await deps.store.apply_version(deps.created_version_id)
+    assert deps.store.current() == second
+
+
 # ---------- 注册表统一错误 ----------
 
 

@@ -486,12 +486,14 @@ async def list_research_reviews(deps: ReviewToolDeps, args: dict) -> str:
 async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     """提交对单个逐标的结论的复盘批改（暂存内存草稿，随本轮报告落库生效）。
 
-    校验：须先经 get_research_review_case 读过案例；outcome 由代码从已读案例
-    缓存附加，LLM 携带 outcome 字段一律拒绝；方向关系/推理质量/置信度合规为
-    枚举（非法取值拒绝），各自必须配独立理由文本；evidence_reviews 与原研报
-    依据强制 1:1（数量相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含
-    事实核对与推理支撑双枚举及写明核对来源的 explanation。同轮对同一目标
-    重复提交时更新内存草稿。
+    校验：须先经 get_research_review_case 读过案例；后端自查案例仍存在、
+    horizon 窗口已到期且未被正式复盘过（不依赖已读缓存的陈旧状态）；已读案例
+    缓存的客观结果 data_status 仅 complete/partial 放行（unavailable/pending
+    数据不足以支撑批改）；outcome 由代码从已读案例缓存附加，LLM 携带 outcome
+    字段一律拒绝；方向关系/推理质量/置信度合规为枚举（非法取值拒绝），各自
+    必须配独立理由文本；evidence_reviews 与原研报依据强制 1:1（数量相等且
+    evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双枚举及
+    写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读写 loaded_research_cases 与
@@ -511,6 +513,28 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
         return f"参数错误：请先用 get_research_review_case 读取研报#{report_id}/{contract} 的案例材料后再提交批改"
     if "outcome" in args:
         return "参数错误：outcome（客观行情结果）由代码计算附加，不允许提交该字段"
+    # 后端自查（不依赖已读缓存的陈旧状态）：案例仍存在、窗口已到期、未被正式复盘
+    fresh = await deps.repo.research_review.get_case(report_id, contract)
+    if fresh is None:
+        return (
+            f"参数错误：研报#{report_id}/{contract} 的逐标的结论不存在"
+            "（请用 list_research_review_candidates 核对）"
+        )
+    report, view = fresh
+    seconds = HORIZON_SECONDS.get(view.horizon)
+    if seconds is None or report.created_at + seconds > time.time():
+        return (
+            f"参数错误：研报#{report_id}/{contract} 的 horizon 窗口未到期"
+            "（或 horizon 非法），暂不可复盘"
+        )
+    if await deps.repo.research_review.has_review(report_id, contract):
+        return f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交"
+    outcome_status = case["outcome"].get("data_status")
+    if outcome_status not in ("complete", "partial"):
+        return (
+            f"参数错误：案例客观行情数据不可用（data_status={outcome_status}），"
+            "不足以支撑批改；请核对 K 线来源装配或稍后再试"
+        )
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
     confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)

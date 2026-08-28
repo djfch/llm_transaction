@@ -412,6 +412,56 @@ async def test_research_v3_migration_rejects_non_empty_verify_result(tmp_path):
         await db.open(path)
 
 
+async def test_research_v3_rebuild_failure_rolls_back_and_retries(tmp_path, monkeypatch):
+    """重建中途失败时 SAVEPOINT 回滚：旧表数据完整，故障消除后重开库迁移成功。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+        monkeypatch: pytest.MonkeyPatch，注入 COPY 语句故障的夹具
+
+    返回：
+        None，执行断言验证目标行为
+    """
+    from src.memory import migrate_v3
+
+    path = tmp_path / "v2-fail.db"
+    conn = await _make_v2_db(path)
+    await conn.execute(
+        "INSERT INTO research_asset_views(report_id,contract,direction,confidence,created_at)"
+        " VALUES(1,'BTC_USDT','偏多','高',1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    # 故障注入：COPY 引用不存在的表 → DDL 已完成、COPY 失败的中途现场
+    monkeypatch.setattr(
+        migrate_v3,
+        "_ASSET_VIEWS_V3_COPY",
+        "INSERT INTO research_asset_views_v3(id,report_id,contract)"
+        " SELECT id,report_id,contract FROM no_such_table",
+    )
+    db = Database()
+    with pytest.raises(Exception, match="no_such_table"):
+        await db.open(path)
+    await db.close()  # 清理半开连接（重复调用安全）
+
+    # SAVEPOINT 回滚：旧表未被 DROP，数据行与旧结构（含 verify_result 列）完整保留
+    conn2 = await aiosqlite.connect(str(path))
+    cur = await conn2.execute("SELECT COUNT(*) FROM research_asset_views WHERE contract='BTC_USDT'")
+    row = await cur.fetchone()
+    assert row is not None and row[0] == 1
+    cur = await conn2.execute("PRAGMA table_info(research_asset_views)")
+    assert "verify_result" in {r[1] for r in await cur.fetchall()}  # 裸连接行为 tuple
+    await conn2.close()
+
+    monkeypatch.undo()  # 故障消除后迁移可重试
+    db2 = Database()
+    await db2.open(path)
+    views = await Repo(db2).research.list_asset_views_by_report(1)
+    assert len(views) == 1 and views[0].contract == "BTC_USDT" and views[0].direction == "偏多"
+    await db2.close()
+
+
 async def test_research_schema_validation_rejects_unknown_schema_version(tmp_path):
     """存在 schema_version 非 2/3 的研报数据时拒绝启动（无论结构是哪一代）。
 

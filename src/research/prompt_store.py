@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -95,6 +96,9 @@ class ResearchPromptStore:
         self._path = Path(prompt_path)
         self._repo = repo
         self._on_change = on_change
+        # 生效临界区锁（issue #113 F11）：apply_version/revise_applied 全收锁，
+        # 锁内重读最新 applied——旧草稿晚于人工更高版本到达时不覆盖人工内容
+        self._apply_lock = asyncio.Lock()
 
     def _notify_change(self) -> None:
         """变更即通知（前端据此立即重拉版本面板）；未接线时静默跳过。
@@ -174,6 +178,7 @@ class ResearchPromptStore:
 
         复盘 agent 走 revise（draft）+ 报告成功后 apply_version；本方法是
         监控接口等"人按下按钮即刻生效"场景的合并入口。
+        落草稿与生效全程在生效锁内完成，避免与轮末草稿生效交错（issue #113 F11）。
 
         参数：
             content: str，待保存的完整文本
@@ -182,18 +187,47 @@ class ResearchPromptStore:
 
         返回：
             ResearchPromptVersion：已生效（applied）的版本对象
-        """
-        version = await self.revise(content, reason, created_by)
-        return await self.apply_version(version.id)
 
-    async def apply_version(self, version_id: int) -> ResearchPromptVersion:
+        异常：
+            ResearchPromptValidationError：内容校验失败，或新版本已被更高 applied
+                版本取代（锁内防御分支，理论上不可达）时抛出
+        """
+        async with self._apply_lock:
+            version = await self.revise(content, reason, created_by)
+            applied = await self._apply_version_locked(version.id)
+            if applied is None:  # 锁内落的新版本不可能被取代，防御性检查
+                raise ResearchPromptValidationError(
+                    [f"研报提示词版本 v{version.id} 生效失败：已被更高版本取代"]
+                )
+            return applied
+
+    async def apply_version(self, version_id: int) -> ResearchPromptVersion | None:
         """把草稿（或历史）版本原子写入提示词文件并置为 applied——统一生效入口。
+
+        全程在生效锁内；锁内重读最新 applied 版本，存在 id 更大的 applied 版本时
+        本版本已被取代——置 discarded 并返回 None，不覆盖人工新内容（issue #113 F11）。
 
         参数：
             version_id: int，待生效的版本编号
 
         返回：
-            ResearchPromptVersion：已生效（applied）的版本对象
+            ResearchPromptVersion | None：已生效（applied）的版本对象；
+            已被更高 applied 版本取代时返回 None（本版本已置 discarded）
+
+        异常：
+            ResearchPromptValidationError，目标版本不存在时抛出
+        """
+        async with self._apply_lock:
+            return await self._apply_version_locked(version_id)
+
+    async def _apply_version_locked(self, version_id: int) -> ResearchPromptVersion | None:
+        """apply_version 的无锁核心（调用方必须已持有 _apply_lock）。
+
+        参数：
+            version_id: int，待生效的版本编号
+
+        返回：
+            ResearchPromptVersion | None：已生效版本；被更高 applied 版本取代时返回 None
 
         异常：
             ResearchPromptValidationError，目标版本不存在时抛出
@@ -201,6 +235,15 @@ class ResearchPromptStore:
         version = await self._repo.research_prompt.get_version(version_id)
         if version is None:
             raise ResearchPromptValidationError([f"研报提示词版本 v{version_id} 不存在，无法生效"])
+        latest = await self._repo.research_prompt.latest_applied_version()
+        if latest is not None and latest.id > version_id:
+            await self._repo.research_prompt.set_version_status(version_id, "discarded")
+            logger.warning(
+                "研报提示词版本 v%d 已被更高的 applied 版本 v%d 取代，废弃不生效",
+                version_id,
+                latest.id,
+            )
+            return None
         self._atomic_write(version.content)
         await self._repo.research_prompt.set_version_status(version_id, "applied")
         self._notify_change()

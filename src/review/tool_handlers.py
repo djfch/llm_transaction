@@ -480,7 +480,10 @@ async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
     except StrategyValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原策略书未改动，修正后可重新提交）"
     deps.created_version_id = version.id
-    deps.strategy_draft_ids.append(version.id)
+    # issue #113 F11：同轮重复提交先废弃旧草稿，保证本轮最多一份草稿待生效
+    for old_id in deps.strategy_draft_ids:
+        await deps.store.discard_draft(old_id)
+    deps.strategy_draft_ids = [version.id]
     return (
         f"校验通过，修订已存为草稿 v{version.id}（md5={version.md5[:8]}）；"
         "本轮复盘报告提交成功后统一生效，报告失败则自动废弃"

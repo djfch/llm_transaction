@@ -357,3 +357,27 @@ async def test_attach_report_to_version(repo):
     assert v.report_id is None
     await repo.indicator_config.attach_report_to_version(v.id, 7)
     assert (await repo.indicator_config.get_version(v.id)).report_id == 7
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(store, repo, config_path):
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，断言 apply 返回 None、文件保留新版本内容、旧草稿状态为 discarded
+    """
+    await store.seed_if_empty()
+    older = await store.revise(["rsi14"], "review_agent", "第一版草稿")
+    newer = await store.revise(["adx14"], "review_agent", "第二版草稿")
+    applied_newer = await store.apply_version(newer.id)
+    assert applied_newer is not None and applied_newer.status == "applied"
+    applied_older = await store.apply_version(older.id)
+    assert applied_older is None  # 已被更高 applied 版本取代
+    assert _file_shortlist(config_path) == ["adx14"]  # 文件保留新版本内容
+    assert (await store.get_version(older.id)).status == "discarded"
