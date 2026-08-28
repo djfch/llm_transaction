@@ -647,3 +647,105 @@ async def test_research_reviews_unique_constraint(tmp_path):
     )  # 另一份复盘报告可复评同一研报同一合约
     await db.conn.commit()
     await db.close()
+
+
+# 旧版三张版本表结构（无 base_md5 列），与草稿基线 CAS 上线前的库一致
+_OLD_STRATEGY_VERSIONS_DDL = """
+CREATE TABLE strategy_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    report_id INTEGER,
+    created_at REAL NOT NULL
+)
+"""
+
+_OLD_INDICATOR_CONFIG_VERSIONS_DDL = """
+CREATE TABLE indicator_config_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    report_id INTEGER,
+    created_at REAL NOT NULL
+)
+"""
+
+_OLD_RESEARCH_PROMPT_VERSIONS_DDL = """
+CREATE TABLE research_prompt_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'applied',
+    review_report_id INTEGER,
+    created_at REAL NOT NULL
+)
+"""
+
+
+async def test_version_tables_gain_base_md5_column(tmp_path):
+    """三张版本表旧库（无 base_md5 列）open 后补列；历史行保持 NULL，带基线新行往返一致。
+
+    base_md5 是草稿基线 CAS 的比较键（issue #113）：历史行无基线可循不回填，
+    生效判定对 NULL 回退旧 id 比较行为。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言三表补列、旧行 base_md5 为 None、带 base_md5 的新行写入读出一致、
+        二次 open 幂等
+    """
+    path = tmp_path / "old-versions.db"
+    conn = await aiosqlite.connect(str(path))
+    await conn.execute(_OLD_STRATEGY_VERSIONS_DDL)
+    await conn.execute(_OLD_INDICATOR_CONFIG_VERSIONS_DDL)
+    await conn.execute(_OLD_RESEARCH_PROMPT_VERSIONS_DDL)
+    await conn.execute(
+        "INSERT INTO strategy_versions(content,md5,created_by,reason,created_at)"
+        " VALUES('旧策略','md5-s','human','初始版本',1.0)"
+    )
+    await conn.execute(
+        "INSERT INTO indicator_config_versions(content,md5,created_by,reason,created_at)"
+        " VALUES('shortlist: [ema20]','md5-i','human','初始基线',1.0)"
+    )
+    await conn.execute(
+        "INSERT INTO research_prompt_versions(content,md5,created_by,reason,created_at)"
+        " VALUES('旧研报提示词','md5-r','human','初始版本',1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    await db.open(path)  # open 执行完整 SCHEMA（IF NOT EXISTS 不动旧表）+ _migrate 补列
+    for table in ("strategy_versions", "indicator_config_versions", "research_prompt_versions"):
+        cur = await db.conn.execute(f"PRAGMA table_info({table})")
+        assert "base_md5" in {row["name"] for row in await cur.fetchall()}  # 列已补上
+    repo = Repo(db)
+    # 历史行保持 NULL（无基线可循，不回填）
+    assert (await repo.review.get_strategy_version(1)).base_md5 is None
+    assert (await repo.indicator_config.get_version(1)).base_md5 is None
+    assert (await repo.research_prompt.get_version(1)).base_md5 is None
+    # 迁移后带基线的新行正常写入读出
+    sv = await repo.review.save_strategy_version(
+        "新策略", "md5-s2", "review_agent", "修订", status="draft", base_md5="md5-s"
+    )
+    assert (await repo.review.get_strategy_version(sv.id)).base_md5 == "md5-s"
+    iv = await repo.indicator_config.save_version(
+        "shortlist: [rsi14]", "md5-i2", "review_agent", "修订", status="draft", base_md5="md5-i"
+    )
+    assert (await repo.indicator_config.get_version(iv.id)).base_md5 == "md5-i"
+    rv = await repo.research_prompt.save_version(
+        "新研报提示词", "md5-r2", "review_agent", "修订", status="draft", base_md5="md5-r"
+    )
+    assert (await repo.research_prompt.get_version(rv.id)).base_md5 == "md5-r"
+    await db.close()
+
+    db2 = Database()
+    await db2.open(path)  # 重复 open 幂等（列已存在，不再 ALTER）
+    await db2.close()

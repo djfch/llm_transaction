@@ -1659,3 +1659,31 @@ async def test_candidates_list_shows_pending_rereview_section(
     assert "人工授权重评待处理 1 条" in text
     assert f"- 研报#{report_id}/BTC_USDT | 授权理由=复核原结论" in text
     assert "发起人=human" in text
+
+
+async def test_submit_research_prompt_revision_stamps_base_md5(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, prompt_store
+) -> None:
+    """轮初采样基线写入 deps 后，研报提示词修订草稿盖 base_md5 章且端到端正常生效。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        prompt_store: ResearchPromptStore，已装配并播种 v1 的研报提示词存储
+
+    返回：
+        None，断言草稿版本行 base_md5 等于轮初基线、apply 按 CAS 正路径生效
+    """
+    v1 = await deps.repo.research_prompt.get_version(1)
+    deps.base_md5_by_channel["research_prompt"] = v1.md5  # 模拟轮初采样
+    new_prompt = "修订后研报提示词：" + "逐条核对证据。" * 20
+    text = await registry.execute(
+        "submit_research_prompt_revision",
+        {"new_prompt_md": new_prompt, "reason": "研报复盘发现证据门槛过低"},
+    )
+    assert "草稿 v2" in text
+    version = await deps.repo.research_prompt.get_version(2)
+    assert version is not None and version.base_md5 == v1.md5
+    applied = await prompt_store.apply_version(2)
+    assert applied is not None and applied.status == "applied"
+    assert prompt_store.current() == new_prompt

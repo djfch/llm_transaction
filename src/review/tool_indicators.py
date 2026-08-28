@@ -182,9 +182,13 @@ async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     reason = _need_str(args, "reason")
     try:
         # report_id 跟随 submit_strategy_revision 取法：工具执行时报告尚未生成，置 None，
-        # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）
+        # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）；
+        # base_md5 盖本轮基线章（issue #113 CAS），轮末生效按基线比对
         version = await deps.indicator_config_store.revise(
-            shortlist, created_by="review_agent", reason=reason
+            shortlist,
+            created_by="review_agent",
+            reason=reason,
+            base_md5=deps.base_md5_by_channel.get("indicator_config"),
         )
     except IndicatorConfigValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原短名单未改动，修正后可重新提交）"

@@ -505,6 +505,27 @@ async def test_submit_strategy_revision_twice_discards_older_draft(registry, dep
     assert deps.store.current() == second
 
 
+async def test_submit_strategy_revision_stamps_base_md5(registry, deps):
+    """轮初采样基线写入 deps 后，策略修订草稿盖 base_md5 章且端到端正常生效。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合（已播种 v1）
+
+    返回：
+        None，断言草稿版本行 base_md5 等于轮初基线、apply 按 CAS 正路径生效
+    """
+    v1 = (await deps.store.list_versions())[0]
+    deps.base_md5_by_channel["strategy"] = v1.md5  # 模拟轮初采样（agent._sample_base_md5s）
+    new = "新策略书：" + "顺势加仓，严格止损。" * 10
+    await registry.execute("submit_strategy_revision", {"new_prompt_md": new, "reason": "收紧止损"})
+    version = await deps.store.get_version(deps.created_version_id)
+    assert version.base_md5 == v1.md5
+    applied = await deps.store.apply_version(deps.created_version_id)
+    assert applied is not None and applied.status == "applied"
+    assert deps.store.current() == new
+
+
 # ---------- 注册表统一错误 ----------
 
 

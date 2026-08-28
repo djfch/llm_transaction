@@ -282,3 +282,149 @@ async def test_rollback_and_apply_interleave_keeps_file_consistent(env, monkeypa
     latest = await env.repo.research_prompt.latest_applied_version()
     assert latest is not None
     assert env.store.current() == latest.content
+
+
+# ---------- 草稿基线 CAS（issue #113） ----------
+
+
+async def test_cas_discards_stale_draft_after_human_intervenes(env, monkeypatch, caplog) -> None:
+    """交错复现竞态：人工持锁落库让出期间 agent 草稿以更大 id 插队，轮末生效被 CAS 废弃。
+
+    人工 revise_applied(C) 在生效锁内落库后、写文件前让出事件循环，复盘整改
+    revise(B, base_md5=md5(初始内容)) 无锁落 draft v3（id 大于人工 v2）；
+    无 CAS 时旧 id 比较（v3 > v2）不会判取代，陈旧 B 会覆盖人工 C（PR #114 R6）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        monkeypatch: MonkeyPatch，用于在人工落库点插入确定性让出
+        caplog: LogCaptureFixture，用于断言基线取代告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留人工内容、告警落日志
+    """
+    import logging
+
+    from src.research.prompt_store import content_md5
+
+    await env.store.seed_if_empty()
+    base = content_md5(_INIT)
+    human_content = "人工提示词：" + "提高证据门槛。" * 20
+    human_saved = asyncio.Event()
+    agent_done = asyncio.Event()
+    original_save = env.repo.research_prompt.save_version
+
+    async def gated_save(content, md5, created_by, *args, **kwargs):
+        """人工落库完成后让出事件循环，等 agent 草稿插队落库后再放行。
+
+        参数：
+            content: str，版本内容（透传）
+            md5: str，内容摘要（透传）
+            created_by: str，创建来源；为 "human" 时触发让出门（agent 草稿不拦）
+            *args: 其余位置参数（透传）
+            **kwargs: 其余关键字参数（透传）
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        version = await original_save(content, md5, created_by, *args, **kwargs)
+        if created_by == "human":
+            human_saved.set()  # 人工 draft 已落库但仍持生效锁、尚未写文件置 applied
+            await agent_done.wait()
+        return version
+
+    monkeypatch.setattr(env.repo.research_prompt, "save_version", gated_save)
+    human_task = asyncio.create_task(env.store.revise_applied(human_content, "人工调优"))
+    await human_saved.wait()
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10,
+        "复盘修订",
+        "review_agent",
+        base_md5=base,
+    )
+    assert draft.id > 2  # agent 草稿以更大 id 插队（v1 种子、v2 人工、v3 草稿）
+    agent_done.set()
+    human = await human_task
+    assert human.status == "applied"
+    with caplog.at_level(logging.WARNING):
+        applied = await env.store.apply_version(draft.id)
+    assert applied is None  # 基线已被人工变更取代
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert env.store.current() == human_content  # 陈旧草稿未覆盖人工内容
+    assert any("基线已被人工变更取代" in r.message for r in caplog.records)
+
+
+async def test_cas_applies_draft_when_base_matches(env) -> None:
+    """草稿基线与最新 applied 内容一致时正常生效（CAS 正路径）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言草稿生效、文件替换、版本行 base_md5 落库
+    """
+    v1 = await env.store.seed_if_empty()
+    new_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent", base_md5=v1.md5)
+    assert draft.base_md5 == v1.md5
+    applied = await env.store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"
+    assert env.store.current() == new_content
+
+
+async def test_cas_null_base_falls_back_to_id_compare(env) -> None:
+    """base_md5 为 NULL 的历史/人工行回退旧 id 比较：id 更大的草稿照常生效。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言无基线草稿按旧行为生效覆盖、文件为新内容
+    """
+    await env.store.seed_if_empty()
+    await env.store.revise_applied("人工提示词：" + "提高证据门槛。" * 20, "人工调优")
+    new_content = "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent")  # 不盖基线章
+    assert draft.base_md5 is None
+    applied = await env.store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"  # id 更大，按旧行为生效
+    assert env.store.current() == new_content
+
+
+async def test_cas_replay_of_applied_draft_is_idempotent(env) -> None:
+    """已生效草稿的幂等重放不被 CAS 误判：latest 即本版本自身时跳过比对。
+
+    轮末生效成功后被打断、启动重放 apply_drafts 的场景（_complete_interrupted）：
+    草稿自身即最新 applied，其内容必然异于基线，无 latest.id == version_id 豁免
+    会把已生效草稿误判废弃。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言二次 apply 仍返回生效版本、文件与状态保持不变
+    """
+    v1 = await env.store.seed_if_empty()
+    new_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent", base_md5=v1.md5)
+    first = await env.store.apply_version(draft.id)
+    assert first is not None and first.status == "applied"
+    second = await env.store.apply_version(draft.id)  # 幂等重放
+    assert second is not None and second.status == "applied"
+    assert env.store.current() == new_content
+    assert (await env.store.get_version(draft.id)).status == "applied"
+
+
+async def test_current_base_md5_sampling(env) -> None:
+    """轮初基线采样：有 applied 取最新 applied 的 md5，无 applied 取当前文件内容 md5。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言无版本与有 applied 两种状态下的采样值
+    """
+    from src.research.prompt_store import content_md5
+
+    assert await env.store.current_base_md5() == content_md5(_INIT)  # 无版本：按文件内容
+    v1 = await env.store.seed_if_empty()
+    assert await env.store.current_base_md5() == v1.md5  # 有 applied：按最新 applied

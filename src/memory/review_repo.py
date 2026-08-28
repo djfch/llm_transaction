@@ -107,6 +107,7 @@ class ReviewRepo:
         reason: str,
         report_id: int | None = None,
         status: str = "applied",
+        base_md5: str | None = None,
     ) -> StrategyVersion:
         """落库一个策略书版本（content 为完整原文，md5 为关联键）。
 
@@ -118,15 +119,17 @@ class ReviewRepo:
             report_id: int | None，研报记录编号
             status: str，版本状态：applied 已生效 / draft 草稿（报告成功才生效，
                 issue #62/#73）/ discarded 已废弃
+            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
+                issue #113 CAS）；None = 人工/历史行，生效判定回退旧 id 比较
 
         返回：
             StrategyVersion：落库一个策略书版本（content 为完整原文，md5 为关联键）
         """
         ts = _now()
         cur = await self._conn.execute(
-            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,status)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts, status),
+            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,"
+            "status,base_md5) VALUES(?,?,?,?,?,?,?,?)",
+            (content, md5, created_by, reason, report_id, ts, status, base_md5),
         )
         await self._conn.commit()
         return StrategyVersion(
@@ -138,6 +141,7 @@ class ReviewRepo:
             report_id=report_id,
             created_at=ts,
             status=status,
+            base_md5=base_md5,
         )
 
     async def list_strategy_versions(self) -> list[StrategyVersion]:

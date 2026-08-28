@@ -149,6 +149,7 @@ class IndicatorConfigStore:
         created_by: str,
         reason: str,
         report_id: int | None = None,
+        base_md5: str | None = None,
     ) -> IndicatorConfigVersion:
         """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
@@ -157,6 +158,9 @@ class IndicatorConfigStore:
             created_by: str，本次修订的创建者分类
             reason: str，本次修订原因
             report_id: int | None，触发修订的复盘报告编号
+            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
+                issue #113 CAS）；人工即时生效路径锁内落库即生效、无竞态窗口，
+                不传（None 回退旧 id 比较）
 
         返回：
             IndicatorConfigVersion，已落库的 draft 版本（短名单文件未改动，
@@ -165,21 +169,50 @@ class IndicatorConfigStore:
         cfg = self._validated(shortlist, reason)
         content = _serialize(cfg)  # yaml.safe_dump 产出纯 LF，无需换行归一化
         return await self._versions.save_version(
-            content, content_md5(content), created_by, reason.strip(), report_id, status="draft"
+            content,
+            content_md5(content),
+            created_by,
+            reason.strip(),
+            report_id,
+            status="draft",
+            base_md5=base_md5,
         )
+
+    async def current_base_md5(self) -> str:
+        """轮初草稿基线采样：最新 applied 版本的 md5；无 applied 版本时用当前文件内容 md5。
+
+        供复盘轮初给本轮草稿盖基线章（issue #113 CAS）：轮末生效时若最新 applied
+        内容已偏离此基线（人工中途改过），草稿废弃不生效。
+
+        参数：无
+
+        返回：
+            str：当前生效内容的 md5（无 applied 版本且文件不存在时为空串的 md5）
+        """
+        latest = await self._versions.latest_applied_version()
+        if latest is not None:
+            return latest.md5
+        try:
+            current = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current = ""
+        return content_md5(current)
 
     async def apply_version(self, version_id: int) -> IndicatorConfigVersion | None:
         """把草稿（或历史）版本原子写入短名单文件并置为 applied——统一生效入口。
 
-        全程在生效锁内；锁内重读最新 applied 版本，存在 id 更大的 applied 版本时
-        本版本已被取代——置 discarded 并返回 None，不覆盖人工新内容（issue #113 F11）。
+        全程在生效锁内；锁内重读最新 applied 版本：草稿 base_md5 非空且与最新
+        applied 内容不一致时基线已被人工变更取代（issue #113 CAS），否则存在 id
+        更大的 applied 版本时本版本已被取代——均置 discarded 并返回 None，
+        不覆盖人工新内容（issue #113 F11）。
 
         参数：
             version_id: int，待生效的版本编号
 
         返回：
             IndicatorConfigVersion | None：已生效（applied）的版本对象；
-            已被更高 applied 版本取代时返回 None（本版本已置 discarded）
+            基线被人工变更取代或已被更高 applied 版本取代时返回 None
+            （本版本已置 discarded）
 
         异常：
             IndicatorConfigValidationError，目标版本不存在时抛出
@@ -194,7 +227,8 @@ class IndicatorConfigStore:
             version_id: int，待生效的版本编号
 
         返回：
-            IndicatorConfigVersion | None：已生效版本；被更高 applied 版本取代时返回 None
+            IndicatorConfigVersion | None：已生效版本；草稿基线被人工变更取代
+            （CAS）或被更高 applied 版本取代时返回 None
 
         异常：
             IndicatorConfigValidationError，目标版本不存在时抛出
@@ -203,6 +237,24 @@ class IndicatorConfigStore:
         if version is None:
             raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法生效"])
         latest = await self._versions.latest_applied_version()
+        # 草稿基线 CAS（issue #113）：语义同 StrategyStore——基线非空且与最新
+        # applied 内容不一致时，本草稿基于旧内容生成，废弃不生效；latest 即本版本
+        # 自身（生效成功后的幂等重放）时跳过比对，重写同内容文件
+        if (
+            version.base_md5
+            and latest is not None
+            and latest.id != version_id
+            and latest.md5 != version.base_md5
+        ):
+            await self._versions.set_version_status(version_id, "discarded")
+            logger.warning(
+                "指标配置草稿 v%d 的基线已被人工变更取代（基线 md5=%s，当前生效 v%d md5=%s），废弃不生效",
+                version_id,
+                version.base_md5[:8],
+                latest.id,
+                latest.md5[:8],
+            )
+            return None
         if latest is not None and latest.id > version_id:
             await self._versions.set_version_status(version_id, "discarded")
             logger.warning(
