@@ -4,6 +4,7 @@
  */
 import { useState } from 'react'
 import type { ToolCall } from '../../api/types'
+import { toolResultText } from '../../utils/toolResult'
 import Badge from '../Badge'
 
 /** 入参摘要截断阈值（字符数，超出显示「展开」按钮）；compact 模式更紧凑 */
@@ -13,11 +14,6 @@ const ARGS_CLIP_COMPACT = 72
 /** 入参展示文本：对象→紧凑 JSON 单行，字符串原样 */
 function argsText(args: ToolCall['args']): string {
   return typeof args === 'string' ? args : JSON.stringify(args)
-}
-
-/** 结果展示文本：对象→缩进 JSON，字符串原样 */
-function resultText(result: ToolCall['result']): string {
-  return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
 }
 
 /** 风控判定徽标三态（与后端口径一致：空串=未入风控） */
@@ -97,7 +93,7 @@ function StepItem({ call, last, compact }: { call: ToolCall; last: boolean; comp
             ▸ 执行结果
           </summary>
           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-zinc-950/80 p-2 font-mono text-[11px] leading-5 text-zinc-400">
-            {resultText(call.result)}
+            {toolResultText(call.result)}
           </pre>
         </details>
       </div>

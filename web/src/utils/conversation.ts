@@ -7,6 +7,7 @@
  * output 数组）三种格式；解析失败时降级为「原文 + 工具调用链」。
  */
 import type { ToolCall } from '../api/types'
+import { toolResultText } from './toolResult'
 
 /** 对话视图消息：assistant 的文本/工具调用 + user 角色的工具结果 */
 export interface ConversationMessage {
@@ -48,11 +49,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 function argsText(input: unknown): string {
   if (input == null) return ''
   return typeof input === 'string' ? input : JSON.stringify(input)
-}
-
-/** 工具结果文本：字符串原样，对象 JSON 序列化 */
-function resultText(result: ToolCall['result']): string {
-  return typeof result === 'string' ? result : JSON.stringify(result)
 }
 
 /** OpenAI arguments 为 JSON 字符串：解析后重新序列化（去掉转义），失败则原样展示 */
@@ -198,7 +194,7 @@ function toResultMessage(call: ToolCall): ConversationMessage {
   return {
     role: 'user',
     kind: 'tool_result',
-    text: resultText(call.result),
+    text: toolResultText(call.result),
     toolName: call.tool,
     riskVerdict: call.risk_verdict || undefined,
     riskReason: call.risk_reason || undefined,

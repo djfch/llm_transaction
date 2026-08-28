@@ -662,7 +662,7 @@ function anthropicTurn(
   return JSON.stringify({ role: 'assistant', content })
 }
 
-/** 审计工具调用简写：风控默认空串（未入风控），duration_ms 按 seq 递增 */
+/** 审计工具调用简写：风控默认空串（未入风控），duration_ms 按 seq 递增；result 按后端真实形态包 {text} */
 function mockCall(
   seq: number,
   tool: string,
@@ -671,7 +671,7 @@ function mockCall(
   verdict = '',
   reason = '',
 ): ToolCall {
-  return { seq, tool, args, risk_verdict: verdict, risk_reason: reason, result, duration_ms: 3 + seq * 7 }
+  return { seq, tool, args, risk_verdict: verdict, risk_reason: reason, result: { text: result }, duration_ms: 3 + seq * 7 }
 }
 
 /** 有归属成交的轮：分析 → 下单(allow) → 成交结论；llm_raw 的 tool_use 与审计链逐条对应 */

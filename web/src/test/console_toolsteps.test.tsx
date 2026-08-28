@@ -80,6 +80,23 @@ describe('ToolSteps 工具调用步骤链', () => {
     expect(screen.queryByText(/result\(/)).not.toBeInTheDocument()
   })
 
+  it('结果拆包：{text} 对象只显示值（无 {"text" 外壳），\\n 为真实换行', () => {
+    const { container } = render(
+      <ToolSteps toolCalls={[call({ result: { text: '第一行\n第二行' } })]} />,
+    )
+    fireEvent.click(screen.getByText(/执行结果/))
+    const pre = container.querySelector('details pre')!
+    expect(pre.textContent).toBe('第一行\n第二行')
+    expect(container.textContent).not.toContain('{"text"')
+  })
+
+  it('结果拆包：string 类型（历史兼容）原样展示', () => {
+    const { container } = render(<ToolSteps toolCalls={[call({ result: '裸字符串结果' })]} />)
+    fireEvent.click(screen.getByText(/执行结果/))
+    const pre = container.querySelector('details pre')!
+    expect(pre.textContent).toBe('裸字符串结果')
+  })
+
   it('多步渲染：按 seq 展示圆点步骤，仅最后一步无连线', () => {
     const { container } = render(
       <ToolSteps
