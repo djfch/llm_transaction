@@ -190,17 +190,21 @@ CREATE TABLE IF NOT EXISTS causal_links (
     supersedes_id INTEGER,
     created_at REAL NOT NULL
 );
--- 研报复盘记录（issue #113）：复盘 agent 对逐标的结论的批改；outcome_json 由代码按
--- 历史 K 线计算（LLM 不可写）；同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘
+-- 研报复盘记录（issue #113）：复盘 agent 对逐标的结论的批改；方向/推理/置信度为枚举 +
+-- 对应 *_reason 理由文本；outcome_json 由代码按历史 K 线计算（LLM 不可写）；
+-- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘
 CREATE TABLE IF NOT EXISTS research_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     review_report_id INTEGER NOT NULL,
     report_id INTEGER NOT NULL,
     contract TEXT NOT NULL,
     direction_relation TEXT NOT NULL DEFAULT '',
+    direction_reason TEXT NOT NULL DEFAULT '',
     reasoning_quality TEXT NOT NULL DEFAULT '',
+    reasoning_review TEXT NOT NULL DEFAULT '',
     evidence_reviews_json TEXT NOT NULL DEFAULT '[]',
     confidence_assessment TEXT NOT NULL DEFAULT '',
+    confidence_reason TEXT NOT NULL DEFAULT '',
     improvement_advice TEXT NOT NULL DEFAULT '',
     outcome_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,

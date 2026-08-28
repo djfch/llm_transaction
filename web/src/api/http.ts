@@ -436,9 +436,12 @@ interface RawResearchReview {
   id: number
   review_report_id: number
   direction_relation: string
+  direction_reason?: string
   reasoning_quality: string
+  reasoning_review?: string
   evidence_reviews?: unknown
   confidence_assessment: string
+  confidence_reason?: string
   improvement_advice: string
   outcome?: unknown
   created_at: number
@@ -582,12 +585,22 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
   }
 }
 
-/** 逐条依据评价适配：契约 {index, comment} 对象数组；结构非法的元素丢弃（无法定位原依据） */
+/** 逐条依据评价适配：契约 {evidence_index, fact_status, reasoning_status, explanation} 对象数组；结构非法的元素丢弃（无法定位原依据） */
 function adaptEvidenceReview(raw: unknown): ResearchEvidenceReview | null {
   if (raw === null || typeof raw !== 'object') return null
-  const item = raw as { index?: unknown; comment?: unknown }
-  if (typeof item.index !== 'number' || typeof item.comment !== 'string') return null
-  return { index: item.index, comment: item.comment }
+  const item = raw as {
+    evidence_index?: unknown
+    fact_status?: unknown
+    reasoning_status?: unknown
+    explanation?: unknown
+  }
+  if (typeof item.evidence_index !== 'number' || typeof item.explanation !== 'string') return null
+  return {
+    evidenceIndex: item.evidence_index,
+    factStatus: typeof item.fact_status === 'string' ? item.fact_status : '',
+    reasoningStatus: typeof item.reasoning_status === 'string' ? item.reasoning_status : '',
+    explanation: item.explanation,
+  }
 }
 
 /** 后端研报复盘 → 前端 ResearchReviewItem：evidence_reviews/outcome 防御性解析，created_at(Unix秒) 转 ISO */
@@ -598,11 +611,14 @@ function adaptResearchReview(raw: RawResearchReview): ResearchReviewItem {
     id: raw.id,
     reviewReportId: raw.review_report_id,
     directionRelation: raw.direction_relation ?? '',
+    directionReason: raw.direction_reason ?? '',
     reasoningQuality: raw.reasoning_quality ?? '',
+    reasoningReview: raw.reasoning_review ?? '',
     evidenceReviews: Array.isArray(evidence)
       ? evidence.map(adaptEvidenceReview).filter((e): e is ResearchEvidenceReview => e !== null)
       : [],
     confidenceAssessment: raw.confidence_assessment ?? '',
+    confidenceReason: raw.confidence_reason ?? '',
     improvementAdvice: raw.improvement_advice ?? '',
     outcome: outcome !== null && typeof outcome === 'object' && !Array.isArray(outcome)
       ? (outcome as Record<string, unknown>)

@@ -53,10 +53,23 @@ def _pending(report_id: int, contract: str, status: str) -> dict:
     return {
         "report_id": report_id,
         "contract": contract,
-        "direction_relation": "方向一致",
-        "reasoning_quality": "推理完整",
-        "evidence_reviews_json": '[{"index":0,"comment":"成立"}]',
-        "confidence_assessment": "合规",
+        "direction_relation": "realized",
+        "direction_reason": "方向一致",
+        "reasoning_quality": "sound",
+        "reasoning_review": "推理完整",
+        "evidence_reviews_json": json.dumps(
+            [
+                {
+                    "evidence_index": 0,
+                    "fact_status": "confirmed",
+                    "reasoning_status": "supported",
+                    "explanation": "快照核对成立",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        "confidence_assessment": "appropriate",
+        "confidence_reason": "合规",
         "improvement_advice": "无",
         "outcome_json": json.dumps({"data_status": status}, ensure_ascii=False),
     }
@@ -92,7 +105,7 @@ def test_render_stats_empty() -> None:
 
 
 def test_render_stats_counts() -> None:
-    """计数口径：条数、涉及研报数、合约分布、客观结果数据状态分布全部来自草稿字段。
+    """计数口径：条数、涉及研报数、合约分布、数据状态与依据事实核对分布全部来自草稿字段。
 
     参数：无
 
@@ -109,6 +122,7 @@ def test_render_stats_counts() -> None:
     assert "批改条数：3（涉及研报 2 份）" in text
     assert "BTC_USDT 2 条" in text and "ETH_USDT 1 条" in text
     assert "complete 1 条" in text and "partial 1 条" in text and "unavailable 1 条" in text
+    assert "依据事实核对：confirmed 3 条" in text
 
 
 # ---------- save_review_bundle（单事务落库） ----------

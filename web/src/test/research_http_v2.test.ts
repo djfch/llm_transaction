@@ -94,10 +94,21 @@ describe('研报 v2 端点适配', () => {
             research_reviews: [{
               id: 2,
               review_report_id: 7,
-              direction_relation: '兑现',
-              reasoning_quality: '因果链成立',
-              evidence_reviews: [{ index: 0, comment: '引用准确' }, { index: 'x' }],
-              confidence_assessment: '匹配',
+              direction_relation: 'realized',
+              direction_reason: '方向一致',
+              reasoning_quality: 'sound',
+              reasoning_review: '因果链成立',
+              evidence_reviews: [
+                {
+                  evidence_index: 0,
+                  fact_status: 'confirmed',
+                  reasoning_status: 'supported',
+                  explanation: '引用准确',
+                },
+                { evidence_index: 'x' },
+              ],
+              confidence_assessment: 'appropriate',
+              confidence_reason: '匹配',
               improvement_advice: '',
               outcome: { data_status: 'complete', start_price: 67400, end_price: 70800, return_pct: 5.04 },
               created_at: 1784595900,
@@ -112,9 +123,17 @@ describe('研报 v2 端点适配', () => {
     const detail = await httpApi.getResearchReport(9)
     const review = detail.assetViews?.[0].researchReviews?.[0]
     expect(review?.reviewReportId).toBe(7)
-    expect(review?.directionRelation).toBe('兑现')
-    // 结构非法的依据评价元素被丢弃（index 非数字）
-    expect(review?.evidenceReviews).toEqual([{ index: 0, comment: '引用准确' }])
+    expect(review?.directionRelation).toBe('realized')
+    expect(review?.directionReason).toBe('方向一致')
+    expect(review?.reasoningReview).toBe('因果链成立')
+    expect(review?.confidenceReason).toBe('匹配')
+    // 结构非法的依据评价元素被丢弃（evidence_index 非数字）
+    expect(review?.evidenceReviews).toEqual([{
+      evidenceIndex: 0,
+      factStatus: 'confirmed',
+      reasoningStatus: 'supported',
+      explanation: '引用准确',
+    }])
     expect(review?.outcome).toMatchObject({ data_status: 'complete', return_pct: 5.04 })
     expect(review?.createdAt).toBe(new Date(1784595900 * 1000).toISOString())
   })

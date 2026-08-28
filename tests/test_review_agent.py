@@ -1435,10 +1435,20 @@ async def test_run_research_review_end_to_end(env):
                         args={
                             "report_id": report.id,
                             "contract": "BTC_USDT",
-                            "direction_relation": "方向兑现",
-                            "reasoning_quality": "推理链完整",
-                            "evidence_reviews": [{"index": 0, "comment": "依据成立"}],
-                            "confidence_assessment": "置信度合理",
+                            "direction_relation": "realized",
+                            "direction_reason": "窗口内上行",
+                            "reasoning_quality": "sound",
+                            "reasoning_review": "推理链完整",
+                            "evidence_reviews": [
+                                {
+                                    "evidence_index": 0,
+                                    "fact_status": "confirmed",
+                                    "reasoning_status": "supported",
+                                    "explanation": "金十快讯核对：依据成立",
+                                }
+                            ],
+                            "confidence_assessment": "appropriate",
+                            "confidence_reason": "置信度合理",
                             "improvement_advice": "无",
                         },
                         call_id="c2",

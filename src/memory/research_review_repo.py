@@ -63,8 +63,9 @@ LIMIT ?
 """
 
 _REVIEW_COLUMNS = (
-    "review_report_id,report_id,contract,direction_relation,reasoning_quality,"
-    "evidence_reviews_json,confidence_assessment,improvement_advice,outcome_json,created_at"
+    "review_report_id,report_id,contract,direction_relation,direction_reason,"
+    "reasoning_quality,reasoning_review,evidence_reviews_json,"
+    "confidence_assessment,confidence_reason,improvement_advice,outcome_json,created_at"
 )
 
 
@@ -75,9 +76,12 @@ async def _insert_review(
     report_id: int,
     contract: str,
     direction_relation: str,
+    direction_reason: str,
     reasoning_quality: str,
+    reasoning_review: str,
     evidence_reviews_json: str,
     confidence_assessment: str,
+    confidence_reason: str,
     improvement_advice: str,
     outcome_json: str,
     created_at: float,
@@ -89,10 +93,13 @@ async def _insert_review(
         review_report_id: int，产生本记录的复盘报告编号
         report_id: int，被复盘的研报编号
         contract: str，被复盘的合约
-        direction_relation: str，方向关系评价
-        reasoning_quality: str，推理质量评价
+        direction_relation: str，方向关系枚举评价
+        direction_reason: str，方向关系评价理由
+        reasoning_quality: str，推理质量枚举评价
+        reasoning_review: str，推理质量评价理由
         evidence_reviews_json: str，逐条依据评价 JSON（与原研报 evidence 1:1）
-        confidence_assessment: str，置信度合规评价
+        confidence_assessment: str，置信度合规枚举评价
+        confidence_reason: str，置信度合规评价理由
         improvement_advice: str，改进建议
         outcome_json: str，代码计算的客观行情结果 JSON（LLM 不可写）
         created_at: float，落库时间戳
@@ -101,15 +108,18 @@ async def _insert_review(
         int：新插入行的自增 id
     """
     cur = await conn.execute(
-        f"INSERT INTO research_reviews({_REVIEW_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        f"INSERT INTO research_reviews({_REVIEW_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             review_report_id,
             report_id,
             contract,
             direction_relation,
+            direction_reason,
             reasoning_quality,
+            reasoning_review,
             evidence_reviews_json,
             confidence_assessment,
+            confidence_reason,
             improvement_advice,
             outcome_json,
             created_at,
@@ -191,9 +201,12 @@ class ResearchReviewRepo:
         report_id: int,
         contract: str,
         direction_relation: str = "",
+        direction_reason: str = "",
         reasoning_quality: str = "",
+        reasoning_review: str = "",
         evidence_reviews_json: str = "[]",
         confidence_assessment: str = "",
+        confidence_reason: str = "",
         improvement_advice: str = "",
         outcome_json: str = "{}",
         created_at: float | None = None,
@@ -207,10 +220,13 @@ class ResearchReviewRepo:
             review_report_id: int，产生本记录的复盘报告编号
             report_id: int，被复盘的研报编号
             contract: str，被复盘的合约
-            direction_relation: str，方向关系评价
-            reasoning_quality: str，推理质量评价
+            direction_relation: str，方向关系枚举评价
+            direction_reason: str，方向关系评价理由
+            reasoning_quality: str，推理质量枚举评价
+            reasoning_review: str，推理质量评价理由
             evidence_reviews_json: str，逐条依据评价 JSON
-            confidence_assessment: str，置信度合规评价
+            confidence_assessment: str，置信度合规枚举评价
+            confidence_reason: str，置信度合规评价理由
             improvement_advice: str，改进建议
             outcome_json: str，代码计算的客观行情结果 JSON
             created_at: float | None，可选落库时间戳（测试注入用）；None 取当前时间
@@ -225,9 +241,12 @@ class ResearchReviewRepo:
             report_id=report_id,
             contract=contract,
             direction_relation=direction_relation,
+            direction_reason=direction_reason,
             reasoning_quality=reasoning_quality,
+            reasoning_review=reasoning_review,
             evidence_reviews_json=evidence_reviews_json,
             confidence_assessment=confidence_assessment,
+            confidence_reason=confidence_reason,
             improvement_advice=improvement_advice,
             outcome_json=outcome_json,
             created_at=ts,
@@ -239,9 +258,12 @@ class ResearchReviewRepo:
             report_id=report_id,
             contract=contract,
             direction_relation=direction_relation,
+            direction_reason=direction_reason,
             reasoning_quality=reasoning_quality,
+            reasoning_review=reasoning_review,
             evidence_reviews_json=evidence_reviews_json,
             confidence_assessment=confidence_assessment,
+            confidence_reason=confidence_reason,
             improvement_advice=improvement_advice,
             outcome_json=outcome_json,
             created_at=ts,

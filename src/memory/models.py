@@ -263,11 +263,12 @@ class ResearchReview(BaseModel):
 
     review_report_id 指向产生本记录的复盘报告；report_id+contract 定位被复盘的
     逐标的结论；同一份复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘。
-    direction_relation（方向关系评价）/reasoning_quality（推理质量评价）/
-    confidence_assessment（置信度合规评价）/improvement_advice（改进建议）为复盘
-    agent 的批改文本；evidence_reviews_json 为逐条依据评价列表（与原研报 evidence
-    一一对应，后端强制 1:1 校验）；outcome_json 为代码按历史 K 线计算的客观行情
-    结果（LLM 不可写）。
+    direction_relation（方向关系）/reasoning_quality（推理质量）/confidence_assessment
+    （置信度合规）为枚举评价，对应 direction_reason/reasoning_review/confidence_reason
+    为各枚举的评价理由文本；improvement_advice（改进建议）为自由文本；
+    evidence_reviews_json 为逐条依据评价列表（与原研报 evidence 一一对应，后端强制
+    1:1 校验，每条含 evidence_index/fact_status/reasoning_status/explanation）；
+    outcome_json 为代码按历史 K 线计算的客观行情结果（LLM 不可写）。
     """
 
     id: int
@@ -275,9 +276,12 @@ class ResearchReview(BaseModel):
     report_id: int
     contract: str
     direction_relation: str = ""
+    direction_reason: str = ""
     reasoning_quality: str = ""
+    reasoning_review: str = ""
     evidence_reviews_json: str = "[]"
     confidence_assessment: str = ""
+    confidence_reason: str = ""
     improvement_advice: str = ""
     outcome_json: str = "{}"
     created_at: float

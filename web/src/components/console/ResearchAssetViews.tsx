@@ -64,6 +64,32 @@ function outcomeSummary(outcome: Record<string, unknown>): string {
   )
 }
 
+/** 复盘枚举 → 中文释义（用户可见只显示中文；未知/空值原样透出便于排查） */
+const REVIEW_ENUM_TEXT: Record<string, string> = {
+  realized: '兑现',
+  diverged: '背离',
+  digested: '震荡消化',
+  invalidated: '失效',
+  sound: '成立',
+  flawed: '有缺陷',
+  unsupported: '不支撑',
+  counterevidence: '构成反证',
+  partially_supported: '部分支撑',
+  supported: '支撑结论',
+  appropriate: '匹配合理',
+  too_high: '偏高',
+  too_low: '偏低',
+  confirmed: '已证实',
+  contradicted: '已证伪',
+  unverifiable: '无法核实',
+  unreviewable: '无法评价',
+}
+
+/** 枚举值显示：有中文释义取释义，否则原样返回（空串由调用方跳过渲染） */
+function enumText(value: string): string {
+  return REVIEW_ENUM_TEXT[value] ?? value
+}
+
 /** 复盘字段行：「标签：内容」（内容为空时由调用方跳过，不渲染） */
 function ReviewRow({ label, text }: { label: string; text: string }) {
   return (
@@ -74,7 +100,7 @@ function ReviewRow({ label, text }: { label: string; text: string }) {
   )
 }
 
-/** 单条研报复盘卡：复盘时间/来源报告 + 四段评价 + 逐条依据评价 + 客观结果摘要 */
+/** 单条研报复盘卡：复盘时间/来源报告 + 三维枚举评价与理由 + 逐条依据评价 + 客观结果摘要 */
 function ReviewCard({ review }: { review: ResearchReviewItem }) {
   return (
     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
@@ -82,9 +108,15 @@ function ReviewCard({ review }: { review: ResearchReviewItem }) {
         复盘 · {fmtTime(review.createdAt)} · 复盘报告 #{review.reviewReportId}
       </p>
       <div className="mt-1 space-y-1">
-        {review.directionRelation !== '' && <ReviewRow label="方向关系" text={review.directionRelation} />}
-        {review.reasoningQuality !== '' && <ReviewRow label="推理质量" text={review.reasoningQuality} />}
-        {review.confidenceAssessment !== '' && <ReviewRow label="置信度合规" text={review.confidenceAssessment} />}
+        {review.directionRelation !== '' && (
+          <ReviewRow label="方向关系" text={`${enumText(review.directionRelation)}（${review.directionReason}）`} />
+        )}
+        {review.reasoningQuality !== '' && (
+          <ReviewRow label="推理质量" text={`${enumText(review.reasoningQuality)}（${review.reasoningReview}）`} />
+        )}
+        {review.confidenceAssessment !== '' && (
+          <ReviewRow label="置信度合规" text={`${enumText(review.confidenceAssessment)}（${review.confidenceReason}）`} />
+        )}
         {review.improvementAdvice !== '' && <ReviewRow label="改进建议" text={review.improvementAdvice} />}
       </div>
       {review.evidenceReviews.length > 0 && (
@@ -92,8 +124,8 @@ function ReviewCard({ review }: { review: ResearchReviewItem }) {
           <p className="text-[10px] text-zinc-500">依据逐条评价</p>
           <ul className="mt-0.5 space-y-0.5">
             {review.evidenceReviews.map((item) => (
-              <li key={item.index} className="text-[11px] leading-4 text-zinc-400">
-                #{item.index} {item.comment}
+              <li key={item.evidenceIndex} className="text-[11px] leading-4 text-zinc-400">
+                #{item.evidenceIndex} 事实：{enumText(item.factStatus)} · 推理：{enumText(item.reasoningStatus)} —— {item.explanation}
               </li>
             ))}
           </ul>

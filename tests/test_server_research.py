@@ -307,10 +307,16 @@ async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
         review_report_id=1,
         report_id=report.id,
         contract="BTC_USDT",
-        direction_relation="方向正确",
-        reasoning_quality="链条完整",
-        evidence_reviews_json='[{"index": 1, "comment": "依据成立"}]',
-        confidence_assessment="置信度合规",
+        direction_relation="realized",
+        direction_reason="方向正确",
+        reasoning_quality="sound",
+        reasoning_review="链条完整",
+        evidence_reviews_json=(
+            '[{"evidence_index": 1, "fact_status": "confirmed",'
+            ' "reasoning_status": "supported", "explanation": "依据成立"}]'
+        ),
+        confidence_assessment="appropriate",
+        confidence_reason="置信度合规",
         improvement_advice="继续保持",
         outcome_json='{"data_status": "ok", "return_pct": 1.2}',
     )
@@ -318,7 +324,7 @@ async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
         review_report_id=2,
         report_id=report.id,
         contract="BTC_USDT",
-        direction_relation="方向相反",
+        direction_relation="diverged",
     )
     async with _client_of(_deps(repo, tmp_path)) as c:
         detail = (await c.get(f"/api/research/reports/{report.id}")).json()
@@ -329,15 +335,25 @@ async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
             "id",
             "review_report_id",
             "direction_relation",
+            "direction_reason",
             "reasoning_quality",
+            "reasoning_review",
             "evidence_reviews",
             "confidence_assessment",
+            "confidence_reason",
             "improvement_advice",
             "outcome",
             "created_at",
         }
         assert btc_reviews[0]["review_report_id"] == 1
-        assert btc_reviews[0]["evidence_reviews"] == [{"index": 1, "comment": "依据成立"}]
+        assert btc_reviews[0]["evidence_reviews"] == [
+            {
+                "evidence_index": 1,
+                "fact_status": "confirmed",
+                "reasoning_status": "supported",
+                "explanation": "依据成立",
+            }
+        ]
         assert btc_reviews[0]["outcome"] == {"data_status": "ok", "return_pct": 1.2}
         assert btc_reviews[1]["outcome"] == {}  # 默认 outcome_json '{}' 解析为空对象
         assert by_contract["ETH_USDT"]["research_reviews"] == []  # 未复盘标的给空数组

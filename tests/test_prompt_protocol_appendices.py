@@ -210,6 +210,12 @@ def test_prompt_templates_match_current_agent_contracts():
     assert "研报复盘门禁" in review
     assert "list_research_review_candidates" in review
     assert "方向错误不代表推理荒谬" in review
+    assert "realized（兑现）" in review  # 方向关系枚举写入提示词
+    assert "unverifiable（无法核对）" in review
+    assert "appropriate（匹配合理）" in review  # 置信度合规枚举
+    assert "fact_status（confirmed/contradicted/unverifiable）" in review  # 依据事实核对枚举
+    assert "必须写明核对来源" in review
+    assert "提交四段评价" not in review  # 旧协议文案已移除
     assert "submit_research_prompt_revision" in review
     assert "单次复盘不修订提示词" in review
     assert "版本化修订" not in review

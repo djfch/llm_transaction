@@ -526,10 +526,12 @@ export interface ResearchAssetSummary {
   dataStatus: string
 }
 
-/** 逐条依据评价：与原研报 evidence 一一对应（index 为原依据序号，从 0 开始；comment 为评价文本） */
+/** 逐条依据评价：与原研报 evidence 一一对应（evidenceIndex 为原依据序号，从 0 开始） */
 export interface ResearchEvidenceReview {
-  index: number // 原研报 evidence 的序号（从 0 开始）
-  comment: string // 该条依据的复盘评价
+  evidenceIndex: number // 原研报 evidence 的序号（从 0 开始）
+  factStatus: string // 事实核对枚举：confirmed/contradicted/unverifiable
+  reasoningStatus: string // 推理支撑枚举：supported/partially_supported/unsupported/counterevidence/unverifiable
+  explanation: string // 评价说明（含核对来源）
 }
 
 /**
@@ -540,10 +542,13 @@ export interface ResearchEvidenceReview {
 export interface ResearchReviewItem {
   id: number // 复盘记录 ID
   reviewReportId: number // 产生本记录的复盘报告 ID（由 review_report_id 适配）
-  directionRelation: string // 方向关系评价
-  reasoningQuality: string // 推理质量评价
+  directionRelation: string // 方向关系枚举：realized/diverged/digested/invalidated/unverifiable
+  directionReason: string // 方向关系评价理由
+  reasoningQuality: string // 推理质量枚举：sound/flawed/unsupported/unverifiable
+  reasoningReview: string // 推理质量评价复核文本
   evidenceReviews: ResearchEvidenceReview[] // 逐条依据评价（与原研报 evidence 1:1）
-  confidenceAssessment: string // 置信度合规评价
+  confidenceAssessment: string // 置信度合规枚举：appropriate/too_high/too_low/unreviewable
+  confidenceReason: string // 置信度合规评价理由
   improvementAdvice: string // 改进建议
   outcome: Record<string, unknown> // 代码按历史 K 线计算的客观行情结果（LLM 不可写）
   createdAt: string // 复盘时间（ISO 字符串，由 created_at(Unix秒) 适配）

@@ -136,18 +136,31 @@ def _valid_review_args(report_id: int) -> dict:
         report_id: int，目标研报编号
 
     返回：
-        dict：合法的工具参数
+        dict：合法的工具参数（枚举评价+理由文本+双枚举逐条依据评价）
     """
     return {
         "report_id": report_id,
         "contract": "BTC_USDT",
-        "direction_relation": "方向与实际走势一致",
-        "reasoning_quality": "因果链基本成立",
+        "direction_relation": "realized",
+        "direction_reason": "窗口内价格上行，与研报方向一致",
+        "reasoning_quality": "sound",
+        "reasoning_review": "当时论据提取与表达方法无明显缺陷",
         "evidence_reviews": [
-            {"index": 0, "comment": "EMA 信号属实"},
-            {"index": 1, "comment": "宏观依据无法验证"},
+            {
+                "evidence_index": 0,
+                "fact_status": "confirmed",
+                "reasoning_status": "supported",
+                "explanation": "市场快照核对：EMA 信号属实",
+            },
+            {
+                "evidence_index": 1,
+                "fact_status": "unverifiable",
+                "reasoning_status": "unverifiable",
+                "explanation": "快讯原文已不可得，无法核实宏观依据",
+            },
         ],
-        "confidence_assessment": "中置信与证据强度匹配",
+        "confidence_assessment": "appropriate",
+        "confidence_reason": "中置信与证据强度匹配",
         "improvement_advice": "宏观依据应附可核实出处",
     }
 
@@ -264,7 +277,7 @@ async def test_submit_rejects_outcome_field(
 async def test_submit_enforces_evidence_one_to_one(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
-    """依据评价与原研报依据强制 1:1：漏评、越界、重复 index 均被拒。
+    """依据评价与原研报依据强制 1:1：漏评、越界、重复 evidence_index 均被拒。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
@@ -273,28 +286,76 @@ async def test_submit_enforces_evidence_one_to_one(
     返回：
         None，断言三类违规的拒绝文本
     """
+
+    def _item(index: int, text: str) -> dict:
+        """构造一条合法结构的依据评价（仅序号与说明可变）。
+
+        参数：
+            index: int，原研报依据序号
+            text: str，评价说明
+
+        返回：
+            dict：合法结构的依据评价项
+        """
+        return {
+            "evidence_index": index,
+            "fact_status": "confirmed",
+            "reasoning_status": "supported",
+            "explanation": text,
+        }
+
     report_id = await _seed_reviewable_report(deps)
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
 
     missing = _valid_review_args(report_id)
-    missing["evidence_reviews"] = [{"index": 0, "comment": "只评了第一条"}]
+    missing["evidence_reviews"] = [_item(0, "只评了第一条")]
     assert "一一对应" in await registry.execute("submit_research_review", missing)
 
     overflow = _valid_review_args(report_id)
-    overflow["evidence_reviews"] = [
-        {"index": 0, "comment": "a"},
-        {"index": 5, "comment": "b"},
-    ]
+    overflow["evidence_reviews"] = [_item(0, "a"), _item(5, "b")]
     assert "一一对应" in await registry.execute("submit_research_review", overflow)
 
     duplicated = _valid_review_args(report_id)
-    duplicated["evidence_reviews"] = [
-        {"index": 0, "comment": "a"},
-        {"index": 0, "comment": "b"},
-    ]
+    duplicated["evidence_reviews"] = [_item(0, "a"), _item(0, "b")]
     assert "一一对应" in await registry.execute("submit_research_review", duplicated)
+    assert deps.pending_research_reviews == {}
+
+
+async def test_submit_rejects_invalid_enums_and_empty_explanation(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """枚举校验：三个评价维度的非法枚举值与依据评价的空 explanation 均被拒。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言非法取值的拒绝文本且不落草稿
+    """
+    report_id = await _seed_reviewable_report(deps)
+    await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+
+    bad_direction = _valid_review_args(report_id) | {"direction_relation": "方向一致"}
+    result = await registry.execute("submit_research_review", bad_direction)
+    assert "direction_relation 取值非法" in result
+
+    bad_reasoning = _valid_review_args(report_id) | {"reasoning_quality": "推理成立"}
+    result = await registry.execute("submit_research_review", bad_reasoning)
+    assert "reasoning_quality 取值非法" in result
+
+    bad_confidence = _valid_review_args(report_id) | {"confidence_assessment": "匹配"}
+    result = await registry.execute("submit_research_review", bad_confidence)
+    assert "confidence_assessment 取值非法" in result
+
+    empty_explanation = _valid_review_args(report_id)
+    empty_explanation["evidence_reviews"][0]["explanation"] = "  "
+    result = await registry.execute("submit_research_review", empty_explanation)
+    assert "explanation 必须是非空文本" in result
     assert deps.pending_research_reviews == {}
 
 
@@ -318,23 +379,27 @@ async def test_submit_stores_draft_and_repeat_updates(
     first = await registry.execute("submit_research_review", _valid_review_args(report_id))
     assert "已暂存" in first
     draft = deps.pending_research_reviews[(report_id, "BTC_USDT")]
-    assert draft["direction_relation"] == "方向与实际走势一致"
+    assert draft["direction_relation"] == "realized"
+    assert draft["direction_reason"] == "窗口内价格上行，与研报方向一致"
     assert json.loads(draft["outcome_json"])["data_status"] == "unavailable"
-    assert [item["index"] for item in json.loads(draft["evidence_reviews_json"])] == [0, 1]
+    evidence = json.loads(draft["evidence_reviews_json"])
+    assert [item["evidence_index"] for item in evidence] == [0, 1]
+    assert evidence[0]["fact_status"] == "confirmed"
+    assert evidence[1]["reasoning_status"] == "unverifiable"
 
-    updated_args = _valid_review_args(report_id) | {"direction_relation": "方向背离"}
+    updated_args = _valid_review_args(report_id) | {"direction_relation": "diverged"}
     second = await registry.execute("submit_research_review", updated_args)
     assert "已更新同目标草稿" in second
     assert len(deps.pending_research_reviews) == 1
-    assert (
-        deps.pending_research_reviews[(report_id, "BTC_USDT")]["direction_relation"] == "方向背离"
+    assert deps.pending_research_reviews[(report_id, "BTC_USDT")]["direction_relation"] == (
+        "diverged"
     )
 
 
 async def test_list_research_reviews_returns_full_records(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
-    """历史复盘查询返回完整记录（五段评价+客观结果），支持合约过滤。
+    """历史复盘查询返回完整记录（枚举+理由+逐条依据双枚举+客观结果），支持合约过滤。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
@@ -349,10 +414,22 @@ async def test_list_research_reviews_returns_full_records(
         review_report_id=7,
         report_id=42,
         contract="BTC_USDT",
-        direction_relation="方向一致",
-        reasoning_quality="推理成立",
-        evidence_reviews_json=json.dumps([{"index": 0, "comment": "属实"}]),
-        confidence_assessment="匹配合规",
+        direction_relation="realized",
+        direction_reason="方向一致，窗口内上行",
+        reasoning_quality="sound",
+        reasoning_review="推理成立",
+        evidence_reviews_json=json.dumps(
+            [
+                {
+                    "evidence_index": 0,
+                    "fact_status": "confirmed",
+                    "reasoning_status": "supported",
+                    "explanation": "快照核对属实",
+                }
+            ]
+        ),
+        confidence_assessment="appropriate",
+        confidence_reason="匹配合规",
         improvement_advice="继续",
         outcome_json=json.dumps(
             {
@@ -371,8 +448,10 @@ async def test_list_research_reviews_returns_full_records(
     )
     text = await registry.execute("list_research_reviews", {"contract": "BTC_USDT"})
     assert "研报#42/BTC_USDT" in text
-    assert "方向一致" in text and "推理成立" in text and "匹配合规" in text
-    assert "属实" in text and "涨跌 10%" in text
+    assert "realized" in text and "方向一致，窗口内上行" in text
+    assert "sound" in text and "推理成立" in text
+    assert "appropriate" in text and "匹配合规" in text
+    assert "事实=confirmed" in text and "快照核对属实" in text and "涨跌 10%" in text
 
     none = await registry.execute("list_research_reviews", {"contract": "ETH_USDT"})
     assert "无符合条件" in none

@@ -284,9 +284,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     "submit_research_review": {
         "description": (
             "提交对单个研报逐标的结论的复盘批改（研报复盘写出口）：方向关系/推理质量/"
-            "置信度合规/改进建议四段评价 + evidence_reviews 逐条依据评价（与原研报依据"
-            "一一对应，index 不重不漏覆盖 0..N-1）。客观行情结果由代码附加，不得提交 "
-            "outcome 字段。须先用 get_research_review_case 读取案例；通过则暂存草稿，"
+            "置信度合规三个枚举评价（各配独立理由文本）+ 改进建议 + evidence_reviews "
+            "逐条依据评价（与原研报依据一一对应，evidence_index 不重不漏覆盖 0..N-1，"
+            "每条含事实核对与推理支撑双枚举及写明核对来源的说明）。客观行情结果由代码附加，"
+            "不得提交 outcome 字段。须先用 get_research_review_case 读取案例；通过则暂存草稿，"
             "随本轮复盘报告落库统一生效"
         ),
         "parameters": {
@@ -296,30 +297,86 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "contract": {"type": "string", "description": "合约代码，如 BTC_USDT"},
                 "direction_relation": {
                     "type": "string",
-                    "description": "方向关系评价（研报方向与实际走势的关系：兑现/背离/震荡消化等）",
+                    "enum": ["realized", "diverged", "digested", "invalidated", "unverifiable"],
+                    "description": (
+                        "方向关系枚举：realized=兑现（方向与走势一致）、diverged=背离、"
+                        "digested=震荡消化（区间内未兑现也未破坏）、invalidated=失效"
+                        "（走势反向破坏结论前提）、unverifiable=无法核对"
+                    ),
+                },
+                "direction_reason": {
+                    "type": "string",
+                    "description": "方向关系评价理由（结合客观行情结果说明判定依据）",
                 },
                 "reasoning_quality": {
                     "type": "string",
-                    "description": "推理质量评价（因果链是否成立、论据是否支撑结论）",
+                    "enum": ["sound", "flawed", "unsupported", "unverifiable"],
+                    "description": (
+                        "推理质量枚举（只评价当时推理方法，不评价因果链内容正确性）："
+                        "sound=成立、flawed=有缺陷、unsupported=缺乏依据、unverifiable=无法核对"
+                    ),
+                },
+                "reasoning_review": {
+                    "type": "string",
+                    "description": "推理质量评价复核文本（指出推理方法上的具体得失）",
                 },
                 "evidence_reviews": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "index": {
+                            "evidence_index": {
                                 "type": "integer",
                                 "description": "原研报依据序号（从 0 开始）",
                             },
-                            "comment": {"type": "string", "description": "对该条依据的评价"},
+                            "fact_status": {
+                                "type": "string",
+                                "enum": ["confirmed", "contradicted", "unverifiable"],
+                                "description": (
+                                    "事实核对枚举：confirmed=已证实、contradicted=已证伪、"
+                                    "unverifiable=无法核实"
+                                ),
+                            },
+                            "reasoning_status": {
+                                "type": "string",
+                                "enum": [
+                                    "supported",
+                                    "partially_supported",
+                                    "unsupported",
+                                    "counterevidence",
+                                    "unverifiable",
+                                ],
+                                "description": (
+                                    "推理支撑枚举：supported=支撑结论、"
+                                    "partially_supported=部分支撑、unsupported=不支撑、"
+                                    "counterevidence=构成反证、unverifiable=无法核实"
+                                ),
+                            },
+                            "explanation": {
+                                "type": "string",
+                                "description": "评价说明（必须写明核对来源，如某工具结果或案例材料）",
+                            },
                         },
-                        "required": ["index", "comment"],
+                        "required": [
+                            "evidence_index",
+                            "fact_status",
+                            "reasoning_status",
+                            "explanation",
+                        ],
                     },
-                    "description": "逐条依据评价列表，数量与 index 必须与案例材料的依据一一对应",
+                    "description": "逐条依据评价列表，数量与 evidence_index 必须与案例材料的依据一一对应",
                 },
                 "confidence_assessment": {
                     "type": "string",
-                    "description": "置信度合规评价（置信度是否与证据强度匹配、是否违反归一化规则）",
+                    "enum": ["appropriate", "too_high", "too_low", "unreviewable"],
+                    "description": (
+                        "置信度合规枚举：appropriate=与证据强度匹配、too_high=偏高、"
+                        "too_low=偏低、unreviewable=无法评价"
+                    ),
+                },
+                "confidence_reason": {
+                    "type": "string",
+                    "description": "置信度合规评价理由（引用证据强度或归一化记录）",
                 },
                 "improvement_advice": {
                     "type": "string",
@@ -330,9 +387,12 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "report_id",
                 "contract",
                 "direction_relation",
+                "direction_reason",
                 "reasoning_quality",
+                "reasoning_review",
                 "evidence_reviews",
                 "confidence_assessment",
+                "confidence_reason",
                 "improvement_advice",
             ],
         },

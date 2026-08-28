@@ -32,18 +32,110 @@ from src.review.tool_handlers import (
 
 _CASE_SNAPSHOT_LIMIT = 3000  # 案例内市场快照/上下文快照的截断长度
 
+# 复盘枚举（值 → 中文释义）：schema 描述、工具校验与预注入渲染共用同一来源，改动须同步
+DIRECTION_RELATIONS = {
+    "realized": "兑现",
+    "diverged": "背离",
+    "digested": "震荡消化",
+    "invalidated": "失效",
+    "unverifiable": "无法核对",
+}
+REASONING_QUALITIES = {
+    "sound": "成立",
+    "flawed": "有缺陷",
+    "unsupported": "缺乏依据",
+    "unverifiable": "无法核对",
+}
+CONFIDENCE_ASSESSMENTS = {
+    "appropriate": "匹配合理",
+    "too_high": "偏高",
+    "too_low": "偏低",
+    "unreviewable": "无法评价",
+}
+EVIDENCE_FACT_STATUSES = {
+    "confirmed": "已证实",
+    "contradicted": "已证伪",
+    "unverifiable": "无法核实",
+}
+EVIDENCE_REASONING_STATUSES = {
+    "supported": "支撑结论",
+    "partially_supported": "部分支撑",
+    "unsupported": "不支撑",
+    "counterevidence": "构成反证",
+    "unverifiable": "无法核实",
+}
+
+
+def _enum_text(options: dict[str, str]) -> str:
+    """把枚举字典渲染为「值=释义」顿号串（用于校验错误提示）。
+
+    参数：
+        options: dict[str, str]，枚举值到中文释义的映射
+
+    返回：
+        str：如「realized=兑现、diverged=背离」的枚举说明串
+    """
+    return "、".join(f"{value}={label}" for value, label in options.items())
+
+
+def _need_enum(args: dict, name: str, options: dict[str, str]) -> str:
+    """读取必填枚举参数并校验取值合法。
+
+    参数：
+        args: dict，工具调用参数字典
+        name: str，参数名
+        options: dict[str, str]，合法枚举值到中文释义的映射
+
+    返回：
+        str：校验通过的枚举值
+
+    异常：
+        ToolArgError：参数缺失或取值不在枚举内时抛出
+    """
+    value = _need_str(args, name)
+    if value not in options:
+        raise ToolArgError(f"参数 {name} 取值非法：{value}（合法取值：{_enum_text(options)}）")
+    return value
+
+
+def _check_enum_item(item: dict, pos: int, name: str, options: dict[str, str]) -> str:
+    """校验依据评价元素内单个枚举字段并返回其值。
+
+    参数：
+        item: dict，单条依据评价
+        pos: int，该条在列表中的位置（错误提示用）
+        name: str，枚举字段名
+        options: dict[str, str]，合法枚举值到中文释义的映射
+
+    返回：
+        str：校验通过的枚举值
+
+    异常：
+        ToolArgError：字段缺失或取值非法时抛出
+    """
+    value = item.get(name)
+    if not isinstance(value, str) or value not in options:
+        raise ToolArgError(
+            f"evidence_reviews[{pos}].{name} 必须是合法枚举（{_enum_text(options)}）"
+        )
+    return value
+
 
 def _parse_evidence_reviews(args: dict) -> list[dict[str, Any]]:
-    """解析并校验逐条依据评价列表的结构（index 整数 + comment 非空文本）。
+    """解析并校验逐条依据评价列表（evidence_index 整数 + 两个枚举 + explanation 非空）。
+
+    每条结构：evidence_index（原研报依据序号，从 0 开始）、fact_status（事实核对
+    枚举）、reasoning_status（推理支撑枚举）、explanation（评价说明，须写明核对
+    来源）；1:1 完整性由 submit 校验。
 
     参数：
         args: dict，工具调用参数字典
 
     返回：
-        list[dict[str, Any]]：结构合法的依据评价列表（1:1 完整性由 submit 校验）
+        list[dict[str, Any]]：结构合法的依据评价列表
 
     异常：
-        ToolArgError：字段缺失、不是列表、元素结构非法时抛出
+        ToolArgError：字段缺失、不是列表、元素结构或枚举非法时抛出
     """
     value = args.get("evidence_reviews")
     if not isinstance(value, list):
@@ -51,19 +143,35 @@ def _parse_evidence_reviews(args: dict) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for pos, item in enumerate(value):
         if not isinstance(item, dict):
-            raise ToolArgError(f"evidence_reviews[{pos}] 必须是对象（含 index/comment）")
-        index = item.get("index")
+            raise ToolArgError(
+                f"evidence_reviews[{pos}] 必须是对象（含 evidence_index/fact_status/"
+                "reasoning_status/explanation）"
+            )
+        index = item.get("evidence_index")
         if not isinstance(index, int) or isinstance(index, bool):
-            raise ToolArgError(f"evidence_reviews[{pos}].index 必须是整数")
-        comment = item.get("comment")
-        if not isinstance(comment, str) or not comment.strip():
-            raise ToolArgError(f"evidence_reviews[{pos}].comment 必须是非空文本")
-        items.append({"index": index, "comment": comment.strip()})
+            raise ToolArgError(f"evidence_reviews[{pos}].evidence_index 必须是整数")
+        fact_status = _check_enum_item(item, pos, "fact_status", EVIDENCE_FACT_STATUSES)
+        reasoning_status = _check_enum_item(
+            item, pos, "reasoning_status", EVIDENCE_REASONING_STATUSES
+        )
+        explanation = item.get("explanation")
+        if not isinstance(explanation, str) or not explanation.strip():
+            raise ToolArgError(
+                f"evidence_reviews[{pos}].explanation 必须是非空文本（写明核对来源与结论）"
+            )
+        items.append(
+            {
+                "evidence_index": index,
+                "fact_status": fact_status,
+                "reasoning_status": reasoning_status,
+                "explanation": explanation.strip(),
+            }
+        )
     return items
 
 
 def _evidence_reviews_error(evidence_reviews: list[dict[str, Any]], expected: int) -> str | None:
-    """校验逐条依据评价与原研报依据的 1:1 完整性（数量相等且 index 覆盖 0..N-1）。
+    """校验逐条依据评价与原研报依据的 1:1 完整性（数量相等且 evidence_index 覆盖 0..N-1）。
 
     参数：
         evidence_reviews: list[dict[str, Any]]，已结构校验的依据评价列表
@@ -72,13 +180,13 @@ def _evidence_reviews_error(evidence_reviews: list[dict[str, Any]], expected: in
     返回：
         str | None：不通过时返回错误文本，通过时返回 None
     """
-    indexes = sorted(item["index"] for item in evidence_reviews)
+    indexes = sorted(item["evidence_index"] for item in evidence_reviews)
     if len(evidence_reviews) == expected and indexes == list(range(expected)):
         return None
     return (
         f"参数错误：evidence_reviews 须与原研报依据一一对应（共 {expected} 条，"
-        f"index 不重不漏覆盖 0..{max(expected - 1, 0)}），"
-        f"实际收到 {len(evidence_reviews)} 条（index={indexes}）"
+        f"evidence_index 不重不漏覆盖 0..{max(expected - 1, 0)}），"
+        f"实际收到 {len(evidence_reviews)} 条（evidence_index={indexes}）"
     )
 
 
@@ -111,14 +219,14 @@ def _format_review_row(row: ResearchReview) -> str:
         row: ResearchReview，复盘记录
 
     返回：
-        str：含全部评价维度与客观结果摘要的多行文本
+        str：含全部评价维度（枚举+理由）与客观结果摘要的多行文本
     """
     lines = [
         f"复盘#{row.id} | 研报#{row.report_id}/{row.contract} | 复盘报告#{row.review_report_id}"
         f" | 时间={_fmt_time(row.created_at)}",
-        f"  方向关系：{row.direction_relation}",
-        f"  推理质量：{row.reasoning_quality}",
-        f"  置信度合规：{row.confidence_assessment}",
+        f"  方向关系：{row.direction_relation} | 理由：{row.direction_reason}",
+        f"  推理质量：{row.reasoning_quality} | 复核：{row.reasoning_review}",
+        f"  置信度合规：{row.confidence_assessment} | 理由：{row.confidence_reason}",
         f"  改进建议：{row.improvement_advice}",
     ]
     try:
@@ -127,7 +235,12 @@ def _format_review_row(row: ResearchReview) -> str:
         evidence = []
     if evidence:
         lines.append(
-            "  依据评价：" + "；".join(f"[{e.get('index')}] {e.get('comment')}" for e in evidence)
+            "  依据评价："
+            + "；".join(
+                f"[{e.get('evidence_index')}] 事实={e.get('fact_status')}"
+                f" 推理={e.get('reasoning_status')}：{e.get('explanation')}"
+                for e in evidence
+            )
         )
     try:
         outcome = json.loads(row.outcome_json)
@@ -330,15 +443,18 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     """提交对单个逐标的结论的复盘批改（暂存内存草稿，随本轮报告落库生效）。
 
     校验：须先经 get_research_review_case 读过案例；outcome 由代码从已读案例
-    缓存附加，LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报依据
-    强制 1:1（数量相等且 index 不重不漏覆盖 0..N-1）。同轮对同一目标重复
-    提交时更新内存草稿。
+    缓存附加，LLM 携带 outcome 字段一律拒绝；方向关系/推理质量/置信度合规为
+    枚举（非法取值拒绝），各自必须配独立理由文本；evidence_reviews 与原研报
+    依据强制 1:1（数量相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含
+    事实核对与推理支撑双枚举及写明核对来源的 explanation。同轮对同一目标
+    重复提交时更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读写 loaded_research_cases 与
             pending_research_reviews）
-        args: dict，工具参数：report_id/contract/direction_relation/reasoning_quality/
-            evidence_reviews/confidence_assessment/improvement_advice（均必填）
+        args: dict，工具参数：report_id/contract/direction_relation/direction_reason/
+            reasoning_quality/reasoning_review/evidence_reviews/confidence_assessment/
+            confidence_reason/improvement_advice（均必填）
 
     返回：
         str：提交结果文本；校验失败返回具体原因且不落草稿
@@ -351,24 +467,30 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
         return f"参数错误：请先用 get_research_review_case 读取研报#{report_id}/{contract} 的案例材料后再提交批改"
     if "outcome" in args:
         return "参数错误：outcome（客观行情结果）由代码计算附加，不允许提交该字段"
-    direction_relation = _need_str(args, "direction_relation")
-    reasoning_quality = _need_str(args, "reasoning_quality")
-    confidence_assessment = _need_str(args, "confidence_assessment")
-    improvement_advice = _need_str(args, "improvement_advice")
+    direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
+    reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
+    confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
     evidence_reviews = _parse_evidence_reviews(args)
+    direction_reason = _need_str(args, "direction_reason")
+    reasoning_review = _need_str(args, "reasoning_review")
+    confidence_reason = _need_str(args, "confidence_reason")
+    improvement_advice = _need_str(args, "improvement_advice")
     expected = case["evidence_count"]
     evidence_error = _evidence_reviews_error(evidence_reviews, expected)
     if evidence_error is not None:
         return evidence_error
-    ordered = sorted(evidence_reviews, key=lambda item: item["index"])
+    ordered = sorted(evidence_reviews, key=lambda item: item["evidence_index"])
     existed = key in deps.pending_research_reviews
     deps.pending_research_reviews[key] = {
         "report_id": report_id,
         "contract": contract,
         "direction_relation": direction_relation,
+        "direction_reason": direction_reason,
         "reasoning_quality": reasoning_quality,
+        "reasoning_review": reasoning_review,
         "evidence_reviews_json": json.dumps(ordered, ensure_ascii=False),
         "confidence_assessment": confidence_assessment,
+        "confidence_reason": confidence_reason,
         "improvement_advice": improvement_advice,
         "outcome_json": json.dumps(case["outcome"], ensure_ascii=False),
     }

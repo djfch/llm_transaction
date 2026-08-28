@@ -15,12 +15,35 @@ from src.memory.repo import Repo
 from src.review.tool_handlers import ReviewToolDeps
 
 
+def _count_fact_statuses(pending: list[dict[str, Any]]) -> dict[str, int]:
+    """从本轮复盘草稿的 evidence_reviews_json 统计事实核对枚举分布（代码计算）。
+
+    参数：
+        pending: list[dict[str, Any]]，本轮暂存的研报复盘草稿
+
+    返回：
+        dict[str, int]：fact_status → 条数；坏 JSON 的条目按 unknown 计
+    """
+    counts: dict[str, int] = {}
+    for item in pending:
+        try:
+            evidence = json.loads(item["evidence_reviews_json"])
+        except (json.JSONDecodeError, KeyError):
+            evidence = []
+        if not isinstance(evidence, list):
+            evidence = []
+        for entry in evidence:
+            status = entry.get("fact_status") if isinstance(entry, dict) else None
+            counts[status or "unknown"] = counts.get(status or "unknown", 0) + 1
+    return counts
+
+
 def render_research_review_stats(pending: list[dict[str, Any]]) -> str:
     """由本轮研报复盘草稿确定性计算统计段文本；无草稿时返回空串（不追加段落）。
 
     参数：
         pending: list[dict[str, Any]]，本轮暂存的研报复盘草稿（含
-            report_id/contract/outcome_json 等代码可枚举字段）
+            report_id/contract/outcome_json/evidence_reviews_json 等代码可枚举字段）
 
     返回：
         str：「## 研报复盘统计」Markdown 段；空列表时返回空串
@@ -38,11 +61,14 @@ def render_research_review_stats(pending: list[dict[str, Any]]) -> str:
         except json.JSONDecodeError:
             status = "unknown"
         statuses[status] = statuses.get(status, 0) + 1
+    fact_statuses = _count_fact_statuses(pending)
     lines = [
         "## 研报复盘统计（代码计算，非 LLM 产出）",
         f"批改条数：{len(pending)}（涉及研报 {len(report_ids)} 份）",
         "合约分布：" + "；".join(f"{c} {n} 条" for c, n in sorted(contracts.items())),
         "客观结果数据状态：" + "；".join(f"{s} {n} 条" for s, n in sorted(statuses.items())),
+        "依据事实核对："
+        + ("；".join(f"{s} {n} 条" for s, n in sorted(fact_statuses.items())) or "无"),
     ]
     return "\n".join(lines)
 

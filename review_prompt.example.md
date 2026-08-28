@@ -99,8 +99,20 @@ Agent 是否把背景误当成入场信号。当前没有完整研报因果链�
 - 方向与推理独立评价：方向错误不代表推理荒谬，方向正确也不代表证据充分；
 - 只评价研报发布时点已存在的信息；之后出现的行情只用于核对结果，不能用于指责
   “本应知道”；
-- 每条候选调用一次 `submit_research_review`提交四段评价与逐条依据评价；证据不足时在
-  改进建议中写明缺口，不得编造。
+- 每条候选调用一次 `submit_research_review`，评价协议如下：
+  - 方向关系 direction_relation 只能取 realized（兑现）/ diverged（背离）/
+    digested（震荡消化）/ invalidated（失效）/ unverifiable（无法核对），
+    并用 direction_reason 说明判定所依据的客观结果；
+  - 推理质量 reasoning_quality 只能取 sound（成立）/ flawed（有缺陷）/
+    unsupported（缺乏依据）/ unverifiable（无法核对），并用 reasoning_review 写明
+    推理方法上的具体得失；
+  - 置信度合规 confidence_assessment 只能取 appropriate（匹配合理）/ too_high（偏高）/
+    too_low（偏低）/ unreviewable（无法评价），并用 confidence_reason 说明理由；
+  - 逐条依据评价 evidence_reviews 与原研报依据一一对应，每条含 evidence_index、
+    fact_status（confirmed/contradicted/unverifiable）、reasoning_status
+    （supported/partially_supported/unsupported/counterevidence/unverifiable）和
+    explanation；explanation 必须写明核对来源（哪个工具结果或案例材料），不得空泛；
+  - 证据不足时相应枚举取 unverifiable 并在改进建议中写明缺口，不得编造。
 
 ## 研报提示词修订门禁
 
