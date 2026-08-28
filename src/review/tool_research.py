@@ -463,7 +463,10 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     snapshot_text = await _case_context_text(deps, report)
     causal_links = await deps.repo.research.list_causal_links_by_report(report_id)
     prompt_version = (
-        await deps.repo.research_prompt.get_version_by_md5(report.research_prompt_md5)
+        # 按研报时点归因：只认当时已生效的版本，后来的同 md5 版本（回滚再生）不篡改归因
+        await deps.repo.research_prompt.get_version_by_md5(
+            report.research_prompt_md5, as_of_ts=report.created_at
+        )
         if report.research_prompt_md5
         else None
     )

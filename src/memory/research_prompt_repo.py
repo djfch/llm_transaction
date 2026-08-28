@@ -118,18 +118,26 @@ class ResearchPromptRepo:
         row = await cur.fetchone()
         return ResearchPromptVersion(**dict(row)) if row else None
 
-    async def get_version_by_md5(self, md5: str) -> ResearchPromptVersion | None:
-        """按正文 md5 反解最新一个版本（研报归因展示用，issue #113 R6）；无命中返回 None。
+    async def get_version_by_md5(
+        self, md5: str, *, as_of_ts: float
+    ) -> ResearchPromptVersion | None:
+        """按正文 md5 反解指定时点最新生效的版本（研报归因展示用，issue #113 R6/V3）。
+
+        只认 status='applied' 且 created_at <= as_of_ts 的版本：draft/discarded
+        从未生效，不能作为归因；晚于研报时点的同 md5 版本（如回滚后再生的同文
+        版本）不得归因给该研报，否则旧研报的提示词归因会被后来的同名版本篡改。
 
         参数：
             md5: str，提示词正文摘要（research_reports.research_prompt_md5 的值）
+            as_of_ts: float，归因时点（通常取被归因研报的 created_at）
 
         返回：
-            ResearchPromptVersion | None：该 md5 最新落库的版本；从未归档过时 None
+            ResearchPromptVersion | None：该时点该 md5 最新生效的版本；从未生效过时 None
         """
         cur = await self._conn.execute(
-            "SELECT * FROM research_prompt_versions WHERE md5=? ORDER BY id DESC LIMIT 1",
-            (md5,),
+            "SELECT * FROM research_prompt_versions "
+            "WHERE md5=? AND status='applied' AND created_at <= ? ORDER BY id DESC LIMIT 1",
+            (md5, as_of_ts),
         )
         row = await cur.fetchone()
         return ResearchPromptVersion(**dict(row)) if row else None

@@ -113,16 +113,39 @@ async def test_attach_report_to_version(repo: Repo) -> None:
 
 
 async def test_get_version_by_md5(repo: Repo) -> None:
-    """按 md5 反解版本：命中同 md5 最新一条，未命中返回 None（issue #113 R6）。
+    """按 md5 反解版本：只认归因时点前已生效（applied）的版本（issue #113 R6/V3）。
 
     参数：
         repo: Repo，临时数据库仓储
 
     返回：
-        None，断言命中最新版本与未命中降级
+        None，断言时点内最新 applied 命中、晚于时点的同 md5 版本（回滚再生）
+        不误归因、draft/discarded 不归因、未命中降级 None
     """
-    await repo.research_prompt.save_version("正文旧", "md5-x", "human", "初始版本")
+    v1 = await repo.research_prompt.save_version("正文旧", "md5-x", "human", "初始版本")
     v2 = await repo.research_prompt.save_version("正文新", "md5-x", "review_agent", "复盘修订")
-    got = await repo.research_prompt.get_version_by_md5("md5-x")
-    assert got is not None and got.id == v2.id and got.content == "正文新"
-    assert await repo.research_prompt.get_version_by_md5("md5-不存在") is None
+    v3 = await repo.research_prompt.save_version(
+        "正文草稿", "md5-x", "review_agent", "草稿", status="draft"
+    )
+    v4 = await repo.research_prompt.save_version(
+        "正文废弃", "md5-x", "review_agent", "废弃", status="discarded"
+    )
+    # 控制版本时点：v1=1000（applied）、v2=2000（applied）、v3=3000（draft）、v4=3500（discarded）
+    for vid, ts in ((v1.id, 1000.0), (v2.id, 2000.0), (v3.id, 3000.0), (v4.id, 3500.0)):
+        await repo._conn.execute(
+            "UPDATE research_prompt_versions SET created_at=? WHERE id=?", (ts, vid)
+        )
+    await repo._conn.commit()
+
+    # 归因时点取两条 applied 之间 → 命中较早的 v1（晚于时点的 v2 不误归因）
+    got = await repo.research_prompt.get_version_by_md5("md5-x", as_of_ts=1500.0)
+    assert got is not None and got.id == v1.id and got.content == "正文旧"
+    # 归因时点覆盖 v2 → 命中 v2
+    got = await repo.research_prompt.get_version_by_md5("md5-x", as_of_ts=2000.0)
+    assert got is not None and got.id == v2.id
+    # draft/discarded 不归因：时点越过 v3/v4 仍命中 v2（二者从未生效）
+    got = await repo.research_prompt.get_version_by_md5("md5-x", as_of_ts=4000.0)
+    assert got is not None and got.id == v2.id
+    # 未命中降级 None（含归因时点早于任何生效版本）
+    assert await repo.research_prompt.get_version_by_md5("md5-不存在", as_of_ts=4000.0) is None
+    assert await repo.research_prompt.get_version_by_md5("md5-x", as_of_ts=500.0) is None
