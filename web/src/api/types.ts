@@ -577,6 +577,7 @@ export interface ResearchReportSummary extends LLMIdentityInfo {
   error: string
   roundId: string
   researchPromptMd5?: string // 生成本研报所用 research_prompt.md 正文 md5（旧数据缺省）
+  researchPromptVersionId?: number // 构建时点精确归因的提示词版本 id（R5-4；旧数据缺省/为 null）
   time: string
 }
 /** 人工重评授权登记响应（POST /api/review/research/rereview，R5-2）：只需 id 与幂等标记，其余为请求回显 */

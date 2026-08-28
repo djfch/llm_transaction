@@ -2262,6 +2262,39 @@ async def test_run_records_research_prompt_md5(repo: Repo, settings: Settings, t
     assert report is not None
     expected = hashlib.md5(content.encode("utf-8")).hexdigest()
     assert report.research_prompt_md5 == expected
+    assert report.research_prompt_version_id is None  # 版本表无该 md5 的 applied 版本
+
+
+async def test_run_records_prompt_version_id_resolved_at_build_time(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """R5-4：落库版本 id 为构建 prompt 时点该 md5 的最新 applied 版本（draft 不命中）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_version_id 精确指向目标版本
+    """
+    import hashlib
+
+    content = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    (tmp_path / "research_prompt.md").write_text(content, encoding="utf-8")
+    md5 = hashlib.md5(content.encode("utf-8")).hexdigest()
+    await repo.research_prompt.save_version("无关旧版本", "aa" * 16, "human", "干扰项")
+    target = await repo.research_prompt.save_version(content, md5, "human", "目标版本")
+    await repo.research_prompt.save_version(
+        content, md5, "review_agent", "同文草稿", status="draft"
+    )
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    assert report.research_prompt_md5 == md5
+    assert report.research_prompt_version_id == target.id  # 草稿不命中，取最新 applied
 
 
 async def test_run_records_prompt_md5_sampled_at_build_time(

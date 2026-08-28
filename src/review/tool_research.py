@@ -523,14 +523,7 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     }
     snapshot_text = await _case_context_text(deps, report)
     causal_links = await deps.repo.research.list_causal_links_by_report(report_id)
-    prompt_version = (
-        # 按研报时点归因：只认当时已生效的版本，后来的同 md5 版本（回滚再生）不篡改归因
-        await deps.repo.research_prompt.get_version_by_md5(
-            report.research_prompt_md5, as_of_ts=report.created_at
-        )
-        if report.research_prompt_md5
-        else None
-    )
+    prompt_version = await _resolve_case_prompt_version(deps, report)
     lines = _format_case_lines(
         report,
         view,
@@ -543,6 +536,33 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
         prompt_version,
     )
     return "\n".join(lines)
+
+
+async def _resolve_case_prompt_version(deps: ReviewToolDeps, report: Any) -> Any:
+    """解析研报所用提示词的版本归因：优先按 version_id 精确归因，回退 md5+时点反解。
+
+    R5-4 起研报落库携带构建时点解析的 research_prompt_version_id（精确归因）；
+    该列为 NULL（历史研报）或指向的版本已不存在（版本被清理）时，回退为按
+    research_prompt_md5 + 研报时点反解（只认当时已生效的版本，后来的同 md5
+    版本如回滚再生不篡改归因）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_prompt 读版本表）
+        report: 研报报告行（取 research_prompt_version_id/research_prompt_md5/created_at）
+
+    返回：
+        Any：ResearchPromptVersion 或 None（md5 为空且无 version_id 时 None）
+    """
+    version_id = report.research_prompt_version_id
+    if version_id is not None:
+        version = await deps.repo.research_prompt.get_version(version_id)
+        if version is not None:
+            return version
+    if report.research_prompt_md5:
+        return await deps.repo.research_prompt.get_version_by_md5(
+            report.research_prompt_md5, as_of_ts=report.created_at
+        )
+    return None
 
 
 async def _case_outcome(
@@ -629,7 +649,8 @@ def _format_case_lines(
         snapshot_text: str，研报轮上下文快照文本
         causal_links: list，当时随研报提交的因果链（CausalLink 行，只读展示）
         prompt_version: 研报提示词版本行（ResearchPromptVersion）或 None；
-            由调用方按 report.research_prompt_md5 反解（issue #113 R6）
+            由调用方优先按 report.research_prompt_version_id 精确归因，回退按
+            md5+研报时点反解（issue #113 R6/R5-4）
 
     返回：
         list[str]：案例材料文本行

@@ -554,6 +554,48 @@ async def test_get_case_shows_report_level_and_prompt_version(
     assert "研报提示词版本：（无记录）" in text3
 
 
+async def test_get_case_prefers_version_id_then_falls_back_to_md5(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R5-4：案例归因优先按 research_prompt_version_id；id 失效时回退 md5+时点反解。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言 id 优先（md5 指向别的版本也不篡改）与 id 失效回退两形态
+    """
+    md5_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    md5_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    version_a = await deps.repo.research_prompt.save_version("版本A正文", md5_a, "human", "A")
+    version_b = await deps.repo.research_prompt.save_version("版本B正文", md5_b, "human", "B")
+    # id 优先：md5 指向 B 但 version_id 指向 A（构建时点精确归因覆盖 md5 反解）
+    by_id = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        narrative="id 优先归因。",
+        research_prompt_md5=md5_b,
+        research_prompt_version_id=version_a.id,
+    )
+    text = await registry.execute(
+        "get_research_review_case", {"report_id": by_id.id, "contract": "BTC_USDT"}
+    )
+    assert f"研报提示词版本：v{version_a.id}（md5 bbbbbbbb…）" in text
+    # id 失效（版本已被清理）→ 回退 md5 反解出 B
+    stale = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        narrative="id 失效回退。",
+        research_prompt_md5=md5_b,
+        research_prompt_version_id=99999,
+    )
+    text2 = await registry.execute(
+        "get_research_review_case", {"report_id": stale.id, "contract": "BTC_USDT"}
+    )
+    assert f"研报提示词版本：v{version_b.id}（md5 bbbbbbbb…）" in text2
+
+
 async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> None:
     """K 线来源未装配时案例客观结果降级为 unavailable 且明确标注原因。
 

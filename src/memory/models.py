@@ -201,7 +201,10 @@ class ResearchReport(BaseModel):
     schema_version 取值：2（历史代际）/ 3（当前代际，issue #113 起写入）；error 非空表示
     本次研报失败且没有逐标的结论；round_id 为产生本研报的审计轮 id；
     research_prompt_md5 为生成本研报所用的 research_prompt.md 正文 md5（与
-    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）。
+    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）；
+    research_prompt_version_id 为构建 prompt 时点解析到的版本 id（R5-4 起写入，
+    消除复盘侧按 md5+时点反解的歧义；NULL = 历史研报或构建时版本表无对应 applied
+    版本，不回填，复盘侧回退 md5 反解）。
     """
 
     id: int
@@ -215,6 +218,7 @@ class ResearchReport(BaseModel):
     round_id: str = ""
     created_at: float
     research_prompt_md5: str = ""
+    research_prompt_version_id: int | None = None
 
 
 class ResearchAssetView(BaseModel):

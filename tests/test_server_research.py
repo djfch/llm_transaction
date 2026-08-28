@@ -147,6 +147,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "error",
             "round_id",
             "research_prompt_md5",
+            "research_prompt_version_id",
             "created_at",
             "llm_credential_name",
             "llm_provider",
@@ -156,6 +157,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
         }
         assert item["round_id"] == "rs-round-1"
         assert item["research_prompt_md5"] == "0123456789abcdef0123456789abcdef"
+        assert item["research_prompt_version_id"] is None  # 未传版本 id 的研报为 null
         assert item["asset_views"][0]["direction"] == "偏空"
         assert "narrative" not in item["asset_views"][0]
         assert body["items"][0]["error"] == "LLM 超时"

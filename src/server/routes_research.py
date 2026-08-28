@@ -115,6 +115,8 @@ def _report_item(
         "error": report.error,
         "round_id": report.round_id,
         "research_prompt_md5": report.research_prompt_md5,
+        # R5-4 新增契约键：构建时点精确归因的提示词版本 id（历史研报为 null）
+        "research_prompt_version_id": report.research_prompt_version_id,
         "created_at": report.created_at,
         **_llm_identity_fields(audit),
         "asset_views": [_asset_summary(view) for view in views],

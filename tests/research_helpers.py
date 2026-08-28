@@ -31,6 +31,7 @@ async def save_report_fixture(
     error: str = "",
     round_id: str = "",
     research_prompt_md5: str = "",
+    research_prompt_version_id: int | None = None,
     market_context: dict[str, Any] | None = None,
 ) -> ResearchReport:
     """创建当前结构测试报告；失败报告不生成逐标的结论。
@@ -56,6 +57,7 @@ async def save_report_fixture(
         error: str，研报生成错误文本
         round_id: str，关联审计轮次编号
         research_prompt_md5: str，生成本研报所用的 research_prompt.md 正文 md5
+        research_prompt_version_id: int | None，构建 prompt 时点解析的版本 id（R5-4）
         market_context: dict[str, Any] | None，生成研报时的市场上下文快照
 
     返回：
@@ -76,6 +78,7 @@ async def save_report_fixture(
         raw_json=raw_json,
         round_id=round_id,
         research_prompt_md5=research_prompt_md5,
+        research_prompt_version_id=research_prompt_version_id,
         asset_views=[
             {
                 "contract": contract,

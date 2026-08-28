@@ -201,9 +201,12 @@ class ResearchAgent:
             )
             registry = ResearchToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
-            # 提示词正文 md5 与构建 prompt 同一时点取样（中间无 await，读同一缓存正文）：
-            # 在 persist 末尾才取样会因运行途中热替换记错版本（审查 P2-2）
+            # 提示词正文 md5 与版本 id 同为构建 prompt 时点取样归因（R5-4：版本 id 消除
+            # 复盘侧按 md5+时点反解的歧义）；在 persist 末尾才取样会因运行途中热替换
+            # 记错版本（审查 P2-2）
             prompt_body_md5 = self._prompts.body_md5()
+            prompt_version = await self._repo.research_prompt.latest_applied_by_md5(prompt_body_md5)
+            prompt_version_id = prompt_version.id if prompt_version is not None else None
             round_id = await self._audit.begin_round(
                 self._settings.mode,
                 "research",
@@ -235,8 +238,10 @@ class ResearchAgent:
                 payload=payload,
                 round_id=round_id,
                 deps=deps,
-                # 落库所用提示词正文 md5：构建 prompt 时点取样，供复盘按版本归因（issue #113）
+                # 落库所用提示词正文 md5 与版本 id：构建 prompt 时点取样，供复盘归因
+                # （issue #113；R5-4 起版本 id 为精确归因，md5 留作回退反解键）
                 research_prompt_md5=prompt_body_md5,
+                research_prompt_version_id=prompt_version_id,
             )
             report_id = report.id
             # 收尾（因果链回填 + end_round）可被打断：report_id 已置位，remaining_links
