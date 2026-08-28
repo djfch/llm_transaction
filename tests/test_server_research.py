@@ -129,6 +129,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
         confidence="中",
         narrative=_LONG_NARRATIVE,
         round_id="rs-round-1",
+        research_prompt_md5="0123456789abcdef0123456789abcdef",
     )
     r3 = await save_report_fixture(repo, report_type="us", error="LLM 超时")
     async with _client_of(_deps(repo, tmp_path)) as c:
@@ -145,6 +146,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "global_risks",
             "error",
             "round_id",
+            "research_prompt_md5",
             "created_at",
             "llm_credential_name",
             "llm_provider",
@@ -153,6 +155,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "asset_views",
         }
         assert item["round_id"] == "rs-round-1"
+        assert item["research_prompt_md5"] == "0123456789abcdef0123456789abcdef"
         assert item["asset_views"][0]["direction"] == "偏空"
         assert "narrative" not in item["asset_views"][0]
         assert body["items"][0]["error"] == "LLM 超时"

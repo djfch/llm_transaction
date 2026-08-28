@@ -95,7 +95,7 @@ def _asset_detail(view: ResearchAssetView) -> dict[str, Any]:
 def _report_item(
     report: ResearchReport, views: list[ResearchAssetView], audit: AuditRound | None = None
 ) -> dict[str, Any]:
-    """报告头只暴露当前协议字段（含模型身份四键）；逐标的列表使用摘要形状。
+    """报告头只暴露当前协议字段（含模型身份四键与研报提示词 md5 归因）；逐标的列表使用摘要形状。
 
     参数：
         report: ResearchReport，研报或复盘报告记录
@@ -114,6 +114,7 @@ def _report_item(
         "global_risks": _parse_json_field(report.global_risks_json),
         "error": report.error,
         "round_id": report.round_id,
+        "research_prompt_md5": report.research_prompt_md5,
         "created_at": report.created_at,
         **_llm_identity_fields(audit),
         "asset_views": [_asset_summary(view) for view in views],

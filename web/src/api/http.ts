@@ -466,6 +466,7 @@ interface RawResearchReport extends RawLLMIdentity {
   report_type: string
   error: string
   round_id: string
+  research_prompt_md5?: string
   created_at: number
 }
 
@@ -494,6 +495,7 @@ function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
     reportType: raw.report_type,
     error: raw.error,
     roundId: raw.round_id,
+    researchPromptMd5: raw.research_prompt_md5,
     time: new Date(raw.created_at * 1000).toISOString(),
     ...adaptLLMIdentity(raw),
   }

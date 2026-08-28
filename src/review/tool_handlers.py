@@ -57,9 +57,10 @@ class ReviewToolDeps:
     # 失败/取消置 discarded——写工具不再直接改文件
     strategy_draft_ids: list[int] = dataclass_field(default_factory=list)
     indicator_draft_ids: list[int] = dataclass_field(default_factory=list)
-    # 生效失败的草稿 id（磁盘满等持久性失败）：随 review_round 事件暴露给前端
-    # （issue #100：报告成功但文件未更新必须可观察）
-    apply_failed_ids: list[int] = dataclass_field(default_factory=list)
+    # 生效失败的草稿（磁盘满等持久性失败）：(通道键, 草稿版本 id)，通道键取值
+    # strategy/indicator_config/research_prompt；随 review_round 事件暴露给前端
+    # （issue #100：报告成功但文件未更新必须可观察；issue #113 R9：带通道以指明文件）
+    apply_failed_ids: list[tuple[str, int]] = dataclass_field(default_factory=list)
     # 研报复盘（issue #113）：已读案例缓存（(report_id, contract) → outcome/evidence_count），
     # submit_research_review 的前置校验与 outcome 附加来源
     loaded_research_cases: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)

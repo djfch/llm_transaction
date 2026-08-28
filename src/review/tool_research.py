@@ -1,6 +1,6 @@
 """复盘侧的研报复盘工具（issue #113）：3 只读 + 1 写。
 
-- list_research_review_candidates：已到期未复盘的逐标的结论候选；
+- list_research_review_candidates：已到期未复盘且客观行情可批改的逐标的结论候选；
 - get_research_review_case：单个案例的完整材料（原文+市场快照+研报轮上下文+
   policy_adjustments 归一化记录+代码计算的客观行情），读后登记到
   deps.loaded_research_cases（submit 的前置）；
@@ -16,7 +16,7 @@ import json
 import time
 from typing import Any
 
-from src.memory.models import ResearchReview
+from src.memory.models import ResearchReview, ResearchReviewCandidate
 from src.research.payload_v2 import HORIZON_SECONDS
 from src.review.research_outcome import (
     PARTIAL_MIN_COVERAGE_PCT,
@@ -218,18 +218,20 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
     )
 
 
-def _format_review_row(row: ResearchReview) -> str:
+def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
     """把一条复盘记录渲染成多行完整文本（供历史查询逐条展示）。
 
     参数：
         row: ResearchReview，复盘记录
+        prompt_md5: str，被复盘研报所用研报提示词正文 md5（无记录时空串，不展示）
 
     返回：
-        str：含全部评价维度（枚举+理由）与客观结果摘要的多行文本
+        str：含全部评价维度（枚举+理由）、提示词归因与客观结果摘要的多行文本
     """
     lines = [
         f"复盘#{row.id} | 研报#{row.report_id}/{row.contract} | 复盘报告#{row.review_report_id}"
-        f" | 时间={_fmt_time(row.created_at)}",
+        f" | 时间={_fmt_time(row.created_at)}"
+        + (f" | 研报提示词 md5={prompt_md5[:8]}…" if prompt_md5 else ""),
         f"  方向关系：{row.direction_relation} | 理由：{row.direction_reason}",
         f"  推理质量：{row.reasoning_quality} | 复核：{row.reasoning_review}",
         f"  置信度合规：{row.confidence_assessment} | 理由：{row.confidence_reason}",
@@ -257,26 +259,96 @@ def _format_review_row(row: ResearchReview) -> str:
     return "\n".join(lines)
 
 
-async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> str:
-    """列出已到期且未被正式复盘的逐标的结论候选（按到期时刻升序）。
+def _format_candidate_line(c: ResearchReviewCandidate) -> str:
+    """把一条复盘候选渲染成一行摘要文本。
 
     参数：
-        deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_review 取数）
+        c: ResearchReviewCandidate，候选行
+
+    返回：
+        str：含 report_id/contract/方向/置信/horizon/研报时间/到期时刻/类型的一行文本
+    """
+    return (
+        f"- 研报#{c.report_id}/{c.contract} | 方向={c.direction} | 置信={c.confidence}"
+        f" | horizon={c.horizon} | 研报时间={_fmt_time(c.report_created_at)}"
+        f" | 到期={_fmt_time(c.due_at)} | 类型={c.report_type}"
+    )
+
+
+async def _candidate_usable(deps: ReviewToolDeps, c: ResearchReviewCandidate) -> bool:
+    """快速计算候选的客观行情结果，判定其数据是否足以支撑批改。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 candle_source 拉取窗口 K 线，
+            调用方须先确认已装配非 None）
+        c: ResearchReviewCandidate，候选行
+
+    返回：
+        bool：data_status 非 pending/unavailable 时 True（complete/partial 均保留，
+        partial 是否够批改由提交侧覆盖率门槛把关）
+    """
+    outcome = await compute_outcome(c.contract, c.report_created_at, c.horizon, deps.candle_source)
+    return outcome.get("data_status") not in ("pending", "unavailable")
+
+
+async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> str:
+    """列出已到期、未被正式复盘且客观行情可批改的逐标的结论候选（按到期时刻升序）。
+
+    K线来源装配时对每候选快速计算客观结果，跳过 data_status 为
+    pending/unavailable 的不可用候选（统计跳过数），经 repo offset 分页
+    扫描凑满 limit 或扫完为止；来源未装配时不做可用性预检、全量列出并附
+    说明（issue #113 R10）。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 repo.research_review 分页取数、
+            candle_source 做可用性预检）
         args: dict，工具参数：limit（可选，默认 20，限制在 1~100）
 
     返回：
-        str：候选清单文本（含 report_id/contract/方向/horizon/到期时刻）；无候选时返回提示
+        str：候选清单文本（含 report_id/contract/方向/horizon/到期时刻与跳过计数）；
+        无候选或无可用候选时返回提示
     """
     limit = _clamp(_opt_int(args, "limit", 20), 1, 100)
-    candidates = await deps.repo.research_review.list_review_candidates(time.time(), limit)
-    if not candidates:
+    now = time.time()
+    if deps.candle_source is None:
+        candidates = await deps.repo.research_review.list_review_candidates(now, limit)
+        if not candidates:
+            return "当前无已到期的研报复盘候选"
+        lines = [
+            f"已到期待复盘候选共 {len(candidates)} 条（按到期时刻升序；"
+            "K线来源未装配，未做客观数据可用性预检）："
+        ]
+        lines.extend(_format_candidate_line(c) for c in candidates)
+        return "\n".join(lines)
+    usable: list[ResearchReviewCandidate] = []
+    skipped = 0
+    offset = 0
+    while len(usable) < limit:
+        batch = await deps.repo.research_review.list_review_candidates(now, limit, offset)
+        if not batch:
+            break
+        offset += len(batch)
+        for c in batch:
+            if len(usable) >= limit:
+                break
+            if await _candidate_usable(deps, c):
+                usable.append(c)
+            else:
+                skipped += 1
+        if len(batch) < limit:
+            break
+    if not usable:
+        if skipped:
+            return (
+                f"已到期待复盘候选共 {skipped} 条，但客观行情数据均不可用"
+                "（pending/unavailable），留待后续轮次"
+            )
         return "当前无已到期的研报复盘候选"
-    lines = [f"已到期待复盘候选共 {len(candidates)} 条（按到期时刻升序）："]
-    for c in candidates:
+    lines = [f"已到期待复盘候选共 {len(usable)} 条（按到期时刻升序）："]
+    lines.extend(_format_candidate_line(c) for c in usable)
+    if skipped:
         lines.append(
-            f"- 研报#{c.report_id}/{c.contract} | 方向={c.direction} | 置信={c.confidence}"
-            f" | horizon={c.horizon} | 研报时间={_fmt_time(c.report_created_at)}"
-            f" | 到期={_fmt_time(c.due_at)} | 类型={c.report_type}"
+            f"（另跳过 {skipped} 条客观行情数据不可用（pending/unavailable）的候选，留待后续轮次）"
         )
     return "\n".join(lines)
 
@@ -315,8 +387,21 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     }
     snapshot_text = await _case_context_text(deps, report)
     causal_links = await deps.repo.research.list_causal_links_by_report(report_id)
+    prompt_version = (
+        await deps.repo.research_prompt.get_version_by_md5(report.research_prompt_md5)
+        if report.research_prompt_md5
+        else None
+    )
     lines = _format_case_lines(
-        report, view, outcome, evidence, risks, policy_adjustments, snapshot_text, causal_links
+        report,
+        view,
+        outcome,
+        evidence,
+        risks,
+        policy_adjustments,
+        snapshot_text,
+        causal_links,
+        prompt_version,
     )
     return "\n".join(lines)
 
@@ -390,11 +475,13 @@ def _format_case_lines(
     policy_adjustments: list,
     snapshot_text: str,
     causal_links: list,
+    prompt_version: Any,
 ) -> list[str]:
     """把案例材料拼装成展示文本行（纯函数，不读写依赖）。
 
     参数：
-        report: 研报报告行
+        report: 研报报告行（取报告级 summary/cross_market_view/global_risks_json
+            与 research_prompt_md5 归因字段）
         view: 逐标的结论行
         outcome: dict[str, Any]，客观行情结果
         evidence: list，依据列表
@@ -402,15 +489,43 @@ def _format_case_lines(
         policy_adjustments: list，代码归一化调仓记录
         snapshot_text: str，研报轮上下文快照文本
         causal_links: list，当时随研报提交的因果链（CausalLink 行，只读展示）
+        prompt_version: 研报提示词版本行（ResearchPromptVersion）或 None；
+            由调用方按 report.research_prompt_md5 反解（issue #113 R6）
 
     返回：
         list[str]：案例材料文本行
     """
+    try:
+        global_risks = json.loads(report.global_risks_json)
+    except (TypeError, ValueError):
+        global_risks = []
+    md5 = report.research_prompt_md5
+    if not md5:
+        prompt_text = "（无记录）"
+    elif prompt_version is not None:
+        prompt_text = f"v{prompt_version.id}（md5 {md5[:8]}…）"
+    else:
+        prompt_text = f"md5 {md5[:8]}…（未归档版本）"
     lines = [
         f"研报#{report.id}/{view.contract} | round={report.round_id or '—'}"
         f" | 方向={view.direction} | 置信={view.confidence} | horizon={view.horizon}"
         f" | 市场状态={view.market_regime} | 技术确认={view.technical_confirmation}"
         f" | 依据类型={view.basis_type} | 研报时间={_fmt_time(report.created_at)}",
+        "报告摘要："
+        + (_truncate(report.summary, _CASE_SNAPSHOT_LIMIT) if report.summary else "（无）"),
+        "跨市场观察："
+        + (
+            _truncate(report.cross_market_view, _CASE_SNAPSHOT_LIMIT)
+            if report.cross_market_view
+            else "（无）"
+        ),
+        "全局风险："
+        + (
+            _truncate("；".join(str(r) for r in global_risks), _CASE_SNAPSHOT_LIMIT)
+            if global_risks
+            else "（无）"
+        ),
+        f"研报提示词版本：{prompt_text}",
         f"结论正文：{view.narrative or '（空）'}",
         f"依据（共 {len(evidence)} 条，提交复盘时须逐条评价，index 从 0 开始）：",
     ]
@@ -476,8 +591,9 @@ async def list_research_reviews(deps: ReviewToolDeps, args: dict) -> str:
     )
     if not rows:
         return "无符合条件的研报复盘记录"
+    md5_map = await deps.repo.research_review.get_reports_prompt_md5([r.report_id for r in rows])
     return f"共 {len(rows)} 条研报复盘记录（按时间正序）：\n" + "\n".join(
-        _format_review_row(r) for r in rows
+        _format_review_row(r, md5_map.get(r.report_id, "")) for r in rows
     )
 
 

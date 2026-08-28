@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.memory.db import Database
@@ -239,3 +241,44 @@ async def test_apply_version_yields_to_newer_applied(env) -> None:
     assert env.store.current() == human.content  # 文件保留人工内容
     assert (await env.store.get_version(draft.id)).status == "discarded"
     assert (await env.store.get_version(human.id)).status == "applied"
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(env, monkeypatch) -> None:
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容；rollback 收进
+    生效锁后两者串行，文件与库内最新 applied 版本必然一致（issue #113 R7）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    v1 = await env.store.seed_if_empty()
+    assert v1 is not None
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10, "复盘修订", "review_agent"
+    )
+    original_save = env.repo.research_prompt.save_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_version 的位置参数
+            **kwargs: 原 save_version 的关键字参数
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(env.repo.research_prompt, "save_version", slow_save)
+    await asyncio.gather(env.store.rollback(v1.id), env.store.apply_version(draft.id))
+    latest = await env.repo.research_prompt.latest_applied_version()
+    assert latest is not None
+    assert env.store.current() == latest.content

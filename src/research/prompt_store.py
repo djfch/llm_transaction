@@ -287,6 +287,9 @@ class ResearchPromptStore:
 
         只允许回滚到 status 为 applied 的版本：草稿/已废弃版本从未生效过，
         其内容未经过生效路径（apply_version）的完整检验，不允许直接提升为当前内容。
+        全程在生效锁内（与 apply_version/revise_applied 互斥）：读目标→写文件→
+        记新版本之间不得被并发生效插队，否则文件与库内最新 applied 版本会错位
+        （issue #113 R7）。
 
         参数：
             version_id: int，目标历史版本标识
@@ -297,20 +300,23 @@ class ResearchPromptStore:
         异常：
             ResearchPromptValidationError，目标版本不存在或状态非 applied（不可回滚）时抛出
         """
-        version = await self._repo.research_prompt.get_version(version_id)
-        if version is None:
-            raise ResearchPromptValidationError([f"研报提示词版本 v{version_id} 不存在，无法回滚"])
-        if version.status != "applied":
-            raise ResearchPromptValidationError(
-                [f"研报提示词版本 v{version_id} 状态为 {version.status}，只能回滚到已生效版本"]
+        async with self._apply_lock:
+            version = await self._repo.research_prompt.get_version(version_id)
+            if version is None:
+                raise ResearchPromptValidationError(
+                    [f"研报提示词版本 v{version_id} 不存在，无法回滚"]
+                )
+            if version.status != "applied":
+                raise ResearchPromptValidationError(
+                    [f"研报提示词版本 v{version_id} 状态为 {version.status}，只能回滚到已生效版本"]
+                )
+            content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
+            self._atomic_write(content)
+            new_version = await self._repo.research_prompt.save_version(
+                content, content_md5(content), "rollback", f"回滚到 v{version_id}"
             )
-        content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
-        self._atomic_write(content)
-        new_version = await self._repo.research_prompt.save_version(
-            content, content_md5(content), "rollback", f"回滚到 v{version_id}"
-        )
-        self._notify_change()
-        return new_version
+            self._notify_change()
+            return new_version
 
     async def list_versions(self) -> list[ResearchPromptVersion]:
         """列出全部研报提示词历史版本，最新版本排在最前。

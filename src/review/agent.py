@@ -43,7 +43,12 @@ from src.market.indicator_service import IndicatorService
 from src.memory.models import ReviewReport
 from src.memory.repo import Repo
 from src.review.bundle import save_review_bundle
-from src.review.drafts import apply_drafts, discard_drafts
+from src.review.drafts import (
+    apply_drafts,
+    apply_failed_files,
+    discard_drafts,
+    format_apply_failures,
+)
 from src.review.indicator_config import IndicatorConfigStore
 from src.review.prompts import ReviewPromptLoader, render_tool_docs
 from src.review.stats import compute_review_stats, format_stats_text
@@ -342,16 +347,14 @@ class ReviewAgent:
             logger.exception("复盘成功落库后收尾异常，按成功语义补全（report_id=%s）", report_id)
             await self._complete_interrupted(deps, report_id, round_id, raw_parts, audit_closed)
             return _success_result(report, round_id)
-        await self._emit_event(
-            {
-                "type": "review_round",
-                "data": {
-                    "round_id": round_id,
-                    "ok": True,
-                    "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
-                },
-            }
-        )
+        event_data = {
+            "round_id": round_id,
+            "ok": True,
+            "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
+        }
+        if deps.apply_failed_ids:  # issue #113 R9：按通道指明未生效文件
+            event_data["apply_failed_files"] = apply_failed_files(deps.apply_failed_ids)
+        await self._emit_event({"type": "review_round", "data": event_data})
         await self._notify(_success_alert(report_md, deps.created_version_id))
         logger.info("复盘完成 report_id=%s action=%s", report.id, report.strategy_action)
         return _success_result(report, round_id)
@@ -399,7 +402,8 @@ class ReviewAgent:
         await self._apply_drafts(deps)
         if deps.apply_failed_ids:
             raise RuntimeError(
-                f"草稿生效失败（draft_ids={deps.apply_failed_ids}），文件未更新，请人工核对"
+                f"草稿生效失败（{format_apply_failures(deps.apply_failed_ids)}），"
+                "文件未更新，请人工核对"
             )
         if deps.created_version_id is not None:
             await self._repo.review.attach_report_to_version(deps.created_version_id, report_id)
@@ -477,22 +481,20 @@ class ReviewAgent:
                 await self._audit.end_round(round_id, "\n".join(raw_parts))
             except Exception:
                 logger.exception("复盘收尾补闭合审计轮失败（成功报告已落库，不反转）")
-        await self._emit_event(
-            {
-                "type": "review_round",
-                "data": {
-                    "round_id": round_id,
-                    "ok": True,
-                    "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
-                },
-            }
-        )
+        event_data = {
+            "round_id": round_id,
+            "ok": True,
+            "applied": not deps.apply_failed_ids,  # issue #100：生效结果可观察
+        }
+        if deps.apply_failed_ids:  # issue #113 R9：按通道指明未生效文件
+            event_data["apply_failed_files"] = apply_failed_files(deps.apply_failed_ids)
+        await self._emit_event({"type": "review_round", "data": event_data})
         if deps.apply_failed_ids:
             # 生效失败必须主动告警（issue #102）：报告成功但文件未更新，
-            # 用户侧仅靠 WS 警示条可能错过
+            # 用户侧仅靠 WS 警示条可能错过；按通道指明文件名（issue #113 R9）
             await self._notify(
-                "【复盘告警】报告已生成但策略修订未生效"
-                f"（draft_ids={deps.apply_failed_ids}），请人工核对 system_prompt.md"
+                "【复盘告警】报告已生成但草稿修订未生效"
+                f"（{format_apply_failures(deps.apply_failed_ids)}），请人工核对"
             )
 
     async def _recover_round_and_committed_id(

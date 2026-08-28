@@ -6,6 +6,7 @@ revise 成功（原子写文件/版本落库/md5 与文件一致/on_change 触�
 有文件记 v1）、load_indicator_config 文件缺失返回默认基线、子仓库直连接入。
 """
 
+import asyncio
 import hashlib
 
 import pytest
@@ -381,3 +382,46 @@ async def test_apply_version_yields_to_newer_applied(store, repo, config_path):
     assert applied_older is None  # 已被更高 applied 版本取代
     assert _file_shortlist(config_path) == ["adx14"]  # 文件保留新版本内容
     assert (await store.get_version(older.id)).status == "discarded"
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(
+    store, repo, config_path, monkeypatch
+):
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容；rollback 收进
+    生效锁后两者串行，文件与库内最新 applied 版本必然一致（issue #113 R7）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    await store.seed_if_empty()
+    v1 = (await store.list_versions())[0]
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进")
+    original_save = repo.indicator_config.save_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_version 的位置参数
+            **kwargs: 原 save_version 的关键字参数
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo.indicator_config, "save_version", slow_save)
+    await asyncio.gather(store.rollback(v1.id), store.apply_version(draft.id))
+    latest = await repo.indicator_config.latest_applied_version()
+    assert latest is not None
+    assert config_path.read_text(encoding="utf-8") == latest.content

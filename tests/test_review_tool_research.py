@@ -94,6 +94,52 @@ class _WindowCandles:
         ]
 
 
+class _PerContractCandles:
+    """按合约区分可用性的 K 线桩：empty_contracts 内合约返回空，其余返回完整窗口（R10 测试用）。"""
+
+    def __init__(self, empty_contracts: set[str]) -> None:
+        """保存返回空 K 线的合约集合。
+
+        参数：
+            empty_contracts: set[str]，模拟行情不可用的合约名集合
+        """
+        self._empty = empty_contracts
+
+    async def get_candlesticks(
+        self,
+        contract: str,
+        interval: str = "1m",
+        limit: int | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> list[Candle]:
+        """空集合内合约或缺窗口参数返回空列表，否则返回窗口内完整 15m K 线。
+
+        参数：
+            contract: str，合约名
+            interval: str，K 线周期
+            limit: int | None，最近 N 根
+            from_ts: int | None，窗口起始时间戳
+            to_ts: int | None，窗口结束时间戳
+
+        返回：
+            list[Candle]：窗口内每 900 秒一根的上行 K 线，或空列表
+        """
+        if from_ts is None or to_ts is None or contract in self._empty:
+            return []
+        return [
+            Candle(
+                t=t,
+                o=Decimal("100"),
+                h=Decimal("110"),
+                l=Decimal("90"),
+                c=Decimal("105"),
+                v=Decimal("1"),
+            )
+            for t in range(from_ts, to_ts, 900)
+        ]
+
+
 @pytest.fixture
 async def deps(tmp_path) -> ReviewToolDeps:
     """组装复盘工具依赖（临时数据库 + 策略 store + 空 K 线桩）。
@@ -220,9 +266,52 @@ async def test_candidates_empty_then_listed(
     assert "无已到期的研报复盘候选" in empty
 
     report_id = await _seed_reviewable_report(deps)
+    # R10 后候选须经客观数据可用性预检：空 K 线桩会让候选被跳过，换成完整窗口桩
+    deps.candle_source = _WindowCandles()
     listed = await registry.execute("list_research_review_candidates", {})
     assert f"研报#{report_id}/BTC_USDT" in listed
     assert "方向=偏多" in listed and "horizon=当日" in listed
+
+
+async def test_candidates_skip_unavailable_and_page(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R10：数据不可用候选被跳过并计数；limit=1 时分页扫描取到后续可用候选。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言返回含可用候选行与跳过计数、不含不可用候选行
+    """
+    deps.candle_source = _PerContractCandles({"BTC_USDT"})
+    # BTC_USDT 到期更早（25h 前）排序靠前但 K 线为空 → unavailable 被跳过；
+    # ETH_USDT 到期稍晚（24.5h 前）K 线完整 → complete 被列出
+    await _seed_reviewable_report(deps)
+    eth = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        contract="ETH_USDT",
+        direction="偏空",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向下。",
+        round_id="round-research-2",
+    )
+    ts = time.time() - 24.5 * 3600
+    await deps.repo._conn.execute(
+        "UPDATE research_reports SET created_at=? WHERE id=?", (ts, eth.id)
+    )
+    await deps.repo._conn.execute(
+        "UPDATE research_asset_views SET created_at=? WHERE report_id=?", (ts, eth.id)
+    )
+    await deps.repo._conn.commit()
+
+    text = await registry.execute("list_research_review_candidates", {"limit": 1})
+    assert f"研报#{eth.id}/ETH_USDT" in text
+    assert "BTC_USDT" not in text
+    assert "另跳过 1 条" in text
 
 
 async def test_get_case_full_material_and_registration(
@@ -304,6 +393,72 @@ async def test_get_case_includes_causal_links_and_window(
         "get_research_review_case", {"report_id": other.id, "contract": "BTC_USDT"}
     )
     assert "（当时未提交因果链）" in text2
+
+
+async def test_get_case_shows_report_level_and_prompt_version(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R6：案例材料含报告级摘要/跨市场观察/全局风险与研报提示词版本归因。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言报告级三行与归因三形态（命中版本 v{id}/未归档标注/无记录占位）
+    """
+    md5 = "0123456789abcdef0123456789abcdef"
+    version = await deps.repo.research_prompt.save_version(
+        "研报提示词正文", md5, "human", "初始版本"
+    )
+    report = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        summary="宏观催化确认",
+        cross_market_view="BTC 强于 ETH",
+        global_risks_json=json.dumps(["流动性偏薄"], ensure_ascii=False),
+        research_prompt_md5=md5,
+    )
+    text = await registry.execute(
+        "get_research_review_case", {"report_id": report.id, "contract": "BTC_USDT"}
+    )
+    assert "报告摘要：宏观催化确认" in text
+    assert "跨市场观察：BTC 强于 ETH" in text
+    assert "全局风险：流动性偏薄" in text
+    assert f"研报提示词版本：v{version.id}（md5 01234567…）" in text
+
+    # md5 有记录但未归档为版本（如人工改文件未入库）→ 标注「未归档版本」
+    other = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏空",
+        confidence="低",
+        horizon="当日",
+        narrative="结构转弱。",
+        research_prompt_md5="ffffffffffffffffffffffffffffffff",
+    )
+    text2 = await registry.execute(
+        "get_research_review_case", {"report_id": other.id, "contract": "BTC_USDT"}
+    )
+    assert "研报提示词版本：md5 ffffffff…（未归档版本）" in text2
+
+    # 旧数据无 md5 → 占位「无记录」
+    legacy = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="中性",
+        confidence="低",
+        horizon="当日",
+        narrative="无归因。",
+    )
+    text3 = await registry.execute(
+        "get_research_review_case", {"report_id": legacy.id, "contract": "BTC_USDT"}
+    )
+    assert "研报提示词版本：（无记录）" in text3
 
 
 async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> None:
@@ -753,6 +908,43 @@ async def test_list_research_reviews_returns_full_records(
 
     none = await registry.execute("list_research_reviews", {"contract": "ETH_USDT"})
     assert "无符合条件" in none
+
+
+async def test_list_research_reviews_shows_prompt_md5(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R6：历史复盘行附被复盘研报的提示词 md5 前 8 位归因；无 md5 的研报不展示。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言有 md5 行带归因文本、无 md5 行不带
+    """
+    md5 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    report = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏多",
+        confidence="中",
+        horizon="当日",
+        narrative="结构向上。",
+        research_prompt_md5=md5,
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=9,
+        report_id=report.id,
+        contract="BTC_USDT",
+        direction_relation="realized",
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=9, report_id=424242, contract="ETH_USDT", direction_relation="diverged"
+    )
+    text = await registry.execute("list_research_reviews", {})
+    assert "研报提示词 md5=aaaaaaaa…" in text
+    eth_row = next(line for line in text.splitlines() if "ETH_USDT" in line)
+    assert "研报提示词" not in eth_row
 
 
 def test_review_registry_has_no_causal_link_write(registry) -> None:

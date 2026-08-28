@@ -236,6 +236,11 @@ function ReportItem({
           {error && <p className="py-3 text-xs text-rose-400">加载失败：{error}</p>}
           {detail && (
             <>
+              {detail.researchPromptMd5 && (
+                <p className="mb-2 text-[10px] text-zinc-600">
+                  研报提示词：md5 {detail.researchPromptMd5.slice(0, 8)}…
+                </p>
+              )}
               <ResearchAssetDetails
                 summary={detail.summary}
                 crossMarketView={detail.crossMarketView}

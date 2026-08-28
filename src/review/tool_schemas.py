@@ -241,7 +241,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "list_research_review_candidates": {
         "description": (
-            "列出已到期且尚未复盘的研报逐标的结论候选（按到期时刻升序）："
+            "列出已到期、尚未复盘且客观行情数据可批改的研报逐标的结论候选"
+            "（按到期时刻升序，数据不可用者自动跳过并计数）："
             "report_id、contract、方向、置信度、horizon、研报时间与到期时刻"
         ),
         "parameters": {

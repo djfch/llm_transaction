@@ -34,6 +34,7 @@ const RAW_REPORT = {
   asset_views: [ASSET],
   error: '',
   round_id: 'rs-round-7',
+  research_prompt_md5: '0123456789abcdef0123456789abcdef',
   created_at: 1784595600,
 }
 
@@ -64,6 +65,7 @@ describe('研报端点适配', () => {
     expect(report.schemaVersion).toBe(3)
     expect(report.summary).toBe('BTC 结构获得宏观催化确认')
     expect(report.globalRisks).toEqual(['亚盘流动性偏薄'])
+    expect(report.researchPromptMd5).toBe('0123456789abcdef0123456789abcdef')
     expect(report.assetViews[0]).toMatchObject({
       contract: 'BTC_USDT',
       direction: '偏多',

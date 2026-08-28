@@ -59,7 +59,7 @@ WHERE c.due_at <= ?
       WHERE rr.report_id = c.report_id AND rr.contract = c.contract
   )
 ORDER BY c.due_at, c.report_id, c.contract
-LIMIT ?
+LIMIT ? OFFSET ?
 """
 
 _REVIEW_COLUMNS = (
@@ -154,19 +154,20 @@ class ResearchReviewRepo:
         return self._db.conn
 
     async def list_review_candidates(
-        self, as_of_ts: float, limit: int = 50
+        self, as_of_ts: float, limit: int = 50, offset: int = 0
     ) -> list[ResearchReviewCandidate]:
         """已到期且未被正式复盘的逐标的结论，按到期时刻升序（最久未复盘优先）。
 
         参数：
             as_of_ts: float，到期判定基准时间戳（due_at ≤ as_of_ts 视为已到期）
             limit: int，最多返回的候选数量
+            offset: int，跳过的候选条数（调用方分页扫描用，issue #113 R10）
 
         返回：
             list[ResearchReviewCandidate]：候选列表；失败研报无逐标的结论，
             被联表自然排除；非法 horizon 的存量行被 IN 过滤排除
         """
-        cur = await self._conn.execute(_CANDIDATES_SQL, (as_of_ts, limit))
+        cur = await self._conn.execute(_CANDIDATES_SQL, (as_of_ts, limit, offset))
         return [ResearchReviewCandidate(**dict(r)) for r in await cur.fetchall()]
 
     async def get_case(
@@ -317,6 +318,29 @@ class ResearchReviewRepo:
             (report_id,),
         )
         return [ResearchReview(**dict(r)) for r in await cur.fetchall()]
+
+    async def get_reports_prompt_md5(self, report_ids: list[int]) -> dict[int, str]:
+        """批量取研报的 research_prompt_md5（复盘历史行归因展示用，issue #113 R6）。
+
+        参数：
+            report_ids: list[int]，研报编号列表（去重后联查）
+
+        返回：
+            dict[int, str]：研报 id → research_prompt_md5；id 不存在或字段为空时不出现
+        """
+        ids = sorted(set(report_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        cur = await self._conn.execute(
+            f"SELECT id, research_prompt_md5 FROM research_reports WHERE id IN ({placeholders})",
+            ids,
+        )
+        return {
+            r["id"]: r["research_prompt_md5"]
+            for r in await cur.fetchall()
+            if r["research_prompt_md5"]
+        }
 
     async def has_review(self, report_id: int, contract: str) -> bool:
         """目标逐标的结论是否已被任何正式复盘批改过。

@@ -5,6 +5,7 @@
 created_by='rollback'）、版本不存在报错。
 """
 
+import asyncio
 import hashlib
 
 import pytest
@@ -426,3 +427,93 @@ async def test_apply_drafts_skips_superseded_without_failure(store, repo, prompt
     assert deps.apply_failed_ids == []  # 被取代不算失败
     assert (await store.get_version(draft.id)).status == "discarded"
     assert store.current().startswith("人工策略书")
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(
+    store, repo, prompt_path, monkeypatch
+):
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容——文件与库内最新
+    applied 错位；rollback 收进生效锁后两者串行，二者必然一致（issue #113 R7）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    await store.seed_if_empty()
+    v1 = (await store.list_versions())[0]
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    original_save = repo.review.save_strategy_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_strategy_version 的位置参数
+            **kwargs: 原 save_strategy_version 的关键字参数
+
+        返回：
+            原 save_strategy_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo.review, "save_strategy_version", slow_save)
+    await asyncio.gather(store.rollback(v1.id), store.apply_version(draft.id))
+    latest = await repo.review.latest_applied_strategy_version()
+    assert latest is not None
+    assert store.current() == latest.content
+
+
+async def test_apply_drafts_failure_records_channel_and_formats(store, repo, monkeypatch):
+    """apply 抛异常时按 (通道键, 草稿 id) 记入失败列表，格式化助手指明文件名（R9）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，临时数据库仓储，本用例通过 store 间接使用
+        monkeypatch: MonkeyPatch，用于让 apply_version 抛持久性异常
+
+    返回：
+        None，断言失败条目带 strategy 通道、文件未被改动、文件名助手输出正确
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts, apply_failed_files, format_apply_failures
+
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+
+    async def _boom(version_id):
+        """模拟磁盘满等持久性失败：任何生效调用直接抛错。
+
+        参数：
+            version_id: int，待生效的版本编号（本桩不使用）
+
+        返回：
+            无正常返回，恒抛 RuntimeError
+
+        异常：
+            RuntimeError：模拟磁盘满等持久性失败
+        """
+        raise RuntimeError("磁盘已满")
+
+    monkeypatch.setattr(store, "apply_version", _boom)
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)
+    assert deps.apply_failed_ids == [("strategy", draft.id)]
+    assert apply_failed_files(deps.apply_failed_ids) == ["system_prompt.md"]
+    assert format_apply_failures(deps.apply_failed_ids) == f"system_prompt.md 草稿 v{draft.id}"
+    assert store.current().startswith("初始策略书")  # 生效失败，文件未被改动

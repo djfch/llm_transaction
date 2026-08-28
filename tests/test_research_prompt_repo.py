@@ -110,3 +110,19 @@ async def test_attach_report_to_version(repo: Repo) -> None:
     await repo.research_prompt.attach_report_to_version(v.id, 42)
     got = await repo.research_prompt.get_version(v.id)
     assert got is not None and got.review_report_id == 42
+
+
+async def test_get_version_by_md5(repo: Repo) -> None:
+    """按 md5 反解版本：命中同 md5 最新一条，未命中返回 None（issue #113 R6）。
+
+    参数：
+        repo: Repo，临时数据库仓储
+
+    返回：
+        None，断言命中最新版本与未命中降级
+    """
+    await repo.research_prompt.save_version("正文旧", "md5-x", "human", "初始版本")
+    v2 = await repo.research_prompt.save_version("正文新", "md5-x", "review_agent", "复盘修订")
+    got = await repo.research_prompt.get_version_by_md5("md5-x")
+    assert got is not None and got.id == v2.id and got.content == "正文新"
+    assert await repo.research_prompt.get_version_by_md5("md5-不存在") is None

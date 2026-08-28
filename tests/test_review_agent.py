@@ -1346,13 +1346,14 @@ async def test_failed_round_discards_draft(env):
 
 
 async def test_apply_failure_alerts_and_marks_not_applied(env):
-    """草稿生效失败：review_round 事件 applied=false 且发 TG 告警（issue #102）。
+    """草稿生效失败：review_round 事件 applied=false 且发 TG 告警（issue #102/#113 R9）。
 
     参数：
         env: SimpleNamespace，包含测试依赖的环境对象
 
     返回：
-        None，断言 apply 抛错时事件带 applied=False、告警含「复盘告警」且报告仍成功
+        None，断言 apply 抛错时事件带 applied=False 与按通道指明的文件名、
+        告警含「复盘告警」并指明文件、报告仍成功
     """
     await _seed_trades(env.repo)
     new_prompt = "生效失败策略书：" + "顺势加仓，严格止损。" * 10
@@ -1383,7 +1384,9 @@ async def test_apply_failure_alerts_and_marks_not_applied(env):
     assert result["ok"] is True  # 报告按成功语义落库
     final_event = env.events[-1]["data"]
     assert final_event["applied"] is False  # 生效失败随事件暴露
+    assert final_event["apply_failed_files"] == ["system_prompt.md"]  # 按通道指明文件（R9）
     assert any("复盘告警" in a and "未生效" in a for a in env.alerts)  # TG 告警已发
+    assert any("system_prompt.md 草稿 v" in a for a in env.alerts)  # 告警指明文件名（R9）
 
 
 async def test_run_research_review_end_to_end(env):

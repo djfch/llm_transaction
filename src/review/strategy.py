@@ -275,6 +275,10 @@ class StrategyStore:
     async def rollback(self, version_id: int) -> StrategyVersion:
         """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。
 
+        全程在生效锁内（与 apply_version/revise_applied 互斥）：读目标→写文件→
+        记新版本之间不得被并发生效插队，否则文件与库内最新 applied 版本会错位
+        （issue #113 R7）。
+
         参数：
             version_id: int，目标历史版本标识
         返回：
@@ -282,16 +286,17 @@ class StrategyStore:
         异常：
             StrategyValidationError，目标策略版本不存在时抛出
         """
-        version = await self._repo.review.get_strategy_version(version_id)
-        if version is None:
-            raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
-        content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
-        self._atomic_write(content)
-        new_version = await self._repo.review.save_strategy_version(
-            content, content_md5(content), "rollback", f"回滚到 v{version_id}"
-        )
-        self._notify_change()
-        return new_version
+        async with self._apply_lock:
+            version = await self._repo.review.get_strategy_version(version_id)
+            if version is None:
+                raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
+            content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
+            self._atomic_write(content)
+            new_version = await self._repo.review.save_strategy_version(
+                content, content_md5(content), "rollback", f"回滚到 v{version_id}"
+            )
+            self._notify_change()
+            return new_version
 
     async def list_versions(self) -> list[StrategyVersion]:
         """列出全部策略书历史版本，最新版本排在最前。

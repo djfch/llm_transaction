@@ -255,6 +255,9 @@ class IndicatorConfigStore:
     async def rollback(self, version_id: int) -> IndicatorConfigVersion:
         """把历史指标短名单内容写回运行时文件并创建一条新的回滚版本。
 
+        全程在生效锁内（与 apply_version 互斥）：读目标→写文件→记新版本之间
+        不得被并发生效插队，否则文件与库内最新 applied 版本会错位（issue #113 R7）。
+
         参数：
             version_id: int，作为回滚来源的历史版本编号
 
@@ -264,16 +267,19 @@ class IndicatorConfigStore:
         异常：
             IndicatorConfigValidationError: 指定历史版本不存在时抛出
         """
-        version = await self._versions.get_version(version_id)
-        if version is None:
-            raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法回滚"])
-        content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
-        self._atomic_write(content)
-        new_version = await self._versions.save_version(
-            content, content_md5(content), "rollback", f"回滚到 v{version_id}"
-        )
-        self._notify_change()
-        return new_version
+        async with self._apply_lock:
+            version = await self._versions.get_version(version_id)
+            if version is None:
+                raise IndicatorConfigValidationError(
+                    [f"指标配置版本 v{version_id} 不存在，无法回滚"]
+                )
+            content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
+            self._atomic_write(content)
+            new_version = await self._versions.save_version(
+                content, content_md5(content), "rollback", f"回滚到 v{version_id}"
+            )
+            self._notify_change()
+            return new_version
 
     async def list_versions(self, limit: int = 50) -> list[IndicatorConfigVersion]:
         """读取短名单历史版本列表（最新在前）。

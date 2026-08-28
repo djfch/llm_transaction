@@ -118,6 +118,22 @@ class ResearchPromptRepo:
         row = await cur.fetchone()
         return ResearchPromptVersion(**dict(row)) if row else None
 
+    async def get_version_by_md5(self, md5: str) -> ResearchPromptVersion | None:
+        """按正文 md5 反解最新一个版本（研报归因展示用，issue #113 R6）；无命中返回 None。
+
+        参数：
+            md5: str，提示词正文摘要（research_reports.research_prompt_md5 的值）
+
+        返回：
+            ResearchPromptVersion | None：该 md5 最新落库的版本；从未归档过时 None
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM research_prompt_versions WHERE md5=? ORDER BY id DESC LIMIT 1",
+            (md5,),
+        )
+        row = await cur.fetchone()
+        return ResearchPromptVersion(**dict(row)) if row else None
+
     async def set_version_status(self, version_id: int, status: str) -> None:
         """更新版本状态（draft→applied 生效、draft→discarded 废弃）。
 

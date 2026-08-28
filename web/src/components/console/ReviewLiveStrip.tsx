@@ -175,8 +175,16 @@ export default function ReviewLiveStrip({ onFinished }: ReviewLiveStripProps) {
       setApplyWarning(null)
       enterActive(lastMessage.data.round_id, true)
     } else if (lastMessage.type === 'review_round') {
-      // issue #102：草稿未生效必须可见——报告成功但策略文件未更新，用户须人工核对
-      if (lastMessage.data.applied === false) setApplyWarning('复盘报告已生成，但策略修订未生效（磁盘或权限异常），请人工核对 system_prompt.md')
+      // issue #102：草稿未生效必须可见——报告成功但文件未更新，用户须人工核对；
+      // apply_failed_files 按通道指明文件名（issue #113 R9），缺省（旧后端）给通用提示
+      if (lastMessage.data.applied === false) {
+        const files = (lastMessage.data.apply_failed_files ?? []).filter(Boolean)
+        setApplyWarning(
+          files.length > 0
+            ? `复盘报告已生成，但草稿修订未生效（磁盘或权限异常），请人工核对 ${files.join('、')}`
+            : '复盘报告已生成，但草稿修订未生效（磁盘或权限异常），请人工核对对应运行时文件',
+        )
+      }
       if (boundIdRef.current === null || lastMessage.data.round_id === boundIdRef.current) exitActive(true)
     }
   }, [lastMessage, enterActive, exitActive])

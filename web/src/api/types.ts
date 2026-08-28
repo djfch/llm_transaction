@@ -574,6 +574,7 @@ export interface ResearchReportSummary extends LLMIdentityInfo {
   assetViews: ResearchAssetSummary[]
   error: string
   roundId: string
+  researchPromptMd5?: string // 生成本研报所用 research_prompt.md 正文 md5（旧数据缺省）
   time: string
 }
 /** 因果链节点：chain 已解析为有序数组（timeline_id 溯源事实层 timeline 条目，可缺省） */
@@ -700,7 +701,7 @@ export type WsMessage =
   | { type: 'strategy_updated' }
   | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
   | { type: 'review_round_start'; data: { round_id: string } } // 复盘轮开始：进度条进入进行中态，实时数据走 /api/review/live
-  | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）
+  | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean; apply_failed_files?: string[] } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）；apply_failed_files 按通道指明未生效文件（issue #113 R9，仅失败时携带）
   | { type: 'research_round_start'; data: { round_id: string } } // 研报轮开始：进度条进入进行中态，实时数据走 /api/research/live
   | { type: 'research_round'; data: { round_id: string; ok: boolean } } // 研报轮结束：仅作失效信号，消费方重拉研报列表
   | { type: 'research_prompt_updated' } // 复盘修订研报提示词落版本即推：仅失效信号，抽屉内编辑器与版本列表重拉 REST
