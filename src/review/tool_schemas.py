@@ -254,8 +254,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     "get_research_review_case": {
         "description": (
             "读取单个研报复盘案例的完整材料：逐标的结论原文与逐条依据、当时市场快照、"
-            "研报轮上下文快照、代码归一化记录（policy_adjustments）、代码按历史 K 线计算的"
-            "客观行情结果（仅供参考）。提交批改（submit_research_review）前必须先读案例"
+            "研报轮上下文快照、代码归一化记录（policy_adjustments）、当时提交的因果链"
+            "（只读）、代码按历史 K 线计算的客观行情结果（仅供参考）。提交批改"
+            "（submit_research_review）前必须先读案例；读案例后可用 read_timeline 与"
+            " get_macro_series 回看案例窗口内的事实层与宏观序列"
         ),
         "parameters": {
             "type": "object",
@@ -395,6 +397,54 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "confidence_reason",
                 "improvement_advice",
             ],
+        },
+    },
+    "read_timeline": {
+        "description": (
+            "回看已读案例窗口内的事实层记录（金十/律动快讯、日历、指标），供逐条依据的"
+            "事实核对引用。仅限窗口 [案例创建时间, min(窗口终点, 当前时间)] 内："
+            "越出窗口即拒绝（防止用案例之后的信息指责当时判断）。"
+            "须先用 get_research_review_case 读取案例"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "report_id": {"type": "integer", "description": "已读案例的研报编号"},
+                "contract": {"type": "string", "description": "已读案例的合约代码"},
+                "start_ts": {"type": "number", "description": "回看起点（Unix 秒，含）"},
+                "end_ts": {"type": "number", "description": "回看终点（Unix 秒，不含）"},
+                "kind": {
+                    "type": "string",
+                    "description": "记录类型过滤（flash/calendar/indicator），可空",
+                },
+                "keyword": {"type": "string", "description": "标题子串过滤，可空"},
+                "limit": {"type": "integer", "description": "条数上限（1-200），默认 50"},
+            },
+            "required": ["report_id", "contract", "start_ts", "end_ts"],
+        },
+    },
+    "get_macro_series": {
+        "description": (
+            "回看已读案例窗口内的 FRED 宏观序列（如 cpi/10y_treasury/m2），供宏观依据的"
+            "事实核对引用。end_ts 缺省为案例窗口终点（与当前时间的较小者），不得晚于它；"
+            "序列起点不早于案例创建时间（窗口纪律同 read_timeline）。"
+            "须先用 get_research_review_case 读取案例"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "report_id": {"type": "integer", "description": "已读案例的研报编号"},
+                "contract": {"type": "string", "description": "已读案例的合约代码"},
+                "indicator": {
+                    "type": "string",
+                    "description": "宏观指标代码（如 cpi / 10y_treasury / m2）",
+                },
+                "end_ts": {
+                    "type": "number",
+                    "description": "序列终点（Unix 秒），可空，缺省为案例窗口终点",
+                },
+            },
+            "required": ["report_id", "contract", "indicator"],
         },
     },
 }

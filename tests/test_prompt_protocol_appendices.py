@@ -221,3 +221,19 @@ def test_prompt_templates_match_current_agent_contracts():
     assert "版本化修订" not in review
     assert "版本化维护" not in review
     assert "最终文本就是存档报告" not in review
+
+
+def test_review_prompt_research_case_window_tools():
+    """校验复盘模板包含案例因果链（只读）与窗口内回看工具纪律（issue #113 F5/F9）。
+
+    参数：无
+
+    返回：
+        None，断言复盘模板含当时因果链说明、read_timeline/get_macro_series
+        回看工具与窗口越界拒绝纪律
+    """
+    review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
+    assert "当时提交的\n  因果链（只读）" in review  # 案例材料含当时因果链（只读）
+    assert "read_timeline" in review
+    assert "get_macro_series" in review
+    assert "越界请求会被工具拒绝" in review

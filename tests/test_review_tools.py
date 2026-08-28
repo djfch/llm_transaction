@@ -290,7 +290,7 @@ async def test_get_tool_call_chain_empty(registry):
 
 
 async def test_calc_tool(registry):
-    """calc 已注册且可算；参数缺失转错误文本；工具总数 18。
+    """calc 已注册且可算；参数缺失转错误文本；工具总数 20。
 
     参数：
         registry: ToolRegistry，待调用的工具注册表
@@ -300,7 +300,7 @@ async def test_calc_tool(registry):
     """
     assert await registry.execute("calc", {"expression": "2*(3-1)^2"}) == "8"
     assert "参数错误" in await registry.execute("calc", {})
-    assert len(registry.specs) == 18
+    assert len(registry.specs) == 20
 
 
 # ---------- list_trades ----------

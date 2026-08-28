@@ -219,6 +219,55 @@ async def test_get_case_full_material_and_registration(
     assert "未找到" in missing
 
 
+async def test_get_case_includes_causal_links_and_window(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """案例材料含当时提交的因果链（只读），已读登记含案例窗口 created_at/window_end。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言因果链段渲染、无链占位与窗口登记字段
+    """
+    from src.research.payload_v2 import HORIZON_SECONDS
+
+    report_id = await _seed_reviewable_report(deps)
+    await deps.repo.research.save_causal_link(
+        report_id=report_id,
+        chain_json='[{"node": "非农数据"}, {"node": "观望"}]',
+        confidence=0.6,
+        topic="非农",
+    )
+    text = await registry.execute(
+        "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
+    )
+    assert "当时提交的因果链（只读" in text
+    assert "[链#" in text and "[非农]" in text
+    assert "非农数据 → 观望" in text
+    assert "置信度 0.6" in text
+
+    case = deps.loaded_research_cases[(report_id, "BTC_USDT")]
+    report = await deps.repo.research.get_report(report_id)
+    assert case["created_at"] == report.created_at
+    assert case["window_end"] == report.created_at + HORIZON_SECONDS["当日"]
+
+    # 无因果链的研报显示占位提示（不挂审计轮，避免 round_id 唯一约束冲突）
+    other = await save_report_fixture(
+        deps.repo,
+        report_type="us_open",
+        direction="偏空",
+        confidence="低",
+        horizon="当日",
+        narrative="结构转弱。",
+    )
+    text2 = await registry.execute(
+        "get_research_review_case", {"report_id": other.id, "contract": "BTC_USDT"}
+    )
+    assert "（当时未提交因果链）" in text2
+
+
 async def test_get_case_without_candle_source_degrades(deps: ReviewToolDeps) -> None:
     """K 线来源未装配时案例客观结果降级为 unavailable 且明确标注原因。
 

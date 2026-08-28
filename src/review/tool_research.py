@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from src.memory.models import ResearchReview
+from src.research.payload_v2 import HORIZON_SECONDS
 from src.review.research_outcome import compute_outcome
 from src.review.tool_handlers import (
     ReviewToolDeps,
@@ -289,7 +290,8 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
         args: dict，工具参数：report_id（必填）、contract（必填）
 
     返回：
-        str：案例材料文本（原文+快照+归一化记录+客观结果）；目标不存在时返回核对提示
+        str：案例材料文本（原文+快照+归一化记录+当时因果链+客观结果）；
+        目标不存在时返回核对提示
     """
     report_id = _to_int(args.get("report_id"), "report_id")
     contract = _need_str(args, "contract")
@@ -302,10 +304,19 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     deps.loaded_research_cases[(report_id, contract)] = {
         "outcome": outcome,
         "evidence_count": len(evidence),
+        # 案例窗口登记：复盘侧历史数据工具（read_timeline/get_macro_series）
+        # 只允许回看 [created_at, min(window_end, now)] 区间，防止引用未来数据
+        "created_at": report.created_at,
+        "window_end": (
+            report.created_at + HORIZON_SECONDS[view.horizon]
+            if view.horizon in HORIZON_SECONDS
+            else None
+        ),
     }
     snapshot_text = await _case_context_text(deps, report)
+    causal_links = await deps.repo.research.list_causal_links_by_report(report_id)
     lines = _format_case_lines(
-        report, view, outcome, evidence, risks, policy_adjustments, snapshot_text
+        report, view, outcome, evidence, risks, policy_adjustments, snapshot_text, causal_links
     )
     return "\n".join(lines)
 
@@ -378,6 +389,7 @@ def _format_case_lines(
     risks: list,
     policy_adjustments: list,
     snapshot_text: str,
+    causal_links: list,
 ) -> list[str]:
     """把案例材料拼装成展示文本行（纯函数，不读写依赖）。
 
@@ -389,6 +401,7 @@ def _format_case_lines(
         risks: list，风险列表
         policy_adjustments: list，代码归一化调仓记录
         snapshot_text: str，研报轮上下文快照文本
+        causal_links: list，当时随研报提交的因果链（CausalLink 行，只读展示）
 
     返回：
         list[str]：案例材料文本行
@@ -413,9 +426,33 @@ def _format_case_lines(
         + ("；".join(policy_adjustments) if policy_adjustments else "无")
     )
     lines.append(
+        "当时提交的因果链（只读，供核对当时推理方法；链内容对错由客观结果与依据核对回答）："
+    )
+    lines += [_format_causal_link_line(link) for link in causal_links] or ["  （当时未提交因果链）"]
+    lines.append(
         f"客观行情结果（代码计算，仅供批改参考，不可由你提交）：{_format_outcome(outcome)}"
     )
     return lines
+
+
+def _format_causal_link_line(link: Any) -> str:
+    """把一条因果链渲染成单行只读摘要（链 id/主题/节点链/置信度/状态）。
+
+    参数：
+        link: CausalLink 行（chain_json 为节点链 JSON，坏 JSON 降级为空链）
+
+    返回：
+        str：单行因果链摘要
+    """
+    try:
+        chain = json.loads(link.chain_json)
+    except (TypeError, ValueError):
+        chain = []
+    nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain if isinstance(n, dict))
+    return (
+        f"  [链#{link.id}][{link.topic or '无主题'}] {nodes or '（空链）'}"
+        f"（置信度 {link.confidence}，状态 {link.status}）"
+    )
 
 
 async def list_research_reviews(deps: ReviewToolDeps, args: dict) -> str:

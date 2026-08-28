@@ -908,7 +908,7 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
 
 
 async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
-    """预注入复盘记录段：同一研报多次复盘全保留、按时间正序、上限 20 条。
+    """预注入复盘记录段：完整记录渲染、同一研报多次复盘全保留、按时间正序、上限 20 条。
 
     参数：
         repo: Repo，临时数据库仓储夹具
@@ -916,16 +916,46 @@ async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
     返回：
         None：通过断言校验目标场景，无返回值
     """
+    import json as _json
+
     now = time.time()
+    outcome = {
+        "data_status": "complete",
+        "candles_actual": 96,
+        "candles_expected": 96,
+        "start_price": "100",
+        "end_price": "110",
+        "high": "120",
+        "low": "90",
+        "return_pct": "10",
+        "max_up_pct": "20",
+        "max_down_pct": "-10",
+        "error": "",
+    }
     for i in range(21):
         await repo.research_review.save_review(
             review_report_id=100 + i,
             report_id=42 if i % 2 == 0 else 43,
             contract="BTC_USDT",
             direction_relation=f"方向关系{i}",
+            direction_reason=f"方向理由{i}",
             reasoning_quality="推理合理",
+            reasoning_review=f"推理复核{i}",
+            evidence_reviews_json=_json.dumps(
+                [
+                    {
+                        "evidence_index": 0,
+                        "fact_status": "成立",
+                        "reasoning_status": "合理",
+                        "explanation": f"说明{i}",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
             confidence_assessment="置信度合规",
-            improvement_advice=f"建议{i}",
+            confidence_reason=f"置信理由{i}",
+            improvement_advice=f"建议{i}" if i != 20 else "建议20" + "长" * 3000,
+            outcome_json=_json.dumps(outcome, ensure_ascii=False),
             created_at=now - (21 - i) * 60,
         )
     provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
@@ -936,6 +966,14 @@ async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
     assert "方向关系20" in text and "建议20" in text
     assert text.count("研报#42/BTC_USDT") == 10  # 同一研报多次复盘全保留（i=2..20 偶数）
     assert text.index("方向关系1") < text.index("方向关系20")  # 按时间正序
+    # 完整记录渲染：理由、逐项依据核对与客观结果都进预注入
+    assert "方向关系：方向关系1 —— 方向理由1" in text
+    assert "推理质量：推理合理 —— 推理复核1" in text
+    assert "置信度合规：置信度合规 —— 置信理由1" in text
+    assert "依据评价：[0] 事实=成立 推理=合理：说明1" in text
+    assert "客观结果：data_status=complete（K线 96/96） | 起价 100 → 止价 110" in text
+    # 单条超 2000 字符截断并标注（i=20 的改进建议超长）
+    assert "已截断，原文共" in text
 
 
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:

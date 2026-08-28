@@ -145,6 +145,7 @@ class ReviewAgent:
         watchlist: Iterable[str] | None = None,
         candle_source: Any | None = None,
         research_prompt_store: Any | None = None,
+        research_data_provider: Any | None = None,
     ) -> None:
         """组装复盘 agent：全部依赖构造期注入，保存为实例属性。
 
@@ -171,6 +172,8 @@ class ReviewAgent:
             research_prompt_store: Any | None，研报提示词版本存储（ResearchPromptStore
                 窄协议：revise/apply_version/discard_draft/current/list_versions/
                 get_version，issue #113）；省略时研报提示词工具降级为中文提示
+            research_data_provider: Any | None，研报数据聚合器（issue #113 F9，
+                复盘侧 get_macro_series 的 FRED 数据源）；省略时该工具降级为中文提示
 
         返回：
             None，仅把依赖保存为实例属性（构造期装配，无其他副作用）
@@ -192,6 +195,8 @@ class ReviewAgent:
         self._watchlist = watchlist
         self._candle_source = candle_source  # None（未装配）时案例客观结果降级 unavailable
         self._research_prompt_store = research_prompt_store  # None（未装配）时提示词工具降级
+        # None（未装配）时复盘侧 get_macro_series 降级为中文提示
+        self._research_data_provider = research_data_provider
 
     def set_provider(self, provider: _ProviderProtocol) -> None:
         """热替换复盘使用的 LLM provider。
@@ -254,6 +259,7 @@ class ReviewAgent:
                 watchlist=tuple(self._watchlist or ()),  # 每轮对活名单拍快照，跟随热更新
                 candle_source=self._candle_source,  # 研报复盘案例客观行情的 K 线来源
                 research_prompt_store=self._research_prompt_store,  # 研报提示词版本存储
+                research_data_provider=self._research_data_provider,  # 复盘回看宏观序列数据源
             )
             registry = ReviewToolRegistry(deps)
             full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))

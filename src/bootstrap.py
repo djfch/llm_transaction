@@ -436,6 +436,19 @@ async def build_app(
     )
     await research_prompt_store.seed_if_empty()
     await research_prompt_store.reconcile()
+    # 研报子系统先装配：复盘侧历史回看工具（get_macro_series，issue #113 F9）
+    # 复用其数据聚合器；build_research 为纯组装（同步），提前无初始化顺序风险
+    research_components = build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
+        settings,
+        repo,
+        audit,
+        researcher_provider,
+        notify_event=event_queue.put_nowait,
+        candle_cache=candles,
+        gateway=gateway,
+        watchlist=watchlist.contracts,
+        prompt_store=research_prompt_store,
+    )
     ctx = AppContext(
         settings=settings,
         db=db,
@@ -455,18 +468,9 @@ async def build_app(
             # K 线窗口适配器：同步网关 → 异步真窗口源（from/to 透传 + 超宽分段，issue #113）
             candle_source=GatewayAsyncCandleSource(gateway),
             research_prompt_store=research_prompt_store,
+            research_data_provider=research_components.data_provider,
         ),
-        research=build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
-            settings,
-            repo,
-            audit,
-            researcher_provider,
-            notify_event=event_queue.put_nowait,
-            candle_cache=candles,
-            gateway=gateway,
-            watchlist=watchlist.contracts,
-            prompt_store=research_prompt_store,
-        ),
+        research=research_components,
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,

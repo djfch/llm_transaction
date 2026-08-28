@@ -1,7 +1,7 @@
-"""复盘工具注册表：18 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
+"""复盘工具注册表：20 个工具的 JSON schema（供 LLM）与异步执行函数绑定。
 
-14 只读（查询/计算：get_*、list_*、calc）+ 4 写（submit_*：策略修订、指标短名单、
-研报复盘、研报提示词修订，写均经 Store 校验或暂存随报告落库）。
+16 只读（查询/计算/回看：get_*、list_*、calc、read_*）+ 4 写（submit_*：策略修订、
+指标短名单、研报复盘、研报提示词修订，写均经 Store 校验或暂存随报告落库）。
 安全不变量：本注册表无任何交易工具、不持有 Gateway 引用；
 execute 是复盘 agent 的唯一执行入口，任何失败（未知工具/参数错误/内部异常）
 都转成中文错误文本返回给 LLM，绝不向上抛异常中断本轮。
@@ -15,7 +15,13 @@ from functools import partial
 from typing import Any
 
 from src.audit.logger import get_logger
-from src.review import tool_handlers, tool_indicators, tool_research, tool_research_prompt
+from src.review import (
+    tool_handlers,
+    tool_indicators,
+    tool_research,
+    tool_research_data,
+    tool_research_prompt,
+)
 from src.review.tool_handlers import ReviewToolDeps, ToolArgError
 from src.review.tool_schemas import SCHEMAS
 
@@ -41,6 +47,8 @@ _HANDLERS: dict[str, Callable[[ReviewToolDeps, dict], Awaitable[str]]] = {
     "submit_research_review": tool_research.submit_research_review,
     "get_research_prompt_versions": tool_research_prompt.get_research_prompt_versions,
     "submit_research_prompt_revision": tool_research_prompt.submit_research_prompt_revision,
+    "read_timeline": tool_research_data.read_timeline,
+    "get_macro_series": tool_research_data.get_macro_series,
 }
 
 

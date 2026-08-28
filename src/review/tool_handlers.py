@@ -68,6 +68,9 @@ class ReviewToolDeps:
     # K 线只读来源（AsyncCandleSource 异步窄协议，生产为 GatewayAsyncCandleSource 包网关）；
     # None 时案例客观结果降级为 unavailable
     candle_source: Any | None = None
+    # 研报数据聚合器（issue #113 F9，复盘侧 get_macro_series 的数据源）；
+    # None（未装配）时该工具返回「未装配」降级提示
+    research_data_provider: Any | None = None
     # 研报提示词版本存储（issue #113 草稿模式同策略书）：None（未装配）时
     # submit_research_prompt_revision / get_research_prompt_versions 返回「未装配」降级提示；
     # research_prompt_version_id 为 submit 成功时置位（轮末版本↔报告关联），
