@@ -211,13 +211,17 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
         error = outcome.get("error") or ""
         return f"data_status={status}（{error or '无价格数据'}）"
     # R3 后 start/end/高/低要么齐全（有完整落窗 K 线）要么全缺，无需分支止价缺失
-    return (
+    line = (
         f"data_status={status}（K线 {outcome['candles_actual']}/{outcome['candles_expected']}）"
         f" | 起价 {outcome['start_price']} → 止价 {outcome['end_price']}"
         f" | 涨跌 {outcome['return_pct']}%"
         f" | 区间最高 {outcome['high']}（{outcome['max_up_pct']}%）"
         f" | 区间最低 {outcome['low']}（{outcome['max_down_pct']}%）"
     )
+    # 价格时点仅在有完整落窗 K 线时存在（旧落库记录无此字段，缺省不展示）
+    if outcome.get("price_start_at") is not None:
+        line += f" | 首价时点 {outcome['price_start_at']} | 末价时点 {outcome['price_end_at']}"
+    return line
 
 
 def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
@@ -603,14 +607,17 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     """提交对单个逐标的结论的复盘批改（暂存内存草稿，随本轮报告落库生效）。
 
     校验：须先经 get_research_review_case 读过案例；后端自查案例仍存在、
-    horizon 窗口已到期且未被正式复盘过（不依赖已读缓存的陈旧状态）；已读案例
-    缓存的客观结果须过 partial_acceptable 门槛——complete 放行，partial 须
-    起止价/涨跌幅齐全且覆盖率 ≥80%，pending/unavailable 与过稀 partial 一律
-    拒绝并留待后续轮次（R1）；outcome 由代码从已读案例缓存附加，LLM 携带
-    outcome 字段一律拒绝；方向关系/推理质量/置信度合规为枚举（非法取值拒绝），
-    各自必须配独立理由文本；evidence_reviews 与原研报依据强制 1:1（数量相等且
-    evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双枚举及
-    写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
+    horizon 窗口已到期且未被正式复盘过（不依赖已读缓存的陈旧状态）；方向关系/
+    推理质量/置信度合规为枚举（非法取值拒绝），各自必须配独立理由文本；已读
+    案例缓存的客观结果须过 partial_acceptable 门槛——complete 放行，partial 须
+    起止价/涨跌幅齐全、覆盖率 ≥80% 且两个价格时点贴近窗口端点（缺头/缺尾段的
+    partial 不放行），pending/unavailable 与不达标 partial 一律拒绝并留待后续
+    轮次（R1）；数据不足的候选不得闭合为正常复盘，仅当复盘方核对案例后确认
+    行情数据不可恢复时，可显式以 reasoning_quality=unreviewable 结案逃生；
+    outcome 由代码从已读案例缓存附加，LLM 携带 outcome 字段一律拒绝；
+    evidence_reviews 与原研报依据强制 1:1（数量相等且 evidence_index 不重不漏
+    覆盖 0..N-1），每条须含事实核对与推理支撑双枚举及写明核对来源的
+    explanation。同轮对同一目标重复提交时更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读写 loaded_research_cases 与
@@ -646,18 +653,20 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
         )
     if await deps.repo.research_review.has_review(report_id, contract):
         return f"参数错误：研报#{report_id}/{contract} 已被正式复盘批改过，不得重复提交"
+    direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
+    reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
+    confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
     outcome = case["outcome"]
-    if not partial_acceptable(outcome):
+    # 数据不足的候选不得闭合为正常复盘；unreviewable 是确认数据不可恢复后的显式逃生口
+    if not partial_acceptable(outcome) and reasoning_quality != "unreviewable":
         return (
             f"参数错误：案例客观行情数据不足（data_status={outcome.get('data_status')}，"
             f"完整落窗 K 线 {outcome.get('candles_actual', 0)}/"
             f"{outcome.get('candles_expected', 0)} 根；partial 放行门槛为起止价/涨跌幅"
-            f"齐全且覆盖率 ≥{PARTIAL_MIN_COVERAGE_PCT}%），不足以支撑批改；"
-            "请核对 K 线来源装配或留待后续轮次"
+            f"齐全、覆盖率 ≥{PARTIAL_MIN_COVERAGE_PCT}% 且价格时点贴近窗口端点），"
+            "不足以支撑批改；请核对 K 线来源装配或留待后续轮次；"
+            "若确认行情数据不可恢复，可以 reasoning_quality=unreviewable 结案"
         )
-    direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
-    reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
-    confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
     evidence_reviews = _parse_evidence_reviews(args)
     direction_reason = _need_str(args, "direction_reason")
     reasoning_review = _need_str(args, "reasoning_review")

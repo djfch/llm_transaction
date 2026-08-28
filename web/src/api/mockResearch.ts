@@ -169,7 +169,7 @@ const researchReports: ResearchReportDetail[] = [
             confidenceAssessment: 'appropriate',
             confidenceReason: '与证据强度匹配。',
             improvementAdvice: '宏观事件类依据应给出兑现窗口的明确时间界。',
-            outcome: { data_status: 'complete', candles_actual: 6, candles_expected: 6, start_price: 67400, end_price: 70800, return_pct: 5.04, high: 71500, max_up_pct: 6.1, low: 66600, max_down_pct: -1.2 },
+            outcome: { data_status: 'complete', candles_actual: 6, candles_expected: 6, price_start_at: '2026-08-22T08:00:00+00:00', price_end_at: '2026-08-22T09:30:00+00:00', start_price: 67400, end_price: 70800, return_pct: 5.04, high: 71500, max_up_pct: 6.1, low: 66600, max_down_pct: -1.2 },
             createdAt: nowIso(6),
           },
         ],

@@ -8,6 +8,7 @@ GatewayAsyncCandleSource 适配器用假同步网关验证窗口透传、超宽�
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -39,6 +40,18 @@ def _candle(t: float, o: str, h: str, low: str, c: str) -> Candle:
         Candle：测试用 K 线
     """
     return Candle(t=int(t), o=Decimal(o), h=Decimal(h), l=Decimal(low), c=Decimal(c), v=Decimal(1))
+
+
+def _iso(ts: float) -> str:
+    """测试辅助：Unix 秒 → UTC ISO 字符串（与 research_outcome._iso_utc 同格式）。
+
+    参数：
+        ts: float，Unix 秒时间戳
+
+    返回：
+        str：UTC ISO 字符串
+    """
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
 
 def _window_candles(count: int, start_price: int = 100) -> list[Candle]:
@@ -184,6 +197,8 @@ def test_outcome_complete_window_metrics() -> None:
     assert result["candles_actual"] == 96
     assert result["start_price"] == "100"
     assert result["end_price"] == "196"  # 第 96 根收盘 = 100 + 95 + 1
+    assert result["price_start_at"] == _iso(_BASE_TS)  # 首根完整 K 线开盘时刻
+    assert result["price_end_at"] == _iso(_BASE_TS + 86400)  # 末根收盘时刻 = 窗口终点
     assert result["high"] == "200"  # 第 96 根最高 = 100 + 95 + 5
     assert result["low"] == "95"  # 第 1 根最低 = 100 - 5
     assert Decimal(result["return_pct"]) == pytest.approx(Decimal(96))  # (196-100)/100
@@ -445,10 +460,14 @@ def _outcome_dict(status: str, actual: int = 96, **overrides) -> dict:
         overrides: dict，需要覆盖默认值的字段
 
     返回：
-        dict：含 data_status/计数/价格字段的结果字典
+        dict：含 data_status/窗口端点/价格时点/计数/价格字段的结果字典
     """
     base = {
         "data_status": status,
+        "window_start": _BASE_TS,
+        "window_end": _BASE_TS + 86400,
+        "price_start_at": _iso(_BASE_TS),  # 默认两端贴窗（端点缺口 0）
+        "price_end_at": _iso(_BASE_TS + 86400),
         "candles_expected": 96,
         "candles_actual": actual,
         "start_price": "100",
@@ -484,3 +503,71 @@ def test_partial_acceptable_requires_prices_and_coverage() -> None:
     assert partial_acceptable(_outcome_dict("partial", actual=77)) is True  # 77/96 ≈ 80.2%
     assert partial_acceptable(_outcome_dict("partial", actual=10)) is False  # 10/96 ≈ 10.4%
     assert PARTIAL_MIN_COVERAGE_PCT == 80
+
+
+def test_partial_acceptable_endpoint_gap_tolerance() -> None:
+    """端点约束：首/末价格时点距窗口端点 ≤2 个 interval 放行，达到 3 个即拒（头/尾各验）。
+
+    参数：无
+
+    返回：
+        None，断言头部与尾部缺口在容忍边界两侧的门槛判定
+    """
+    end = _BASE_TS + 86400
+    # 头部缺口：2 根（1800s）放行、3 根（2700s）拒绝
+    assert (
+        partial_acceptable(_outcome_dict("partial", price_start_at=_iso(_BASE_TS + 1800))) is True
+    )
+    assert (
+        partial_acceptable(_outcome_dict("partial", price_start_at=_iso(_BASE_TS + 2700))) is False
+    )
+    # 尾部缺口：2 根放行、3 根拒绝
+    assert partial_acceptable(_outcome_dict("partial", price_end_at=_iso(end - 1800))) is True
+    assert partial_acceptable(_outcome_dict("partial", price_end_at=_iso(end - 2700))) is False
+
+
+def test_partial_acceptable_legacy_record_without_price_points_rejected() -> None:
+    """缺价格时点字段（或值非法）的旧落库记录一律不达标（宁缺毋滥，倒逼重算）。
+
+    参数：无
+
+    返回：
+        None，断言缺键、None 值与非法 ISO 字符串三种形态的门槛判定
+    """
+    legacy = _outcome_dict("partial")
+    del legacy["price_start_at"], legacy["price_end_at"]
+    assert partial_acceptable(legacy) is False
+    assert partial_acceptable(_outcome_dict("partial", price_start_at=None)) is False
+    assert partial_acceptable(_outcome_dict("partial", price_end_at="not-a-date")) is False
+
+
+def test_outcome_missing_tail_fails_endpoint_constraint() -> None:
+    """集成：当日窗只拿到前 80 根——覆盖率 83% 达标但尾部缺 16 根，端点约束拒绝。
+
+    参数：无
+
+    返回：
+        None，断言 data_status=partial、价格时点位置与 partial_acceptable=False
+    """
+    result = outcome_from_candles(_window_candles(80), _BASE_TS, "当日")
+
+    assert result["data_status"] == "partial"
+    assert result["candles_actual"] * 100 >= result["candles_expected"] * PARTIAL_MIN_COVERAGE_PCT
+    assert result["price_start_at"] == _iso(_BASE_TS)
+    assert result["price_end_at"] == _iso(_BASE_TS + 80 * 900)
+    assert partial_acceptable(result) is False
+
+
+def test_outcome_missing_head_fails_endpoint_constraint() -> None:
+    """集成：头部缺 3 根（覆盖率 96.9%）——端点约束拒绝，不得闭合为正常复盘。
+
+    参数：无
+
+    返回：
+        None，断言 data_status=partial 且 partial_acceptable=False
+    """
+    result = outcome_from_candles(_window_candles(96)[3:], _BASE_TS, "当日")
+
+    assert result["data_status"] == "partial"
+    assert result["candles_actual"] == 93
+    assert partial_acceptable(result) is False
