@@ -194,3 +194,24 @@ async def test_rollback_writes_content_and_records_new_version(env) -> None:
     assert rolled.id > v2.id
     with pytest.raises(ResearchPromptValidationError):
         await env.store.rollback(9999)
+
+
+async def test_rollback_rejects_non_applied_version(env) -> None:
+    """回滚目标为草稿/已废弃版本时拒绝（审查 P2-4）：文件不动、不落新版本。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言两种非 applied 状态均抛 ResearchPromptValidationError 且无副作用
+    """
+    await env.store.seed_if_empty()
+    draft = await env.store.revise("草稿版：" + "未生效内容。" * 20, "复盘草稿", "review_agent")
+    with pytest.raises(ResearchPromptValidationError, match="只能回滚到已生效版本"):
+        await env.store.rollback(draft.id)
+    await env.store.discard_draft(draft.id)
+    with pytest.raises(ResearchPromptValidationError, match="只能回滚到已生效版本"):
+        await env.store.rollback(draft.id)
+    assert env.store.current() == _INIT
+    assert len(await env.repo.research_prompt.list_versions()) == 2  # v1 + 已废弃草稿，无新增
+    assert env.events == []

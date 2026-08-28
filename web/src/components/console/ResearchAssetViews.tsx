@@ -39,11 +39,12 @@ function ListBlock({ title, items }: { title: string; items: string[] }) {
   )
 }
 
-/** 客观结果数据状态：后端枚举 complete/partial/unavailable 只保留中文（未知值原样显示） */
+/** 客观结果数据状态：后端枚举 complete/partial/unavailable/pending 只保留中文（未知值原样显示） */
 const DATA_STATUS_TEXT: Record<string, string> = {
   complete: '完整',
   partial: '部分',
   unavailable: '不可用',
+  pending: '未到期',
 }
 
 /** 客观行情结果一行摘要：与后端 _format_outcome 同口径（无价格数据时只呈现状态与说明） */

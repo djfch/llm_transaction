@@ -287,6 +287,9 @@ class ReviewRepo:
         报告与研报复盘是同一逻辑提交单元（issue #113）：不允许出现"报告已落库
         而批改丢失"的中间态；研报复盘为空时等价于原单报告落库。失败复盘
         （error 非空）不应携带研报复盘记录。
+        事务在独立连接上以 BEGIN IMMEDIATE 开始（与 research 侧 save_report_bundle
+        同范式）：共享连接在 await 间隙被其他协程 commit 会把本批部分行提前提交，
+        届时 rollback 只能回滚最后一段，破坏整批原子性。
 
         参数：
             period_start: float，复盘区间起点时间戳
@@ -309,8 +312,10 @@ class ReviewRepo:
                 回滚整批（报告与批改都不残留）并原样上抛
         """
         ts = _now()
+        conn = await aiosqlite.connect(str(self._db.path))
         try:
-            cur = await self._conn.execute(
+            await conn.execute("BEGIN IMMEDIATE")
+            cur = await conn.execute(
                 "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
                 "strategy_action,new_version_id,error,round_id,created_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?)",
@@ -328,11 +333,13 @@ class ReviewRepo:
             )
             report_id = cur.lastrowid or 0
             for item in research_reviews or []:
-                await _insert_review(self._conn, review_report_id=report_id, created_at=ts, **item)
-            await self._conn.commit()
+                await _insert_review(conn, review_report_id=report_id, created_at=ts, **item)
+            await conn.commit()
         except Exception:
-            await self._conn.rollback()
+            await conn.rollback()
             raise
+        finally:
+            await conn.close()
         return ReviewReport(
             id=report_id,
             period_start=period_start,

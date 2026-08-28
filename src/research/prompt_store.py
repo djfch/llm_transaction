@@ -8,7 +8,8 @@
 - 写前校验：strip 后 ≥100 字符、UTF-8 体积 ≤32KB、与当前版本有差异；
   任一不过即拒绝（ResearchPromptValidationError 携带全部原因），原文件不动、不落版本；
 - 文件替换走 .tmp 临时文件 + os.replace 原子提交，避免写一半的提示词被研报循环读到；
-- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）。
+- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）；
+  只允许回滚到 status 为 applied 的版本（草稿/已废弃版本从未走生效路径，不得直接提升）。
 """
 
 from __future__ import annotations
@@ -241,6 +242,9 @@ class ResearchPromptStore:
     async def rollback(self, version_id: int) -> ResearchPromptVersion:
         """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。
 
+        只允许回滚到 status 为 applied 的版本：草稿/已废弃版本从未生效过，
+        其内容未经过生效路径（apply_version）的完整检验，不允许直接提升为当前内容。
+
         参数：
             version_id: int，目标历史版本标识
 
@@ -248,11 +252,15 @@ class ResearchPromptStore:
             ResearchPromptVersion，回滚产生的新版本（applied）
 
         异常：
-            ResearchPromptValidationError，目标版本不存在时抛出
+            ResearchPromptValidationError，目标版本不存在或状态非 applied（不可回滚）时抛出
         """
         version = await self._repo.research_prompt.get_version(version_id)
         if version is None:
             raise ResearchPromptValidationError([f"研报提示词版本 v{version_id} 不存在，无法回滚"])
+        if version.status != "applied":
+            raise ResearchPromptValidationError(
+                [f"研报提示词版本 v{version_id} 状态为 {version.status}，只能回滚到已生效版本"]
+            )
         content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
         self._atomic_write(content)
         new_version = await self._repo.research_prompt.save_version(

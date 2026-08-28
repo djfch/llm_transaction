@@ -475,7 +475,7 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
 
     @router.post("/research/prompt/rollback/{version_id}")
     async def rollback_research_prompt(version_id: int) -> dict[str, Any]:
-        """回滚到指定研报提示词版本：回调未接线 503；版本不存在 404。
+        """回滚到指定研报提示词版本：回调未接线 503；版本不存在或状态非 applied（不可回滚）404。
 
         参数：
             version_id: int，研报提示词版本编号
@@ -484,13 +484,14 @@ def create_research_router(deps: ServerDeps) -> APIRouter:
             dict[str, Any]，{"rolled_back_to", "version"}：回滚目标版本号与新版本号
 
         异常：
-            HTTPException，研报提示词版本管理未接线时以 503 响应，目标版本不存在时以 404 响应
+            HTTPException，研报提示词版本管理未接线时以 503 响应，
+                目标版本不存在或状态非 applied（草稿/已废弃不可回滚）时以 404 响应
         """
         if deps.research_prompt_rollback is None:
             raise HTTPException(status_code=503, detail="研报提示词版本管理未接线（agent 未装配）")
         try:
             return await deps.research_prompt_rollback(version_id)
-        except ResearchPromptValidationError as exc:  # 回滚的唯一校验失败即版本不存在
+        except ResearchPromptValidationError as exc:  # 版本不存在或状态非 applied 均映 404
             raise HTTPException(status_code=404, detail="；".join(exc.reasons)) from exc
 
     return router

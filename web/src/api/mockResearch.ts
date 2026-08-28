@@ -146,6 +146,7 @@ const researchReports: ResearchReportDetail[] = [
             reasoningQuality: '方向判断与 ETF 资金流证据一致，但宏观利多兑现的时点论证偏弱。',
             evidenceReviews: [
               { index: 0, comment: 'CPI 数值与公布时间引用准确' },
+              { index: 1, comment: 'ETF 净流入与方向判断一致，但缺具体规模数据' },
               { index: 2, comment: '资金费率方向对，但「中性」表述与原文「略偏正」有出入' },
             ],
             confidenceAssessment: '与证据强度匹配',

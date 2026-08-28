@@ -62,6 +62,26 @@ def _parse_evidence_reviews(args: dict) -> list[dict[str, Any]]:
     return items
 
 
+def _evidence_reviews_error(evidence_reviews: list[dict[str, Any]], expected: int) -> str | None:
+    """校验逐条依据评价与原研报依据的 1:1 完整性（数量相等且 index 覆盖 0..N-1）。
+
+    参数：
+        evidence_reviews: list[dict[str, Any]]，已结构校验的依据评价列表
+        expected: int，原研报依据条数
+
+    返回：
+        str | None：不通过时返回错误文本，通过时返回 None
+    """
+    indexes = sorted(item["index"] for item in evidence_reviews)
+    if len(evidence_reviews) == expected and indexes == list(range(expected)):
+        return None
+    return (
+        f"参数错误：evidence_reviews 须与原研报依据一一对应（共 {expected} 条，"
+        f"index 不重不漏覆盖 0..{max(expected - 1, 0)}），"
+        f"实际收到 {len(evidence_reviews)} 条（index={indexes}）"
+    )
+
+
 def _format_outcome(outcome: dict[str, Any]) -> str:
     """把客观行情结果字典渲染成一行摘要文本。
 
@@ -159,10 +179,46 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     if case is None:
         return f"未找到研报#{report_id}/{contract} 的逐标的结论（请用 list_research_review_candidates 核对）"
     report, view = case
+    outcome = _case_outcome(deps, report, view, contract)
+    policy_adjustments, evidence, risks = _parse_case_jsons(report, view)
+    deps.loaded_research_cases[(report_id, contract)] = {
+        "outcome": outcome,
+        "evidence_count": len(evidence),
+    }
+    snapshot_text = await _case_context_text(deps, report)
+    lines = _format_case_lines(
+        report, view, outcome, evidence, risks, policy_adjustments, snapshot_text
+    )
+    return "\n".join(lines)
+
+
+def _case_outcome(deps: ReviewToolDeps, report: Any, view: Any, contract: str) -> dict[str, Any]:
+    """计算案例的客观行情结果；K线来源未装配时以 unavailable 降级。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 candle_source）
+        report: 研报报告行（取 created_at 作窗口起点）
+        view: 逐标的结论行（取 horizon 作窗口长度）
+        contract: str，合约代码
+
+    返回：
+        dict[str, Any]：compute_outcome 的结果字典或不可用占位
+    """
     if deps.candle_source is None:
-        outcome: dict[str, Any] = {"data_status": "unavailable", "error": "K线来源未配置"}
-    else:
-        outcome = compute_outcome(contract, report.created_at, view.horizon, deps.candle_source)
+        return {"data_status": "unavailable", "error": "K线来源未配置"}
+    return compute_outcome(contract, report.created_at, view.horizon, deps.candle_source)
+
+
+def _parse_case_jsons(report: Any, view: Any) -> tuple[list, list, list]:
+    """解析案例三段 JSON 字段（调仓记录/依据/风险），坏 JSON 一律降级为空列表。
+
+    参数：
+        report: 研报报告行（取 raw_json 中的 policy_adjustments）
+        view: 逐标的结论行（取 evidence_json/risks_json）
+
+    返回：
+        tuple[list, list, list]：（policy_adjustments, evidence, risks）
+    """
     try:
         policy_adjustments = json.loads(report.raw_json).get("policy_adjustments", [])
     except json.JSONDecodeError:
@@ -171,16 +227,52 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
         evidence = json.loads(view.evidence_json)
     except json.JSONDecodeError:
         evidence = []
-    deps.loaded_research_cases[(report_id, contract)] = {
-        "outcome": outcome,
-        "evidence_count": len(evidence),
-    }
+    try:
+        risks = json.loads(view.risks_json)
+    except json.JSONDecodeError:
+        risks = []
+    return policy_adjustments, evidence, risks
+
+
+async def _case_context_text(deps: ReviewToolDeps, report: Any) -> str:
+    """取研报轮上下文快照文本；无关联轮或无快照时返回占位提示。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖（用其 repo 取审计轮）
+        report: 研报报告行（取 round_id 关联研报轮）
+
+    返回：
+        str：截断后的上下文快照文本或占位提示
+    """
     audit = await deps.repo.get_audit_round(report.round_id) if report.round_id else None
-    snapshot_text = (
-        _truncate(audit.context_snapshot, _CASE_SNAPSHOT_LIMIT)
-        if audit is not None and audit.context_snapshot
-        else "（无研报轮上下文快照）"
-    )
+    if audit is None or not audit.context_snapshot:
+        return "（无研报轮上下文快照）"
+    return _truncate(audit.context_snapshot, _CASE_SNAPSHOT_LIMIT)
+
+
+def _format_case_lines(
+    report: Any,
+    view: Any,
+    outcome: dict[str, Any],
+    evidence: list,
+    risks: list,
+    policy_adjustments: list,
+    snapshot_text: str,
+) -> list[str]:
+    """把案例材料拼装成展示文本行（纯函数，不读写依赖）。
+
+    参数：
+        report: 研报报告行
+        view: 逐标的结论行
+        outcome: dict[str, Any]，客观行情结果
+        evidence: list，依据列表
+        risks: list，风险列表
+        policy_adjustments: list，代码归一化调仓记录
+        snapshot_text: str，研报轮上下文快照文本
+
+    返回：
+        list[str]：案例材料文本行
+    """
     lines = [
         f"研报#{report.id}/{view.contract} | round={report.round_id or '—'}"
         f" | 方向={view.direction} | 置信={view.confidence} | horizon={view.horizon}"
@@ -193,10 +285,6 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
         f"  [{i}] {item.get('point', '')}（来源：{item.get('source', '')}）"
         for i, item in enumerate(evidence)
     ] or ["  （无依据记录）"]
-    try:
-        risks = json.loads(view.risks_json)
-    except json.JSONDecodeError:
-        risks = []
     lines.append("风险：" + ("；".join(risks) if risks else "（无）"))
     lines.append("当时市场快照：" + _truncate(view.market_context_json, _CASE_SNAPSHOT_LIMIT))
     lines.append(f"研报轮上下文快照：{snapshot_text}")
@@ -207,7 +295,7 @@ async def get_research_review_case(deps: ReviewToolDeps, args: dict) -> str:
     lines.append(
         f"客观行情结果（代码计算，仅供批改参考，不可由你提交）：{_format_outcome(outcome)}"
     )
-    return "\n".join(lines)
+    return lines
 
 
 async def list_research_reviews(deps: ReviewToolDeps, args: dict) -> str:
@@ -269,13 +357,9 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     improvement_advice = _need_str(args, "improvement_advice")
     evidence_reviews = _parse_evidence_reviews(args)
     expected = case["evidence_count"]
-    indexes = sorted(item["index"] for item in evidence_reviews)
-    if len(evidence_reviews) != expected or indexes != list(range(expected)):
-        return (
-            f"参数错误：evidence_reviews 须与原研报依据一一对应（共 {expected} 条，"
-            f"index 不重不漏覆盖 0..{max(expected - 1, 0)}），"
-            f"实际收到 {len(evidence_reviews)} 条（index={indexes}）"
-        )
+    evidence_error = _evidence_reviews_error(evidence_reviews, expected)
+    if evidence_error is not None:
+        return evidence_error
     ordered = sorted(evidence_reviews, key=lambda item: item["index"])
     existed = key in deps.pending_research_reviews
     deps.pending_research_reviews[key] = {

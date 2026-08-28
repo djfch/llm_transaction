@@ -1,8 +1,8 @@
 """复盘 bundle 与 K 线窗口适配器测试（issue #113 C4）。
 
 覆盖：render_research_review_stats 代码计数口径；save_review_bundle 单事务
-（成功全落 / 中途失败整体回滚无残留 / 无草稿退化为纯报告）；
-RecentWindowCandleSource 的 from/to 窗口过滤与 limit 直通。
+（成功全落 / 中途失败整体回滚无残留 / 共享连接外部 commit 不破坏整批回滚 /
+无草稿退化为纯报告）；RecentWindowCandleSource 的 from/to 窗口过滤与 limit 直通。
 """
 
 from __future__ import annotations
@@ -195,6 +195,75 @@ async def test_bundle_rollback_on_mid_failure(repo: Repo, monkeypatch) -> None:
     _, total = await repo.review.list_review_reports_page(10, 0)
     assert total == 0  # 报告未残留
     assert await repo.research_review.list_reviews() == []  # 批改未残留
+
+
+async def test_bundle_immune_to_external_commit_on_shared_conn(repo: Repo, monkeypatch) -> None:
+    """回归（审查 P1-2）：bundle 中途共享连接被外部 commit，失败后仍整体回滚无残留。
+
+    旧实现在共享连接上顺序写报告与批改：外部协程的 commit 会把已写行提前提交，
+    rollback 只剩最后一段可回滚，残留「有报告无批改」。现行为独立连接事务，
+    共享连接上的提交无法触及本批。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        monkeypatch: pytest.MonkeyPatch，替换 _insert_review 注入外部提交与中途失败
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
+    real_insert = review_repo_mod._insert_review
+    state = {"n": 0}
+
+    async def external_commit_then_fail(*args, **kwargs):
+        """第二条插入前先在共享连接上做无关写入并 commit，随后抛错。
+
+        旧实现下共享连接的 commit 会把 bundle 已写行提前提交（残留「有报告无批改」）；
+        独立连接 BEGIN IMMEDIATE 持写锁，此外部写入只会撞锁失败，无法穿插进本批。
+
+        参数：
+            args: tuple，_insert_review 的位置参数，原样透传真实函数
+            kwargs: dict，_insert_review 的关键字参数，原样透传真实函数
+
+        返回：
+            int：第一条调用返回的真实插入行 id
+
+        异常：
+            RuntimeError：第二条调用固定抛出，模拟中途失败
+        """
+        state["n"] += 1
+        if state["n"] == 2:
+            try:
+                await repo._db.conn.execute(
+                    "INSERT INTO notes(round_id,content,created_at) VALUES('ext','外部写入',1)"
+                )
+                await repo._db.conn.commit()
+                state["external"] = "committed"  # 旧实现的破坏路径：穿插成功
+            except Exception:
+                state["external"] = "locked"  # 独立连接持写锁：外部写入撞锁
+            raise RuntimeError("模拟中途失败")
+        return await real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(review_repo_mod, "_insert_review", external_commit_then_fail)
+    pending = [_pending(1, "BTC_USDT", "complete"), _pending(2, "ETH_USDT", "partial")]
+    with pytest.raises(RuntimeError):
+        await save_review_bundle(
+            repo,
+            _deps(pending),
+            period_start=1000.0,
+            period_end=2000.0,
+            stats_json="{}",
+            report_md="# 正文",
+            strategy_action="none",
+            round_id="rr-ext",
+        )
+    # 不变量：外部写入无论撞锁还是提交，bundle 都不得残留任何行
+    _, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 0  # 报告未残留
+    assert await repo.research_review.list_reviews() == []  # 批改未残留
+    # 外部无关写入不被 bundle 回滚牵连：提交则留存、撞锁则缺席，两种都一致
+    cur = await repo._db.conn.execute("SELECT COUNT(*) AS n FROM notes WHERE round_id='ext'")
+    row = await cur.fetchone()
+    assert row["n"] == (1 if state["external"] == "committed" else 0)
 
 
 async def test_bundle_without_reviews_keeps_plain_report(repo: Repo) -> None:

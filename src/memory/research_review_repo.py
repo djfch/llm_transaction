@@ -200,6 +200,9 @@ class ResearchReviewRepo:
     ) -> ResearchReview:
         """单条落库一条研报复盘记录（立即 commit）。
 
+        生产唯一写路径为 ReviewRepo.save_review_bundle（报告与批改同事务）；
+        本方法仅供测试/调试种子数据使用，业务代码不得直接调用。
+
         参数：
             review_report_id: int，产生本记录的复盘报告编号
             report_id: int，被复盘的研报编号

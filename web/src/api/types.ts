@@ -678,7 +678,8 @@ export interface RollbackResult {
  * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}） /
  * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数) /
  * review_round_start(data={round_id}) / review_round(data={round_id, ok})（复盘轮开始/结束）/
- * research_round_start(data={round_id}) / research_round(data={round_id, ok})（研报轮开始/结束）；
+ * research_round_start(data={round_id}) / research_round(data={round_id, ok})（研报轮开始/结束）/
+ * research_prompt_updated（复盘 agent 修订研报提示词落版本即推，无 payload，仅失效信号）；
  * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），trades_updated
  * 也不携带成交明细，两者均只作失效信号——消费方应据事件重拉 REST，勿把 payload 当数据直接渲染；
  * 后端当前不生产 trade/position；类型仅供 mock 使用，真实消费前必须按后端实际事件接线。
@@ -697,6 +698,7 @@ export type WsMessage =
   | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）
   | { type: 'research_round_start'; data: { round_id: string } } // 研报轮开始：进度条进入进行中态，实时数据走 /api/research/live
   | { type: 'research_round'; data: { round_id: string; ok: boolean } } // 研报轮结束：仅作失效信号，消费方重拉研报列表
+  | { type: 'research_prompt_updated' } // 复盘修订研报提示词落版本即推：仅失效信号，抽屉内编辑器与版本列表重拉 REST
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {

@@ -2262,3 +2262,54 @@ async def test_run_records_research_prompt_md5(repo: Repo, settings: Settings, t
     assert report is not None
     expected = hashlib.md5(content.encode("utf-8")).hexdigest()
     assert report.research_prompt_md5 == expected
+
+
+async def test_run_records_prompt_md5_sampled_at_build_time(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """回归（审查 P2-2）：运行途中提示词被热替换，落库 md5 仍为构建 prompt 时的正文版本。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_md5 等于原文 md5 而非热替换后的新文 md5
+    """
+    import hashlib
+    import os
+    import time
+
+    original = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    prompt_file = tmp_path / "research_prompt.md"
+    prompt_file.write_text(original, encoding="utf-8")
+
+    class _HotSwapProvider(_SequentialProvider):
+        """首轮调用前热替换提示词文件（模拟运行途中人工保存），随后按序返回预设响应。"""
+
+        async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+            """首轮先热替换提示词文件（mtime 显式拨快），再交回父类按序响应。
+
+            参数：
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+
+            返回：
+                LLMResponse，父类预设的模型响应
+            """
+            if self._calls == 0:
+                prompt_file.write_text(
+                    "被热替换的新提示词：" + "另一套纪律。" * 20, encoding="utf-8"
+                )
+                future = time.time() + 5  # 显式拨快 mtime，确保缓存判定感知替换
+                os.utime(prompt_file, (future, future))
+            return await super().chat(system, messages, tools)
+
+    agent = await _build_agent(repo, settings, _HotSwapProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    assert report.research_prompt_md5 == hashlib.md5(original.encode("utf-8")).hexdigest()

@@ -62,12 +62,13 @@ function DrawerSection<T>({
 }
 
 /** 抽屉主体：打开时挂载，统一拉取四类配置数据并装配六个表单 */
-function DrawerBody({ onReset }: { onReset: () => void }) {
+function DrawerBody({ onReset, researchPromptTick }: { onReset: () => void; researchPromptTick: number }) {
   const configQ = useApiData(() => api.getConfig(), [])
   const secretsQ = useApiData(() => api.getSecretsStatus(), [])
   const watchlistQ = useApiData(() => api.getWatchlist(), [])
   const strategyQ = useApiData(() => api.getStrategy(), [])
-  const researchPromptQ = useApiData(() => api.getResearchPrompt(), [])
+  // 研报 Prompt 全文：WS research_prompt_updated（复盘修订落版本即推）经 researchPromptTick 驱动重拉
+  const researchPromptQ = useApiData(() => api.getResearchPrompt(), [researchPromptTick])
   const scheduleQ = useApiData(() => api.getResearchScheduleStatus(), [])
   // PUT /api/config 响应附带的 LLM 热生效错误（空 = 正常）
   const [llmError, setLlmError] = useState<string | null>(null)
@@ -160,8 +161,11 @@ function DrawerBody({ onReset }: { onReset: () => void }) {
               }}
             />
             {/* 版本历史侧栏（挂在编辑器下方）；回滚成功后经 researchPromptQ.reload 重拉全文，编辑器随 initial 同步；
-                refreshKey 在保存成功后递增，驱动版本列表重拉 */}
-            <ResearchPromptVersions onRolledBack={researchPromptQ.reload} refreshKey={researchPromptSavedTick} />
+                refreshKey 在保存成功（savedTick）或复盘 agent 远端修订（WS researchPromptTick）后递增，驱动版本列表重拉 */}
+            <ResearchPromptVersions
+              onRolledBack={researchPromptQ.reload}
+              refreshKey={researchPromptSavedTick + researchPromptTick}
+            />
           </>
         )}
       </DrawerSection>
@@ -223,11 +227,15 @@ export default function ConfigDrawer({
   open,
   onClose,
   onReset = () => {},
+  researchPromptTick = 0,
 }: {
   open: boolean
   onClose: () => void
   /** paper 权益重置成功后的联动回调（父级负责刷新账户/持仓/权益/当日统计）；可选，缺省空操作 */
   onReset?: () => void
+  /** WS research_prompt_updated 的刷新信号（复盘 agent 修订研报提示词落版本即推）；
+      变化时抽屉内研报 Prompt 编辑器与版本列表即时重拉；可选，缺省 0 */
+  researchPromptTick?: number
 }) {
   // ESC 关闭（仅打开时监听）
   useEffect(() => {
@@ -270,7 +278,7 @@ export default function ConfigDrawer({
           </button>
         </div>
         <div className="flex-1 space-y-6 overflow-y-auto p-5 text-sm">
-          {open && <DrawerBody onReset={onReset} />}
+          {open && <DrawerBody onReset={onReset} researchPromptTick={researchPromptTick} />}
         </div>
       </aside>
     </>
