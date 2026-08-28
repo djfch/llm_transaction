@@ -186,7 +186,8 @@ async def _rebuild_causal_links(conn: aiosqlite.Connection) -> None:
 
     异常：
         RuntimeError：存在 pending/superseded 之外的状态（如 verified/failed），
-            或 broken_at 存在非空数据时（当前版本无对应写入路径，属未知数据）
+            或 broken_at 存在非空数据时（当前版本无对应写入路径，属未知数据），
+            或 await_verification 存在非 0/1 异常值（无法判定三态归属）时
     """
     if "await_verification" not in await _table_columns(conn, "causal_links"):
         return
@@ -205,6 +206,14 @@ async def _rebuild_causal_links(conn: aiosqlite.Connection) -> None:
         raise RuntimeError(
             f"causal_links.broken_at 存在 {broken} 条非空数据；"
             "当前版本将移除该列，请先备份数据库再启动以完成迁移"
+        )
+    bad_flag = await _count(
+        conn, "SELECT COUNT(*) AS n FROM causal_links WHERE await_verification NOT IN (0, 1)"
+    )
+    if bad_flag:
+        raise RuntimeError(
+            f"causal_links.await_verification 存在 {bad_flag} 条异常值（非 0/1）；"
+            "当前版本无法判定其三态归属，请先备份数据库再启动以完成迁移"
         )
     # SAVEPOINT 包裹 DDL→COPY→DROP→RENAME→INDEX：中途失败回滚到保存点，
     # 旧表保持完整，下次启动可安全重试（issue #113 F8）

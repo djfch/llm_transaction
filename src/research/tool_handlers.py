@@ -535,6 +535,9 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     （须同主题当前版），落库时旧链标记 superseded；concluded 声明事件已定论
     （默认 false：待跟踪中间态，允许 1 节点半成品观察；true：结论链，须 2-6 节点）。
 
+    兼容：旧运行时 research_prompt.md 仍传 await_verification（是否待验证），
+    未传 concluded 时按其取反解析为 concluded；生产基线提示词升级后该过渡别名可删除。
+
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
         args: dict，调用方传入的工具参数字典
@@ -548,6 +551,12 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     if not topic:
         return "参数错误：topic 必填（事件主题，如 非农/关税/美联储）"
     concluded = _parse_concluded(args.get("concluded"))
+    if args.get("concluded") is None and "await_verification" in args:
+        # 旧运行时 research_prompt.md 的过渡别名：await_verification（待验证）取反即 concluded
+        awaiting = _parse_concluded(args["await_verification"])
+        if awaiting is None:
+            return "参数错误：await_verification 必须为布尔值"
+        concluded = not awaiting
     if concluded is None:
         return "参数错误：concluded 必须为布尔值"
     min_nodes, max_nodes = (2, 6) if concluded else (1, 6)

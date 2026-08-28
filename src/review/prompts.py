@@ -32,6 +32,23 @@ REVIEW_ATTRIBUTION_POLICY_V1 = """## 强制复盘附录：REVIEW_ATTRIBUTION_POL
   不得声称已计算实施差额、市场冲击或完整执行成本。
 """
 
+REVIEW_RESEARCH_REVIEW_GATE_V1 = """## 强制复盘附录：REVIEW_RESEARCH_REVIEW_GATE_V1
+
+- 固定附录优先于可变正文；正文与本附录冲突时以本附录为准。
+- 必须处理 `list_research_review_candidates` 返回的全部候选结论，不得只挑方向错误的，
+  也不得跳过不便评价的。
+- 提交批改前必须先用 `get_research_review_case` 读取案例材料；客观行情结果以工具返回
+  为准，不得自行计算涨跌幅，也不得自行提交 outcome 字段。
+- 客观数据不足（窗口未到期、行情不可用或 K 线覆盖过稀）的结论本轮不提交批改，留待
+  后续轮次；不得编造结果强行闭合候选。
+- 不得评价具体因果链内容的正确或错误；只允许指出因果链提取与表达方法上的反复问题。
+  具体链的创建、跟踪与替代由 Research Agent 自行负责，不由复盘评价裁决。
+- 逐条依据评价必须与原研报依据一一对应；每条的 explanation 必须写明核对来源（哪个
+  工具结果或案例材料），不得空泛或编造。
+- 只有同类问题在多份复盘中重复出现时，才允许调用 `submit_research_prompt_revision`
+  修订研报提示词；单次复盘不得修订。
+"""
+
 
 class _ToolSpecLike(Protocol):
     """工具说明渲染所需的最小结构（鸭子类型，不绑定任何具体注册表）。"""
@@ -88,7 +105,11 @@ class ReviewPromptLoader:
         return self._body
 
     def system_prompt(self, tool_docs: str) -> tuple[str, str]:
-        """返回完整复盘提示词及摘要，正文后固定追加归因纪律与工具说明。
+        """返回完整复盘提示词及摘要，正文后固定追加两份强制附录与工具说明。
+
+        拼接顺序固定为 正文 → 归因纪律附录 → 研报复盘门禁附录 → 工具说明；
+        旧版 review_prompt.md（未含门禁内容的存量运行时文件）驱动加载器时
+        同样会获得两份附录，新契约不依赖运行时文件是否更新。
 
         参数：
             tool_docs: str，渲染后的工具说明
@@ -97,7 +118,15 @@ class ReviewPromptLoader:
             tuple[str, str]，拼接工具说明后的完整系统提示词及其 MD5
         """
         body = self._load_body()
-        full = body.rstrip() + "\n\n" + REVIEW_ATTRIBUTION_POLICY_V1 + "\n\n" + tool_docs
+        full = (
+            body.rstrip()
+            + "\n\n"
+            + REVIEW_ATTRIBUTION_POLICY_V1
+            + "\n\n"
+            + REVIEW_RESEARCH_REVIEW_GATE_V1
+            + "\n\n"
+            + tool_docs
+        )
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()
 
 

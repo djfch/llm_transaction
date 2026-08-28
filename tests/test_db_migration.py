@@ -387,6 +387,28 @@ async def test_research_v3_migration_rejects_non_null_broken_at(tmp_path):
         await db.open(path)
 
 
+async def test_research_v3_migration_rejects_invalid_await_verification(tmp_path):
+    """causal_links.await_verification 存在非 0/1 异常值时迁移拒绝启动（无法判定三态归属）。
+
+    参数：
+        tmp_path: Path，pytest 提供的临时目录
+    返回：
+        None，执行断言验证目标行为
+    """
+    path = tmp_path / "v2-bad-flag.db"
+    conn = await _make_v2_db(path)
+    await conn.execute(
+        "INSERT INTO causal_links(report_id,chain_json,confidence,status,"
+        "await_verification,created_at) VALUES(1,'[]',0.5,'pending',2,1.0)"
+    )
+    await conn.commit()
+    await conn.close()
+
+    db = Database()
+    with pytest.raises(RuntimeError, match="await_verification"):
+        await db.open(path)
+
+
 async def test_research_v3_migration_rejects_non_empty_verify_result(tmp_path):
     """research_asset_views.verify_result 存在非空数据时迁移拒绝启动（死字段非空即未知来源）。
 

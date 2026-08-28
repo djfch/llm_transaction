@@ -425,9 +425,7 @@ def _format_case_lines(
         "代码归一化记录（policy_adjustments）："
         + ("；".join(policy_adjustments) if policy_adjustments else "无")
     )
-    lines.append(
-        "当时提交的因果链（只读，供核对当时推理方法；链内容对错由客观结果与依据核对回答）："
-    )
+    lines.append("当时提交的因果链（只读，供核对当时推理方法；链内容对错不在复盘中评价）：")
     lines += [_format_causal_link_line(link) for link in causal_links] or ["  （当时未提交因果链）"]
     lines.append(
         f"客观行情结果（代码计算，仅供批改参考，不可由你提交）：{_format_outcome(outcome)}"

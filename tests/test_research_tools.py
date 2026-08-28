@@ -468,6 +468,65 @@ async def test_submit_causal_links_concluded_parsing(deps) -> None:
     assert "参数错误" in text
 
 
+async def test_submit_causal_links_await_verification_alias(deps) -> None:
+    """await_verification 过渡别名：False→结论链、True→待跟踪；非法值与优先级校验。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "await_verification": False,
+        },
+    )
+    assert "已暂存" in text and "结论" in text
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            "await_verification": True,
+        },
+    )
+    assert "已暂存" in text and "待跟踪" in text
+    assert deps.pending_causal_links[-1]["status"] == "tracking"
+    # concluded 显式传入时优先，await_verification 被忽略
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "concluded": True,
+            "await_verification": True,
+        },
+    )
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "await_verification": "也许",
+        },
+    )
+    assert "参数错误" in text and "await_verification" in text
+
+
 async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
     """supersedes_id 校验：不存在/已被替代/主题不一致分别报错；合法替代通过。
 
