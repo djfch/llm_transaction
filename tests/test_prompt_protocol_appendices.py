@@ -278,3 +278,28 @@ def test_review_prompt_rereview_discipline():
     assert "你不可自行发起或伪造授权" in review
     assert "direction_relation 必须取" in review
     assert "confidence_assessment 必须取 unreviewable" in review
+
+
+def test_gate_appendix_allows_authorized_unreviewable_closure(tmp_path):
+    """校验复盘门禁附录含人工授权结案豁免（R5-2 复审必修：消除附录与授权契约冲突）。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，用于写入自定义 review_prompt.md
+
+    返回：
+        None，断言附录常量与拼装后的完整提示词均含授权结案豁免的关键语义标记：
+        豁免锚定在人工重评授权、结案三枚举一致约束与理由以授权理由为准
+    """
+    # 附录常量本体：数据不足留待后续为默认纪律，人工重评授权为唯一结案豁免
+    assert "留待" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "人工重评授权时例外" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "reasoning_quality 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "direction_relation 取 unverifiable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "confidence_assessment 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "结案理由以授权理由为准" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    # 拼装后的完整提示词同样携带豁免（固定附录强制追加，正文不可覆盖）
+    path = tmp_path / "review_prompt.md"
+    path.write_text("自定义复盘正文：数据不足一律留待，不承认任何豁免", encoding="utf-8")
+    prompt, _ = ReviewPromptLoader(path).system_prompt("## 可用工具")
+    assert "人工重评授权时例外" in prompt
+    assert "结案理由以授权理由为准" in prompt
