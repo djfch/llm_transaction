@@ -123,7 +123,9 @@ Agent 是否把背景误当成入场信号。只评价决策上下文中实际�
   reasoning_quality=unreviewable 结案，但此时 direction_relation 必须取
   unverifiable、confidence_assessment 必须取 unreviewable，三个理由文本仍须写明
   数据缺口。自动复盘路径（无授权）客观行情数据不达提交门槛时不得提交批改，
-  留待后续轮次待行情回补；不得以 reasoning_quality=unreviewable 闭合结案。
+  留待后续轮次待行情回补；客观行情达标后，推理证据永久缺失的结论允许以
+  reasoning_quality=unreviewable 结案，direction_relation 与
+  confidence_assessment 按实际核对独立取值。
 
 ## 研报提示词修订门禁
 

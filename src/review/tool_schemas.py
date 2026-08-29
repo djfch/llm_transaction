@@ -298,8 +298,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "统一生效。已被正式复盘过的目标仅当存在人工重评授权时可再次提交（授权由"
             "人工在研报详情页发起，你不可自行发起）；授权重评允许以 unreviewable 结案"
             "（此时 direction_relation 必须取 unverifiable、confidence_assessment "
-            "必须取 unreviewable）。自动路径客观行情数据不达门槛时留待后续轮次，"
-            "不得以 unreviewable 闭合结案"
+            "必须取 unreviewable）。自动路径在客观行情达标后也允许 unreviewable 结案"
+            "（推理证据永久缺失时；三枚举按实际核对独立取值）；客观行情数据不达门槛"
+            "时一律留待后续轮次"
         ),
         "parameters": {
             "type": "object",
@@ -325,8 +326,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "description": (
                         "推理质量枚举（只评价当时推理方法，不评价因果链内容正确性）："
                         "sound=推理基本成立、partial=推理部分成立、flawed=推理存在明显问题、"
-                        "unreviewable=无法评价（仅命中人工重评授权时可用于结案；"
-                        "自动复盘路径不接受此值，数据不足留待后续轮次）"
+                        "unreviewable=无法评价（推理证据永久缺失时的结案值：人工授权重评"
+                        "可用；自动路径在客观行情达标后也可用，数据不达标一律留待后续轮次）"
                     ),
                 },
                 "reasoning_review": {

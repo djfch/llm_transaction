@@ -235,6 +235,20 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
     return line
 
 
+def _manual_tag(row: ResearchReview) -> str:
+    """人工重评标注段（issue #113 R6-5）：manual 复盘记录首行追加替代关系与授权理由。
+
+    参数：
+        row: ResearchReview，复盘记录
+
+    返回：
+        str：人工重评时返回「 | 人工重评（替代复盘#N） | 授权理由=…」；自动复盘为空串
+    """
+    if row.review_kind != "manual":
+        return ""
+    return f" | 人工重评（替代复盘#{row.rereview_of_id or '—'}） | 授权理由={row.rereview_reason}"
+
+
 def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
     """把一条复盘记录渲染成多行完整文本（供历史查询逐条展示）。
 
@@ -248,7 +262,8 @@ def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
     lines = [
         f"复盘#{row.id} | 研报#{row.report_id}/{row.contract} | 复盘报告#{row.review_report_id}"
         f" | 时间={_fmt_time(row.created_at)}"
-        + (f" | 研报提示词 md5={prompt_md5[:8]}…" if prompt_md5 else ""),
+        + (f" | 研报提示词 md5={prompt_md5[:8]}…" if prompt_md5 else "")
+        + _manual_tag(row),
         f"  方向关系：{row.direction_relation} | 理由：{row.direction_reason}",
         f"  推理质量：{row.reasoning_quality} | 复核：{row.reasoning_review}",
         f"  置信度合规：{row.confidence_assessment} | 理由：{row.confidence_reason}",
@@ -776,11 +791,12 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     防读案例到提交之间行情数据变化；K 线来源未装配时直接拒绝）——complete 放行，
     partial 须起止价/涨跌幅齐全、覆盖率 ≥80% 且两个价格时点贴近窗口端点
     （缺头/缺尾段的 partial 不放行），pending/unavailable 与不达标 partial
-    一律拒绝并留待后续轮次（R1）；reasoning_quality=unreviewable 不属于自动
-    复盘路径（数据不足留待后续轮次，不得闭合结案，R5-1）；outcome 由代码附加，
-    LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报依据强制 1:1（数量
-    相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双
-    枚举及写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
+    一律拒绝并留待后续轮次（R1）；outcome 门禁对全部枚举先生效，客观行情达标后
+    reasoning_quality=unreviewable 可用于表达推理证据永久缺失的结案（R6-6 归层）；
+    outcome 由代码附加，LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报
+    依据强制 1:1（数量相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含事实
+    核对与推理支撑双枚举及写明核对来源的 explanation。同轮对同一目标重复提交时
+    更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读 loaded_research_cases，写
@@ -824,11 +840,8 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
     confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
-    if reasoning_quality == "unreviewable":
-        return (
-            "参数错误：reasoning_quality=unreviewable 不属于自动复盘路径；"
-            "客观行情数据不足时请留待后续轮次，或核对 K 线来源装配"
-        )
+    # R6-6 归层：unreviewable（推理证据永久缺失）不再单独设卡——下方 outcome
+    # 门禁对全部枚举先生效，客观行情达标后允许以 unreviewable 结案
     # 提交时点重算客观结果（R5-1）：不信用已读案例缓存的旧 outcome
     if deps.candle_source is None:
         return "参数错误：K 线来源未装配，无法核算客观行情，请核对装配后留待后续轮次"
