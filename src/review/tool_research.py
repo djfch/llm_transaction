@@ -349,15 +349,16 @@ async def _scan_usable_candidates(
 ) -> tuple[list[ResearchReviewCandidate], list[ResearchReviewCandidate], int, bool]:
     """按 keyset 游标分页扫描候选并逐条预检可用性（受 MAX_CANDIDATE_SCAN 预算约束）。
 
-    游标语义 = 已预检推进到的位置（(due_at, report_id, contract) 三元组），跨调用/
-    跨轮持久化于 research_review_scan_state 单行表：预算用尽时下次调用（或下一轮
-    复盘）从游标续扫，不重扫不跳行（R5-3：替代 offset 分页，候选集在扫描期间随
-    复盘落库收缩时 offset 会跳行/重扫，keyset 不受影响）；扫到候选集尾部（取到
-    的批量不足请求页大小）时游标重置落库——下轮从头重扫，被跳过的数据不足候选
-    才有机会在行情回补后复检。
+    游标语义 = 已预检推进到的位置（(due_at, report_id, contract) 三元组）。R6-1 起
+    改为轮内 lease：本轮首次调用把库中游标读入 deps（此后本轮续扫走内存，不再读库），
+    每条预检追加 deps.scan_log，结束只推进内存 scan_cursor/scan_tail——不落库；
+    库中游标由 bundle 事务在本轮报告成功时按「已复盘 + 已跳过」一次性 ack（R5-3
+    的 keyset 抗收缩性质不变，但列出不再产生副作用：本轮失败/未提交报告时库中
+    游标原地不动，下轮从未复盘候选重扫；扫到候选集尾部时 ack 落 NULL 重置——
+    下轮从头重扫，被跳过的数据不足候选才有机会在行情回补后复检）。
 
     参数：
-        deps: ReviewToolDeps，复盘工具依赖
+        deps: ReviewToolDeps，复盘工具依赖（读写其扫描 lease 字段）
         now: float，当前时间戳
         limit: int，要凑满的可用候选条数
 
@@ -367,7 +368,10 @@ async def _scan_usable_candidates(
     usable: list[ResearchReviewCandidate] = []
     skipped: list[ResearchReviewCandidate] = []
     scanned = 0  # 已预检候选数（= 已发起的 K 线请求数），受扫描预算约束
-    cursor = await deps.repo.research_review.get_scan_cursor()
+    if not deps.scan_cursor_loaded:  # 本轮首次扫描：库中游标读入内存 lease
+        deps.scan_cursor = await deps.repo.research_review.get_scan_cursor()
+        deps.scan_cursor_loaded = True
+    cursor = deps.scan_cursor
     tail = False
     while len(usable) < limit and scanned < MAX_CANDIDATE_SCAN:
         page = min(limit, MAX_CANDIDATE_SCAN - scanned)
@@ -380,15 +384,18 @@ async def _scan_usable_candidates(
                 break
             scanned += 1
             cursor = (c.due_at, c.report_id, c.contract)
-            if await _candidate_usable(deps, c):
+            usable_hit = await _candidate_usable(deps, c)
+            deps.scan_log.append((c.due_at, c.report_id, c.contract, usable_hit))
+            if usable_hit:
                 usable.append(c)
             else:
                 skipped.append(c)
         if len(batch) < page:
             tail = True
             break
-    # 整次调用结束统一落库一次：扫到尾部重置为 None（下轮从头），否则记住推进位置
-    await deps.repo.research_review.save_scan_cursor(None if tail else cursor)
+    # 只推进本轮内存 lease（本轮最后一次调用为准）：落库 ack 由 bundle 事务负责
+    deps.scan_cursor = None if tail else cursor
+    deps.scan_tail = tail
     return usable, skipped, scanned, tail
 
 
@@ -398,9 +405,10 @@ async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> s
     K线来源装配时对每候选快速计算客观结果，以提交侧同一 partial_acceptable
     门槛做可用性预检（complete 或达标 partial 才保留），跳过数据不达门槛的
     候选并列出其身份（V2）；扫描有界——单次调用最多预检 MAX_CANDIDATE_SCAN
-    条候选（= K 线请求数上限），扫描位置以 keyset 游标跨调用/跨轮持久化，
-    预算用尽时可再次调用续扫，扫到候选集尾部自动重置、下轮从头重扫
-    （R5-3）；来源未装配时不做可用性预检、全量列出并附说明（issue #113 R10）。
+    条候选（= K 线请求数上限），扫描位置以 keyset 游标维护（R5-3），R6-1 起
+    游标为轮内 lease：列出只推进内存、不落库，本轮报告成功才由 bundle 事务
+    ack 落库，扫到候选集尾部时 ack 重置、下轮从头重扫；来源未装配时不做
+    可用性预检、全量列出并附说明（issue #113 R10）。
     清单末尾追加待处理的人工授权重评段（R5-2：授权必须对复盘方可见，否则
     已复盘目标永不进入候选，授权成为死信）。
 

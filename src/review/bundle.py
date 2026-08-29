@@ -12,6 +12,8 @@ from typing import Any
 
 from src.memory.models import ReviewReport
 from src.memory.repo import Repo
+from src.memory.research_review_repo import compute_scan_cursor_ack
+from src.memory.review_repo import SCAN_CURSOR_UNSET
 from src.review.tool_handlers import ReviewToolDeps
 
 
@@ -87,11 +89,15 @@ async def save_review_bundle(
     """组装最终报告文本（追加代码计算的研报复盘统计段）并单事务落库。
 
     研报复盘草稿（deps.pending_research_reviews）随报告同事务写入；草稿为空时
-    退化为纯报告落库（与 save_review_report 成功路径等价）。
+    退化为纯报告落库（与 save_review_report 成功路径等价）。本轮做过候选扫描
+    （deps.scan_cursor_loaded）时，游标 ack 也随同事务落库（R6-1）：扫到尾部
+    落 NULL 重置，否则推进到「最后一个已复盘或已跳过候选」处，停在首个已预检
+    可用但本轮未复盘的候选之前；本轮失败不调用本函数，库中游标原地不动。
 
     参数：
         repo: Repo，持久化仓库
-        deps: ReviewToolDeps，本轮工具依赖（读取研报复盘草稿与新建策略版本编号）
+        deps: ReviewToolDeps，本轮工具依赖（读取研报复盘草稿、新建策略版本编号
+            与扫描 lease 字段）
         period_start: float，复盘区间起点时间戳
         period_end: float，复盘区间终点时间戳
         stats_json: str，代码预统计 JSON 文本
@@ -105,6 +111,13 @@ async def save_review_bundle(
     pending = list(deps.pending_research_reviews.values())
     stats_section = render_research_review_stats(pending)
     final_md = f"{report_md}\n\n{stats_section}" if stats_section else report_md
+    scan_cursor: Any = SCAN_CURSOR_UNSET
+    if deps.scan_cursor_loaded:
+        scan_cursor = (
+            None
+            if deps.scan_tail
+            else compute_scan_cursor_ack(deps.scan_log, set(deps.pending_research_reviews))
+        )
     return await repo.review.save_review_bundle(
         period_start,
         period_end,
@@ -114,4 +127,5 @@ async def save_review_bundle(
         new_version_id=deps.created_version_id,
         round_id=round_id,
         research_reviews=pending,
+        scan_cursor=scan_cursor,
     )

@@ -84,6 +84,16 @@ class ReviewToolDeps:
     # 取本通道值盖章，轮末生效按基线比对防陈旧草稿覆盖人工变更；空字典（未采样，
     # 如测试直接构造 deps）时草稿 base_md5 落 NULL，回退旧 id 比较行为
     base_md5_by_channel: dict[str, str] = dataclass_field(default_factory=dict)
+    # 候选扫描游标本轮 lease（issue #113 R6-1）：list_research_review_candidates
+    # 首次扫描时把库中游标读入内存（scan_cursor_loaded=True），本轮所有扫描只在内存
+    # 推进（scan_cursor/scan_tail 以最后一次调用为准，不 sticky），每条预检追加
+    # scan_log（(due_at, report_id, contract, usable)）；游标不再随列出落库——本轮
+    # 复盘报告成功时由 bundle 事务按「已复盘 + 已跳过」一次性 ack 落库，本轮失败
+    # 或未提交报告时库中游标原地不动、下轮从未复盘的可用候选重扫
+    scan_cursor: tuple[float, int, str] | None = None
+    scan_cursor_loaded: bool = False
+    scan_tail: bool = False
+    scan_log: list[tuple[float, int, str, bool]] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------

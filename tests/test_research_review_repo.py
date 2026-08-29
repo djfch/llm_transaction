@@ -11,6 +11,7 @@ import time
 import pytest
 
 from src.memory import Database, Repo
+from src.memory.research_review_repo import compute_scan_cursor_ack
 from tests.research_helpers import save_report_fixture
 
 
@@ -207,6 +208,39 @@ async def test_scan_cursor_roundtrip_and_reset(repo: Repo) -> None:
     assert await repo.research_review.get_scan_cursor() == (1700000000.5, 42, "BTC_USDT")
     await repo.research_review.save_scan_cursor(None)
     assert await repo.research_review.get_scan_cursor() is None
+
+
+# ---------- R6-1：扫描游标 ack 推导（纯函数） ----------
+
+
+def test_compute_scan_cursor_ack_stops_before_unhandled_usable() -> None:
+    """ack 越过已跳过与已复盘候选，停在首个已预检可用但本轮未复盘的候选之前。
+
+    参数：无
+
+    返回：
+        None，断言推进位置符合「可越过 skipped/已复盘，不越过未复盘 usable」语义
+    """
+    log = [
+        (100.0, 1, "BTC_USDT", False),  # 数据不足被跳过：可越过
+        (200.0, 2, "ETH_USDT", True),  # 可用且本轮已复盘：可越过
+        (300.0, 3, "SOL_USDT", True),  # 可用但本轮未复盘：ack 停在它之前
+        (400.0, 4, "XRP_USDT", False),  # 其后的条目不影响停位
+    ]
+    assert compute_scan_cursor_ack(log, {(2, "ETH_USDT")}) == (200.0, 2, "ETH_USDT")
+
+
+def test_compute_scan_cursor_ack_all_handled_or_empty() -> None:
+    """全部处理完推进到末条；空日志返回 None（调用方配 tail 判定落 NULL 重置）。
+
+    参数：无
+
+    返回：
+        None，断言全处理完时 ack=末条 key、空日志时 ack=None
+    """
+    log = [(100.0, 1, "BTC_USDT", True), (200.0, 2, "ETH_USDT", False)]
+    assert compute_scan_cursor_ack(log, {(1, "BTC_USDT")}) == (200.0, 2, "ETH_USDT")
+    assert compute_scan_cursor_ack([], set()) is None
 
 
 # ---------- R5-2：人工重评授权（research_rereview_requests） ----------
