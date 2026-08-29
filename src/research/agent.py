@@ -102,6 +102,7 @@ class ResearchAgent:
         notify_event: Callable[[dict], None] | None = None,  # WS 事件广播（轮始/轮末）
         max_turns: int = 30,
         timeout_seconds: int = 900,
+        prompt_store: Any | None = None,  # ResearchPromptStore（鸭子类型，防循环 import）
     ) -> None:
         """注入全部依赖并初始化研报 agent。
 
@@ -118,6 +119,9 @@ class ResearchAgent:
                 None 则不广播（测试/未接线场景零事件）
             max_turns: int，工具调用最大轮次，小于 1 时按 1 处理
             timeout_seconds: int，单次研报整体超时秒数（保险丝），小于 60 时按 60 处理
+            prompt_store: Any | None，研报提示词版本存储（issue #113 R6-4：装配后
+                prompt 正文/md5/版本归因经其锁内快照一次取齐）；None 时回退
+                prompt_loader 自读、版本归因落 NULL
 
         返回：
             None，就地初始化实例属性
@@ -133,6 +137,7 @@ class ResearchAgent:
         self._notify_event = notify_event  # None 则不广播（测试/未接线场景零事件）
         self._max_turns = max(1, max_turns)
         self._timeout = max(60, timeout_seconds)
+        self._prompt_store = prompt_store
 
     def set_provider(self, provider: _ProviderProtocol) -> None:
         """热替换 LLM provider（与 DecisionLoop/ReviewAgent 同模式）。
@@ -155,6 +160,28 @@ class ResearchAgent:
             bool：True 表示已注入 LLM provider，可执行研报
         """
         return self._provider is not None
+
+    async def _build_prompt(self, registry: ResearchToolRegistry) -> tuple[str, str, int | None]:
+        """构建本轮 system prompt，并同刻采样提示词正文 md5 与版本归因（issue #113 R6-4）。
+
+        装配 prompt_store 时经其锁内快照一次取齐正文/md5/版本 id，杜绝
+        「读正文→算 md5→反解版本」分步取样被运行途中热替换错位；未装配
+        （测试直造 agent）回退 loader 自读，版本归因落 NULL。
+
+        参数：
+            registry: ResearchToolRegistry，本轮工具注册表（渲染工具说明段）
+
+        返回：
+            tuple[str, str, int | None]：完整 system prompt、正文 md5、
+            可归因的 applied 版本 id（未装配或内容不一致时 None）
+        """
+        tool_docs = render_tool_docs(registry.specs)
+        if self._prompt_store is not None:
+            body, body_md5, version_id = await self._prompt_store.current_snapshot()
+            full, _ = self._prompts.system_prompt(tool_docs, body=body)
+            return full, body_md5, version_id
+        full, _ = self._prompts.system_prompt(tool_docs)
+        return full, self._prompts.body_md5(), None
 
     async def run(
         self, report_type: str = "manual", hours: int = 24, *, round_id: str | None = None
@@ -200,13 +227,7 @@ class ResearchAgent:
                 mode=self._settings.mode,
             )
             registry = ResearchToolRegistry(deps)
-            full_prompt, _ = self._prompts.system_prompt(render_tool_docs(registry.specs))
-            # 提示词正文 md5 与版本 id 同为构建 prompt 时点取样归因（R5-4：版本 id 消除
-            # 复盘侧按 md5+时点反解的歧义）；在 persist 末尾才取样会因运行途中热替换
-            # 记错版本（审查 P2-2）
-            prompt_body_md5 = self._prompts.body_md5()
-            prompt_version = await self._repo.research_prompt.latest_applied_by_md5(prompt_body_md5)
-            prompt_version_id = prompt_version.id if prompt_version is not None else None
+            full_prompt, prompt_body_md5, prompt_version_id = await self._build_prompt(registry)
             round_id = await self._audit.begin_round(
                 self._settings.mode,
                 "research",

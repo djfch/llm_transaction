@@ -497,3 +497,22 @@ async def test_cas_discards_draft_when_file_hot_edited(env, caplog) -> None:
     assert (await env.store.get_version(draft.id)).status == "discarded"
     assert env.store.current() == hot  # 热编辑内容不被草稿覆盖
     assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
+
+
+async def test_current_snapshot_attributes_version_by_content(env) -> None:
+    """研报运行快照（issue #113 R6-4）：内容一致的最新 applied 才归因其 id，热编辑不归因。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言快照三元组在「无版本 / 内容一致 / 文件热编辑」三种情形下的归因
+    """
+    from src.research.prompt_store import content_md5
+
+    assert await env.store.current_snapshot() == (_INIT, content_md5(_INIT), None)  # 无版本
+    v1 = await env.store.seed_if_empty()
+    assert await env.store.current_snapshot() == (_INIT, v1.md5, v1.id)  # 内容一致归因 v1
+    hot = "热编辑提示词：" + "绕过存储直接改文件。" * 10
+    env.path.write_text(hot, encoding="utf-8")  # 热编辑：动文件不动库
+    assert await env.store.current_snapshot() == (hot, content_md5(hot), None)  # 偏离不归因

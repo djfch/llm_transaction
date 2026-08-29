@@ -105,15 +105,18 @@ class ResearchPromptLoader:
             self._mtime = mtime
         return self._body
 
-    def system_prompt(self, tool_docs: str) -> tuple[str, str]:
+    def system_prompt(self, tool_docs: str, body: str | None = None) -> tuple[str, str]:
         """返回完整研报提示词及摘要，正文后固定追加协议、证据纪律与工具说明。
 
         参数：
             tool_docs: str，渲染后的工具说明文本
+            body: str | None，调用方已取好的正文快照（issue #113 R6-4：研报 agent
+                经 ResearchPromptStore.current_snapshot 锁内采样，使正文/md5/版本
+                归因同源同刻）；None 时按 mtime 缓存自行读文件
         返回：
             tuple[str, str]，依次为完整 system prompt 与其 md5 摘要
         """
-        body = self._load_body()
+        body = self._load_body() if body is None else body
         full = body.rstrip() + "\n\n" + RESEARCH_PROTOCOL_V2
         full += "\n\n" + RESEARCH_EVIDENCE_POLICY_V1 + "\n\n" + tool_docs
         return full, hashlib.md5(full.encode("utf-8")).hexdigest()

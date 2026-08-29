@@ -197,6 +197,27 @@ class ResearchPromptStore:
             latest = await self._repo.research_prompt.latest_applied_version()
             return content, content_md5(content), latest.id if latest is not None else None
 
+    async def current_snapshot(self) -> tuple[str, str, int | None]:
+        """在生效锁内原子采样研报运行用快照：正文、正文 md5、可归因的 applied 版本 id。
+
+        供研报 agent 构建 prompt 时点一次取齐（issue #113 R6-4）：正文/md5/版本归属
+        同源同刻，避免「读正文 → 算 md5 → 反解版本」分步取样被运行途中热替换错位。
+        版本归因按内容一致性确认：最新 applied 版本 md5 与当前正文一致才归因其 id，
+        否则（文件热编辑、播种缺失等）返回 None。
+
+        参数：无
+
+        返回：
+            tuple[str, str, int | None]：当前正文（文件不存在为 ''）、正文 md5、
+            可归因的最新 applied 版本 id（内容不一致或无 applied 版本时 None）
+        """
+        async with self._apply_lock:
+            content = self.current()
+            md5 = content_md5(content)
+            latest = await self._repo.research_prompt.latest_applied_version()
+            version_id = latest.id if latest is not None and latest.md5 == md5 else None
+            return content, md5, version_id
+
     async def revise(
         self,
         content: str,
