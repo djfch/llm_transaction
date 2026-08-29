@@ -1648,15 +1648,16 @@ async def test_research_prompt_revision_applied_on_success(env, tmp_path):
     assert version.review_report_id == reports[0].id  # 版本↔报告关联已回填
 
 
-async def test_round_start_samples_base_md5_for_strategy_draft(env, tmp_path):
-    """轮初采样策略通道基线：本轮修订草稿盖当时生效内容的 base_md5 章（issue #113 CAS）。
+async def test_briefing_samples_base_for_strategy_draft(env, tmp_path):
+    """策略通道基线随简报组装采样：草稿盖 LLM 实读时点的 md5 + applied 身份双章（R6-3）。
 
     参数：
         env: SimpleNamespace，包含测试依赖的环境对象（策略 store 已播种 v1）
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言本轮草稿版本行 base_md5 等于 v1 生效内容 md5、轮末按 CAS 正路径生效
+        None，断言本轮草稿版本行 base_md5 等于 v1 生效内容 md5、
+        base_applied_version_id 指向 v1、轮末按 CAS 正路径生效
     """
     from src.review.strategy import content_md5
 
@@ -1682,28 +1683,52 @@ async def test_round_start_samples_base_md5_for_strategy_draft(env, tmp_path):
     assert result["ok"] is True
     version = await env.repo.review.get_strategy_version(2)  # v1 种子，v2 本轮草稿
     assert version is not None and version.status == "applied"
-    assert version.base_md5 == content_md5(_INIT)  # 轮初冻结的生效内容基线
+    assert version.base_md5 == content_md5(_INIT)  # 简报组装时点冻结的生效内容基线
+    assert version.base_applied_version_id == 1  # 基线身份指向播种的 v1
 
 
-async def test_round_start_samples_base_md5_for_research_prompt_draft(env, tmp_path):
-    """轮初采样研报提示词通道基线：本轮修订草稿盖当时生效内容的 base_md5 章（issue #113 CAS）。
+async def test_read_tool_samples_base_for_research_prompt_draft(env, tmp_path):
+    """研报提示词通道基线随读取工具采样：读版本列表后再修订，草稿盖实读时点双章（R6-3）。
 
     参数：
         env: SimpleNamespace，包含测试依赖的环境对象
         tmp_path: Path，pytest 提供的临时目录
 
     返回：
-        None，断言本轮草稿版本行 base_md5 等于 v1 生效内容 md5
+        None，断言本轮草稿版本行 base_md5 等于 v1 生效内容 md5、
+        base_applied_version_id 指向 v1
     """
     store = _research_prompt_store(env, tmp_path)
     v1 = await store.seed_if_empty()
     new_prompt = "修订后研报提示词：" + "逐条核对证据，先找反对材料。" * 10
-    agent = _make_agent(env, _prompt_revision_provider(new_prompt), research_prompt_store=store)
+    provider = StubProvider(
+        [
+            LLMResponse(
+                text="",
+                raw="raw-1",
+                tool_calls=[ToolCall(name="get_research_prompt_versions", args={}, call_id="c0")],
+            ),
+            LLMResponse(
+                text="",
+                raw="raw-2",
+                tool_calls=[
+                    ToolCall(
+                        name="submit_research_prompt_revision",
+                        args={"new_prompt_md": new_prompt, "reason": "研报复盘修订"},
+                        call_id="c1",
+                    )
+                ],
+            ),
+            LLMResponse(text="完成。", raw="raw-3"),
+        ]
+    )
+    agent = _make_agent(env, provider, research_prompt_store=store)
     result = await agent.run(*_PERIOD)
     assert result["ok"] is True
     version = await env.repo.research_prompt.get_version(2)  # v1 种子，v2 本轮草稿
     assert version is not None and version.status == "applied"
     assert version.base_md5 == v1.md5
+    assert version.base_applied_version_id == v1.id
 
 
 async def test_failed_round_discards_research_prompt_draft(env, tmp_path):

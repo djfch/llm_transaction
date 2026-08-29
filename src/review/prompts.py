@@ -40,8 +40,10 @@ REVIEW_RESEARCH_REVIEW_GATE_V1 = """## 强制复盘附录：REVIEW_RESEARCH_REVI
 - 提交批改前必须先用 `get_research_review_case` 读取案例材料；客观行情结果以工具返回
   为准，不得自行计算涨跌幅，也不得自行提交 outcome 字段。
 - 客观数据不足（窗口未到期、行情不可用或 K 线覆盖过稀）的结论本轮不提交批改，留待
-  后续轮次；不得编造结果强行闭合候选。
-- 目标存在人工重评授权时例外：可按授权对数据不可恢复的结论结案，此时
+  后续轮次；不得编造结果强行闭合候选。客观行情数据门禁先于一切枚举取值生效。
+- 客观行情达标后，推理证据永久缺失的结论允许以 reasoning_quality=unreviewable 结案；
+  此时 direction_relation 与 confidence_assessment 按实际核对独立取值，不强制一致。
+- 目标存在人工重评授权时另有结案口径：可按授权对数据不可恢复的结论结案，此时
   reasoning_quality 取 unreviewable、direction_relation 取 unverifiable、
   confidence_assessment 取 unreviewable，三者必须一致，结案理由以授权理由为准。
 - 不得评价具体因果链内容的正确或错误；只允许指出因果链提取与表达方法上的反复问题。

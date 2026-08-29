@@ -44,7 +44,13 @@ async def get_research_prompt_versions(deps: ReviewToolDeps, args: dict) -> str:
             f"- v{v.id} | 状态={v.status} | 来源={v.created_by} | md5={v.md5[:8]}"
             f" | 时间={_fmt_time(v.created_at)} | 理由={v.reason}"
         )
-    lines += ["", "当前研报提示词全文：", store.current() or "（研报提示词文件不存在）"]
+    # 读取时点基线采样（issue #113 R6-3）：展示正文与基线章（md5/applied 身份）
+    # 取自同一次锁内采样，LLM 所见即所盖——防"轮初采样后人工变更"的错位
+    text, md5, applied_id = await store.sample_current_base()
+    deps.base_md5_by_channel["research_prompt"] = md5
+    if applied_id is not None:
+        deps.base_applied_id_by_channel["research_prompt"] = applied_id
+    lines += ["", "当前研报提示词全文：", text or "（研报提示词文件不存在）"]
     return "\n".join(lines)
 
 
@@ -64,12 +70,14 @@ async def submit_research_prompt_revision(deps: ReviewToolDeps, args: dict) -> s
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
     try:
-        # 草稿盖基线章（issue #113 CAS）：轮末生效时按基线比对，防陈旧草稿覆盖人工变更
+        # 基线章（md5 + applied 身份，issue #113 CAS/R6-3）盖 LLM 实读时点采样值，
+        # 轮末生效按身份 + 文件内容双重比对，防陈旧草稿覆盖人工变更
         version = await store.revise(
             new_prompt_md,
             reason,
             created_by="review_agent",
             base_md5=deps.base_md5_by_channel.get("research_prompt"),
+            base_applied_version_id=deps.base_applied_id_by_channel.get("research_prompt"),
         )
     except ResearchPromptValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原研报提示词未改动，修正后可重新提交）"

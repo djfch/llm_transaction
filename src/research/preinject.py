@@ -264,7 +264,14 @@ def _format_review_entry(review: ResearchReview) -> str:
     """
     lines = [
         f"- [{_fmt_ts(review.created_at)}] 复盘#{review.review_report_id} → "
-        f"研报#{review.report_id}/{review.contract}："
+        f"研报#{review.report_id}/{review.contract}"
+        + (
+            f"（人工重评，替代复盘#{review.rereview_of_id or '—'}；"
+            f"授权理由：{review.rereview_reason}）"
+            if review.review_kind == "manual"
+            else ""
+        )
+        + "："
     ]
     for label, value, reason in (
         ("方向关系", review.direction_relation, review.direction_reason),

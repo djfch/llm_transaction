@@ -1035,6 +1035,32 @@ async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
     assert "已截断，原文共" in text
 
 
+async def test_build_preinjection_marks_manual_rereview(repo: Repo) -> None:
+    """R6-5：人工重评记录在预注入复盘段首行标注替代关系与授权理由。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言 manual 复盘条目含「人工重评，替代复盘#N；授权理由：…」标注
+    """
+    await repo.research_review.save_review(
+        review_report_id=100,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+        reasoning_quality="partial",
+        confidence_assessment="too_high",
+        review_kind="manual",
+        rereview_of_id=7,
+        rereview_reason="原复盘把震荡误判为背离",
+    )
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    assert "人工重评，替代复盘#7；授权理由：原复盘把震荡误判为背离" in text
+
+
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:
     """预注入单段失败：标注不可用，其余段正常。
 

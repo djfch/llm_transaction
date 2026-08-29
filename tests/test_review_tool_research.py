@@ -341,10 +341,10 @@ async def test_candidates_skip_unqualified_partial(
     assert "unreviewable" not in text  # R5-1：自动复盘路径删除结案逃生口引导
 
 
-async def test_candidates_scan_budget_exhausted_persists_keyset_cursor(
+async def test_candidates_scan_budget_exhausted_uses_in_memory_lease(
     deps: ReviewToolDeps, registry: ReviewToolRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R5-3：扫描预算用尽时 keyset 游标跨调用持久化，续扫不重扫不跳行，扫尾后重置。
+    """R6-1：扫描预算用尽时游标只推进内存 lease 不落库；续扫走内存，扫尾也只写内存。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
@@ -352,9 +352,10 @@ async def test_candidates_scan_budget_exhausted_persists_keyset_cursor(
         monkeypatch: pytest.MonkeyPatch，把扫描预算钳小为 2 条
 
     返回：
-        None，断言首轮预算提示（不再给 offset）、游标落库在推进位置、
-        第二次调用（不传游标参数）自动续扫到第 3 条可用候选、
-        扫到候选集尾部后游标重置为 None（下轮从头重扫）
+        None，断言首轮预算提示（不再给 offset）、库中游标未被列出动作触碰、
+        内存 lease 推进到第 2 条已预检候选、第二次调用（不传游标参数）从内存
+        续扫到第 3 条可用候选、扫到候选集尾部后内存 lease 重置为 None（报告
+        成功才由 bundle 事务把游标 ack 落库——本测试不提交报告，库中恒为 None）
     """
     monkeypatch.setattr(tool_research_module, "MAX_CANDIDATE_SCAN", 2)
     # BTC/ETH 数据不可用（空 K 线），SOL 完整可用；到期时刻 BTC 最早、SOL 最晚
@@ -395,15 +396,19 @@ async def test_candidates_scan_budget_exhausted_persists_keyset_cursor(
     assert "已记住续扫位置" in first
     assert "offset" not in first  # R5-3：不再暴露 offset 游标
     assert "SOL_USDT" not in first
-    # 游标已落库：推进到最后一条已预检候选（ETH_USDT 到期晚于 BTC_USDT）
-    cursor = await deps.repo.research_review.get_scan_cursor()
-    assert cursor is not None and cursor[1] == eth.id and cursor[2] == "ETH_USDT"
+    # R6-1：列出只推进内存 lease——库中游标不动（报告成功才由 bundle 事务 ack）；
+    # 内存推进到最后一条已预检候选（ETH_USDT 到期晚于 BTC_USDT）
+    assert await deps.repo.research_review.get_scan_cursor() is None
+    assert deps.scan_cursor is not None
+    assert deps.scan_cursor[1] == eth.id and deps.scan_cursor[2] == "ETH_USDT"
+    assert deps.scan_tail is False
 
-    # 第二次调用不传任何游标参数：自动从落库位置续扫取到 SOL_USDT；
-    # 其后无更多候选（批量不足页大小）→ 扫到尾部，游标重置为 None
+    # 第二次调用不传任何游标参数：自动从内存 lease 续扫取到 SOL_USDT；
+    # 其后无更多候选（批量不足页大小）→ 扫到尾部，内存 lease 重置为 None，库中仍不动
     resumed = await registry.execute("list_research_review_candidates", {"limit": 5})
     assert f"研报#{sol.id}/SOL_USDT" in resumed
     assert "扫描预算" not in resumed
+    assert deps.scan_cursor is None and deps.scan_tail is True
     assert await deps.repo.research_review.get_scan_cursor() is None
 
 
@@ -1129,31 +1134,36 @@ async def test_submit_rejects_tail_gapped_partial(
     assert deps.pending_research_reviews == {}
 
 
-async def test_submit_rejects_unreviewable_on_auto_path(
+async def test_submit_unreviewable_gated_by_outcome_not_enum(
     deps: ReviewToolDeps, registry: ReviewToolRegistry
 ) -> None:
-    """R5-1：reasoning_quality=unreviewable 不属于自动复盘路径，数据不足也不许结案。
+    """R6-6 归层：unreviewable 不再单独设卡——客观行情不达标一律留待，达标后允许结案。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖
         registry: ReviewToolRegistry，工具注册表
 
     返回：
-        None，断言 unreviewable 提交被拒（即使客观数据确实不足）且不落草稿
+        None，断言数据不足时 unreviewable 仍被 outcome 门禁拒绝且不落草稿，
+        客观行情达标后 unreviewable 暂存成功（表达推理证据永久缺失）
     """
     report_id = await _seed_reviewable_report(deps)
-    deps.candle_source = _TruncatedWindowCandles(80)  # 同缺尾场景：数据确实不足
+    deps.candle_source = _TruncatedWindowCandles(80)  # 数据不足：unreviewable 也不得结案
     await registry.execute(
         "get_research_review_case", {"report_id": report_id, "contract": "BTC_USDT"}
     )
     args = _valid_review_args(report_id) | {
         "reasoning_quality": "unreviewable",
-        "reasoning_review": "窗口尾部行情数据确认不可恢复，无法评价推理兑现",
+        "reasoning_review": "推理证据永久缺失，无法评价推理兑现",
     }
-    result = await registry.execute("submit_research_review", args)
-    assert "已暂存" not in result
-    assert "unreviewable 不属于自动复盘路径" in result
+    rejected = await registry.execute("submit_research_review", args)
+    assert "已暂存" not in rejected
+    assert "数据不足" in rejected and "留待后续轮次" in rejected
     assert deps.pending_research_reviews == {}
+
+    deps.candle_source = _WindowCandles()  # 客观行情达标：允许 unreviewable 结案
+    ok = await registry.execute("submit_research_review", args)
+    assert "已暂存" in ok
 
 
 async def test_submit_recomputes_outcome_at_submit_time(
@@ -1310,6 +1320,42 @@ async def test_list_research_reviews_shows_prompt_md5(
     assert "研报提示词 md5=aaaaaaaa…" in text
     eth_row = next(line for line in text.splitlines() if "ETH_USDT" in line)
     assert "研报提示词" not in eth_row
+
+
+async def test_list_research_reviews_marks_manual_rereview(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry
+) -> None:
+    """R6-5：人工重评记录在历史查询首行标注替代关系与授权理由。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+
+    返回：
+        None，断言 manual 记录含「人工重评（替代复盘#N）」与「授权理由=…」标注，
+        自动复盘记录不带标注
+    """
+    await deps.repo.research_review.save_review(
+        review_report_id=7,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="realized",
+    )
+    await deps.repo.research_review.save_review(
+        review_report_id=8,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+        review_kind="manual",
+        rereview_of_id=1,
+        rereview_reason="原复盘把震荡误判为背离",
+    )
+    text = await registry.execute("list_research_reviews", {})
+    manual_row = next(line for line in text.splitlines() if "复盘报告#8" in line)
+    assert "人工重评（替代复盘#1）" in manual_row
+    assert "授权理由=原复盘把震荡误判为背离" in manual_row
+    auto_row = next(line for line in text.splitlines() if "复盘报告#7" in line)
+    assert "人工重评" not in auto_row
 
 
 def test_review_registry_has_no_causal_link_write(registry) -> None:

@@ -362,7 +362,7 @@ def settings() -> Settings:
 
 
 async def _build_agent(
-    repo: Repo, settings: Settings, provider, tmp_path, notify_event=None
+    repo: Repo, settings: Settings, provider, tmp_path, notify_event=None, prompt_store=None
 ) -> ResearchAgent:
     """组装使用测试替身的研报 Agent。
 
@@ -372,6 +372,7 @@ async def _build_agent(
         provider: object，模型提供方测试替身
         tmp_path: Path，pytest 提供的临时目录
         notify_event: object，可选事件通知回调
+        prompt_store: object，可选研报提示词版本存储（装配后 prompt 归因走其锁内快照）
     返回：
         ResearchAgent，返回该测试辅助函数构造或记录的结果
     """
@@ -389,6 +390,7 @@ async def _build_agent(
         notify_event=notify_event,
         max_turns=10,
         timeout_seconds=60,
+        prompt_store=prompt_store,
     )
 
 
@@ -2268,7 +2270,7 @@ async def test_run_records_research_prompt_md5(repo: Repo, settings: Settings, t
 async def test_run_records_prompt_version_id_resolved_at_build_time(
     repo: Repo, settings: Settings, tmp_path
 ) -> None:
-    """R5-4：落库版本 id 为构建 prompt 时点该 md5 的最新 applied 版本（draft 不命中）。
+    """R6-4：装配 prompt_store 时落库版本 id 经其锁内快照归因（内容一致的 applied 才命中）。
 
     参数：
         repo: Repo，测试数据库仓库
@@ -2280,6 +2282,8 @@ async def test_run_records_prompt_version_id_resolved_at_build_time(
     """
     import hashlib
 
+    from src.research.prompt_store import ResearchPromptStore
+
     content = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
     (tmp_path / "research_prompt.md").write_text(content, encoding="utf-8")
     md5 = hashlib.md5(content.encode("utf-8")).hexdigest()
@@ -2288,7 +2292,8 @@ async def test_run_records_prompt_version_id_resolved_at_build_time(
     await repo.research_prompt.save_version(
         content, md5, "review_agent", "同文草稿", status="draft"
     )
-    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    store = ResearchPromptStore(tmp_path / "research_prompt.md", repo)
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, prompt_store=store)
     result = await agent.run(report_type="us")
     assert result["ok"] is True
     report = await repo.research.latest_report()

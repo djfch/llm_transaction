@@ -75,17 +75,22 @@ def _pending(report_id: int, contract: str, status: str) -> dict:
 
 
 def _deps(pending_list: list[dict]) -> SimpleNamespace:
-    """构造 bundle 落库所需的最小 deps 替身（暂存区 + 新建版本编号）。
+    """构造 bundle 落库所需的最小 deps 替身（暂存区 + 新建版本编号 + 扫描 lease）。
 
     参数：
         pending_list: list[dict]，本轮暂存的研报复盘草稿列表
 
     返回：
-        SimpleNamespace：含 pending_research_reviews 与 created_version_id 的替身
+        SimpleNamespace：含 pending_research_reviews、created_version_id 与
+        R6-1 扫描 lease 字段（scan_cursor_loaded/scan_tail/scan_log）的替身；
+        默认未做候选扫描（scan_cursor_loaded=False）
     """
     return SimpleNamespace(
         pending_research_reviews={(d["report_id"], d["contract"]): d for d in pending_list},
         created_version_id=None,
+        scan_cursor_loaded=False,
+        scan_tail=False,
+        scan_log=[],
     )
 
 
@@ -418,3 +423,209 @@ async def test_bundle_failure_keeps_rereview_request_pending(repo: Repo, monkeyp
     assert await repo.research_review.list_reviews() == []  # 批改无残留
     pending_req = await repo.research_review.get_pending_rereview_request(1, "BTC_USDT")
     assert pending_req is not None and pending_req.id == req.id  # 授权未被消费
+
+
+# ---------- R6-1：候选扫描游标 lease + 随 bundle 事务 ack ----------
+
+
+def _scanning_deps(
+    pending_list: list[dict],
+    scan_log: list[tuple[float, int, str, bool]],
+    *,
+    tail: bool,
+) -> SimpleNamespace:
+    """构造做过候选扫描的 deps 替身（scan_cursor_loaded=True + 指定扫描日志）。
+
+    参数：
+        pending_list: list[dict]，本轮暂存的研报复盘草稿列表
+        scan_log: list[tuple[float, int, str, bool]]，本轮扫描日志
+        tail: bool，本轮最后一次扫描是否到候选集尾部
+
+    返回：
+        SimpleNamespace：带扫描 lease 状态的 deps 替身
+    """
+    deps = _deps(pending_list)
+    deps.scan_cursor_loaded = True
+    deps.scan_tail = tail
+    deps.scan_log = scan_log
+    return deps
+
+
+async def test_bundle_acks_scan_cursor_with_report(repo: Repo) -> None:
+    """报告成功时游标随同事务 ack：越过已跳过/已复盘候选，停在首个未复盘可用候选之前。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言库中游标推进到已复盘候选处（未复盘的 SOL_USDT 不被越过）
+    """
+    pending = [_pending(2, "ETH_USDT", "complete")]
+    deps = _scanning_deps(
+        pending,
+        [
+            (100.0, 1, "BTC_USDT", False),  # 数据不足被跳过：可越过
+            (200.0, 2, "ETH_USDT", True),  # 可用且本轮已复盘：可越过
+            (300.0, 3, "SOL_USDT", True),  # 可用但本轮未复盘：ack 停在它之前
+        ],
+        tail=False,
+    )
+    await save_review_bundle(
+        repo,
+        deps,
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 正文",
+        strategy_action="none",
+        round_id="rr-scan",
+    )
+    assert await repo.research_review.get_scan_cursor() == (200.0, 2, "ETH_USDT")
+
+
+async def test_bundle_scan_tail_resets_cursor(repo: Repo) -> None:
+    """扫到候选集尾部时 ack 落 NULL：库中旧游标被重置，下轮从头重扫。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言 bundle 后库中游标读回 None
+    """
+    await repo.research_review.save_scan_cursor((50.0, 9, "BTC_USDT"))  # 上轮残留游标
+    deps = _scanning_deps([], [(100.0, 1, "BTC_USDT", False)], tail=True)
+    await save_review_bundle(
+        repo,
+        deps,
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 正文",
+        strategy_action="none",
+        round_id="rr-tail",
+    )
+    assert await repo.research_review.get_scan_cursor() is None
+
+
+async def test_bundle_without_scan_keeps_cursor(repo: Repo) -> None:
+    """本轮未做候选扫描（未调用列出工具）时，库中已有游标不被 bundle 触碰。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言库中游标保持原值
+    """
+    await repo.research_review.save_scan_cursor((50.0, 9, "BTC_USDT"))
+    await save_review_bundle(
+        repo,
+        _deps([]),
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 正文",
+        strategy_action="none",
+        round_id="rr-noscan",
+    )
+    assert await repo.research_review.get_scan_cursor() == (50.0, 9, "BTC_USDT")
+
+
+async def test_bundle_failure_rolls_back_scan_cursor(repo: Repo, monkeypatch) -> None:
+    """bundle 中途失败整体回滚时，游标 ack 一并回滚：库中游标保持上轮位置。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+        monkeypatch: pytest.MonkeyPatch，替换 _insert_review 注入中途失败
+
+    返回：
+        None，断言失败后游标未推进（仍为上轮 ack 的位置）
+    """
+    await repo.research_review.save_scan_cursor((50.0, 9, "BTC_USDT"))
+
+    async def fail_insert(*args, **kwargs):
+        """插入固定抛错（模拟约束冲突/磁盘故障），触发整批回滚。
+
+        参数：
+            args: tuple，_insert_review 的位置参数（不消费）
+            kwargs: dict，_insert_review 的关键字参数（不消费）
+
+        返回：
+            int：永不返回
+
+        异常：
+            RuntimeError：固定抛出，模拟中途失败
+        """
+        raise RuntimeError("模拟中途失败")
+
+    monkeypatch.setattr(review_repo_mod, "_insert_review", fail_insert)
+    deps = _scanning_deps(
+        [_pending(2, "ETH_USDT", "complete")],
+        [(200.0, 2, "ETH_USDT", True)],
+        tail=False,
+    )
+    with pytest.raises(RuntimeError):
+        await save_review_bundle(
+            repo,
+            deps,
+            period_start=1000.0,
+            period_end=2000.0,
+            stats_json="{}",
+            report_md="# 正文",
+            strategy_action="none",
+            round_id="rr-scan-fail",
+        )
+    assert await repo.research_review.get_scan_cursor() == (50.0, 9, "BTC_USDT")  # 未推进
+
+
+# ---------- R6-2：授权消费改条件更新，防并发二次消费 ----------
+
+
+async def test_bundle_rejects_double_consumed_rereview_request(repo: Repo) -> None:
+    """同一授权被第二个 bundle 再消费时条件更新落空：抛错且整体回滚，授权仍绑定首轮。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言第二次 bundle 抛 RuntimeError、其报告与批改无残留、
+        授权 consumed_round_id 仍绑定第一轮轮次
+    """
+    seeded = await repo.research_review.save_review(
+        review_report_id=999, report_id=1, contract="BTC_USDT"
+    )
+    req, _ = await repo.research_review.create_rereview_request(1, "BTC_USDT", "人工复核原结论")
+
+    first = await save_review_bundle(
+        repo,
+        _deps([_manual_pending(1, "BTC_USDT", req.id, seeded.id)]),
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 第一轮",
+        strategy_action="none",
+        round_id="rr-first",
+    )
+    # 第二个 bundle 携带同一授权（并发轮/重放）：insert 批改可写，但授权消费
+    # 条件更新落空 → 抛错回滚，整条 bundle 不残留
+    with pytest.raises(RuntimeError, match="拒绝重复消费"):
+        await save_review_bundle(
+            repo,
+            _deps([_manual_pending(1, "BTC_USDT", req.id, seeded.id)]),
+            period_start=1000.0,
+            period_end=2000.0,
+            stats_json="{}",
+            report_md="# 第二轮",
+            strategy_action="none",
+            round_id="rr-second",
+        )
+
+    _, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 第二轮报告未残留
+    rows = await repo.research_review.list_reviews()
+    manual_rows = [r for r in rows if r.review_kind == "manual"]
+    assert len(manual_rows) == 1 and manual_rows[0].review_report_id == first.id
+    cur = await repo._conn.execute(
+        "SELECT consumed_round_id FROM research_rereview_requests WHERE id=?", (req.id,)
+    )
+    row = await cur.fetchone()
+    assert row["consumed_round_id"] == "rr-first"  # 授权仍绑定第一轮

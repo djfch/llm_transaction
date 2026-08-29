@@ -485,6 +485,10 @@ class Database:
           （issue #113 CAS）：草稿的基线内容 md5（轮初采样），生效时与最新 applied
           版本比对，防止「草稿 id 更大但基线更旧」的陈旧草稿覆盖人工变更；历史行与
           人工即时生效行无基线可循，保持 NULL（生效判定回退旧 id 比较），不回填。
+        - 同三表 .base_applied_version_id（issue #113 R6-3）：草稿基线的 applied
+          版本身份（LLM 实读时点采样），生效时身份比对防 ABA（人工改走又改回
+          同内容时 md5 不变、md5 比对漏检）；历史行保持 NULL（只做文件 md5 校验
+          或回退旧 id 比较），不回填。
 
         参数：
             无
@@ -528,6 +532,9 @@ class Database:
         await self._ensure_version_status_columns()
         # 草稿基线列（issue #113 CAS）：三张版本表统一补 base_md5，历史行 NULL 回退旧行为
         await self._ensure_version_base_md5_columns()
+        # 基线 applied 身份列（issue #113 R6-3）：三张版本表统一补
+        # base_applied_version_id，历史行 NULL（只做文件 md5 校验或回退旧 id 比较）
+        await self._ensure_version_base_applied_id_columns()
         # 模型身份四列（跨模型效果对比）：历史轮次无法可靠推断当时所用模型，保持默认 ''，不回填
         await self._ensure_audit_llm_identity_columns()
         # 权益曲线按模式+时间的窗口扫描索引（issue #79）
@@ -604,6 +611,22 @@ class Database:
             cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
             if "base_md5" not in {row["name"] for row in await cur.fetchall()}:
                 await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN base_md5 TEXT")
+
+    async def _ensure_version_base_applied_id_columns(self) -> None:
+        """为三张版本表补 base_applied_version_id 列（幂等）：基线 applied 身份（issue #113 R6-3）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（无身份可循，
+            生效判定只做文件 md5 校验或回退旧 id 比较），不回填
+        """
+        for table in ("strategy_versions", "indicator_config_versions", "research_prompt_versions"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
+            if "base_applied_version_id" not in {row["name"] for row in await cur.fetchall()}:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN base_applied_version_id INTEGER"
+                )
 
     async def _ensure_audit_llm_identity_columns(self) -> None:
         """为审计主表补模型身份四列（幂等）：开轮快照落库，供跨模型效果对比。

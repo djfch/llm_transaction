@@ -173,6 +173,7 @@ def build_research(
         market_data=market_data,
         watchlist=watchlist or [],
         timeout_seconds=cfg.timeout_seconds,
+        prompt_store=prompt_store,  # R6-4：prompt 正文/md5/版本归因经其锁内快照同刻取齐
     )
     scheduler = ResearchScheduler(settings, agent, repo)
     return ResearchComponents(

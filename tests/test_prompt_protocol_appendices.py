@@ -270,7 +270,7 @@ def test_review_prompt_rereview_discipline():
     review = (ROOT / "review_prompt.example.md").read_text(encoding="utf-8")
     assert "已被正式复盘过的结论不得重复提交" in review
     assert "留待后续轮次" in review
-    assert "unreviewable 闭合结案" in review
+    assert "推理证据永久缺失" in review  # R6-6：达标后允许 unreviewable 结案的分层口径
     assert "manual_rereview" not in review
     # R5-2：人工授权重评口径（授权只能由人工发起，经候选清单尾部对复盘方可见）
     assert "人工重评授权" in review
@@ -281,25 +281,28 @@ def test_review_prompt_rereview_discipline():
 
 
 def test_gate_appendix_allows_authorized_unreviewable_closure(tmp_path):
-    """校验复盘门禁附录含人工授权结案豁免（R5-2 复审必修：消除附录与授权契约冲突）。
+    """校验复盘门禁附录：outcome 门禁先于一切枚举取值（R6-6）+ 人工授权结案口径（R5-2）。
 
     参数：
         tmp_path: Path，pytest 临时目录夹具，用于写入自定义 review_prompt.md
 
     返回：
-        None，断言附录常量与拼装后的完整提示词均含授权结案豁免的关键语义标记：
-        豁免锚定在人工重评授权、结案三枚举一致约束与理由以授权理由为准
+        None，断言附录常量与拼装后的完整提示词均含关键语义标记：数据不足一律留待、
+        客观行情数据门禁先于一切枚举取值生效、达标后推理证据永久缺失允许 unreviewable
+        结案，以及人工授权结案的三枚举一致约束与理由以授权理由为准
     """
-    # 附录常量本体：数据不足留待后续为默认纪律，人工重评授权为唯一结案豁免
+    # 附录常量本体：数据不足留待后续为默认纪律，outcome 门禁先于一切枚举取值（R6-6）
     assert "留待" in REVIEW_RESEARCH_REVIEW_GATE_V1
-    assert "人工重评授权时例外" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "客观行情数据门禁先于一切枚举取值生效" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "推理证据永久缺失" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "人工重评授权时另有结案口径" in REVIEW_RESEARCH_REVIEW_GATE_V1
     assert "reasoning_quality 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
     assert "direction_relation 取 unverifiable" in REVIEW_RESEARCH_REVIEW_GATE_V1
     assert "confidence_assessment 取 unreviewable" in REVIEW_RESEARCH_REVIEW_GATE_V1
     assert "结案理由以授权理由为准" in REVIEW_RESEARCH_REVIEW_GATE_V1
-    # 拼装后的完整提示词同样携带豁免（固定附录强制追加，正文不可覆盖）
+    # 拼装后的完整提示词同样携带门禁与授权口径（固定附录强制追加，正文不可覆盖）
     path = tmp_path / "review_prompt.md"
     path.write_text("自定义复盘正文：数据不足一律留待，不承认任何豁免", encoding="utf-8")
     prompt, _ = ReviewPromptLoader(path).system_prompt("## 可用工具")
-    assert "人工重评授权时例外" in prompt
+    assert "人工重评授权时另有结案口径" in prompt
     assert "结案理由以授权理由为准" in prompt

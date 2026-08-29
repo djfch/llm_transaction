@@ -79,11 +79,25 @@ class ReviewToolDeps:
     research_prompt_store: Any | None = None
     research_prompt_version_id: int | None = None
     research_prompt_draft_ids: list[int] = dataclass_field(default_factory=list)
-    # 本轮三通道草稿基线 md5（issue #113 CAS）：轮初采样的「当前生效内容」摘要，
+    # 本轮三通道草稿基线 md5（issue #113 CAS）：LLM 实读时点的「当前生效内容」摘要，
     # 键为通道键（strategy/indicator_config/research_prompt）；三个修订工具落草稿时
     # 取本通道值盖章，轮末生效按基线比对防陈旧草稿覆盖人工变更；空字典（未采样，
     # 如测试直接构造 deps）时草稿 base_md5 落 NULL，回退旧 id 比较行为
     base_md5_by_channel: dict[str, str] = dataclass_field(default_factory=dict)
+    # 与 base_md5_by_channel 同点采样的基线 applied 版本身份（issue #113 R6-3）：
+    # 键同为通道键；轮末生效时先按此身份判定基线版本是否仍在位（防人工变更/回滚/
+    # ABA），再按文件内容 md5 比对（防热编辑）；采样时无 applied 版本则该通道无此键
+    base_applied_id_by_channel: dict[str, int] = dataclass_field(default_factory=dict)
+    # 候选扫描游标本轮 lease（issue #113 R6-1）：list_research_review_candidates
+    # 首次扫描时把库中游标读入内存（scan_cursor_loaded=True），本轮所有扫描只在内存
+    # 推进（scan_cursor/scan_tail 以最后一次调用为准，不 sticky），每条预检追加
+    # scan_log（(due_at, report_id, contract, usable)）；游标不再随列出落库——本轮
+    # 复盘报告成功时由 bundle 事务按「已复盘 + 已跳过」一次性 ack 落库，本轮失败
+    # 或未提交报告时库中游标原地不动、下轮从未复盘的可用候选重扫
+    scan_cursor: tuple[float, int, str] | None = None
+    scan_cursor_loaded: bool = False
+    scan_tail: bool = False
+    scan_log: list[tuple[float, int, str, bool]] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------
@@ -488,6 +502,7 @@ async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
             reason,
             created_by="review_agent",
             base_md5=deps.base_md5_by_channel.get("strategy"),
+            base_applied_version_id=deps.base_applied_id_by_channel.get("strategy"),
         )
     except StrategyValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原策略书未改动，修正后可重新提交）"

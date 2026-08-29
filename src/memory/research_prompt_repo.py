@@ -61,6 +61,7 @@ class ResearchPromptRepo:
         review_report_id: int | None = None,
         status: str = "applied",
         base_md5: str | None = None,
+        base_applied_version_id: int | None = None,
     ) -> ResearchPromptVersion:
         """落库一个研报提示词版本（content 为完整原文，md5 为关联键）。
 
@@ -71,8 +72,11 @@ class ResearchPromptRepo:
             reason: str，操作原因
             review_report_id: int | None，触发本版本的复盘报告编号
             status: str，版本状态：applied 已生效 / draft 草稿 / discarded 已废弃
-            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
+            base_md5: str | None，草稿基线 md5（LLM 实读时点的当时生效内容摘要，
                 issue #113 CAS）；None = 人工/历史行，生效判定回退旧 id 比较
+            base_applied_version_id: int | None，草稿基线的 applied 版本身份
+                （issue #113 R6-3）；None = 采样时无 applied 版本/人工/历史行，
+                生效判定只做文件 md5 校验
 
         返回：
             ResearchPromptVersion：已落库的版本对象
@@ -80,8 +84,19 @@ class ResearchPromptRepo:
         ts = _now()
         cur = await self._conn.execute(
             "INSERT INTO research_prompt_versions(content,md5,created_by,reason,"
-            "review_report_id,created_at,status,base_md5) VALUES(?,?,?,?,?,?,?,?)",
-            (content, md5, created_by, reason, review_report_id, ts, status, base_md5),
+            "review_report_id,created_at,status,base_md5,base_applied_version_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                content,
+                md5,
+                created_by,
+                reason,
+                review_report_id,
+                ts,
+                status,
+                base_md5,
+                base_applied_version_id,
+            ),
         )
         await self._conn.commit()
         return ResearchPromptVersion(
@@ -94,6 +109,7 @@ class ResearchPromptRepo:
             created_at=ts,
             status=status,
             base_md5=base_md5,
+            base_applied_version_id=base_applied_version_id,
         )
 
     async def list_versions(self) -> list[ResearchPromptVersion]:
@@ -142,27 +158,6 @@ class ResearchPromptRepo:
             "SELECT * FROM research_prompt_versions "
             "WHERE md5=? AND status='applied' AND created_at <= ? ORDER BY id DESC LIMIT 1",
             (md5, as_of_ts),
-        )
-        row = await cur.fetchone()
-        return ResearchPromptVersion(**dict(row)) if row else None
-
-    async def latest_applied_by_md5(self, md5: str) -> ResearchPromptVersion | None:
-        """按正文 md5 解析当前最新生效的版本（研报构建时点归因用，issue #113 R5-4）。
-
-        与 get_version_by_md5 的区别：不带 as_of 时点——构建 prompt 的当下，
-        "该 md5 最新 applied 版本"就是研报实际使用的版本，直接落库为
-        research_reports.research_prompt_version_id，消除复盘侧 md5+时点反解的歧义。
-
-        参数：
-            md5: str，提示词正文摘要（构建 prompt 时点取样的 body_md5）
-
-        返回：
-            ResearchPromptVersion | None：该 md5 最新生效的版本；无 applied 记录时 None
-        """
-        cur = await self._conn.execute(
-            "SELECT * FROM research_prompt_versions "
-            "WHERE md5=? AND status='applied' ORDER BY id DESC LIMIT 1",
-            (md5,),
         )
         row = await cur.fetchone()
         return ResearchPromptVersion(**dict(row)) if row else None

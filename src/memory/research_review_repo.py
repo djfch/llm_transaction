@@ -74,6 +74,56 @@ LIMIT ?
 # 故 (0.0, 0, '') 等价于"从头扫"，免去了有无游标两套 SQL
 _CURSOR_ORIGIN: tuple[float, int, str] = (0.0, 0, "")
 
+
+def compute_scan_cursor_ack(
+    scan_log: list[tuple[float, int, str, bool]],
+    reviewed_keys: set[tuple[int, str]],
+) -> tuple[float, int, str] | None:
+    """由本轮扫描日志推导应落库的游标 ack 位置（纯函数，不落库）（R6-1）。
+
+    按扫描顺序走：被跳过的候选与本轮已复盘的可用候选都可越过（ack 推进到它）；
+    遇到首个「已预检可用但本轮未复盘」的候选即停（ack 不越过它，下轮从它重扫，
+    不会被饿死）。扫描期间被反复复检的同 key 条目（多 pass 续扫）天然按序处理，
+    不影响首个未处理可用候选的停位判定。
+
+    参数：
+        scan_log: list[tuple[float, int, str, bool]]，本轮扫描日志，
+            每条为 (due_at, report_id, contract, usable)
+        reviewed_keys: set[tuple[int, str]]，本轮已暂存复盘的
+            (report_id, contract) 集合
+
+    返回：
+        tuple[float, int, str] | None：ack 推进位置；空日志返回 None
+    """
+    ack: tuple[float, int, str] | None = None
+    for due_at, report_id, contract, usable in scan_log:
+        if usable and (report_id, contract) not in reviewed_keys:
+            break  # 首个可用但未复盘候选：ack 停在它之前，下轮从它续扫
+        ack = (due_at, report_id, contract)
+    return ack
+
+
+async def _save_scan_cursor(
+    conn: aiosqlite.Connection, cursor: tuple[float, int, str] | None
+) -> None:
+    """在 bundle 事务内持久化候选扫描游标；不 commit（随事务提交/回滚）（R6-1）。
+
+    参数：
+        conn: aiosqlite.Connection，bundle 事务连接
+        cursor: tuple[float, int, str] | None，ack 推进位置；None 时三字段写 NULL
+            （扫到候选集尾部，下轮从头重扫）
+
+    返回：
+        None：单行状态被就地更新（提交由调用方事务边界控制）
+    """
+    due_at, report_id, contract = cursor if cursor is not None else (None, None, None)
+    await conn.execute(
+        "INSERT OR REPLACE INTO research_review_scan_state"
+        "(id, last_due_at, last_report_id, last_contract) VALUES(1, ?, ?, ?)",
+        (due_at, report_id, contract),
+    )
+
+
 _REVIEW_COLUMNS = (
     "review_report_id,report_id,contract,direction_relation,direction_reason,"
     "reasoning_quality,reasoning_review,evidence_reviews_json,"
@@ -87,6 +137,10 @@ async def _consume_rereview_request(
 ) -> None:
     """把人工重评授权标记为已消费并绑定复盘轮次；不 commit（随 bundle 同事务）。
 
+    条件更新防并发二次消费（R6-2）：WHERE 附带 consumed_round_id=''，授权已被
+    其他复盘轮消费（或不存在）时 rowcount=0——抛错让 bundle 事务整体回滚，
+    杜绝「一份授权结出两条 manual 复盘」的半消费状态。
+
     参数：
         conn: aiosqlite.Connection，bundle 事务连接
         request_id: int，被消费的重评授权编号
@@ -94,11 +148,17 @@ async def _consume_rereview_request(
 
     返回：
         None：授权行 consumed_round_id 就地更新（提交由调用方事务边界控制）
+
+    异常：
+        RuntimeError：授权不存在或已被其他复盘轮消费（并发/重复提交）时抛出
     """
-    await conn.execute(
-        "UPDATE research_rereview_requests SET consumed_round_id=? WHERE id=?",
+    cur = await conn.execute(
+        "UPDATE research_rereview_requests SET consumed_round_id=?"
+        " WHERE id=? AND consumed_round_id=''",
         (round_id, request_id),
     )
+    if cur.rowcount != 1:
+        raise RuntimeError(f"人工重评授权 #{request_id} 不存在或已被其他复盘轮消费，拒绝重复消费")
 
 
 async def _insert_review(
@@ -247,7 +307,11 @@ class ResearchReviewRepo:
         return (due_at, report_id, contract)
 
     async def save_scan_cursor(self, cursor: tuple[float, int, str] | None) -> None:
-        """持久化候选扫描游标（立即 commit）；None 表示重置（扫到候选集尾部）。
+        """持久化候选扫描游标（立即 commit 的独立入口）；None 表示重置（扫到候选集尾部）。
+
+        R6-1 起复盘轮内不再经本方法落库——列出工具只推进内存 lease，随报告成功
+        由 review_repo.save_review_bundle 事务内经 _save_scan_cursor 一次性 ack；
+        本方法保留给无 bundle 的独立重置场景与测试。
 
         参数：
             cursor: tuple[float, int, str] | None，已预检推进到的位置；

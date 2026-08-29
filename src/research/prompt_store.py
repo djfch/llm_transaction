@@ -32,6 +32,43 @@ _MAX_BYTES = 32 * 1024  # UTF-8 体积上限 32KB
 _NO_DIFF_REASON = "与当前研报提示词无差异"
 
 
+def _staleness_reason(
+    version: ResearchPromptVersion, latest: ResearchPromptVersion | None, current_md5: str
+) -> str | None:
+    """判定草稿基线是否失效（issue #113 CAS，R6-3 加固）；失效返回原因文本，否则 None。
+
+    判定语义同 src/review/strategy.py 的同名函数：latest 即本版本自身（轮末生效
+    成功后被打断的幂等重放）→ 有效；无基线章（历史行/人工即时生效行）→ 回退旧
+    id 比较；有基线章 → 实读时点的 applied 身份已不在位（人工变更/回滚/ABA）或
+    当前文件内容偏离实读基线（热编辑）均失效；兼容章额外保留旧「更高 applied
+    取代」判定。
+
+    参数：
+        version: ResearchPromptVersion，待生效的草稿版本
+        latest: ResearchPromptVersion | None，当前最新 applied 版本
+        current_md5: str，当前文件内容 md5（调用方在生效锁内采样）
+
+    返回：
+        str | None：失效原因（供告警日志）；None 表示基线有效、可生效
+    """
+    if latest is not None and latest.id == version.id:
+        return None  # 幂等重放：该版本自身即最新生效，其内容本就异于基线
+    if version.base_md5 is None:
+        if latest is not None and latest.id > version.id:
+            return f"已被更高的 applied 版本 v{latest.id} 取代"
+        return None
+    if version.base_applied_version_id is not None and (
+        latest is None or latest.id != version.base_applied_version_id
+    ):
+        current_id = f"v{latest.id}" if latest is not None else "无"
+        return f"实读基线版本 v{version.base_applied_version_id} 已不在位（当前生效 {current_id}）"
+    if current_md5 != version.base_md5:
+        return f"当前文件内容已偏离实读基线（基线 md5={version.base_md5[:8]}…）"
+    if version.base_applied_version_id is None and latest is not None and latest.id > version.id:
+        return f"已被更高的 applied 版本 v{latest.id} 取代"
+    return None
+
+
 def content_md5(content: str) -> str:
     """研报提示词原文 md5（与 ResearchPromptLoader.body_md5 同一算法，作为版本关联键）。
 
@@ -142,21 +179,44 @@ class ResearchPromptStore:
         except FileNotFoundError:
             return ""
 
-    async def current_base_md5(self) -> str:
-        """轮初草稿基线采样：最新 applied 版本的 md5；无 applied 版本时用当前文件内容 md5。
+    async def sample_current_base(self) -> tuple[str, str, int | None]:
+        """在生效锁内原子采样当前生效内容三元组：文件正文、其 md5、最新 applied 版本 id。
 
-        供复盘轮初给本轮草稿盖基线章（issue #113 CAS）：轮末生效时若最新 applied
-        内容已偏离此基线（人工中途改过），草稿废弃不生效。
+        供 LLM 读取时点给本轮草稿盖基线章（issue #113 R6-3）：正文即 LLM 所见
+        内容（调用方直接嵌入展示，避免二次读文件的竞态窗口），md5 与 applied id
+        一并写入草稿；轮末生效时按身份 + 文件内容双重比对，防 ABA 与热编辑漏检。
 
         参数：无
 
         返回：
-            str：当前生效内容的 md5（无 applied 版本且文件不存在时为空串的 md5）
+            tuple[str, str, int | None]：当前文件正文（不存在为 ''）、正文 md5、
+            最新 applied 版本 id（无 applied 版本时 None）
         """
-        latest = await self._repo.research_prompt.latest_applied_version()
-        if latest is not None:
-            return latest.md5
-        return content_md5(self.current())
+        async with self._apply_lock:
+            content = self.current()
+            latest = await self._repo.research_prompt.latest_applied_version()
+            return content, content_md5(content), latest.id if latest is not None else None
+
+    async def current_snapshot(self) -> tuple[str, str, int | None]:
+        """在生效锁内原子采样研报运行用快照：正文、正文 md5、可归因的 applied 版本 id。
+
+        供研报 agent 构建 prompt 时点一次取齐（issue #113 R6-4）：正文/md5/版本归属
+        同源同刻，避免「读正文 → 算 md5 → 反解版本」分步取样被运行途中热替换错位。
+        版本归因按内容一致性确认：最新 applied 版本 md5 与当前正文一致才归因其 id，
+        否则（文件热编辑、播种缺失等）返回 None。
+
+        参数：无
+
+        返回：
+            tuple[str, str, int | None]：当前正文（文件不存在为 ''）、正文 md5、
+            可归因的最新 applied 版本 id（内容不一致或无 applied 版本时 None）
+        """
+        async with self._apply_lock:
+            content = self.current()
+            md5 = content_md5(content)
+            latest = await self._repo.research_prompt.latest_applied_version()
+            version_id = latest.id if latest is not None and latest.md5 == md5 else None
+            return content, md5, version_id
 
     async def revise(
         self,
@@ -165,6 +225,7 @@ class ResearchPromptStore:
         created_by: str,
         review_report_id: int | None = None,
         base_md5: str | None = None,
+        base_applied_version_id: int | None = None,
     ) -> ResearchPromptVersion:
         """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
@@ -173,9 +234,11 @@ class ResearchPromptStore:
             reason: str，变更原因
             created_by: str，版本创建来源
             review_report_id: int | None，关联复盘报告标识
-            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
-                issue #113 CAS）；人工即时生效路径（revise_applied）锁内落库即生效、
-                无竞态窗口，不传（None 回退旧 id 比较）
+            base_md5: str | None，草稿基线 md5（LLM 实读时点的生效内容摘要，
+                issue #113 CAS/R6-3）；人工即时生效路径（revise_applied）锁内落库
+                即生效、无竞态窗口，不传（None 回退旧 id 比较）
+            base_applied_version_id: int | None，草稿基线的 applied 版本身份
+                （issue #113 R6-3，与 base_md5 同时取自 sample_current_base）
 
         返回：
             ResearchPromptVersion，校验通过后落库的 draft 版本（提示词文件未改动，
@@ -194,6 +257,7 @@ class ResearchPromptStore:
             review_report_id,
             status="draft",
             base_md5=base_md5,
+            base_applied_version_id=base_applied_version_id,
         )
 
     async def revise_applied(
@@ -229,9 +293,10 @@ class ResearchPromptStore:
     async def apply_version(self, version_id: int) -> ResearchPromptVersion | None:
         """把草稿（或历史）版本原子写入提示词文件并置为 applied——统一生效入口。
 
-        全程在生效锁内；锁内重读最新 applied 版本：草稿 base_md5 非空且与最新
-        applied 内容不一致时基线已被人工变更取代（issue #113 CAS），否则存在 id
-        更大的 applied 版本时本版本已被取代——均置 discarded 并返回 None，
+        全程在生效锁内；锁内重读最新 applied 版本与当前文件内容：草稿基线章
+        （base_md5/base_applied_version_id，issue #113 CAS/R6-3）失效——实读时点
+        的 applied 身份不在位（人工变更/回滚/ABA）或文件被热编辑偏离实读内容——
+        或无基线章但已被更高 applied 版本取代时，均置 discarded 并返回 None，
         不覆盖人工新内容（issue #113 F11）。
 
         参数：
@@ -239,7 +304,7 @@ class ResearchPromptStore:
 
         返回：
             ResearchPromptVersion | None：已生效（applied）的版本对象；
-            基线被人工变更取代或已被更高 applied 版本取代时返回 None
+            基线已失效或已被更高 applied 版本取代时返回 None
             （本版本已置 discarded）
 
         异常：
@@ -255,8 +320,8 @@ class ResearchPromptStore:
             version_id: int，待生效的版本编号
 
         返回：
-            ResearchPromptVersion | None：已生效版本；草稿基线被人工变更取代
-            （CAS）或被更高 applied 版本取代时返回 None
+            ResearchPromptVersion | None：已生效版本；草稿基线已失效（CAS）
+            或被更高 applied 版本取代时返回 None
 
         异常：
             ResearchPromptValidationError，目标版本不存在时抛出
@@ -265,31 +330,14 @@ class ResearchPromptStore:
         if version is None:
             raise ResearchPromptValidationError([f"研报提示词版本 v{version_id} 不存在，无法生效"])
         latest = await self._repo.research_prompt.latest_applied_version()
-        # 草稿基线 CAS（issue #113）：语义同 StrategyStore——基线非空且与最新
-        # applied 内容不一致时，本草稿基于旧内容生成，废弃不生效；latest 即本版本
-        # 自身（生效成功后的幂等重放）时跳过比对，重写同内容文件
-        if (
-            version.base_md5
-            and latest is not None
-            and latest.id != version_id
-            and latest.md5 != version.base_md5
-        ):
+        # 草稿基线 CAS（issue #113，R6-3 加固）：语义同 StrategyStore——基线章绑定
+        # LLM 实读时点的文件内容 md5 与最新 applied 版本身份；人工变更/回滚/ABA
+        # 导致身份不在位、或文件被热编辑偏离实读内容，均判基线失效、废弃草稿
+        # 不生效，不覆盖人工内容（issue #113 F11）
+        reason = _staleness_reason(version, latest, content_md5(self.current()))
+        if reason is not None:
             await self._repo.research_prompt.set_version_status(version_id, "discarded")
-            logger.warning(
-                "研报提示词草稿 v%d 的基线已被人工变更取代（基线 md5=%s，当前生效 v%d md5=%s），废弃不生效",
-                version_id,
-                version.base_md5[:8],
-                latest.id,
-                latest.md5[:8],
-            )
-            return None
-        if latest is not None and latest.id > version_id:
-            await self._repo.research_prompt.set_version_status(version_id, "discarded")
-            logger.warning(
-                "研报提示词版本 v%d 已被更高的 applied 版本 v%d 取代，废弃不生效",
-                version_id,
-                latest.id,
-            )
+            logger.warning("研报提示词草稿 v%d 的基线已失效（%s），废弃不生效", version_id, reason)
             return None
         self._atomic_write(version.content)
         await self._repo.research_prompt.set_version_status(version_id, "applied")

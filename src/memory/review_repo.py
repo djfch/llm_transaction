@@ -9,12 +9,21 @@ Repo.__init__ 挂载为 repo.review，复盘相关调用一律走 repo.review.xx
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersion, Trade
-from src.memory.research_review_repo import _consume_rereview_request, _insert_review
+from src.memory.research_review_repo import (
+    _consume_rereview_request,
+    _insert_review,
+    _save_scan_cursor,
+)
+
+# scan_cursor 参数缺省哨兵：区分「本轮未做候选扫描（不动库中游标）」与
+# 「扫到候选集尾部（事务内写 NULL 重置）」（None 本身是合法值，不能当缺省标记）
+SCAN_CURSOR_UNSET: Any = object()
 
 
 def _now() -> float:
@@ -108,6 +117,7 @@ class ReviewRepo:
         report_id: int | None = None,
         status: str = "applied",
         base_md5: str | None = None,
+        base_applied_version_id: int | None = None,
     ) -> StrategyVersion:
         """落库一个策略书版本（content 为完整原文，md5 为关联键）。
 
@@ -119,8 +129,11 @@ class ReviewRepo:
             report_id: int | None，研报记录编号
             status: str，版本状态：applied 已生效 / draft 草稿（报告成功才生效，
                 issue #62/#73）/ discarded 已废弃
-            base_md5: str | None，草稿基线 md5（复盘轮初采样的当时生效内容摘要，
+            base_md5: str | None，草稿基线 md5（LLM 实读时点的当时生效内容摘要，
                 issue #113 CAS）；None = 人工/历史行，生效判定回退旧 id 比较
+            base_applied_version_id: int | None，草稿基线的 applied 版本身份
+                （issue #113 R6-3）；None = 采样时无 applied 版本/人工/历史行，
+                生效判定只做文件 md5 校验
 
         返回：
             StrategyVersion：落库一个策略书版本（content 为完整原文，md5 为关联键）
@@ -128,8 +141,18 @@ class ReviewRepo:
         ts = _now()
         cur = await self._conn.execute(
             "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,"
-            "status,base_md5) VALUES(?,?,?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts, status, base_md5),
+            "status,base_md5,base_applied_version_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                content,
+                md5,
+                created_by,
+                reason,
+                report_id,
+                ts,
+                status,
+                base_md5,
+                base_applied_version_id,
+            ),
         )
         await self._conn.commit()
         return StrategyVersion(
@@ -142,6 +165,7 @@ class ReviewRepo:
             created_at=ts,
             status=status,
             base_md5=base_md5,
+            base_applied_version_id=base_applied_version_id,
         )
 
     async def list_strategy_versions(self) -> list[StrategyVersion]:
@@ -285,6 +309,7 @@ class ReviewRepo:
         error: str = "",
         round_id: str = "",
         research_reviews: list[dict] | None = None,
+        scan_cursor: Any = SCAN_CURSOR_UNSET,
     ) -> ReviewReport:
         """单事务落库一份复盘报告及其全部研报复盘记录；任一步失败整体回滚。
 
@@ -309,6 +334,9 @@ class ReviewRepo:
                 review_report_id/created_at，由本方法统一回填）；人工授权重评
                 草稿可携带内部键 rereview_request_id（授权编号），本方法弹出后
                 在同事务内把该授权标记为已消费并绑定 round_id（R5-2）
+            scan_cursor: Any，候选扫描游标 ack（R6-1）：缺省（SCAN_CURSOR_UNSET）
+                表示本轮未做候选扫描、库中游标不动；其余取值（含 None=扫到尾部
+                重置）在同事务内落库，随整批同生共死
 
         返回：
             ReviewReport：已提交的复盘报告
@@ -345,6 +373,9 @@ class ReviewRepo:
                 await _insert_review(conn, review_report_id=report_id, created_at=ts, **item)
                 if request_id is not None:
                     await _consume_rereview_request(conn, request_id, round_id)
+            if scan_cursor is not SCAN_CURSOR_UNSET:
+                # R6-1：本轮做过候选扫描才把游标 ack 随报告同事务落库
+                await _save_scan_cursor(conn, scan_cursor)
             await conn.commit()
         except Exception:
             await conn.rollback()

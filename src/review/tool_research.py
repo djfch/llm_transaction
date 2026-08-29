@@ -1,8 +1,10 @@
 """复盘侧的研报复盘工具（issue #113）：3 只读 + 1 写。
 
 - list_research_review_candidates：已到期未复盘且客观行情可批改的逐标的结论候选；
-  扫描位置以 keyset 游标跨轮持久化（research_review_scan_state 单行表），
-  扫到候选集尾部自动重置、下轮从头重扫（R5）；
+  扫描位置以 keyset 游标维护（research_review_scan_state 单行表）：R6-1 起列出
+  只推进轮内内存 lease（续扫不再读库、列出无副作用），库中游标随本轮报告成功的
+  save_review_bundle 事务一次性 ack——越过已复盘与已跳过、停在首个未处理 usable
+  之前；扫到候选集尾部时 ack 落 NULL 重置、下轮从头重扫；
 - get_research_review_case：单个案例的完整材料（原文+市场快照+研报轮上下文+
   policy_adjustments 归一化记录+代码计算的客观行情），读后登记到
   deps.loaded_research_cases（submit 的前置）；
@@ -44,8 +46,9 @@ from src.review.tool_handlers import (
 _CASE_SNAPSHOT_LIMIT = 3000  # 案例内市场快照/上下文快照的截断长度
 # 候选扫描预算（V5）：单次 list_research_review_candidates 调用最多预检的候选数
 # （= 最多发起的 K 线请求数）。每候选预检是一次 from/to 窗口 K 线拉取，不设上限
-# 时大量数据不可用候选会把单次工具调用拖成数百次网关请求；预算用尽时扫描位置
-# 以 keyset 游标落库（R5），由复盘方再次调用或下一轮复盘接力续扫。
+# 时大量数据不可用候选会把单次工具调用拖成数百次网关请求；预算用尽时只推进轮内
+# 内存游标（R6-1 lease，列出无副作用），由复盘方再次调用本工具续扫；库中游标
+# 随本轮报告成功的 save_review_bundle 事务一次性 ack 落库，本轮失败/取消不落库。
 MAX_CANDIDATE_SCAN = 200
 
 # 复盘枚举（值 → 中文释义）：schema 描述、工具校验与预注入渲染共用同一来源，改动须同步
@@ -235,6 +238,20 @@ def _format_outcome(outcome: dict[str, Any]) -> str:
     return line
 
 
+def _manual_tag(row: ResearchReview) -> str:
+    """人工重评标注段（issue #113 R6-5）：manual 复盘记录首行追加替代关系与授权理由。
+
+    参数：
+        row: ResearchReview，复盘记录
+
+    返回：
+        str：人工重评时返回「 | 人工重评（替代复盘#N） | 授权理由=…」；自动复盘为空串
+    """
+    if row.review_kind != "manual":
+        return ""
+    return f" | 人工重评（替代复盘#{row.rereview_of_id or '—'}） | 授权理由={row.rereview_reason}"
+
+
 def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
     """把一条复盘记录渲染成多行完整文本（供历史查询逐条展示）。
 
@@ -248,7 +265,8 @@ def _format_review_row(row: ResearchReview, prompt_md5: str = "") -> str:
     lines = [
         f"复盘#{row.id} | 研报#{row.report_id}/{row.contract} | 复盘报告#{row.review_report_id}"
         f" | 时间={_fmt_time(row.created_at)}"
-        + (f" | 研报提示词 md5={prompt_md5[:8]}…" if prompt_md5 else ""),
+        + (f" | 研报提示词 md5={prompt_md5[:8]}…" if prompt_md5 else "")
+        + _manual_tag(row),
         f"  方向关系：{row.direction_relation} | 理由：{row.direction_reason}",
         f"  推理质量：{row.reasoning_quality} | 复核：{row.reasoning_review}",
         f"  置信度合规：{row.confidence_assessment} | 理由：{row.confidence_reason}",
@@ -349,15 +367,16 @@ async def _scan_usable_candidates(
 ) -> tuple[list[ResearchReviewCandidate], list[ResearchReviewCandidate], int, bool]:
     """按 keyset 游标分页扫描候选并逐条预检可用性（受 MAX_CANDIDATE_SCAN 预算约束）。
 
-    游标语义 = 已预检推进到的位置（(due_at, report_id, contract) 三元组），跨调用/
-    跨轮持久化于 research_review_scan_state 单行表：预算用尽时下次调用（或下一轮
-    复盘）从游标续扫，不重扫不跳行（R5-3：替代 offset 分页，候选集在扫描期间随
-    复盘落库收缩时 offset 会跳行/重扫，keyset 不受影响）；扫到候选集尾部（取到
-    的批量不足请求页大小）时游标重置落库——下轮从头重扫，被跳过的数据不足候选
-    才有机会在行情回补后复检。
+    游标语义 = 已预检推进到的位置（(due_at, report_id, contract) 三元组）。R6-1 起
+    改为轮内 lease：本轮首次调用把库中游标读入 deps（此后本轮续扫走内存，不再读库），
+    每条预检追加 deps.scan_log，结束只推进内存 scan_cursor/scan_tail——不落库；
+    库中游标由 bundle 事务在本轮报告成功时按「已复盘 + 已跳过」一次性 ack（R5-3
+    的 keyset 抗收缩性质不变，但列出不再产生副作用：本轮失败/未提交报告时库中
+    游标原地不动，下轮从未复盘候选重扫；扫到候选集尾部时 ack 落 NULL 重置——
+    下轮从头重扫，被跳过的数据不足候选才有机会在行情回补后复检）。
 
     参数：
-        deps: ReviewToolDeps，复盘工具依赖
+        deps: ReviewToolDeps，复盘工具依赖（读写其扫描 lease 字段）
         now: float，当前时间戳
         limit: int，要凑满的可用候选条数
 
@@ -367,7 +386,10 @@ async def _scan_usable_candidates(
     usable: list[ResearchReviewCandidate] = []
     skipped: list[ResearchReviewCandidate] = []
     scanned = 0  # 已预检候选数（= 已发起的 K 线请求数），受扫描预算约束
-    cursor = await deps.repo.research_review.get_scan_cursor()
+    if not deps.scan_cursor_loaded:  # 本轮首次扫描：库中游标读入内存 lease
+        deps.scan_cursor = await deps.repo.research_review.get_scan_cursor()
+        deps.scan_cursor_loaded = True
+    cursor = deps.scan_cursor
     tail = False
     while len(usable) < limit and scanned < MAX_CANDIDATE_SCAN:
         page = min(limit, MAX_CANDIDATE_SCAN - scanned)
@@ -380,15 +402,18 @@ async def _scan_usable_candidates(
                 break
             scanned += 1
             cursor = (c.due_at, c.report_id, c.contract)
-            if await _candidate_usable(deps, c):
+            usable_hit = await _candidate_usable(deps, c)
+            deps.scan_log.append((c.due_at, c.report_id, c.contract, usable_hit))
+            if usable_hit:
                 usable.append(c)
             else:
                 skipped.append(c)
         if len(batch) < page:
             tail = True
             break
-    # 整次调用结束统一落库一次：扫到尾部重置为 None（下轮从头），否则记住推进位置
-    await deps.repo.research_review.save_scan_cursor(None if tail else cursor)
+    # 只推进本轮内存 lease（本轮最后一次调用为准）：落库 ack 由 bundle 事务负责
+    deps.scan_cursor = None if tail else cursor
+    deps.scan_tail = tail
     return usable, skipped, scanned, tail
 
 
@@ -398,9 +423,10 @@ async def list_research_review_candidates(deps: ReviewToolDeps, args: dict) -> s
     K线来源装配时对每候选快速计算客观结果，以提交侧同一 partial_acceptable
     门槛做可用性预检（complete 或达标 partial 才保留），跳过数据不达门槛的
     候选并列出其身份（V2）；扫描有界——单次调用最多预检 MAX_CANDIDATE_SCAN
-    条候选（= K 线请求数上限），扫描位置以 keyset 游标跨调用/跨轮持久化，
-    预算用尽时可再次调用续扫，扫到候选集尾部自动重置、下轮从头重扫
-    （R5-3）；来源未装配时不做可用性预检、全量列出并附说明（issue #113 R10）。
+    条候选（= K 线请求数上限），扫描位置以 keyset 游标维护（R5-3），R6-1 起
+    游标为轮内 lease：列出只推进内存、不落库，本轮报告成功才由 bundle 事务
+    ack 落库，扫到候选集尾部时 ack 重置、下轮从头重扫；来源未装配时不做
+    可用性预检、全量列出并附说明（issue #113 R10）。
     清单末尾追加待处理的人工授权重评段（R5-2：授权必须对复盘方可见，否则
     已复盘目标永不进入候选，授权成为死信）。
 
@@ -768,11 +794,12 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     防读案例到提交之间行情数据变化；K 线来源未装配时直接拒绝）——complete 放行，
     partial 须起止价/涨跌幅齐全、覆盖率 ≥80% 且两个价格时点贴近窗口端点
     （缺头/缺尾段的 partial 不放行），pending/unavailable 与不达标 partial
-    一律拒绝并留待后续轮次（R1）；reasoning_quality=unreviewable 不属于自动
-    复盘路径（数据不足留待后续轮次，不得闭合结案，R5-1）；outcome 由代码附加，
-    LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报依据强制 1:1（数量
-    相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含事实核对与推理支撑双
-    枚举及写明核对来源的 explanation。同轮对同一目标重复提交时更新内存草稿。
+    一律拒绝并留待后续轮次（R1）；outcome 门禁对全部枚举先生效，客观行情达标后
+    reasoning_quality=unreviewable 可用于表达推理证据永久缺失的结案（R6-6 归层）；
+    outcome 由代码附加，LLM 携带 outcome 字段一律拒绝；evidence_reviews 与原研报
+    依据强制 1:1（数量相等且 evidence_index 不重不漏覆盖 0..N-1），每条须含事实
+    核对与推理支撑双枚举及写明核对来源的 explanation。同轮对同一目标重复提交时
+    更新内存草稿。
 
     参数：
         deps: ReviewToolDeps，复盘工具依赖（读 loaded_research_cases，写
@@ -816,11 +843,8 @@ async def submit_research_review(deps: ReviewToolDeps, args: dict) -> str:
     direction_relation = _need_enum(args, "direction_relation", DIRECTION_RELATIONS)
     reasoning_quality = _need_enum(args, "reasoning_quality", REASONING_QUALITIES)
     confidence_assessment = _need_enum(args, "confidence_assessment", CONFIDENCE_ASSESSMENTS)
-    if reasoning_quality == "unreviewable":
-        return (
-            "参数错误：reasoning_quality=unreviewable 不属于自动复盘路径；"
-            "客观行情数据不足时请留待后续轮次，或核对 K 线来源装配"
-        )
+    # R6-6 归层：unreviewable（推理证据永久缺失）不再单独设卡——下方 outcome
+    # 门禁对全部枚举先生效，客观行情达标后允许以 unreviewable 结案
     # 提交时点重算客观结果（R5-1）：不信用已读案例缓存的旧 outcome
     if deps.candle_source is None:
         return "参数错误：K 线来源未装配，无法核算客观行情，请核对装配后留待后续轮次"
