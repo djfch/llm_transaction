@@ -837,3 +837,50 @@ async def test_content_match_without_identity_baseline_is_stale(store, repo, pro
     assert (await store.get_version(draft.id)).status == "discarded"
     assert store.current() == _NEW  # 文件保持现状，不被回滚也不错位补章
     assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(
+    store, repo, prompt_path
+):
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工经 revise_applied 生效了更新版本
+    （latest 前移）。_complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被
+    当草稿重过 CAS，会因「实读基线已不在位」被反标 discarded——它确实生效过，
+    版本历史不得被静默改写（issue #113 R9）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工内容
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    first = await store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（v3，latest 前移）
+    human_content = "人工策略书：" + "人工优先，覆盖草稿。" * 10
+    human = await store.revise_applied(human_content, "人工修改")
+    assert human.id > draft.id
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert store.current() == human_content  # 人工内容不被回写

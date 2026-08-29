@@ -589,3 +589,57 @@ async def test_interrupted_after_write_recovers_on_apply_retry(env, monkeypatch)
     latest = await env.repo.research_prompt.latest_applied_version()
     assert latest is not None and latest.id == draft.id
     assert env.store.current() == latest.content == new_content
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(env) -> None:
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工经 revise_applied 生效了更新版本
+    （latest 前移）。_complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被
+    当草稿重过 CAS，会因「实读基线已不在位」被反标 discarded——它确实生效过，
+    版本历史不得被静默改写（issue #113 R9）。本通道 rollback 校验
+    status=='applied'（prompt_store.py），被误反标的版本会永久不可回滚，
+    故额外断言重放后仍可回滚到该版本。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工内容、
+        旧版本仍可回滚
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await env.store.seed_if_empty()
+    _, base_md5, base_vid = await env.store.sample_current_base()
+    draft_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(
+        draft_content,
+        "复盘修订",
+        "review_agent",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    first = await env.store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（latest 前移）
+    human_content = "人工提示词：" + "提高证据门槛。" * 20
+    human = await env.store.revise_applied(human_content, "人工调优")
+    assert human.id > draft.id
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=None,
+        research_prompt_store=env.store,
+        research_prompt_draft_ids=[draft.id],
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await env.store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert env.store.current() == human_content  # 人工内容不被回写
+    rolled = await env.store.rollback(draft.id)  # 状态保持 applied，仍可回滚到该版本
+    assert rolled.status == "applied" and env.store.current() == draft_content
