@@ -575,3 +575,57 @@ async def test_bundle_failure_rolls_back_scan_cursor(repo: Repo, monkeypatch) ->
             round_id="rr-scan-fail",
         )
     assert await repo.research_review.get_scan_cursor() == (50.0, 9, "BTC_USDT")  # 未推进
+
+
+# ---------- R6-2：授权消费改条件更新，防并发二次消费 ----------
+
+
+async def test_bundle_rejects_double_consumed_rereview_request(repo: Repo) -> None:
+    """同一授权被第二个 bundle 再消费时条件更新落空：抛错且整体回滚，授权仍绑定首轮。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言第二次 bundle 抛 RuntimeError、其报告与批改无残留、
+        授权 consumed_round_id 仍绑定第一轮轮次
+    """
+    seeded = await repo.research_review.save_review(
+        review_report_id=999, report_id=1, contract="BTC_USDT"
+    )
+    req, _ = await repo.research_review.create_rereview_request(1, "BTC_USDT", "人工复核原结论")
+
+    first = await save_review_bundle(
+        repo,
+        _deps([_manual_pending(1, "BTC_USDT", req.id, seeded.id)]),
+        period_start=1000.0,
+        period_end=2000.0,
+        stats_json="{}",
+        report_md="# 第一轮",
+        strategy_action="none",
+        round_id="rr-first",
+    )
+    # 第二个 bundle 携带同一授权（并发轮/重放）：insert 批改可写，但授权消费
+    # 条件更新落空 → 抛错回滚，整条 bundle 不残留
+    with pytest.raises(RuntimeError, match="拒绝重复消费"):
+        await save_review_bundle(
+            repo,
+            _deps([_manual_pending(1, "BTC_USDT", req.id, seeded.id)]),
+            period_start=1000.0,
+            period_end=2000.0,
+            stats_json="{}",
+            report_md="# 第二轮",
+            strategy_action="none",
+            round_id="rr-second",
+        )
+
+    _, total = await repo.review.list_review_reports_page(10, 0)
+    assert total == 1  # 第二轮报告未残留
+    rows = await repo.research_review.list_reviews()
+    manual_rows = [r for r in rows if r.review_kind == "manual"]
+    assert len(manual_rows) == 1 and manual_rows[0].review_report_id == first.id
+    cur = await repo._conn.execute(
+        "SELECT consumed_round_id FROM research_rereview_requests WHERE id=?", (req.id,)
+    )
+    row = await cur.fetchone()
+    assert row["consumed_round_id"] == "rr-first"  # 授权仍绑定第一轮

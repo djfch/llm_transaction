@@ -137,6 +137,10 @@ async def _consume_rereview_request(
 ) -> None:
     """把人工重评授权标记为已消费并绑定复盘轮次；不 commit（随 bundle 同事务）。
 
+    条件更新防并发二次消费（R6-2）：WHERE 附带 consumed_round_id=''，授权已被
+    其他复盘轮消费（或不存在）时 rowcount=0——抛错让 bundle 事务整体回滚，
+    杜绝「一份授权结出两条 manual 复盘」的半消费状态。
+
     参数：
         conn: aiosqlite.Connection，bundle 事务连接
         request_id: int，被消费的重评授权编号
@@ -144,11 +148,17 @@ async def _consume_rereview_request(
 
     返回：
         None：授权行 consumed_round_id 就地更新（提交由调用方事务边界控制）
+
+    异常：
+        RuntimeError：授权不存在或已被其他复盘轮消费（并发/重复提交）时抛出
     """
-    await conn.execute(
-        "UPDATE research_rereview_requests SET consumed_round_id=? WHERE id=?",
+    cur = await conn.execute(
+        "UPDATE research_rereview_requests SET consumed_round_id=?"
+        " WHERE id=? AND consumed_round_id=''",
         (round_id, request_id),
     )
+    if cur.rowcount != 1:
+        raise RuntimeError(f"人工重评授权 #{request_id} 不存在或已被其他复盘轮消费，拒绝重复消费")
 
 
 async def _insert_review(
