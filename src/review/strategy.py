@@ -275,7 +275,7 @@ class StrategyStore:
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效的版本对象；基线被人工变更取代或已被
+            StrategyVersion | None：已生效的版本对象；基线已失效（语义见上文）或已被
             更高 applied 版本取代时返回 None（本版本已置 discarded）
 
         异常：
@@ -291,8 +291,9 @@ class StrategyStore:
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效版本；草稿基线被人工变更取代（CAS）或
-            被更高 applied 版本取代时返回 None
+            StrategyVersion | None：已生效版本；草稿基线已失效（CAS：人工变更/
+            回滚/ABA 致实读时点 applied 身份不在位，或文件被热编辑偏离实读内容）
+            或被更高 applied 版本取代时返回 None
 
         异常：
             StrategyValidationError，目标版本不存在时抛出

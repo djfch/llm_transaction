@@ -1,8 +1,10 @@
 """复盘侧的研报复盘工具（issue #113）：3 只读 + 1 写。
 
 - list_research_review_candidates：已到期未复盘且客观行情可批改的逐标的结论候选；
-  扫描位置以 keyset 游标跨轮持久化（research_review_scan_state 单行表），
-  扫到候选集尾部自动重置、下轮从头重扫（R5）；
+  扫描位置以 keyset 游标维护（research_review_scan_state 单行表）：R6-1 起列出
+  只推进轮内内存 lease（续扫不再读库、列出无副作用），库中游标随本轮报告成功的
+  save_review_bundle 事务一次性 ack——越过已复盘与已跳过、停在首个未处理 usable
+  之前；扫到候选集尾部时 ack 落 NULL 重置、下轮从头重扫；
 - get_research_review_case：单个案例的完整材料（原文+市场快照+研报轮上下文+
   policy_adjustments 归一化记录+代码计算的客观行情），读后登记到
   deps.loaded_research_cases（submit 的前置）；
@@ -44,8 +46,9 @@ from src.review.tool_handlers import (
 _CASE_SNAPSHOT_LIMIT = 3000  # 案例内市场快照/上下文快照的截断长度
 # 候选扫描预算（V5）：单次 list_research_review_candidates 调用最多预检的候选数
 # （= 最多发起的 K 线请求数）。每候选预检是一次 from/to 窗口 K 线拉取，不设上限
-# 时大量数据不可用候选会把单次工具调用拖成数百次网关请求；预算用尽时扫描位置
-# 以 keyset 游标落库（R5），由复盘方再次调用或下一轮复盘接力续扫。
+# 时大量数据不可用候选会把单次工具调用拖成数百次网关请求；预算用尽时只推进轮内
+# 内存游标（R6-1 lease，列出无副作用），由复盘方再次调用本工具续扫；库中游标
+# 随本轮报告成功的 save_review_bundle 事务一次性 ack 落库，本轮失败/取消不落库。
 MAX_CANDIDATE_SCAN = 200
 
 # 复盘枚举（值 → 中文释义）：schema 描述、工具校验与预注入渲染共用同一来源，改动须同步
