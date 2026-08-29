@@ -45,13 +45,14 @@ _NO_DIFF_REASON = "与当前策略书无差异"
 def _staleness_reason(
     version: StrategyVersion, latest: StrategyVersion | None, current_md5: str
 ) -> str | None:
-    """判定草稿基线是否失效（issue #113 CAS，R6-3 加固）；失效返回原因文本，否则 None。
+    """判定草稿基线是否失效（issue #113 CAS，R6-3/R7-1 加固）；失效返回原因文本，否则 None。
 
     判定顺序：latest 即本版本自身（轮末生效成功后被打断的幂等重放）→ 有效；
-    无基线章（历史行/人工即时生效行）→ 回退旧 id 比较；有基线章 → 实读时点的
-    applied 身份已不在位（人工变更/回滚/ABA）或当前文件内容偏离实读基线（热
-    编辑）均失效；兼容章（采样时无 applied 版本，无身份可言）额外保留旧
-    「更高 applied 取代」判定。
+    无基线章（历史行/人工即时生效行）→ 回退旧 id 比较；有基线章且身份基线仍在位、
+    当前文件内容已等于本草稿正文 → 上轮写文件成功、置状态前中断的恢复态（R7-1），
+    有效放行以补置状态；除此之外，实读时点的 applied 身份已不在位（人工变更/回滚/
+    ABA）或当前文件内容偏离实读基线（热编辑）均失效；兼容章（采样时无 applied
+    版本，无身份可言）额外保留旧「更高 applied 取代」判定。
 
     参数：
         version: StrategyVersion，待生效的草稿版本
@@ -66,6 +67,16 @@ def _staleness_reason(
     if version.base_md5 is None:
         if latest is not None and latest.id > version.id:
             return f"已被更高的 applied 版本 v{latest.id} 取代"
+        return None
+    # R7-1 中断恢复态：身份基线仍在位且文件已是本草稿正文——上轮 _atomic_write
+    # 成功、set_version_status(applied) 前被打断，文件与库只差一个状态位；
+    # 放行让生效路径重写同内容文件（幂等）并补置 applied，不得误判为热编辑废弃
+    if (
+        version.base_applied_version_id is not None
+        and latest is not None
+        and latest.id == version.base_applied_version_id
+        and current_md5 == version.md5
+    ):
         return None
     if version.base_applied_version_id is not None and (
         latest is None or latest.id != version.base_applied_version_id

@@ -57,18 +57,32 @@ async def get_research_prompt_versions(deps: ReviewToolDeps, args: dict) -> str:
 async def submit_research_prompt_revision(deps: ReviewToolDeps, args: dict) -> str:
     """提交修订后的研报提示词；校验通过则落草稿版本，本轮复盘报告成功后统一生效。
 
+    先读后写硬门禁（R7-2）：本轮未调用无参 get_research_prompt_versions 实读
+    当前提示词全文（deps 无本通道基线章）时直接拒绝，不落草稿——无基线草稿
+    会绕过 CAS 身份/热编辑校验；带 version_id 只读历史版本不授予基线章。
+
     参数：
         deps: ReviewToolDeps，复盘工具依赖（成功时回写 research_prompt_version_id 与草稿列表）
         args: dict，工具参数：new_prompt_md（必填，新提示词全文）、reason（必填，修订理由）
 
     返回：
-        str：提交结果文本；校验拒绝时列出原因且原提示词不变；未装配时返回降级提示
+        str：提交结果文本；未先读当前全文或校验拒绝时列出原因且原提示词不变；
+        未装配时返回降级提示
     """
     store = deps.research_prompt_store
     if store is None:
         return "研报提示词版本功能未装配（research_prompt_store 为空），修订未提交"
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
+    # R7-2 先读后写硬门禁：基线章只能由无参 get_research_prompt_versions 实读当前
+    # 完整提示词授予；缺章提交会落 base_md5=NULL 草稿，绕过 CAS 校验，硬性拒绝
+    base_md5 = deps.base_md5_by_channel.get("research_prompt")
+    if base_md5 is None:
+        return (
+            "提交拒绝：本轮尚未读取当前研报提示词。必须先调用无参的 "
+            "get_research_prompt_versions 读取当前提示词全文后再提交修订"
+            "（只读历史版本不算读取当前状态）"
+        )
     try:
         # 基线章（md5 + applied 身份，issue #113 CAS/R6-3）盖 LLM 实读时点采样值，
         # 轮末生效按身份 + 文件内容双重比对，防陈旧草稿覆盖人工变更
@@ -76,7 +90,7 @@ async def submit_research_prompt_revision(deps: ReviewToolDeps, args: dict) -> s
             new_prompt_md,
             reason,
             created_by="review_agent",
-            base_md5=deps.base_md5_by_channel.get("research_prompt"),
+            base_md5=base_md5,
             base_applied_version_id=deps.base_applied_id_by_channel.get("research_prompt"),
         )
     except ResearchPromptValidationError as e:

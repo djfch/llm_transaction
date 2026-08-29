@@ -181,17 +181,29 @@ async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
 async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     """提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号。
 
+    先读后写硬门禁（R7-2）：本轮未调用 get_indicator_config 实读当前完整配置
+    （deps 无本通道基线章）时直接拒绝，不落草稿——无基线草稿会绕过 CAS 校验。
+
     参数：
         deps: ReviewToolDeps，工具或服务依赖集合
         args: dict，工具调用参数
 
     返回：
-        str，提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号
+        str，提交指标短名单改写（全文替换）；未先读当前配置或校验拒绝时返回
+        原因文本，成功记 deps 版本号
     """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
     shortlist = _need_str_list(args, "shortlist")
     reason = _need_str(args, "reason")
+    # R7-2 先读后写硬门禁：基线章只能由 get_indicator_config 实读当前完整配置授予；
+    # 缺章提交会落 base_md5=NULL 草稿，绕过 CAS 身份/热编辑校验，硬性拒绝
+    base_md5 = deps.base_md5_by_channel.get("indicator_config")
+    if base_md5 is None:
+        return (
+            "提交拒绝：本轮尚未读取当前指标配置。必须先调用 get_indicator_config "
+            "读取当前完整短名单与可选菜单后，再提交修订"
+        )
     try:
         # report_id 跟随 submit_strategy_revision 取法：工具执行时报告尚未生成，置 None，
         # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）；
@@ -200,7 +212,7 @@ async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
             shortlist,
             created_by="review_agent",
             reason=reason,
-            base_md5=deps.base_md5_by_channel.get("indicator_config"),
+            base_md5=base_md5,
             base_applied_version_id=deps.base_applied_id_by_channel.get("indicator_config"),
         )
     except IndicatorConfigValidationError as e:

@@ -52,6 +52,10 @@ REVIEW_RESEARCH_REVIEW_GATE_V1 = """## 强制复盘附录：REVIEW_RESEARCH_REVI
   工具结果或案例材料），不得空泛或编造。
 - 只有同类问题在多份复盘中重复出现时，才允许调用 `submit_research_prompt_revision`
   修订研报提示词；单次复盘不得修订。
+- 调用 `submit_indicator_config` 或 `submit_research_prompt_revision` 前，必须先在本轮
+  调用对应读取工具读取当前完整状态：`get_indicator_config` 读当前完整指标配置，
+  无参 `get_research_prompt_versions` 读当前提示词全文（只读历史版本不算）；
+  未读取的提交会被拒绝。
 """
 
 
