@@ -1061,6 +1061,46 @@ async def test_build_preinjection_marks_manual_rereview(repo: Repo) -> None:
     assert "人工重评，替代复盘#7；授权理由：原复盘把震荡误判为背离" in text
 
 
+async def test_build_preinjection_review_id_namespace(repo: Repo) -> None:
+    """R7-3：预注入复盘条目主标识为复盘记录自身编号，与复盘工具历史查询同命名空间。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言主标识「复盘#{id}（复盘报告#…）」每条恰好一次，
+        人工重评的替代指向与主标识同命名空间
+    """
+    await repo.research_review.save_review(
+        review_report_id=100,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="aligned",
+        reasoning_quality="sound",
+        confidence_assessment="appropriate",
+    )
+    auto_id = (await repo.research_review.list_reviews(limit=1))[0].id
+    await repo.research_review.save_review(
+        review_report_id=101,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+        reasoning_quality="partial",
+        confidence_assessment="too_high",
+        review_kind="manual",
+        rereview_of_id=auto_id,
+        rereview_reason="原复盘把震荡误判为背离",
+    )
+    manual_id = (await repo.research_review.list_reviews(limit=2))[-1].id
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    # 计数带「（复盘报告#…） → 」后缀，避开「替代复盘#N」包含子串「复盘#N」的误计
+    assert text.count(f"复盘#{auto_id}（复盘报告#100） → 研报#42/BTC_USDT") == 1
+    assert text.count(f"复盘#{manual_id}（复盘报告#101） → 研报#42/BTC_USDT") == 1
+    assert f"人工重评，替代复盘#{auto_id}；授权理由：原复盘把震荡误判为背离" in text
+
+
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:
     """预注入单段失败：标注不可用，其余段正常。
 

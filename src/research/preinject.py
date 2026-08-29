@@ -255,6 +255,9 @@ def _format_review_entry(review: ResearchReview) -> str:
     """把单条复盘记录渲染为多行完整文本（枚举+理由+逐项依据核对+改进建议+客观结果）。
 
     空值字段整行跳过；坏 JSON 字段降级为空，不拖垮整段预注入。
+    首行主标识为复盘记录自身编号（复盘#{id}），与复盘工具历史查询
+    （tool_research._format_review_row）同命名空间，避免同一数字在「复盘记录」
+    与「复盘报告」两个序列间错配；复盘报告编号仅作附带标注（R7-3）。
 
     参数：
         review: ResearchReview，单条正式复盘批改记录
@@ -263,7 +266,8 @@ def _format_review_entry(review: ResearchReview) -> str:
         str：多行完整复盘文本（截断由调用方 _truncate_entry 统一负责）
     """
     lines = [
-        f"- [{_fmt_ts(review.created_at)}] 复盘#{review.review_report_id} → "
+        f"- [{_fmt_ts(review.created_at)}] 复盘#{review.id}"
+        f"（复盘报告#{review.review_report_id}） → "
         f"研报#{review.report_id}/{review.contract}"
         + (
             f"（人工重评，替代复盘#{review.rereview_of_id or '—'}；"
