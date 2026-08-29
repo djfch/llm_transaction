@@ -12,6 +12,9 @@
 
 from __future__ import annotations
 
+import yaml
+
+from src.config import IndicatorConfig
 from src.market.indicator_service import REGISTRY
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.review.indicator_config import IndicatorConfigValidationError
@@ -153,7 +156,16 @@ async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
-    current = deps.indicator_config_store.load_current()
+    store = deps.indicator_config_store
+    # 读取时点基线采样（issue #113 R6-3）：展示文本与基线章（md5/applied 身份）
+    # 取自同一次锁内采样，LLM 所见即所盖——防"轮初采样后人工变更"的错位
+    text, md5, applied_id = await store.sample_current_base()
+    deps.base_md5_by_channel["indicator_config"] = md5
+    if applied_id is not None:
+        deps.base_applied_id_by_channel["indicator_config"] = applied_id
+    # 展示内容即 LLM 实读文本（与基线章同源）；空/非映射内容回退默认基线
+    parsed = yaml.safe_load(text) if text.strip() else None
+    current = IndicatorConfig(**parsed) if isinstance(parsed, dict) else store.load_current()
     lines = [
         f"当前指标短名单（{len(current.shortlist)} 个）：{', '.join(current.shortlist)}",
         "",
@@ -183,12 +195,13 @@ async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     try:
         # report_id 跟随 submit_strategy_revision 取法：工具执行时报告尚未生成，置 None，
         # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）；
-        # base_md5 盖本轮基线章（issue #113 CAS），轮末生效按基线比对
+        # 基线章（md5 + applied 身份，issue #113 CAS/R6-3）盖 LLM 实读时点采样值
         version = await deps.indicator_config_store.revise(
             shortlist,
             created_by="review_agent",
             reason=reason,
             base_md5=deps.base_md5_by_channel.get("indicator_config"),
+            base_applied_version_id=deps.base_applied_id_by_channel.get("indicator_config"),
         )
     except IndicatorConfigValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原短名单未改动，修正后可重新提交）"

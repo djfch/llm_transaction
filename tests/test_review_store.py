@@ -579,10 +579,10 @@ async def test_cas_discards_stale_draft_after_human_intervenes(
     assert human.status == "applied"
     with caplog.at_level(logging.WARNING):
         applied = await store.apply_version(draft.id)
-    assert applied is None  # 基线已被人工变更取代
+    assert applied is None  # 基线已失效（人工变更取代实读基线）
     assert (await store.get_version(draft.id)).status == "discarded"
     assert store.current() == human_content  # 陈旧草稿未覆盖人工内容
-    assert any("基线已被人工变更取代" in r.message for r in caplog.records)
+    assert any("基线已失效" in r.message for r in caplog.records)
 
 
 async def test_cas_applies_draft_when_base_matches(store, repo, prompt_path):
@@ -649,8 +649,8 @@ async def test_cas_replay_of_applied_draft_is_idempotent(store, repo, prompt_pat
     assert (await store.get_version(draft.id)).status == "applied"
 
 
-async def test_current_base_md5_sampling(store, repo, prompt_path):
-    """轮初基线采样：有 applied 取最新 applied 的 md5，无 applied 取当前文件内容 md5。
+async def test_sample_current_base(store, repo, prompt_path):
+    """读取时点基线采样（issue #113 R6-3）：返回（文件正文, 正文 md5, 最新 applied id）三元组。
 
     参数：
         store: StrategyStore，store 夹具提供的策略版本管理对象
@@ -658,10 +658,76 @@ async def test_current_base_md5_sampling(store, repo, prompt_path):
         prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
 
     返回：
-        None，断言三种状态下采样值分别等于文件 md5 / v1 md5 / 新生效版本 md5
+        None，断言无版本/seed 后/人工生效后三种状态下采样三元组的正文、md5 与 id
     """
-    assert await store.current_base_md5() == content_md5(_INIT)  # 无版本：按文件内容
+    assert await store.sample_current_base() == (_INIT, content_md5(_INIT), None)  # 无版本
     v1 = await store.seed_if_empty()
-    assert await store.current_base_md5() == v1.md5  # 有 applied：按最新 applied
-    v2 = await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
-    assert await store.current_base_md5() == v2.md5
+    assert await store.sample_current_base() == (_INIT, v1.md5, v1.id)  # 有 applied
+    human = "人工策略书：" + "人工优先，覆盖草稿。" * 10
+    v2 = await store.revise_applied(human, "人工修改")
+    assert await store.sample_current_base() == (human, v2.md5, v2.id)
+
+
+async def test_cas_discards_draft_when_base_version_aba_replaced(store, repo, prompt_path, caplog):
+    """基线版本 ABA 回绕：草稿基于 v1(A) 实读盖章后，人工改 B(v2) 又回滚 A(v3)，轮末废弃。
+
+    内容回绕后当前文件 md5 与基线一致（都是 A），仅凭 md5 比对的旧 CAS 会放行；
+    新 CAS 按实读基线身份检出失效（base_applied_version_id=v1 ≠ 当前生效 v3，
+    issue #113 R6-3）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留回滚后内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工改 B")  # v2
+    await store.rollback(v1.id)  # v3：内容回绕为 A，id 前进
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == _INIT  # 文件保留回滚后的 A
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_discards_draft_when_file_hot_edited(store, repo, prompt_path, caplog):
+    """文件热编辑：草稿盖章后文件被绕过 store 直接改写（库中 applied 不动），轮末废弃。
+
+    实读基线身份仍在位（v1），但当前文件内容 md5 已偏离实读基线——防"库不变、
+    文件被外部编辑"的漏检（issue #113 R6-3）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、热编辑内容不被覆盖、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    hot = "热编辑策略书：" + "绕过存储直接改文件。" * 10
+    prompt_path.write_text(hot, encoding="utf-8")  # 热编辑：动文件不动库
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == hot  # 热编辑内容不被草稿覆盖
+    assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)

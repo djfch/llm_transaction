@@ -455,10 +455,10 @@ async def test_cas_discards_stale_draft_after_human_intervenes(store, repo, conf
     assert human is not None and human.status == "applied"
     with caplog.at_level(logging.WARNING):
         applied = await store.apply_version(agent_draft.id)
-    assert applied is None  # 基线已被人工变更取代
+    assert applied is None  # 基线已失效（人工变更取代实读基线）
     assert (await store.get_version(agent_draft.id)).status == "discarded"
     assert _file_shortlist(config_path) == ["adx14"]  # 文件保留人工内容
-    assert any("基线已被人工变更取代" in r.message for r in caplog.records)
+    assert any("基线已失效" in r.message for r in caplog.records)
 
 
 async def test_cas_applies_draft_when_base_matches(store, repo, config_path):
@@ -522,8 +522,8 @@ async def test_cas_replay_of_applied_draft_is_idempotent(store, repo, config_pat
     assert (await store.get_version(draft.id)).status == "applied"
 
 
-async def test_current_base_md5_sampling(store, repo, config_path):
-    """轮初基线采样：有 applied 取最新 applied 的 md5，无 applied 取当前文件内容 md5。
+async def test_sample_current_base(store, repo, config_path):
+    """读取时点基线采样（issue #113 R6-3）：返回（文件正文, 正文 md5, 最新 applied id）三元组。
 
     参数：
         store: IndicatorConfigStore，指标配置存储测试夹具
@@ -531,10 +531,83 @@ async def test_current_base_md5_sampling(store, repo, config_path):
         config_path: Path，指标配置文件路径
 
     返回：
-        None，断言无文件、有文件无版本、有 applied 三种状态下的采样值
+        None，断言无文件、有文件无版本、有 applied 三种状态下的采样三元组
     """
-    assert await store.current_base_md5() == content_md5("")  # 无文件：空串 md5
-    config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")
-    assert await store.current_base_md5() == content_md5("shortlist:\n- adx14\n")  # 按文件
+    assert await store.sample_current_base() == ("", content_md5(""), None)  # 无文件
+    raw = "shortlist:\n- adx14\n"
+    config_path.write_text(raw, encoding="utf-8")
+    assert await store.sample_current_base() == (raw, content_md5(raw), None)  # 有文件无版本
     v1 = await store.seed_if_empty()
-    assert await store.current_base_md5() == v1.md5  # 有 applied：按最新 applied
+    assert await store.sample_current_base() == (raw, v1.md5, v1.id)  # 有 applied
+
+
+async def test_cas_discards_draft_when_base_version_aba_replaced(store, repo, config_path, caplog):
+    """基线版本 ABA 回绕：草稿基于 v1 实读盖章后，人工改短名单(v2) 又回滚 v1(v3)，轮末废弃。
+
+    内容回绕后当前文件 md5 与基线一致，仅凭 md5 比对的旧 CAS 会放行；新 CAS 按
+    实读基线身份检出失效（base_applied_version_id=v1 ≠ 当前生效 v3，issue #113 R6-3）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留回滚后内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()  # 文件不存在：默认基线落文件并记 v1
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")  # v2 draft
+    assert await store.apply_version(human_draft.id) is not None  # v2 applied
+    await store.rollback(v1.id)  # v3：内容回绕为默认短名单，id 前进
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == list(DEFAULT_INDICATOR_SHORTLIST)  # 回滚后内容
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_discards_draft_when_file_hot_edited(store, repo, config_path, caplog):
+    """文件热编辑：草稿盖章后文件被绕过 store 直接改写（库中 applied 不动），轮末废弃。
+
+    实读基线身份仍在位（v1），但当前文件内容 md5 已偏离实读基线——防"库不变、
+    文件被外部编辑"的漏检（issue #113 R6-3）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、热编辑内容不被覆盖、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")  # 热编辑：动文件不动库
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == ["adx14"]  # 热编辑内容不被草稿覆盖
+    assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
