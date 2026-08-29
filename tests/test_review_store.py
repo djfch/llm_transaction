@@ -731,3 +731,74 @@ async def test_cas_discards_draft_when_file_hot_edited(store, repo, prompt_path,
     assert (await store.get_version(draft.id)).status == "discarded"
     assert store.current() == hot  # 热编辑内容不被草稿覆盖
     assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
+
+
+async def test_interrupted_after_write_recovers_on_apply_retry(
+    store, repo, prompt_path, monkeypatch
+):
+    """写文件成功、置状态前中断的草稿：重试识别恢复态补置 applied，不误判热编辑废弃（R7-1）。
+
+    首轮 apply 在原子写成功后让 set_version_status("applied") 抛错，留下「文件已是
+    草稿正文、库内仍是旧 applied + 本草稿 draft」的中断现场；随后经 apply_drafts
+    重试（_complete_interrupted 的幂等收尾路径）：身份基线仍在位且文件内容已等于
+    草稿正文 → 恢复态放行，幂等重写同内容文件并补置 applied，失败集合保持为空
+    （轮末事件 applied=True 名实相符）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        monkeypatch: MonkeyPatch，用于让首次置 applied 抛错模拟进程中断
+
+    返回：
+        None，断言重试后草稿 applied、文件与库内最新 applied 一致、失败集合为空
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    original_set = repo.review.set_version_status
+    tripped = {"done": False}
+
+    async def flaky_set_status(version_id, status):
+        """首次置 applied 时模拟「写文件已成功、状态未落库」的进程中断。
+
+        参数：
+            version_id: int，版本编号（透传）
+            status: str，目标状态（透传）
+
+        返回：
+            原 set_version_status 的返回（透传）
+
+        异常：
+            RuntimeError：首次置 applied 时抛出，模拟置状态前进程中断
+        """
+        if status == "applied" and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("模拟置状态前进程中断")
+        return await original_set(version_id, status)
+
+    monkeypatch.setattr(repo.review, "set_version_status", flaky_set_status)
+    with pytest.raises(RuntimeError):
+        await store.apply_version(draft.id)
+    # 中断现场：文件已是草稿正文，库内仍是 v1 applied + 本草稿 draft
+    assert store.current() == _NEW
+    assert (await store.get_version(draft.id)).status == "draft"
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重试路径
+    assert deps.apply_failed_ids == []  # 轮末事件 applied=True 名实相符
+    assert (await store.get_version(draft.id)).status == "applied"
+    latest = await repo.review.latest_applied_strategy_version()
+    assert latest is not None and latest.id == draft.id
+    assert store.current() == latest.content == _NEW

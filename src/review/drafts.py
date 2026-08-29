@@ -2,9 +2,10 @@
 
 从 review/agent.py 拆出（文件行数门禁）：三类 store 的草稿语义完全一致——
 revise 只落 draft 不动文件，报告成功后经 apply_version 统一生效，失败/取消置
-discarded；"草稿已被人工更高版本取代"的判定收口在各 store 的生效锁内
-（apply_version 返回 None 即被取代，store 侧已置 discarded，issue #113 F11），
-本模块不再做生效前快照比对——快照与生效之间的等待窗口正是竞态来源。
+discarded；"草稿基线失效"的判定收口在各 store 的生效锁内
+（apply_version 返回 None 即失效，store 侧已置 discarded 并告警真实原因，
+issue #113 F11/R7-1），本模块不再做生效前快照比对——快照与生效之间的等待窗口
+正是竞态来源。
 """
 
 from __future__ import annotations
@@ -88,14 +89,15 @@ def _channels(deps: ReviewToolDeps) -> list[tuple[Any, list[int], str, str]]:
 
 
 async def apply_drafts(deps: ReviewToolDeps) -> None:
-    """统一生效本轮草稿：失败收集 + 被取代草稿跳过（issue #100/#113 F11）。
+    """统一生效本轮草稿：失败收集 + 基线失效草稿跳过（issue #100/#113 F11/R7-1）。
 
-    取代判定在 store 生效锁内完成（apply_version 返回 None）：store 已把被取代
-    草稿置 discarded 并告警，此处只跳过、不计入失败；单个 apply 抛异常不中断
-    其余草稿，失败按 (通道键, 草稿 id) 记入 deps.apply_failed_ids 供事件与告警
-    按通道指明文件（issue #113 R9）。每次生效尝试开头先清空失败集合重算：
-    _complete_interrupted 的补全收尾会对同一 deps 重试生效，残留的旧失败记录
-    会让告警/事件把已生效的草稿误报为失败、并重复累计（V4）。
+    失效判定在 store 生效锁内完成（apply_version 返回 None）：store 已把失效
+    草稿置 discarded 并带出真实原因告警（身份不在位/热编辑等），此处只跳过、
+    不计入失败；单个 apply 抛异常不中断其余草稿，失败按 (通道键, 草稿 id) 记入
+    deps.apply_failed_ids 供事件与告警按通道指明文件（issue #113 R9）。每次生效
+    尝试开头先清空失败集合重算：_complete_interrupted 的补全收尾会对同一 deps
+    重试生效，残留的旧失败记录会让告警/事件把已生效的草稿误报为失败、并重复
+    累计（V4）。
 
     参数：
         deps: ReviewToolDeps，本轮工具依赖
@@ -114,7 +116,11 @@ async def apply_drafts(deps: ReviewToolDeps) -> None:
                 logger.exception("%s草稿生效失败（draft_id=%s）", label, draft_id)
                 continue
             if applied is None:
-                logger.warning("%s草稿 v%d 已被更高版本取代，跳过生效", label, draft_id)
+                # store 侧已置 discarded 并告警真实失效原因（身份不在位/热编辑等，
+                # R7-1 修正旧文案误统称「已被更高版本取代」），此处只记跳过事实
+                logger.warning(
+                    "%s草稿 v%d 基线已失效，跳过生效（失效原因见 store 侧告警）", label, draft_id
+                )
 
 
 async def discard_drafts(deps: ReviewToolDeps) -> None:
