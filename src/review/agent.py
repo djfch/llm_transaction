@@ -428,9 +428,11 @@ class ReviewAgent:
         """成功报告落库后被打断（取消或普通异常）的补全收尾：重放幂等关联 + 成功闭合审计 + ok=True 事件。
 
         attach_report_to_version 是幂等 UPDATE，打断点可能落在任一 attach 之前/之中/之后，
-        无法也无须区分，两个版本关联无条件重放；重放失败只记日志（版本 report_id 留空
+        无法也无须区分，各版本关联无条件重放；重放失败只记日志（版本 report_id 留空
         可由下轮复盘重新关联），绝不反写失败报告。草稿生效同样幂等重放（issue #62/#73）：
-        apply_version 对已 applied 版本只是重写同内容文件；失败集合由 apply_drafts 每次
+        apply_version 对已 applied 版本不会误伤——latest 仍是其自身时只是重写同内容文件；
+        收尾窗口内人工已生效更新版本时由 store 的 R9 守卫直接幂等返回（不写文件、
+        不反标 discarded）。失败集合由 apply_drafts 每次
         生效尝试开头清空重算，重试不会残留/重复累计旧失败记录（V4）。
 
         参数：

@@ -264,8 +264,9 @@ class IndicatorConfigStore:
             version_id: int，待生效的版本编号
 
         返回：
-            IndicatorConfigVersion | None：已生效（applied）的版本对象；
-            基线已失效或已被更高 applied 版本取代时返回 None
+            IndicatorConfigVersion | None：已生效（applied）的版本对象；目标版本
+            已是 applied 且最新生效已前移时幂等返回该版本（不写文件、不改状态，
+            issue #113 R9 守卫）；基线已失效或已被更高 applied 版本取代时返回 None
             （本版本已置 discarded）
 
         异常：
@@ -281,8 +282,9 @@ class IndicatorConfigStore:
             version_id: int，待生效的版本编号
 
         返回：
-            IndicatorConfigVersion | None：已生效版本；草稿基线已失效（CAS）
-            或被更高 applied 版本取代时返回 None
+            IndicatorConfigVersion | None：已生效版本；目标版本已是 applied 且最新
+            生效已前移（幂等重放守卫，issue #113 R9）时直接返回该版本，不写文件、
+            不改状态；草稿基线已失效（CAS）或被更高 applied 版本取代时返回 None
 
         异常：
             IndicatorConfigValidationError，目标版本不存在时抛出
@@ -291,6 +293,15 @@ class IndicatorConfigStore:
         if version is None:
             raise IndicatorConfigValidationError([f"指标配置版本 v{version_id} 不存在，无法生效"])
         latest = await self._versions.latest_applied_version()
+        # 已生效版本幂等重放守卫（issue #113 R9）：语义同 StrategyStore——轮末生效
+        # 成功后收尾被打断、窗口内人工已生效更新版本（latest 前移）时，重放不得把
+        # 本版本当草稿重过 CAS——它确实生效过，直接返回，不写文件、不改状态，
+        # 避免被「实读基线已不在位」误反标 discarded
+        if version.status == "applied" and latest is not None and latest.id != version.id:
+            logger.debug(
+                "指标配置版本 v%d 已生效过，重放幂等返回（当前生效 v%d）", version_id, latest.id
+            )
+            return version
         # 草稿基线 CAS（issue #113，R6-3 加固）：语义同 StrategyStore——基线章绑定
         # LLM 实读时点的文件内容 md5 与最新 applied 版本身份；人工变更/回滚/ABA
         # 导致身份不在位、或文件被热编辑偏离实读内容，均判基线失效、废弃草稿

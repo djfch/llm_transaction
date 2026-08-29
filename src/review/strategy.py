@@ -286,8 +286,10 @@ class StrategyStore:
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效的版本对象；基线已失效（语义见上文）或已被
-            更高 applied 版本取代时返回 None（本版本已置 discarded）
+            StrategyVersion | None：已生效的版本对象；目标版本已是 applied 且最新
+            生效已前移时幂等返回该版本（不写文件、不改状态，issue #113 R9 守卫）；
+            基线已失效（语义见上文）或已被更高 applied 版本取代时返回 None
+            （本版本已置 discarded）
 
         异常：
             StrategyValidationError，目标版本不存在时抛出
@@ -302,9 +304,10 @@ class StrategyStore:
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion | None：已生效版本；草稿基线已失效（CAS：人工变更/
-            回滚/ABA 致实读时点 applied 身份不在位，或文件被热编辑偏离实读内容）
-            或被更高 applied 版本取代时返回 None
+            StrategyVersion | None：已生效版本；目标版本已是 applied 且最新生效已
+            前移（幂等重放守卫，issue #113 R9）时直接返回该版本，不写文件、不改状态；
+            草稿基线已失效（CAS：人工变更/回滚/ABA 致实读时点 applied 身份不在位，
+            或文件被热编辑偏离实读内容）或被更高 applied 版本取代时返回 None
 
         异常：
             StrategyValidationError，目标版本不存在时抛出
@@ -313,6 +316,15 @@ class StrategyStore:
         if version is None:
             raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法生效"])
         latest = await self._repo.review.latest_applied_strategy_version()
+        # 已生效版本幂等重放守卫（issue #113 R9）：轮末生效成功后收尾被打断、窗口内
+        # 人工已生效更新版本（latest 前移）时，_complete_interrupted 的重放不得把
+        # 本版本当草稿重过 CAS——它确实生效过，直接返回，不写文件、不改状态，
+        # 避免被「实读基线已不在位」误反标 discarded（版本历史被静默改写）
+        if version.status == "applied" and latest is not None and latest.id != version.id:
+            logger.debug(
+                "策略版本 v%d 已生效过，重放幂等返回（当前生效 v%d）", version_id, latest.id
+            )
+            return version
         # 草稿基线 CAS（issue #113，R6-3 加固）：基线章绑定 LLM 实读时点的文件
         # 内容 md5 与最新 applied 版本身份——id 只代表落库先后，不代表分析基线
         # 新旧；人工变更/回滚/ABA 导致身份不在位、或文件被热编辑偏离实读内容，

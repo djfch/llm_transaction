@@ -688,3 +688,55 @@ async def test_interrupted_after_write_recovers_on_apply_retry(
     assert latest is not None and latest.id == draft.id
     assert _file_shortlist(config_path) == _NEW_SHORTLIST
     assert content_md5(config_path.read_text(encoding="utf-8")) == latest.md5
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(
+    store, repo, config_path
+):
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工生效了更新版本（latest 前移）。
+    _complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被当草稿重过 CAS，
+    会因「实读基线已不在位」被反标 discarded——它确实生效过，版本历史不得被
+    静默改写（issue #113 R9，语义同策略书通道）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工短名单
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    first = await store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（latest 前移）
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")
+    human = await store.apply_version(human_draft.id)
+    assert human is not None and human.id > draft.id
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=store,
+        indicator_draft_ids=[draft.id],
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert _file_shortlist(config_path) == ["adx14"]  # 人工短名单不被回写
