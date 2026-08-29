@@ -802,3 +802,38 @@ async def test_interrupted_after_write_recovers_on_apply_retry(
     latest = await repo.review.latest_applied_strategy_version()
     assert latest is not None and latest.id == draft.id
     assert store.current() == latest.content == _NEW
+
+
+async def test_content_match_without_identity_baseline_is_stale(store, repo, prompt_path, caplog):
+    """身份基线不在位但文件恰等于草稿正文：仍判失效废弃，不得走 R7-1 恢复态。
+
+    恢复态的前提是「身份基线仍在位 ∧ 文件已是草稿正文」同时成立；本组合负例
+    钉死判定顺序——草稿盖章后人工直改生效了新版本（身份基线前移），随后文件
+    被写成与草稿相同的内容（如过期生效世界的延迟落盘）：仅内容吻合不得放行
+    补状态，必须按「实读基线已不在位」废弃，避免把已前移的生效序列当作
+    自己的中断现场而错位补章。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保持现状、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    await store.revise_applied("人工策略书：" + "人工优先，身份基线前移。" * 10, "人工改")  # v2
+    prompt_path.write_text(_NEW, encoding="utf-8")  # 文件恰等于草稿正文，但基线已不在位
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == _NEW  # 文件保持现状，不被回滚也不错位补章
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)

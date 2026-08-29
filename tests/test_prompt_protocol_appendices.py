@@ -314,3 +314,28 @@ def test_gate_appendix_allows_authorized_unreviewable_closure(tmp_path):
     prompt, _ = ReviewPromptLoader(path).system_prompt("## 可用工具")
     assert "人工重评授权时另有结案口径" in prompt
     assert "结案理由以授权理由为准" in prompt
+
+
+def test_gate_appendix_covers_read_before_write(tmp_path):
+    """校验复盘门禁附录收编 R7-2 先读后写硬门禁：两个写工具未实读当前状态不得提交。
+
+    参数：
+        tmp_path: Path，pytest 临时目录夹具，用于写入自定义 review_prompt.md
+
+    返回：
+        None，断言附录常量与拼装后的完整提示词均携带两个写工具的先读后写规则，
+        且明确只读历史版本不算实读当前状态
+    """
+    assert (
+        "调用 `submit_indicator_config` 或 `submit_research_prompt_revision` 前"
+        in REVIEW_RESEARCH_REVIEW_GATE_V1
+    )
+    assert "`get_indicator_config` 读当前完整指标配置" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "只读历史版本不算" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    assert "未读取的提交会被拒绝" in REVIEW_RESEARCH_REVIEW_GATE_V1
+    # 拼装后的完整提示词同样携带先读后写门禁（固定附录强制追加，正文不可覆盖）
+    path = tmp_path / "review_prompt.md"
+    path.write_text("自定义复盘正文：不含门禁内容", encoding="utf-8")
+    prompt, _ = ReviewPromptLoader(path).system_prompt("## 可用工具")
+    assert "只读历史版本不算" in prompt
+    assert "未读取的提交会被拒绝" in prompt
