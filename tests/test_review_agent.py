@@ -489,6 +489,13 @@ async def test_run_with_indicator_config_revision(env, tmp_path):
         [
             LLMResponse(
                 text="",
+                raw="raw-0",
+                tool_calls=[
+                    ToolCall(name="get_indicator_config", args={}, call_id="c0")  # R7-2 先读
+                ],
+            ),
+            LLMResponse(
+                text="",
                 raw="raw-1",
                 tool_calls=[
                     ToolCall(
@@ -887,12 +894,13 @@ async def test_run_prompt_load_failure_lands_error_report(env, monkeypatch):
 
 
 def _dual_revision_provider() -> StubProvider:
-    """构造「提交策略修订 → 提交指标修订 → 最终文本」的复盘脚本。
+    """构造「提交策略修订 → 读当前指标配置 → 提交指标修订 → 最终文本」的复盘脚本。
 
     参数：无
 
     返回：
-        StubProvider，依次回放两个修订工具调用与最终文本的三段式 stub
+        StubProvider，依次回放修订工具调用（指标修订按 R7-2 先读后写门禁先调
+        get_indicator_config）与最终文本的四段式 stub
     """
     new_prompt = "新策略书：" + "顺势加仓，严格止损。" * 10
     return StubProvider(
@@ -906,6 +914,13 @@ def _dual_revision_provider() -> StubProvider:
                         args={"new_prompt_md": new_prompt, "reason": "收紧止损"},
                         call_id="c1",
                     )
+                ],
+            ),
+            LLMResponse(
+                text="",
+                raw="raw-1b",
+                tool_calls=[
+                    ToolCall(name="get_indicator_config", args={}, call_id="c1b")  # R7-2 先读
                 ],
             ),
             LLMResponse(
@@ -1598,16 +1613,24 @@ def _research_prompt_store(env, tmp_path):
 
 
 def _prompt_revision_provider(new_prompt: str) -> StubProvider:
-    """构造「提交研报提示词修订 → 最终文本」的复盘脚本。
+    """构造「读取当前研报提示词 → 提交修订 → 最终文本」的复盘脚本。
 
     参数：
         new_prompt: str，本轮要提交的研报提示词新全文
 
     返回：
-        StubProvider，依次回放修订工具调用与最终文本的两段式 stub
+        StubProvider，依次回放读取与修订工具调用（R7-2 先读后写门禁要求先调
+        无参 get_research_prompt_versions）与最终文本的三段式 stub
     """
     return StubProvider(
         [
+            LLMResponse(
+                text="",
+                raw="raw-0",
+                tool_calls=[
+                    ToolCall(name="get_research_prompt_versions", args={}, call_id="c0")  # 先读
+                ],
+            ),
             LLMResponse(
                 text="",
                 raw="raw-1",
@@ -1750,9 +1773,9 @@ async def test_failed_round_discards_research_prompt_draft(env, tmp_path):
     calls = {"n": 0}
 
     async def chat_boom_late(system, messages, tools):
-        """首轮正常返回工具调用，次轮直接崩溃（模拟报告前 LLM 故障）。"""
+        """前两轮正常返回工具调用（读取 + 提交修订），第三轮直接崩溃。"""
         calls["n"] += 1
-        if calls["n"] >= 2:
+        if calls["n"] >= 3:
             raise RuntimeError("llm crashed")
         return await original_chat(system, messages, tools)
 

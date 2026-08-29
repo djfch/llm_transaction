@@ -1429,6 +1429,7 @@ async def test_submit_research_prompt_revision_draft(
     返回：
         None，断言草稿状态、deps 回写与文件未变
     """
+    await registry.execute("get_research_prompt_versions", {})  # R7-2：先读当前全文授予基线章
     new_prompt = "修订后研报提示词：" + "逐条核对证据。" * 20
     text = await registry.execute(
         "submit_research_prompt_revision",
@@ -1456,6 +1457,7 @@ async def test_submit_research_prompt_revision_validation_rejects(
     返回：
         None，断言拒绝文案与无副作用
     """
+    await registry.execute("get_research_prompt_versions", {})  # R7-2：先读当前全文授予基线章
     text = await registry.execute(
         "submit_research_prompt_revision", {"new_prompt_md": "太短", "reason": "x"}
     )
@@ -1490,6 +1492,44 @@ async def test_get_research_prompt_versions(
     assert "v1" in detail and "全文" in detail
     missing = await registry.execute("get_research_prompt_versions", {"version_id": 99})
     assert "不存在" in missing
+
+
+async def test_submit_research_prompt_revision_requires_current_read(
+    deps: ReviewToolDeps, registry: ReviewToolRegistry, prompt_store
+) -> None:
+    """R7-2 先读后写硬门禁：未读/只读历史版本提交被拒，无参读取当前全文后提交正常。
+
+    基线章只由「无参读取当前完整状态」路径授予：带 version_id 读历史版本不盖章，
+    其后提交仍被拒；无参读取后提交落草稿且盖实读基线章。
+
+    参数：
+        deps: ReviewToolDeps，复盘工具依赖
+        registry: ReviewToolRegistry，工具注册表
+        prompt_store: ResearchPromptStore，已装配的研报提示词存储
+
+    返回：
+        None，断言三种读取状态下的提交结果与草稿基线章
+    """
+    args = {
+        "new_prompt_md": "修订后研报提示词：" + "逐条核对证据。" * 20,
+        "reason": "研报复盘发现证据门槛过低",
+    }
+    rejected = await registry.execute("submit_research_prompt_revision", args)
+    assert "提交拒绝" in rejected and "get_research_prompt_versions" in rejected
+    assert deps.research_prompt_version_id is None
+    assert len(await deps.repo.research_prompt.list_versions()) == 1  # 只有种子 v1
+    # 带 version_id 只读历史版本不授予基线章，提交仍被拒
+    await registry.execute("get_research_prompt_versions", {"version_id": 1})
+    still_rejected = await registry.execute("submit_research_prompt_revision", args)
+    assert "提交拒绝" in still_rejected
+    assert len(await deps.repo.research_prompt.list_versions()) == 1
+    # 无参读取当前全文后授予基线章，提交落草稿
+    await registry.execute("get_research_prompt_versions", {})
+    accepted = await registry.execute("submit_research_prompt_revision", args)
+    assert "草稿 v2" in accepted
+    version = await deps.repo.research_prompt.get_version(2)
+    assert version is not None and version.status == "draft"
+    assert version.base_md5 is not None and version.base_applied_version_id == 1
 
 
 # ---------- R5-2：人工授权重评分派（注册表入口在 tool_research_rereview） ----------

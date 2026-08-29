@@ -236,8 +236,16 @@ def test_prompt_templates_match_current_agent_contracts():
     assert "提交四段评价" not in review  # 旧协议文案已移除
     assert "submit_research_prompt_revision" in review
     assert "单次复盘不修订提示词" in review
-    assert "版本化修订" not in review
-    assert "版本化维护" not in review
+    # R7-2 先读后写硬门禁：两个写工具都要求本轮先实读当前完整状态
+    assert all(
+        s in review
+        for s in (
+            "提交前必须已在本轮调用过 `get_indicator_config`读取当前完整配置",
+            "提交前必须已在本轮调用过无参的 `get_research_prompt_versions`读取当前提示词全文",
+            "（用 version_id 只读历史版本不算），否则会被拒绝",
+        )
+    )
+    assert all(s not in review for s in ("版本化修订", "版本化维护"))
     assert "最终文本就是存档报告" not in review
 
 

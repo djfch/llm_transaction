@@ -278,6 +278,7 @@ async def test_submit_indicator_config_success(registry, deps, repo):
     返回：
         None，通过断言验证上述行为，无返回值
     """
+    await registry.execute("get_indicator_config", {})  # R7-2：先读当前配置授予基线章
     new_list = ["ema20", "rsi14", "macd", "boll"]
     reason = "round-aaa 的 BTC_USDT 亏损源于 ema50 全程无信号，换 boll 捕捉波动"
     text = await registry.execute(
@@ -308,6 +309,7 @@ async def test_submit_indicator_config_dedup(registry, deps):
     返回：
         None，通过断言验证上述行为，无返回值
     """
+    await registry.execute("get_indicator_config", {})  # R7-2：先读当前配置授予基线章
     text = await registry.execute(
         "submit_indicator_config",
         {"shortlist": ["rsi14", "ema20", "rsi14"], "reason": "去重验证"},
@@ -327,6 +329,7 @@ async def test_submit_indicator_config_unknown_key(registry, deps):
     返回：
         None，通过断言验证上述行为，无返回值
     """
+    await registry.execute("get_indicator_config", {})  # R7-2：先读当前配置授予基线章
     text = await registry.execute(
         "submit_indicator_config", {"shortlist": ["ema20", "sma20"], "reason": "尝试未知键"}
     )
@@ -345,6 +348,7 @@ async def test_submit_indicator_config_too_many(registry, deps):
     返回：
         None，通过断言验证上述行为，无返回值
     """
+    await registry.execute("get_indicator_config", {})  # R7-2：先读当前配置授予基线章
     nine = ["ema9", "ema20", "ema50", "macd", "rsi7", "rsi14", "kdj", "roc10", "atr14"]
     text = await registry.execute(
         "submit_indicator_config", {"shortlist": nine, "reason": "堆叠 9 个指标"}
@@ -363,6 +367,7 @@ async def test_submit_indicator_config_no_diff(registry, deps):
     返回：
         None，通过断言验证上述行为，无返回值
     """
+    await registry.execute("get_indicator_config", {})  # R7-2：先读当前配置授予基线章
     text = await registry.execute(
         "submit_indicator_config",
         {"shortlist": list(DEFAULT_INDICATOR_SHORTLIST), "reason": "与当前相同"},
@@ -390,6 +395,29 @@ async def test_submit_indicator_config_bad_args(registry, deps):
     )
     assert "参数错误" in not_list and "shortlist" in not_list
     assert deps.indicator_config_version_id is None
+
+
+async def test_submit_indicator_config_requires_current_read(registry, deps, repo):
+    """R7-2 先读后写硬门禁：未读当前配置直接提交被拒，读后提交正常落草稿。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+        repo: Repo，连接测试数据库的仓储实例
+
+    返回：
+        None，断言未读提交的拒绝文案与无副作用、读后提交成功且草稿盖基线章
+    """
+    args = {"shortlist": ["ema20", "rsi14"], "reason": "复盘证据支持聚焦趋势"}
+    rejected = await registry.execute("submit_indicator_config", args)
+    assert "提交拒绝" in rejected and "get_indicator_config" in rejected
+    assert deps.indicator_config_version_id is None
+    assert not await repo.indicator_config.list_versions()  # 未落任何草稿
+    await registry.execute("get_indicator_config", {})  # 实读当前配置授予基线章
+    accepted = await registry.execute("submit_indicator_config", args)
+    assert "校验通过" in accepted
+    version = await repo.indicator_config.get_version(deps.indicator_config_version_id)
+    assert version is not None and version.base_md5 is not None  # 草稿已盖实读基线章
 
 
 # ---------- 降级与注册 ----------
