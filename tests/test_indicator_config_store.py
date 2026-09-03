@@ -6,6 +6,7 @@ revise 成功（原子写文件/版本落库/md5 与文件一致/on_change 触�
 有文件记 v1）、load_indicator_config 文件缺失返回默认基线、子仓库直连接入。
 """
 
+import asyncio
 import hashlib
 
 import pytest
@@ -357,3 +358,385 @@ async def test_attach_report_to_version(repo):
     assert v.report_id is None
     await repo.indicator_config.attach_report_to_version(v.id, 7)
     assert (await repo.indicator_config.get_version(v.id)).report_id == 7
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(store, repo, config_path):
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+    返回：
+        None，断言 apply 返回 None、文件保留新版本内容、旧草稿状态为 discarded
+    """
+    await store.seed_if_empty()
+    older = await store.revise(["rsi14"], "review_agent", "第一版草稿")
+    newer = await store.revise(["adx14"], "review_agent", "第二版草稿")
+    applied_newer = await store.apply_version(newer.id)
+    assert applied_newer is not None and applied_newer.status == "applied"
+    applied_older = await store.apply_version(older.id)
+    assert applied_older is None  # 已被更高 applied 版本取代
+    assert _file_shortlist(config_path) == ["adx14"]  # 文件保留新版本内容
+    assert (await store.get_version(older.id)).status == "discarded"
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(
+    store, repo, config_path, monkeypatch
+):
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容；rollback 收进
+    生效锁后两者串行，文件与库内最新 applied 版本必然一致（issue #113 R7）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    await store.seed_if_empty()
+    v1 = (await store.list_versions())[0]
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进")
+    original_save = repo.indicator_config.save_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_version 的位置参数
+            **kwargs: 原 save_version 的关键字参数
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo.indicator_config, "save_version", slow_save)
+    await asyncio.gather(store.rollback(v1.id), store.apply_version(draft.id))
+    latest = await repo.indicator_config.latest_applied_version()
+    assert latest is not None
+    assert config_path.read_text(encoding="utf-8") == latest.content
+
+
+# ---------- 草稿基线 CAS（issue #113） ----------
+
+
+async def test_cas_discards_stale_draft_after_human_intervenes(store, repo, config_path, caplog):
+    """交错复现竞态：人工短名单生效后，基于旧内容的 agent 草稿被 CAS 废弃不覆盖。
+
+    人工路径是两步（revise 落草稿 + apply_version 生效）：人工草稿 C(v2) 生效后，
+    轮末再生效基于 v1 基线的 agent 草稿 B(v3)；无 CAS 时旧 id 比较（v3 > v2）
+    不会判取代，陈旧 B 会覆盖人工 C（PR #114 R6）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线取代告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留人工内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")
+    agent_draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    human = await store.apply_version(human_draft.id)
+    assert human is not None and human.status == "applied"
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(agent_draft.id)
+    assert applied is None  # 基线已失效（人工变更取代实读基线）
+    assert (await store.get_version(agent_draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == ["adx14"]  # 文件保留人工内容
+    assert any("基线已失效" in r.message for r in caplog.records)
+
+
+async def test_cas_applies_draft_when_base_matches(store, repo, config_path):
+    """草稿基线与最新 applied 内容一致时正常生效（CAS 正路径）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言草稿生效、文件替换、版本行 base_md5 落库
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    assert draft.base_md5 == v1.md5
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+
+
+async def test_cas_null_base_falls_back_to_id_compare(store, repo, config_path):
+    """base_md5 为 NULL 的历史/人工行回退旧 id 比较：id 更大的草稿照常生效。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言无基线草稿按旧行为生效覆盖、文件为新短名单
+    """
+    await store.seed_if_empty()
+    v2 = await store.revise(["adx14"], "human", "人工换指标")
+    await store.apply_version(v2.id)
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进")  # 不盖基线章
+    assert draft.base_md5 is None
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"  # id 更大，按旧行为生效
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+
+
+async def test_cas_replay_of_applied_draft_is_idempotent(store, repo, config_path):
+    """已生效草稿的幂等重放不被 CAS 误判：latest 即本版本自身时跳过比对。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言二次 apply 仍返回生效版本、文件与状态保持不变
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW_SHORTLIST, "review_agent", "复盘改进", base_md5=v1.md5)
+    first = await store.apply_version(draft.id)
+    assert first is not None and first.status == "applied"
+    second = await store.apply_version(draft.id)  # 幂等重放
+    assert second is not None and second.status == "applied"
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+    assert (await store.get_version(draft.id)).status == "applied"
+
+
+async def test_sample_current_base(store, repo, config_path):
+    """读取时点基线采样（issue #113 R6-3）：返回（文件正文, 正文 md5, 最新 applied id）三元组。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言无文件、有文件无版本、有 applied 三种状态下的采样三元组
+    """
+    assert await store.sample_current_base() == ("", content_md5(""), None)  # 无文件
+    raw = "shortlist:\n- adx14\n"
+    config_path.write_text(raw, encoding="utf-8")
+    assert await store.sample_current_base() == (raw, content_md5(raw), None)  # 有文件无版本
+    v1 = await store.seed_if_empty()
+    assert await store.sample_current_base() == (raw, v1.md5, v1.id)  # 有 applied
+
+
+async def test_cas_discards_draft_when_base_version_aba_replaced(store, repo, config_path, caplog):
+    """基线版本 ABA 回绕：草稿基于 v1 实读盖章后，人工改短名单(v2) 又回滚 v1(v3)，轮末废弃。
+
+    内容回绕后当前文件 md5 与基线一致，仅凭 md5 比对的旧 CAS 会放行；新 CAS 按
+    实读基线身份检出失效（base_applied_version_id=v1 ≠ 当前生效 v3，issue #113 R6-3）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留回滚后内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()  # 文件不存在：默认基线落文件并记 v1
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")  # v2 draft
+    assert await store.apply_version(human_draft.id) is not None  # v2 applied
+    await store.rollback(v1.id)  # v3：内容回绕为默认短名单，id 前进
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == list(DEFAULT_INDICATOR_SHORTLIST)  # 回滚后内容
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_discards_draft_when_file_hot_edited(store, repo, config_path, caplog):
+    """文件热编辑：草稿盖章后文件被绕过 store 直接改写（库中 applied 不动），轮末废弃。
+
+    实读基线身份仍在位（v1），但当前文件内容 md5 已偏离实读基线——防"库不变、
+    文件被外部编辑"的漏检（issue #113 R6-3）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、热编辑内容不被覆盖、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    config_path.write_text("shortlist:\n- adx14\n", encoding="utf-8")  # 热编辑：动文件不动库
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert _file_shortlist(config_path) == ["adx14"]  # 热编辑内容不被草稿覆盖
+    assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
+
+
+async def test_interrupted_after_write_recovers_on_apply_retry(
+    store, repo, config_path, monkeypatch
+):
+    """写文件成功、置状态前中断的草稿：重试识别恢复态补置 applied，不误判热编辑废弃（R7-1）。
+
+    首轮 apply 在原子写成功后让 set_version_status("applied") 抛错，留下「文件已是
+    草稿正文、库内仍是旧 applied + 本草稿 draft」的中断现场；随后经 apply_drafts
+    重试（_complete_interrupted 的幂等收尾路径）：身份基线仍在位且文件内容已等于
+    草稿正文 → 恢复态放行，幂等重写同内容文件并补置 applied，失败集合保持为空
+    （轮末事件 applied=True 名实相符）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+        monkeypatch: MonkeyPatch，用于让首次置 applied 抛错模拟进程中断
+
+    返回：
+        None，断言重试后草稿 applied、文件与库内最新 applied 一致、失败集合为空
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    original_set = repo.indicator_config.set_version_status
+    tripped = {"done": False}
+
+    async def flaky_set_status(version_id, status):
+        """首次置 applied 时模拟「写文件已成功、状态未落库」的进程中断。
+
+        参数：
+            version_id: int，版本编号（透传）
+            status: str，目标状态（透传）
+
+        返回：
+            原 set_version_status 的返回（透传）
+
+        异常：
+            RuntimeError：首次置 applied 时抛出，模拟置状态前进程中断
+        """
+        if status == "applied" and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("模拟置状态前进程中断")
+        return await original_set(version_id, status)
+
+    monkeypatch.setattr(repo.indicator_config, "set_version_status", flaky_set_status)
+    with pytest.raises(RuntimeError):
+        await store.apply_version(draft.id)
+    # 中断现场：文件已是草稿正文，库内仍是 v1 applied + 本草稿 draft
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+    assert (await store.get_version(draft.id)).status == "draft"
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=store,
+        indicator_draft_ids=[draft.id],
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重试路径
+    assert deps.apply_failed_ids == []  # 轮末事件 applied=True 名实相符
+    assert (await store.get_version(draft.id)).status == "applied"
+    latest = await repo.indicator_config.latest_applied_version()
+    assert latest is not None and latest.id == draft.id
+    assert _file_shortlist(config_path) == _NEW_SHORTLIST
+    assert content_md5(config_path.read_text(encoding="utf-8")) == latest.md5
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(
+    store, repo, config_path
+):
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工生效了更新版本（latest 前移）。
+    _complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被当草稿重过 CAS，
+    会因「实读基线已不在位」被反标 discarded——它确实生效过，版本历史不得被
+    静默改写（issue #113 R9，语义同策略书通道）。
+
+    参数：
+        store: IndicatorConfigStore，指标配置存储测试夹具
+        repo: Repo，测试数据库仓库，本用例通过 store 间接使用
+        config_path: Path，指标配置文件路径
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工短名单
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW_SHORTLIST,
+        "review_agent",
+        "复盘改进",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    first = await store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（latest 前移）
+    human_draft = await store.revise(["adx14"], "human", "人工换指标")
+    human = await store.apply_version(human_draft.id)
+    assert human is not None and human.id > draft.id
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=store,
+        indicator_draft_ids=[draft.id],
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert _file_shortlist(config_path) == ["adx14"]  # 人工短名单不被回写

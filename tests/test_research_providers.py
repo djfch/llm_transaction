@@ -679,13 +679,14 @@ async def test_fred_render(monkeypatch) -> None:
         """
         return {"title": "Consumer Price Index"}
 
-    async def fake_obs(self, client, series_id, look_back):
+    async def fake_obs(self, client, series_id, look_back, end_ts=None):
         """返回预设的 FRED 观测序列。
 
         参数：
             client: httpx.AsyncClient，用于发起测试请求的客户端
             series_id: str，FRED 指标序列标识
             look_back: int，观测回看窗口天数
+            end_ts: float | None，观测窗口终点时间戳（本桩不使用）
 
         返回：
             list[tuple[str, str]]，按日期排列的模拟观测点

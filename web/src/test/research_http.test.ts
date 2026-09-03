@@ -27,13 +27,15 @@ const ASSET = {
 const RAW_REPORT = {
   id: 7,
   report_type: 'asia_open',
-  schema_version: 2,
+  schema_version: 3,
   summary: 'BTC 结构获得宏观催化确认',
   cross_market_view: 'BTC 强于 ETH',
   global_risks: ['亚盘流动性偏薄'],
   asset_views: [ASSET],
   error: '',
   round_id: 'rs-round-7',
+  research_prompt_md5: '0123456789abcdef0123456789abcdef',
+  research_prompt_version_id: 5,
   created_at: 1784595600,
 }
 
@@ -46,11 +48,9 @@ const RAW_LINK = {
   ],
   confidence: '0.72',
   evidence: ['金十日历：CPI 公布值 3.0%'],
-  status: 'verified',
-  broken_at: null,
+  status: 'concluded',
   topic: 'CPI',
   supersedes_id: null,
-  await_verification: false,
   created_at: 1784595600,
 }
 
@@ -63,9 +63,11 @@ describe('研报端点适配', () => {
     const page = await httpApi.getResearchReports(0, 5)
     const report = page.items[0]
     expect(page.total).toBe(1)
-    expect(report.schemaVersion).toBe(2)
+    expect(report.schemaVersion).toBe(3)
     expect(report.summary).toBe('BTC 结构获得宏观催化确认')
     expect(report.globalRisks).toEqual(['亚盘流动性偏薄'])
+    expect(report.researchPromptMd5).toBe('0123456789abcdef0123456789abcdef')
+    expect(report.researchPromptVersionId).toBe(5)
     expect(report.assetViews[0]).toMatchObject({
       contract: 'BTC_USDT',
       direction: '偏多',
@@ -89,7 +91,6 @@ describe('研报端点适配', () => {
             ],
             risks: ['资金费率偏高'],
             narrative: 'BTC 逐标的研判',
-            verify_result: '',
             created_at: 1784595600,
           }],
           causal_links: [RAW_LINK],
@@ -105,7 +106,7 @@ describe('研报端点适配', () => {
       reportId: 7,
       confidence: 0.72,
       topic: 'CPI',
-      awaitVerification: false,
+      status: 'concluded',
     })
   })
 
@@ -120,7 +121,6 @@ describe('研报端点适配', () => {
             evidence: [],
             risks: [],
             narrative: '',
-            verify_result: '',
             created_at: 1784595600,
           }],
           causal_links: [{

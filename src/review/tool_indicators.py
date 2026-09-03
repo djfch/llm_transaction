@@ -12,6 +12,9 @@
 
 from __future__ import annotations
 
+import yaml
+
+from src.config import IndicatorConfig
 from src.market.indicator_service import REGISTRY
 from src.market.intervals import GATE_CANDLE_INTERVALS
 from src.review.indicator_config import IndicatorConfigValidationError
@@ -153,7 +156,16 @@ async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
-    current = deps.indicator_config_store.load_current()
+    store = deps.indicator_config_store
+    # 读取时点基线采样（issue #113 R6-3）：展示文本与基线章（md5/applied 身份）
+    # 取自同一次锁内采样，LLM 所见即所盖——防"轮初采样后人工变更"的错位
+    text, md5, applied_id = await store.sample_current_base()
+    deps.base_md5_by_channel["indicator_config"] = md5
+    if applied_id is not None:
+        deps.base_applied_id_by_channel["indicator_config"] = applied_id
+    # 展示内容即 LLM 实读文本（与基线章同源）；空/非映射内容回退默认基线
+    parsed = yaml.safe_load(text) if text.strip() else None
+    current = IndicatorConfig(**parsed) if isinstance(parsed, dict) else store.load_current()
     lines = [
         f"当前指标短名单（{len(current.shortlist)} 个）：{', '.join(current.shortlist)}",
         "",
@@ -169,27 +181,47 @@ async def get_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
 async def submit_indicator_config(deps: ReviewToolDeps, args: dict) -> str:
     """提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号。
 
+    先读后写硬门禁（R7-2）：本轮未调用 get_indicator_config 实读当前完整配置
+    （deps 无本通道基线章）时直接拒绝，不落草稿——无基线草稿会绕过 CAS 校验。
+
     参数：
         deps: ReviewToolDeps，工具或服务依赖集合
         args: dict，工具调用参数
 
     返回：
-        str，提交指标短名单改写（全文替换）；校验拒绝返回原因文本，成功记 deps 版本号
+        str，提交指标短名单改写（全文替换）；未先读当前配置或校验拒绝时返回
+        原因文本，成功记 deps 版本号
     """
     if deps.indicator_config_store is None:
         return _STORE_MISSING
     shortlist = _need_str_list(args, "shortlist")
     reason = _need_str(args, "reason")
+    # R7-2 先读后写硬门禁：基线章只能由 get_indicator_config 实读当前完整配置授予；
+    # 缺章提交会落 base_md5=NULL 草稿，绕过 CAS 身份/热编辑校验，硬性拒绝
+    base_md5 = deps.base_md5_by_channel.get("indicator_config")
+    if base_md5 is None:
+        return (
+            "提交拒绝：本轮尚未读取当前指标配置。必须先调用 get_indicator_config "
+            "读取当前完整短名单与可选菜单后，再提交修订"
+        )
     try:
         # report_id 跟随 submit_strategy_revision 取法：工具执行时报告尚未生成，置 None，
-        # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）
+        # 版本↔报告关联由 ReviewAgent 轮末回填（deps.indicator_config_version_id 驱动）；
+        # 基线章（md5 + applied 身份，issue #113 CAS/R6-3）盖 LLM 实读时点采样值
         version = await deps.indicator_config_store.revise(
-            shortlist, created_by="review_agent", reason=reason
+            shortlist,
+            created_by="review_agent",
+            reason=reason,
+            base_md5=base_md5,
+            base_applied_version_id=deps.base_applied_id_by_channel.get("indicator_config"),
         )
     except IndicatorConfigValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原短名单未改动，修正后可重新提交）"
     deps.indicator_config_version_id = version.id
-    deps.indicator_draft_ids.append(version.id)
+    # issue #113 F11：同轮重复提交先废弃旧草稿，保证本轮最多一份草稿待生效
+    for old_id in deps.indicator_draft_ids:
+        await deps.indicator_config_store.discard_draft(old_id)
+    deps.indicator_draft_ids = [version.id]
     # 展示去重保序后的名单（与 _validated 的生效口径一致）
     deduped = list(dict.fromkeys(shortlist))
     return (

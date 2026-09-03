@@ -50,6 +50,8 @@ async def persist_payload(
     payload: dict,
     round_id: str,
     deps: ResearchToolDeps,
+    research_prompt_md5: str = "",
+    research_prompt_version_id: int | None = None,
 ) -> tuple[ResearchReport, int]:
     """原子保存当前逐标的研报结构。
 
@@ -59,6 +61,10 @@ async def persist_payload(
         payload: dict，待广播、保存或转换的数据载荷
         round_id: str，关联的审计轮次编号
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
+        research_prompt_md5: str，生成本研报所用的 research_prompt.md 正文 md5
+            （与版本表关联，复盘据此归因判断，issue #113）
+        research_prompt_version_id: int | None，构建 prompt 时点解析到的版本 id
+            （issue #113 R5-4；None 时复盘侧回退按 md5+时点反解）
 
     返回：
         tuple[ResearchReport, int]：原子保存当前逐标的研报结构
@@ -71,6 +77,8 @@ async def persist_payload(
         raw_json=json.dumps(payload, ensure_ascii=False),
         round_id=round_id,
         asset_views=_asset_records(payload, deps),
+        research_prompt_md5=research_prompt_md5,
+        research_prompt_version_id=research_prompt_version_id,
     )
     return report, len(views)
 

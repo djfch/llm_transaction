@@ -9,11 +9,21 @@ Repo.__init__ 挂载为 repo.review，复盘相关调用一律走 repo.review.xx
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import aiosqlite
 
 from src.memory.db import Database
 from src.memory.models import AuditRound, Decision, ReviewReport, StrategyVersion, Trade
+from src.memory.research_review_repo import (
+    _consume_rereview_request,
+    _insert_review,
+    _save_scan_cursor,
+)
+
+# scan_cursor 参数缺省哨兵：区分「本轮未做候选扫描（不动库中游标）」与
+# 「扫到候选集尾部（事务内写 NULL 重置）」（None 本身是合法值，不能当缺省标记）
+SCAN_CURSOR_UNSET: Any = object()
 
 
 def _now() -> float:
@@ -106,6 +116,8 @@ class ReviewRepo:
         reason: str,
         report_id: int | None = None,
         status: str = "applied",
+        base_md5: str | None = None,
+        base_applied_version_id: int | None = None,
     ) -> StrategyVersion:
         """落库一个策略书版本（content 为完整原文，md5 为关联键）。
 
@@ -117,15 +129,30 @@ class ReviewRepo:
             report_id: int | None，研报记录编号
             status: str，版本状态：applied 已生效 / draft 草稿（报告成功才生效，
                 issue #62/#73）/ discarded 已废弃
+            base_md5: str | None，草稿基线 md5（LLM 实读时点的当时生效内容摘要，
+                issue #113 CAS）；None = 人工/历史行，生效判定回退旧 id 比较
+            base_applied_version_id: int | None，草稿基线的 applied 版本身份
+                （issue #113 R6-3）；None = 采样时无 applied 版本/人工/历史行，
+                生效判定只做文件 md5 校验
 
         返回：
             StrategyVersion：落库一个策略书版本（content 为完整原文，md5 为关联键）
         """
         ts = _now()
         cur = await self._conn.execute(
-            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,status)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (content, md5, created_by, reason, report_id, ts, status),
+            "INSERT INTO strategy_versions(content,md5,created_by,reason,report_id,created_at,"
+            "status,base_md5,base_applied_version_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                content,
+                md5,
+                created_by,
+                reason,
+                report_id,
+                ts,
+                status,
+                base_md5,
+                base_applied_version_id,
+            ),
         )
         await self._conn.commit()
         return StrategyVersion(
@@ -137,6 +164,8 @@ class ReviewRepo:
             report_id=report_id,
             created_at=ts,
             status=status,
+            base_md5=base_md5,
+            base_applied_version_id=base_applied_version_id,
         )
 
     async def list_strategy_versions(self) -> list[StrategyVersion]:
@@ -243,6 +272,7 @@ class ReviewRepo:
         """落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）。
 
         round_id 为产生本报告的审计轮 id；省略默认 ''（无关联）。
+        实现上委托 save_review_bundle（无研报复盘记录），保持单一写入路径。
 
         参数：
             period_start: float，复盘区间起点时间戳
@@ -257,26 +287,103 @@ class ReviewRepo:
         返回：
             ReviewReport：落库一份复盘报告；error 非空表示该次复盘失败（只留错误记录）
         """
-        ts = _now()
-        cur = await self._conn.execute(
-            "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
-            "strategy_action,new_version_id,error,round_id,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (
-                period_start,
-                period_end,
-                stats_json,
-                report_md,
-                strategy_action,
-                new_version_id,
-                error,
-                round_id,
-                ts,
-            ),
+        return await self.save_review_bundle(
+            period_start,
+            period_end,
+            stats_json,
+            report_md,
+            strategy_action,
+            new_version_id=new_version_id,
+            error=error,
+            round_id=round_id,
         )
-        await self._conn.commit()
+
+    async def save_review_bundle(
+        self,
+        period_start: float,
+        period_end: float,
+        stats_json: str,
+        report_md: str,
+        strategy_action: str,
+        new_version_id: int | None = None,
+        error: str = "",
+        round_id: str = "",
+        research_reviews: list[dict] | None = None,
+        scan_cursor: Any = SCAN_CURSOR_UNSET,
+    ) -> ReviewReport:
+        """单事务落库一份复盘报告及其全部研报复盘记录；任一步失败整体回滚。
+
+        报告与研报复盘是同一逻辑提交单元（issue #113）：不允许出现"报告已落库
+        而批改丢失"的中间态；研报复盘为空时等价于原单报告落库。失败复盘
+        （error 非空）不应携带研报复盘记录。
+        事务在独立连接上以 BEGIN IMMEDIATE 开始（与 research 侧 save_report_bundle
+        同范式）：共享连接在 await 间隙被其他协程 commit 会把本批部分行提前提交，
+        届时 rollback 只能回滚最后一段，破坏整批原子性。
+
+        参数：
+            period_start: float，复盘区间起点时间戳
+            period_end: float，复盘区间终点时间戳
+            stats_json: str，复盘统计 JSON 文本
+            report_md: str，复盘报告 Markdown 正文（成功路径含代码计算的统计段）
+            strategy_action: str，策略书处理动作
+            new_version_id: int | None，复盘生成的新策略版本编号
+            error: str，需要记录的错误文本
+            round_id: str，关联的审计轮次编号
+            research_reviews: list[dict] | None，研报复盘草稿列表；元素键与
+                research_review_repo._insert_review 的关键字参数一致（不含
+                review_report_id/created_at，由本方法统一回填）；人工授权重评
+                草稿可携带内部键 rereview_request_id（授权编号），本方法弹出后
+                在同事务内把该授权标记为已消费并绑定 round_id（R5-2）
+            scan_cursor: Any，候选扫描游标 ack（R6-1）：缺省（SCAN_CURSOR_UNSET）
+                表示本轮未做候选扫描、库中游标不动；其余取值（含 None=扫到尾部
+                重置）在同事务内落库，随整批同生共死
+
+        返回：
+            ReviewReport：已提交的复盘报告
+
+        异常：
+            Exception：INSERT 失败或唯一约束冲突（如同目标重复批改）时
+                回滚整批（报告与批改都不残留）并原样上抛
+        """
+        ts = _now()
+        conn = await aiosqlite.connect(str(self._db.path))
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            cur = await conn.execute(
+                "INSERT INTO review_reports(period_start,period_end,stats_json,report_md,"
+                "strategy_action,new_version_id,error,round_id,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    period_start,
+                    period_end,
+                    stats_json,
+                    report_md,
+                    strategy_action,
+                    new_version_id,
+                    error,
+                    round_id,
+                    ts,
+                ),
+            )
+            report_id = cur.lastrowid or 0
+            for item in research_reviews or []:
+                # rereview_request_id 是授权消费的内部键（R5-2），不是复盘列：
+                # 弹出后在同事务内把授权标记为已消费并绑定本轮 round_id
+                request_id = item.pop("rereview_request_id", None)
+                await _insert_review(conn, review_report_id=report_id, created_at=ts, **item)
+                if request_id is not None:
+                    await _consume_rereview_request(conn, request_id, round_id)
+            if scan_cursor is not SCAN_CURSOR_UNSET:
+                # R6-1：本轮做过候选扫描才把游标 ack 随报告同事务落库
+                await _save_scan_cursor(conn, scan_cursor)
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            await conn.close()
         return ReviewReport(
-            id=cur.lastrowid or 0,
+            id=report_id,
             period_start=period_start,
             period_end=period_end,
             stats_json=stats_json,

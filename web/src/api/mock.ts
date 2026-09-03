@@ -620,7 +620,15 @@ export const mockApi: ApiClient = {
   getResearchReports: researchMock.handlers.getResearchReports,
   getResearchReport: researchMock.handlers.getResearchReport,
   runResearch: researchMock.handlers.runResearch,
+  requestResearchRereview: researchMock.handlers.requestResearchRereview,
   getResearchLive: researchMock.handlers.getResearchLive,
+  // 研报提示词（在线编辑 + 版本历史/diff/回滚）同样由 mockResearch.ts 实现
+  getResearchPrompt: researchMock.handlers.getResearchPrompt,
+  putResearchPrompt: researchMock.handlers.putResearchPrompt,
+  getResearchPromptVersions: researchMock.handlers.getResearchPromptVersions,
+  getResearchPromptVersion: researchMock.handlers.getResearchPromptVersion,
+  getResearchPromptDiff: researchMock.handlers.getResearchPromptDiff,
+  rollbackResearchPrompt: researchMock.handlers.rollbackResearchPrompt,
   getResearchScheduleStatus: () => reply(researchScheduleStatus()),
   // 按 agent 转发三实现并归一为 LiveSnapshot（mock 行为与现状一致：trader 上轮、复盘/研报无进行中轮）
   getLiveFor: (agent): Promise<LiveSnapshot> => {

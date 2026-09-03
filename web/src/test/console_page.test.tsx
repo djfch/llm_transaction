@@ -111,6 +111,9 @@ const holder = vi.hoisted(() => ({
     Promise.resolve({ realized_pnl: 41.37, orders_today: 7, max_orders_per_day: 20 }),
   ),
   getStrategy: vi.fn(() => Promise.resolve('# 系统提示词')),
+  // 配置抽屉研报 Prompt 区块数据源：计数可断言（research_prompt_updated 联动测试用）
+  getResearchPrompt: vi.fn(() => Promise.resolve('# 研报提示词')),
+  getResearchPromptVersions: vi.fn(() => Promise.resolve([])),
   // 交易计划面板（左栏，策略下方）数据源：计数可断言（plan_updated 联动测试用）
   getPlan: vi.fn(() =>
     Promise.resolve({ content: '## BTC 做空\n入场：反弹受阻', roundId: 'r1', updatedAt: '2026-07-20T00:00:00Z' }),
@@ -159,6 +162,11 @@ vi.mock('../api', () => ({
     getIndicatorSeries: () => Promise.resolve({ contract: 'BTC_USDT', interval: '1h', series: {} }),
     // 配置抽屉数据源与 paper 重置（重置联动测试用）；策略面板复用 getStrategy/getStrategyVersions
     getStrategy: () => holder.getStrategy(),
+    // 配置抽屉研报 Prompt 区块数据源：经 holder 桩接入，调用计数可断言
+    getResearchPrompt: () => holder.getResearchPrompt(),
+    putResearchPrompt: (content: string) => Promise.resolve(content),
+    getResearchPromptVersions: () => holder.getResearchPromptVersions(),
+    getResearchPromptDiff: () => Promise.resolve(''),
     getStrategyVersion: (id: number) =>
       Promise.resolve({
         id,
@@ -388,6 +396,25 @@ describe('ConsolePage(AI 大脑观察舱)', () => {
     rerender(<ConsolePage />)
     await waitFor(() => expect(holder.getPlan.mock.calls.length).toBe(planBase + 1))
     expect(holder.getStrategy.mock.calls.length).toBe(strategyBase + 1)
+  })
+
+  it('WS research_prompt_updated → 抽屉内研报 Prompt 编辑器与版本列表即时重拉', async () => {
+    const { rerender } = render(<ConsolePage />)
+    await screen.findByText(/账户 · PAPER/)
+
+    // 打开抽屉，等研报 Prompt 区块就绪后记录计数基线
+    fireEvent.click(screen.getByRole('button', { name: '打开配置中心' }))
+    await screen.findByLabelText('research_prompt 内容')
+    const promptBase = holder.getResearchPrompt.mock.calls.length
+    const versionsBase = holder.getResearchPromptVersions.mock.calls.length
+    const strategyBase = holder.getStrategy.mock.calls.length
+
+    // 复盘 agent 修订研报提示词落版本即推：研报 Prompt 全文与版本列表即时重拉，策略区块不动
+    holder.lastMessage = { type: 'research_prompt_updated' }
+    rerender(<ConsolePage />)
+    await waitFor(() => expect(holder.getResearchPrompt.mock.calls.length).toBe(promptBase + 1))
+    await waitFor(() => expect(holder.getResearchPromptVersions.mock.calls.length).toBe(versionsBase + 1))
+    expect(holder.getStrategy.mock.calls.length).toBe(strategyBase)
   })
 
   it('关闭配置抽屉 → 顶部状态与策略面板同时重拉', async () => {

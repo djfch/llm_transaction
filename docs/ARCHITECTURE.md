@@ -241,17 +241,17 @@ live/testnet 新增敞口逐次读取对应 Gate 环境的合约规格；paper �
 自动调度由 `research.enabled(自动研报总开关)` 与 `research.schedules(调度列表)` 共同决定。东京、伦敦、纽约预设根据市场当地开盘时间、时区和官方休市日换算为 UTC+8；自定义项使用固定 UTC+8 时间，并可绑定每天或指定市场交易日。调度只在自然分钟完全相等时触发，启动晚、忙锁占用、开关晚开或日历晚恢复都不补跑；手动触发绕过自动开关和交易日日历。命中后点火即返回：自动与手动共用「预留标志 + 后台任务内取锁」执行机制，调度循环不等待生成结束，单次运行的异常不会带走调度器；运行中重复命中按忙碌跳过。三家日历独立刷新并写入 `data/market_calendar_cache.json(日历缓存)`；当前年与下一年逐年协调，缩水或冲突结果保留旧缓存并进入降级，只有相同集合或可靠超集才接纳。每日 UTC+8 00:10 先刷新再判断任务，失败按 5/15/30/60 分钟退避并在当天重试；单一来源失败不会污染其他来源，未知工作日降级为交易日并通过状态接口告警。
 
 研报 Agent 每轮先冻结 `watchlist.contracts(白名单合约)`，预注入宏观日历、指标、快讯、
-历史判断与待验证因果链。LLM 必须对每个白名单合约恰好调用一次
+历史判断、待跟踪因果链与近期研报复盘记录。LLM 必须对每个白名单合约恰好调用一次
 `get_research_market_data(获取研报市场数据)`；工具固定返回 `4h(K线)` 与
 `1d(K线)`，指标使用最多 200 根已收盘历史预热，原始 K 线根数由
 `limit(K线根数)` 控制。最终输出的 `asset_views(逐标的结论)` 必须与白名单及工具
 调用集合完全相等，否则整份研报失败。
 
-`schema_version(结构版本)=2`报告头与全部逐标的结论在同一事务中保存，逐标的行同时冻结
-`market_context_json(当轮市场输入快照)` 和 `verify_result(后续验证占位)`。执行
+`schema_version(结构版本)=3`报告头与全部逐标的结论在同一事务中保存，报告头冻结
+`research_prompt_md5(研报提示词原文摘要)`，逐标的行冻结 `market_context_json(当轮市场输入快照)`。执行
 上下文只注入当前白名单合约对应的结论；方向闸门也只查询订单合约，且纯结构延续只作
-软参考。生产基线从未部署研报结构，因此当前实现不提供 v1 迁移或展示兼容；若启动时
-检测到旧研报表，会明确拒绝启动并要求人工备份、重建。
+软参考。v2 库启动时做幂等迁移（补研报提示词摘要列、去除验证占位死字段、因果链三态归并），
+迁移前检查到当前版本无写入路径的未知数据会拒绝启动并提示备份；v1 不提供迁移，仍需人工重建。
 
 
 复盘 agent 使用独立注册表：7 个查询工具（`get_review_stats`、`list_decision_rounds`、`get_decision_detail`、`get_tool_call_chain`、`list_trades`、`get_round_context`、`get_strategy_versions`）只经 `Repo` 与审计表查询历史，`calc(精确计算)` 只处理数学表达式；`submit_strategy_revision(提交策略修订)` 是唯一业务写出口，提交的策略书新文本经 `StrategyStore` 校验后才生效。该注册表不含任何交易工具。
@@ -342,9 +342,12 @@ flowchart LR
 | `audit_rounds(决策轮审计)` | prompt、上下文、原始输出、异常和耗时边界 | `prompt_md5(策略版本摘要)`、`strategy_md5(策略书原文摘要)`、`error(异常)`、`llm_credential_name/llm_provider/llm_model/llm_thinking_effort(本轮调用的模型身份，历史行为空串不回填)` |
 | `audit_tool_calls(工具审计)` | 每次工具调用的参数、风控、结果和耗时 | `risk_verdict(风控结论)`、`duration_ms(耗时毫秒)` |
 | `strategy_versions(策略书版本)` | 策略书全文版本化留痕（人工保存、复盘改写与回滚同走此表） | `created_by(版本来源)`、`md5(策略书原文摘要)`、`report_id(关联复盘报告)` |
-| `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议固定为 v2 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)` |
+| `research_reports(研报报告头)` | 保存总览、跨标的观察、全局风险与失败信息；当前协议为 v3 | `schema_version(结构版本)`、`summary(研报总览)`、`cross_market_view(跨标的观察)`、`research_prompt_md5(研报提示词原文摘要)` |
 | `research_schedule_runs(研报调度执行记录)` | 以计划日期独立记录自动调度认领，避免报告跨零点完成时串占次日名额 | `schedule_id(调度项标识)`、`scheduled_date(UTC+8计划日期)` |
-| `research_asset_views(研报逐标的结论)` | 一个报告内每个合约唯一，保存结论、输入快照与验证占位 | `contract(合约)`、`basis_type(依据类型)`、`market_context_json(市场输入快照)`、`verify_result(验证结果)` |
+| `research_asset_views(研报逐标的结论)` | 一个报告内每个合约唯一，保存结论与输入快照 | `contract(合约)`、`basis_type(依据类型)`、`market_context_json(市场输入快照)` |
+| `causal_links(研报因果链)` | 研报提交的跨期因果链，同主题按 supersedes 链成族 | `topic(事件主题)`、`status(状态：tracking/concluded/superseded)`、`supersedes_id(被替代的旧链)` |
+| `research_reviews(研报复盘记录)` | 复盘 agent 对逐标的结论的批改，同一复盘报告内按研报+合约唯一 | `direction_relation(方向关系)`、`evidence_reviews_json(逐条依据评价)`、`outcome_json(代码计算的客观行情结果)` |
+| `research_prompt_versions(研报提示词版本)` | research_prompt.md 正文版本化存证（人工保存、复盘修订与回滚同走此表） | `created_by(版本来源)`、`md5(提示词原文摘要)`、`status(状态：applied/draft/discarded)`、`review_report_id(关联复盘报告)` |
 | `review_reports(复盘报告)` | 每次复盘的区间统计、报告全文与策略动作 | `period_start/period_end(复盘区间)`、`strategy_action(策略动作)`、`new_version_id(产生的新版本)`、`round_id(产生报告的审计轮，老报告为空串不回填)` |
 
 注意 `decisions.strategy_version(策略版本摘要)` 与 `strategy_md5(策略书原文摘要)` 语义不同：前者是“策略书+工具说明段”拼装后的 md5（与 `audit_rounds.prompt_md5` 同值），后者是策略书原文的 md5（与 `strategy_versions.md5` 关联，供按策略版本统计）。历史数据的 `strategy_md5` 保持空串不回填；`round_id` 无法 join 到 `decisions` 的成交不参与按策略统计。

@@ -283,7 +283,7 @@ async def test_search_news(deps) -> None:
 
 
 async def test_read_timeline_empty(deps) -> None:
-    """事实层无记录时返回提示。
+    """事实层无记录时返回提示（含默认回溯窗口文案）。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -292,7 +292,7 @@ async def test_read_timeline_empty(deps) -> None:
         None：通过断言校验目标场景，无返回值
     """
     text = await _run(deps, "read_timeline")
-    assert "无记录" in text
+    assert "无符合条件的记录" in text and "近 7 天" in text
 
 
 async def test_read_judgments_empty(deps) -> None:
@@ -328,7 +328,7 @@ async def test_submit_causal_links_staged(deps) -> None:
     """回归（H1）：合法因果链校验通过即暂存（无需 report_id），不直接落库。
 
     本轮研报 id 在工具循环结束后才生成，LLM 无法预知；提交先暂存 deps，
-    由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待验证。
+    由 agent 落研报后用代码回填 report_id。版本化：topic 必填、默认待跟踪。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -354,7 +354,7 @@ async def test_submit_causal_links_staged(deps) -> None:
     staged = deps.pending_causal_links[0]
     assert staged["topic"] == "油价"
     assert staged["supersedes_id"] is None
-    assert staged["await_verification"] is True  # 默认待验证
+    assert staged["status"] == "tracking"  # 默认待跟踪
     # 暂存 ≠ 落库：表内仍为空（等 agent 落研报后回填）
     assert await deps.repo.research.list_causal_links() == []
 
@@ -378,7 +378,7 @@ async def test_submit_causal_links_invalid(deps) -> None:
             "chain": [{"node": "a"}],
             "confidence": 0.5,
             "topic": "关税",
-            "await_verification": False,  # 结论链须 2-6 节点
+            "concluded": True,  # 结论链须 2-6 节点
         },
     )
     assert "参数错误" in await _run(
@@ -413,7 +413,7 @@ async def test_submit_causal_links_evidence_not_list(deps) -> None:
 
 
 async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
-    """待验证中间态：1 节点半成品（事件未走完的观察）放行。
+    """待跟踪中间态：1 节点半成品（事件未走完的观察）放行。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -431,11 +431,11 @@ async def test_submit_causal_links_pending_one_node_allowed(deps) -> None:
         },
     )
     assert "已暂存" in text
-    assert deps.pending_causal_links[0]["await_verification"] is True
+    assert deps.pending_causal_links[0]["status"] == "tracking"
 
 
-async def test_submit_causal_links_await_verification_parsing(deps) -> None:
-    """await_verification 解析：false 字符串/数字 0 → 结论链；非法值报错。
+async def test_submit_causal_links_concluded_parsing(deps) -> None:
+    """concluded 解析：true 字符串 → 结论链；非法值报错。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -450,11 +450,70 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
             "chain": [{"node": "a"}, {"node": "b"}],
             "confidence": 0.6,
             "topic": "关税",
-            "await_verification": "false",
+            "concluded": "true",
         },
     )
     assert "已暂存" in text and "结论" in text
-    assert deps.pending_causal_links[-1]["await_verification"] is False
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "concluded": "也许",
+        },
+    )
+    assert "参数错误" in text
+
+
+async def test_submit_causal_links_await_verification_alias(deps) -> None:
+    """await_verification 过渡别名：False→结论链、True→待跟踪；非法值与优先级校验。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "await_verification": False,
+        },
+    )
+    assert "已暂存" in text and "结论" in text
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}],
+            "confidence": 0.6,
+            "topic": "非农",
+            "await_verification": True,
+        },
+    )
+    assert "已暂存" in text and "待跟踪" in text
+    assert deps.pending_causal_links[-1]["status"] == "tracking"
+    # concluded 显式传入时优先，await_verification 被忽略
+    text = await _run(
+        deps,
+        "submit_causal_links",
+        {
+            "chain": [{"node": "a"}, {"node": "b"}],
+            "confidence": 0.6,
+            "topic": "关税",
+            "concluded": True,
+            "await_verification": True,
+        },
+    )
+    assert deps.pending_causal_links[-1]["status"] == "concluded"
     text = await _run(
         deps,
         "submit_causal_links",
@@ -465,7 +524,7 @@ async def test_submit_causal_links_await_verification_parsing(deps) -> None:
             "await_verification": "也许",
         },
     )
-    assert "参数错误" in text
+    assert "参数错误" in text and "await_verification" in text
 
 
 async def test_submit_causal_links_supersedes_validation(repo: Repo) -> None:
@@ -658,8 +717,8 @@ async def test_read_causal_links_arg_boundaries(deps) -> None:
     assert "无已提交因果链" in await _run(deps, "read_causal_links", {"days": 1, "limit": 50})
 
 
-async def test_submit_causal_links_await_verification_shapes(deps) -> None:
-    """await_verification 全形态：数字 0/1、true/是/否 字符串均识别。
+async def test_submit_causal_links_concluded_shapes(deps) -> None:
+    """concluded 全形态：数字 0/1、true/是/否 字符串均识别（映射 concluded/tracking）。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -667,7 +726,8 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
     返回：
         None：通过断言校验目标场景，无返回值
     """
-    for raw, expected in [(1, True), (0, False), ("true", True), ("是", True), ("否", False)]:
+    cases = [(1, "concluded"), (0, "tracking"), ("true", "concluded"), ("是", "concluded")]
+    for raw, expected in cases + [("否", "tracking")]:
         text = await _run(
             deps,
             "submit_causal_links",
@@ -675,11 +735,11 @@ async def test_submit_causal_links_await_verification_shapes(deps) -> None:
                 "chain": [{"node": "a"}, {"node": "b"}],
                 "confidence": 0.6,
                 "topic": "关税",
-                "await_verification": raw,
+                "concluded": raw,
             },
         )
         assert "已暂存" in text
-        assert deps.pending_causal_links[-1]["await_verification"] is expected
+        assert deps.pending_causal_links[-1]["status"] == expected
 
 
 async def test_read_causal_links_empty(deps) -> None:
@@ -696,7 +756,7 @@ async def test_read_causal_links_empty(deps) -> None:
 
 
 async def test_read_causal_links_lists_family(repo: Repo) -> None:
-    """read_causal_links：列出链族（含历史版与状态标注、待验证/结论标记）。
+    """read_causal_links：列出链族（含历史版与状态标注、待跟踪/结论标记）。
 
     参数：
         repo: Repo，临时数据库仓储夹具
@@ -723,22 +783,34 @@ async def test_read_causal_links_lists_family(repo: Repo) -> None:
         chain_json='[{"node": "关税结论"}]',
         confidence=0.6,
         topic="关税",
-        await_verification=False,
+        status="concluded",
     )
+    old = await repo.research.save_causal_link(
+        report_id=report.id,
+        chain_json='[{"node": "远古推断"}]',
+        confidence=0.4,
+        topic="非农",
+    )
+    await repo._conn.execute(
+        "UPDATE causal_links SET created_at=? WHERE id=?", (time.time() - 30 * 86400, old.id)
+    )
+    await repo._conn.commit()
     deps = ResearchToolDeps(
         provider=ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb()),
         repo=repo,
         mode="paper",
     )
     text = await _run(deps, "read_causal_links", {"topic": "非农", "days": 7})
-    assert "已提交因果链" in text
+    assert "已提交因果链" in text and "全历史" in text  # 指定主题查族谱不受 days 窗口限制
     assert f"[链#{v1.id}]" in text
+    assert f"[链#{old.id}]" in text  # 30 天前的同主题旧链也被族谱覆盖
     assert "[非农]" in text
     assert f"替代链#{v1.id}" in text  # 修正版标注替代目标（方向：本链替代了旧链）
     assert "[已被替代]" in text  # 被替代的旧链中文标注
-    assert "[待验证]" in text
+    assert "[待跟踪]" in text
     text_all = await _run(deps, "read_causal_links")
     assert "[关税]" in text_all and "[结论]" in text_all  # 结论链标注
+    assert f"[链#{old.id}]" not in text_all  # 无主题时 days 窗口仍然生效
 
 
 # ---------- 审查补齐：T9 参数边界 ----------
@@ -815,7 +887,7 @@ async def test_source_failure_returns_sentinel(repo: Repo) -> None:
 
 
 async def test_build_preinjection_sections(deps) -> None:
-    """预注入六段齐全：日历/指标/快讯/时间线/判断史/未闭合因果链；快讯与日历已落事实层。
+    """预注入六段齐全：日历/指标/快讯/时间线/判断史/待跟踪因果链；快讯与日历已落事实层。
 
     参数：
         deps: ResearchToolDeps，已组装的工具依赖
@@ -833,7 +905,8 @@ async def test_build_preinjection_sections(deps) -> None:
     assert "快讯" in text and "金十新闻" in text and "律动新闻" in text
     assert "事件时间线" in text and "暂无记录" in text
     assert "历史研报结论" in text and "首次研报" in text
-    assert "未闭合因果链" in text and "（暂无）" in text  # 无未闭合链空态
+    assert "待跟踪因果链" in text and "（暂无）" in text  # 无待跟踪链空态
+    assert "近期研报复盘记录" in text  # 复盘记录段空态也在
     # 事实层已写入：日历 2 条（含低星）+ 快讯 2 条（金十/律动各一）
     rows = await deps.repo.research.list_timeline(0.0, None)
     assert len(rows) == 4
@@ -868,7 +941,7 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
         chain_json='[{"node": "关税结论"}]',
         confidence=0.6,
         topic="关税",
-        await_verification=False,  # 结论链不进池
+        status="concluded",  # 结论链不进池
     )
     old = await repo.research.save_causal_link(
         report_id=report.id,
@@ -891,6 +964,141 @@ async def test_build_preinjection_pending_links_section(repo: Repo) -> None:
     assert "关税结论" not in text  # 结论链排除
     assert "旧链" not in text  # 被替代链排除
     assert "supersedes_id" in text  # 提示跟进修订方式
+
+
+async def test_build_preinjection_recent_reviews_section(repo: Repo) -> None:
+    """预注入复盘记录段：完整记录渲染、同一研报多次复盘全保留、按时间正序、上限 20 条。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：通过断言校验目标场景，无返回值
+    """
+    import json as _json
+
+    now = time.time()
+    outcome = {
+        "data_status": "complete",
+        "candles_actual": 96,
+        "candles_expected": 96,
+        "start_price": "100",
+        "end_price": "110",
+        "high": "120",
+        "low": "90",
+        "return_pct": "10",
+        "max_up_pct": "20",
+        "max_down_pct": "-10",
+        "error": "",
+    }
+    for i in range(21):
+        await repo.research_review.save_review(
+            review_report_id=100 + i,
+            report_id=42 if i % 2 == 0 else 43,
+            contract="BTC_USDT",
+            direction_relation=f"方向关系{i}",
+            direction_reason=f"方向理由{i}",
+            reasoning_quality="推理合理",
+            reasoning_review=f"推理复核{i}",
+            evidence_reviews_json=_json.dumps(
+                [
+                    {
+                        "evidence_index": 0,
+                        "fact_status": "成立",
+                        "reasoning_status": "合理",
+                        "explanation": f"说明{i}",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            confidence_assessment="置信度合规",
+            confidence_reason=f"置信理由{i}",
+            improvement_advice=f"建议{i}" if i != 20 else "建议20" + "长" * 3000,
+            outcome_json=_json.dumps(outcome, ensure_ascii=False),
+            created_at=now - (21 - i) * 60,
+        )
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    assert "近期研报复盘记录（最近 20 条" in text
+    assert "方向关系0" not in text  # 最旧一条被 20 条上限截掉
+    assert "方向关系20" in text and "建议20" in text
+    assert text.count("研报#42/BTC_USDT") == 10  # 同一研报多次复盘全保留（i=2..20 偶数）
+    assert text.index("方向关系1") < text.index("方向关系20")  # 按时间正序
+    # 完整记录渲染：理由、逐项依据核对与客观结果都进预注入
+    assert "方向关系：方向关系1 —— 方向理由1" in text
+    assert "推理质量：推理合理 —— 推理复核1" in text
+    assert "置信度合规：置信度合规 —— 置信理由1" in text
+    assert "依据评价：[0] 事实=成立 推理=合理：说明1" in text
+    assert "客观结果：data_status=complete（K线 96/96） | 起价 100 → 止价 110" in text
+    # 单条超 2000 字符截断并标注（i=20 的改进建议超长）
+    assert "已截断，原文共" in text
+
+
+async def test_build_preinjection_marks_manual_rereview(repo: Repo) -> None:
+    """R6-5：人工重评记录在预注入复盘段首行标注替代关系与授权理由。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言 manual 复盘条目含「人工重评，替代复盘#N；授权理由：…」标注
+    """
+    await repo.research_review.save_review(
+        review_report_id=100,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+        reasoning_quality="partial",
+        confidence_assessment="too_high",
+        review_kind="manual",
+        rereview_of_id=7,
+        rereview_reason="原复盘把震荡误判为背离",
+    )
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    assert "人工重评，替代复盘#7；授权理由：原复盘把震荡误判为背离" in text
+
+
+async def test_build_preinjection_review_id_namespace(repo: Repo) -> None:
+    """R7-3：预注入复盘条目主标识为复盘记录自身编号，与复盘工具历史查询同命名空间。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None：断言主标识「复盘#{id}（复盘报告#…）」每条恰好一次，
+        人工重评的替代指向与主标识同命名空间
+    """
+    await repo.research_review.save_review(
+        review_report_id=100,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="aligned",
+        reasoning_quality="sound",
+        confidence_assessment="appropriate",
+    )
+    auto_id = (await repo.research_review.list_reviews(limit=1))[0].id
+    await repo.research_review.save_review(
+        review_report_id=101,
+        report_id=42,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+        reasoning_quality="partial",
+        confidence_assessment="too_high",
+        review_kind="manual",
+        rereview_of_id=auto_id,
+        rereview_reason="原复盘把震荡误判为背离",
+    )
+    manual_id = (await repo.research_review.list_reviews(limit=2))[-1].id
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb())
+    deps = ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+    text = await build_preinjection(deps, hours=24)
+    # 计数带「（复盘报告#…） → 」后缀，避开「替代复盘#N」包含子串「复盘#N」的误计
+    assert text.count(f"复盘#{auto_id}（复盘报告#100） → 研报#42/BTC_USDT") == 1
+    assert text.count(f"复盘#{manual_id}（复盘报告#101） → 研报#42/BTC_USDT") == 1
+    assert f"人工重评，替代复盘#{auto_id}；授权理由：原复盘把震荡误判为背离" in text
 
 
 async def test_build_preinjection_partial_failure(repo: Repo) -> None:
@@ -979,3 +1187,186 @@ async def test_preinject_dedup_key_second_normalized(repo: Repo) -> None:
     assert len(rows) == 1
     ts_part = rows[0].dedup_key.split("|")[1]
     assert "." not in ts_part  # 按秒取整，无小数
+
+
+# ---------- 历史时间窗与过滤（issue #113 C4） ----------
+
+
+class _RecFred:
+    """记录调用参数的 FRED 桩（满足 _FredLike 结构协议）。"""
+
+    def __init__(self) -> None:
+        """初始化空的调用记录列表。
+
+        参数：无
+
+        返回：
+            None，初始化实例属性 calls
+        """
+        self.calls: list[tuple[str, int, float | None]] = []
+
+    async def get_macro_series(self, indicator, look_back, end_ts=None):
+        """记录调用参数并返回固定文本。
+
+        参数：
+            indicator: str，宏观指标名
+            look_back: int，回溯天数
+            end_ts: float | None，窗口终点时间戳
+
+        返回：
+            str：固定的宏观序列文本
+        """
+        self.calls.append((indicator, look_back, end_ts))
+        return "宏观序列文本"
+
+
+def _deps_with_fred(repo: Repo, fred: _RecFred) -> ResearchToolDeps:
+    """组装带记录型 FRED 桩的研报工具依赖。
+
+    参数：
+        repo: Repo，测试数据库仓储
+        fred: _RecFred，记录调用的 FRED 桩
+
+    返回：
+        ResearchToolDeps：绑定双假数据源与 FRED 桩的工具依赖
+    """
+    provider = ResearchDataProvider(jin10=_FakeJin10(), blockbeats=_FakeBb(), fred=fred)
+    return ResearchToolDeps(provider=provider, repo=repo, mode="paper")
+
+
+async def test_get_macro_series_explicit_window(repo) -> None:
+    """宏观序列指定历史窗口：look_back 由窗口跨度向上取整天数推导，end_ts 透传 FRED。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None：断言窗口推导与透传参数
+    """
+    fred = _RecFred()
+    deps = _deps_with_fred(repo, fred)
+    text = await _run(
+        deps, "get_macro_series", {"indicator": "cpi", "start_ts": 1_000_000, "end_ts": 1_100_000}
+    )
+    assert text == "宏观序列文本"
+    assert fred.calls == [("cpi", 2, 1_100_000.0)]  # ceil(100000/86400)=2 天
+
+
+async def test_get_macro_series_window_arg_validation(repo) -> None:
+    """宏观序列窗口参数校验：end<=start、非数值、布尔均被拒且不触数据源。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None：断言三类非法输入返回参数错误且 FRED 桩零调用
+    """
+    fred = _RecFred()
+    deps = _deps_with_fred(repo, fred)
+    bad_end = await _run(
+        deps, "get_macro_series", {"indicator": "cpi", "start_ts": 2000, "end_ts": 1000}
+    )
+    bad_type = await _run(deps, "get_macro_series", {"indicator": "cpi", "start_ts": "昨天"})
+    bad_bool = await _run(deps, "get_macro_series", {"indicator": "cpi", "start_ts": True})
+    assert "end_ts 须大于 start_ts" in bad_end
+    assert "秒级时间戳数值" in bad_type
+    assert "秒级时间戳数值" in bad_bool
+    assert fred.calls == []  # 参数错误不触数据源
+
+
+def _tl_item(source: str, kind: str, title: str, ts: float, dedup: str) -> dict:
+    """构造事实层时间线测试条目。
+
+    参数：
+        source: str，来源（jin10/blockbeats）
+        kind: str，类型（flash/calendar/indicator）
+        title: str，条目标题
+        ts: float，发布时间戳
+        dedup: str，去重键
+
+    返回：
+        dict：append_timeline_many 可消费的条目字典
+    """
+    return {
+        "source": source,
+        "kind": kind,
+        "title": title,
+        "url": "",
+        "published_at": ts,
+        "meta_json": "{}",
+        "dedup_key": dedup,
+        "fetched_at": ts,
+    }
+
+
+async def _seed_timeline(repo: Repo) -> None:
+    """造四条事实层记录：窗口内三条（两来源两类型）+ 窗口外旧闻一条。
+
+    参数：
+        repo: Repo，测试数据库仓储
+
+    返回：
+        None，写入事实层时间线
+    """
+    await repo.research.append_timeline_many(
+        [
+            _tl_item("jin10", "flash", "旧闻美联储", 100.0, "k0"),
+            _tl_item("jin10", "flash", "美联储降息", 1500.0, "k1"),
+            _tl_item("blockbeats", "flash", "ETF 净流入", 1600.0, "k2"),
+            _tl_item("jin10", "calendar", "CPI 公布", 1700.0, "k3"),
+        ]
+    )
+
+
+async def test_read_timeline_explicit_window_and_filters(deps) -> None:
+    """事实层精确窗口与 kind/source/keyword 过滤：窗口外剔除，过滤回显进头部。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言窗口半开区间、各过滤维度与回显文案
+    """
+    await _seed_timeline(deps.repo)
+    window = {"start_ts": 1000, "end_ts": 2000}
+    text = await _run(deps, "read_timeline", window)
+    assert "3 条" in text and "旧闻美联储" not in text  # 窗口 [start, end) 外剔除
+
+    by_kind = await _run(deps, "read_timeline", {**window, "kind": "flash"})
+    assert "2 条" in by_kind and "CPI 公布" not in by_kind and "kind=flash" in by_kind
+
+    by_source = await _run(deps, "read_timeline", {**window, "source": "blockbeats"})
+    assert "1 条" in by_source and "ETF 净流入" in by_source
+
+    by_keyword = await _run(deps, "read_timeline", {**window, "keyword": "美联储"})
+    assert "1 条" in by_keyword and "美联储降息" in by_keyword
+
+
+async def test_read_timeline_window_arg_validation(deps) -> None:
+    """事实层窗口与过滤参数校验：非法 kind/source、end<=start 均返回参数错误。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言三类非法输入的参数错误文本
+    """
+    assert "kind 须为" in await _run(deps, "read_timeline", {"kind": "bad"})
+    assert "source 须为" in await _run(deps, "read_timeline", {"source": "x"})
+    assert "end_ts 须大于 start_ts" in await _run(
+        deps, "read_timeline", {"start_ts": 2000, "end_ts": 1000}
+    )
+
+
+async def test_read_timeline_keyword_wildcard_escaped(deps) -> None:
+    """事实层关键词按字面匹配：LIKE 通配符被转义，% 不会匹配全部记录。
+
+    参数：
+        deps: ResearchToolDeps，已组装的工具依赖
+
+    返回：
+        None：断言通配符关键词查不到任何记录
+    """
+    await _seed_timeline(deps.repo)
+    text = await _run(deps, "read_timeline", {"start_ts": 1000, "end_ts": 2000, "keyword": "%"})
+    assert "无符合条件的记录" in text  # % 被转义为字面字符，不匹配任何标题

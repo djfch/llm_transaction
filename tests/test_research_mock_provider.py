@@ -18,7 +18,7 @@ async def test_mock_provider_queries_every_watchlist_contract_then_returns_v2_pa
     返回：
         None，断言首轮对白名单中的 BTC_USDT、ETH_USDT 各恰好发起一次
         get_research_market_data 调用（limit=30 且顺序与白名单一致）；
-        回填工具结果后次轮返回 schema_version=2 的研报 JSON，
+        回填工具结果后次轮返回 schema_version=3 的研报 JSON，
         asset_views 按序覆盖两个合约，且各标的 basis_type 为「结构延续」、confidence 为「低」
     """
     provider = ResearchMockProvider()
@@ -47,7 +47,7 @@ async def test_mock_provider_queries_every_watchlist_contract_then_returns_v2_pa
         messages.append(provider.tool_result_message(call, "{}"))
     second = await provider.chat("system", messages, [])
     payload = json.loads(second.text)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert [view["contract"] for view in payload["asset_views"]] == [
         "BTC_USDT",
         "ETH_USDT",

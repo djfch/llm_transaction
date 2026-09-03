@@ -85,7 +85,7 @@ async def test_v2_report_api_returns_asset_summaries_and_safe_detail(repo: Repo,
     )
     async with _client(repo, tmp_path) as client:
         listed = (await client.get("/api/research/reports")).json()["items"][0]
-        assert listed["schema_version"] == 2
+        assert listed["schema_version"] == 3
         assert listed["asset_views"] == [
             {
                 "contract": "BTC_USDT",

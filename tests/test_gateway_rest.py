@@ -1027,3 +1027,39 @@ def test_late_success_after_deadline_treated_as_timeout():
             _slow_success, "GET", "https://example.com", {"timeout": urllib3.Timeout(total=0.2)}
         )
     assert calls == 1  # 预算已耗尽：不再发起第二次尝试
+
+
+def test_get_candlesticks_maps_from_to_to_sdk_kwargs(monkeypatch: pytest.MonkeyPatch):
+    """from_ts/to_ts 必须映射为 SDK 的 _from/to 关键字（from 是 Python 关键字）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，断言 SDK 收到 interval/_from/to 且响应逐字段转为 Candle
+    """
+    gateway = make_gateway()
+    list_candles = Mock(
+        return_value=[SimpleNamespace(t=1000, o="1", h="2", l="0.5", c="1.5", v=10)]
+    )
+    monkeypatch.setattr(gateway._api, "list_futures_candlesticks", list_candles)
+
+    got = gateway.get_candlesticks(BTC, interval="15m", from_ts=1000, to_ts=2000)
+
+    list_candles.assert_called_once_with(gateway._settle, BTC, interval="15m", _from=1000, to=2000)
+    assert [(c.t, c.o, c.c, c.v) for c in got] == [(1000, Decimal(1), Decimal("1.5"), Decimal(10))]
+
+
+def test_get_candlesticks_limit_path_omits_window_kwargs(monkeypatch: pytest.MonkeyPatch):
+    """limit 路径不携带 _from/to 关键字（与窗口参数互斥，防止 SDK 收到歧义参数）。
+
+    参数：
+        monkeypatch: pytest.MonkeyPatch，pytest 运行时替换夹具
+    返回：
+        None，断言 SDK 只收到 limit
+    """
+    gateway = make_gateway()
+    list_candles = Mock(return_value=[])
+    monkeypatch.setattr(gateway._api, "list_futures_candlesticks", list_candles)
+
+    assert gateway.get_candlesticks(BTC, limit=50) == []
+    list_candles.assert_called_once_with(gateway._settle, BTC, interval="1m", limit=50)

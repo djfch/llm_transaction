@@ -362,7 +362,7 @@ def settings() -> Settings:
 
 
 async def _build_agent(
-    repo: Repo, settings: Settings, provider, tmp_path, notify_event=None
+    repo: Repo, settings: Settings, provider, tmp_path, notify_event=None, prompt_store=None
 ) -> ResearchAgent:
     """组装使用测试替身的研报 Agent。
 
@@ -372,6 +372,7 @@ async def _build_agent(
         provider: object，模型提供方测试替身
         tmp_path: Path，pytest 提供的临时目录
         notify_event: object，可选事件通知回调
+        prompt_store: object，可选研报提示词版本存储（装配后 prompt 归因走其锁内快照）
     返回：
         ResearchAgent，返回该测试辅助函数构造或记录的结果
     """
@@ -389,6 +390,7 @@ async def _build_agent(
         notify_event=notify_event,
         max_turns=10,
         timeout_seconds=60,
+        prompt_store=prompt_store,
     )
 
 
@@ -1175,9 +1177,8 @@ async def test_full_round_flushes_causal_links(repo: Repo, settings: Settings, t
     links = await repo.research.list_causal_links()
     assert len(links) == 1
     assert links[0].report_id == result["report_id"]
-    assert links[0].status == "pending"
+    assert links[0].status == "tracking"
     assert links[0].topic == "油价"  # topic 透传
-    assert links[0].await_verification is True  # 默认待验证
     assert links[0].supersedes_id is None
     chain = json.loads(links[0].chain_json)
     assert [n["node"] for n in chain] == ["油价上涨", "通胀预期上升", "BTC 承压"]
@@ -1588,7 +1589,7 @@ async def test_v2_round_saves_every_whitelist_asset(
     assert result["ok"] is True
     assert result["asset_count"] == 2
     report = await repo.research.get_report(result["report_id"])
-    assert report is not None and report.schema_version == 2
+    assert report is not None and report.schema_version == 3
     views = await repo.research.list_asset_views_by_report(report.id)
     assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
     assert json.loads(views[0].market_context_json)["contract"] == "BTC_USDT"
@@ -2239,3 +2240,114 @@ async def test_save_post_commit_exception_recovers_success(
     assert result["round_id"] == audit_round.round_id
     assert [e["type"] for e in events] == ["research_round_start", "research_round"]
     assert events[-1]["data"] == {"round_id": audit_round.round_id, "ok": True}
+
+
+async def test_run_records_research_prompt_md5(repo: Repo, settings: Settings, tmp_path) -> None:
+    """研报落库记录所用提示词正文 md5：与版本表同口径，供复盘按版本归因（issue #113）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_md5 等于正文内容的 md5
+    """
+    import hashlib
+
+    content = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    (tmp_path / "research_prompt.md").write_text(content, encoding="utf-8")
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    expected = hashlib.md5(content.encode("utf-8")).hexdigest()
+    assert report.research_prompt_md5 == expected
+    assert report.research_prompt_version_id is None  # 版本表无该 md5 的 applied 版本
+
+
+async def test_run_records_prompt_version_id_resolved_at_build_time(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """R6-4：装配 prompt_store 时落库版本 id 经其锁内快照归因（内容一致的 applied 才命中）。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_version_id 精确指向目标版本
+    """
+    import hashlib
+
+    from src.research.prompt_store import ResearchPromptStore
+
+    content = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    (tmp_path / "research_prompt.md").write_text(content, encoding="utf-8")
+    md5 = hashlib.md5(content.encode("utf-8")).hexdigest()
+    await repo.research_prompt.save_version("无关旧版本", "aa" * 16, "human", "干扰项")
+    target = await repo.research_prompt.save_version(content, md5, "human", "目标版本")
+    await repo.research_prompt.save_version(
+        content, md5, "review_agent", "同文草稿", status="draft"
+    )
+    store = ResearchPromptStore(tmp_path / "research_prompt.md", repo)
+    agent = await _build_agent(repo, settings, _SequentialProvider(), tmp_path, prompt_store=store)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    assert report.research_prompt_md5 == md5
+    assert report.research_prompt_version_id == target.id  # 草稿不命中，取最新 applied
+
+
+async def test_run_records_prompt_md5_sampled_at_build_time(
+    repo: Repo, settings: Settings, tmp_path
+) -> None:
+    """回归（审查 P2-2）：运行途中提示词被热替换，落库 md5 仍为构建 prompt 时的正文版本。
+
+    参数：
+        repo: Repo，测试数据库仓库
+        settings: Settings，测试配置
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，断言报告头 research_prompt_md5 等于原文 md5 而非热替换后的新文 md5
+    """
+    import hashlib
+    import os
+    import time
+
+    original = "研报提示词正文：" + "先事实后判断，逐标的给结论。" * 10
+    prompt_file = tmp_path / "research_prompt.md"
+    prompt_file.write_text(original, encoding="utf-8")
+
+    class _HotSwapProvider(_SequentialProvider):
+        """首轮调用前热替换提示词文件（模拟运行途中人工保存），随后按序返回预设响应。"""
+
+        async def chat(self, system: str, messages: list[dict], tools: list[dict]):
+            """首轮先热替换提示词文件（mtime 显式拨快），再交回父类按序响应。
+
+            参数：
+                system: str，系统提示词
+                messages: list[dict]，对话消息列表
+                tools: list[dict]，工具定义列表
+
+            返回：
+                LLMResponse，父类预设的模型响应
+            """
+            if self._calls == 0:
+                prompt_file.write_text(
+                    "被热替换的新提示词：" + "另一套纪律。" * 20, encoding="utf-8"
+                )
+                future = time.time() + 5  # 显式拨快 mtime，确保缓存判定感知替换
+                os.utime(prompt_file, (future, future))
+            return await super().chat(system, messages, tools)
+
+    agent = await _build_agent(repo, settings, _HotSwapProvider(), tmp_path)
+    result = await agent.run(report_type="us")
+    assert result["ok"] is True
+    report = await repo.research.latest_report()
+    assert report is not None
+    assert report.research_prompt_md5 == hashlib.md5(original.encode("utf-8")).hexdigest()

@@ -33,10 +33,15 @@ import type {
   ResearchLive,
   ResearchAssetDetail,
   ResearchAssetSummary,
+  ResearchEvidenceReview,
+  ResearchPromptVersion,
+  ResearchPromptVersionDetail,
+  ResearchReviewItem,
   ResearchTechnicalConfirmation,
   ResearchReportDetail,
   ResearchReportsPage,
   ResearchReportSummary,
+  ResearchRereviewAck,
   ResearchScheduleStatus,
   ReviewLive,
   ReviewReport,
@@ -427,12 +432,30 @@ interface RawResearchAssetSummary {
   data_status: string
 }
 
+/** 后端研报复盘记录原始项（evidence_reviews/outcome 契约上已解析为对象，可选仅防御） */
+interface RawResearchReview {
+  id: number
+  review_report_id: number
+  direction_relation: string
+  direction_reason?: string
+  reasoning_quality: string
+  reasoning_review?: string
+  evidence_reviews?: unknown
+  confidence_assessment: string
+  confidence_reason?: string
+  improvement_advice: string
+  outcome?: unknown
+  created_at: number
+  review_kind?: string // R5-2 新增契约键；旧数据缺省视为 auto
+  rereview_reason?: string
+}
+
 interface RawResearchAssetDetail extends RawResearchAssetSummary {
   evidence?: unknown
   risks?: unknown
   narrative: string
-  verify_result: string
   created_at: number
+  research_reviews?: RawResearchReview[]
 }
 
 /** 后端当前研报响应：报告头不再包含全局方向和逐标的详情字段；模型身份四键由审计轮 join。 */
@@ -446,6 +469,8 @@ interface RawResearchReport extends RawLLMIdentity {
   report_type: string
   error: string
   round_id: string
+  research_prompt_md5?: string
+  research_prompt_version_id?: number | null
   created_at: number
 }
 
@@ -474,11 +499,13 @@ function adaptResearchReport(raw: RawResearchReport): ResearchReportSummary {
     reportType: raw.report_type,
     error: raw.error,
     roundId: raw.round_id,
+    researchPromptMd5: raw.research_prompt_md5,
+    researchPromptVersionId: raw.research_prompt_version_id ?? undefined,
     time: new Date(raw.created_at * 1000).toISOString(),
     ...adaptLLMIdentity(raw),
   }
 }
-/** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御）；broken_at 为断点节点下标 */
+/** 后端因果链原始项：chain/evidence 契约上已解析为数组（可选仅防御） */
 interface RawCausalLink {
   id: number
   report_id: number
@@ -486,10 +513,8 @@ interface RawCausalLink {
   confidence: number | string
   evidence?: unknown
   status: string
-  broken_at?: number | null
   topic?: string
   supersedes_id?: number | null
-  await_verification?: unknown
   created_at: number
 }
 
@@ -560,17 +585,54 @@ function adaptCausalLink(raw: RawCausalLink): CausalLinkView {
       : [],
     confidence: Number(raw.confidence),
     evidence: adaptStringList(raw.evidence),
-    status: raw.status ?? 'pending',
-    brokenAt: raw.broken_at ?? null,
+    status: raw.status ?? 'tracking', // 契约必有；防御 null 时按跟踪中灰显
     topic: typeof raw.topic === 'string' ? raw.topic : '',
     supersedesId: raw.supersedes_id ?? null,
-    // 防御解析：缺字段（旧数据）按待验证；布尔/0-1/常见字符串形态均识别
-    awaitVerification:
-      raw.await_verification !== false &&
-      raw.await_verification !== 0 &&
-      raw.await_verification !== 'false' &&
-      raw.await_verification !== '0',
     time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 逐条依据评价适配：契约 {evidence_index, fact_status, reasoning_status, explanation} 对象数组；结构非法的元素丢弃（无法定位原依据） */
+function adaptEvidenceReview(raw: unknown): ResearchEvidenceReview | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const item = raw as {
+    evidence_index?: unknown
+    fact_status?: unknown
+    reasoning_status?: unknown
+    explanation?: unknown
+  }
+  if (typeof item.evidence_index !== 'number' || typeof item.explanation !== 'string') return null
+  return {
+    evidenceIndex: item.evidence_index,
+    factStatus: typeof item.fact_status === 'string' ? item.fact_status : '',
+    reasoningStatus: typeof item.reasoning_status === 'string' ? item.reasoning_status : '',
+    explanation: item.explanation,
+  }
+}
+
+/** 后端研报复盘 → 前端 ResearchReviewItem：evidence_reviews/outcome 防御性解析，created_at(Unix秒) 转 ISO */
+function adaptResearchReview(raw: RawResearchReview): ResearchReviewItem {
+  const evidence = tryParseJson(raw.evidence_reviews)
+  const outcome = tryParseJson(raw.outcome)
+  return {
+    id: raw.id,
+    reviewReportId: raw.review_report_id,
+    directionRelation: raw.direction_relation ?? '',
+    directionReason: raw.direction_reason ?? '',
+    reasoningQuality: raw.reasoning_quality ?? '',
+    reasoningReview: raw.reasoning_review ?? '',
+    evidenceReviews: Array.isArray(evidence)
+      ? evidence.map(adaptEvidenceReview).filter((e): e is ResearchEvidenceReview => e !== null)
+      : [],
+    confidenceAssessment: raw.confidence_assessment ?? '',
+    confidenceReason: raw.confidence_reason ?? '',
+    improvementAdvice: raw.improvement_advice ?? '',
+    outcome: outcome !== null && typeof outcome === 'object' && !Array.isArray(outcome)
+      ? (outcome as Record<string, unknown>)
+      : {},
+    createdAt: new Date((raw.created_at ?? 0) * 1000).toISOString(),
+    reviewKind: raw.review_kind ?? 'auto',
+    rereviewReason: raw.rereview_reason ?? '',
   }
 }
 
@@ -580,8 +642,8 @@ function adaptResearchAssetDetail(raw: RawResearchAssetDetail): ResearchAssetDet
     evidence: adaptEvidenceList(raw.evidence),
     risks: adaptStringList(raw.risks),
     narrative: raw.narrative ?? '',
-    verifyResult: raw.verify_result ?? '',
     time: new Date((raw.created_at ?? 0) * 1000).toISOString(),
+    researchReviews: (raw.research_reviews ?? []).map(adaptResearchReview),
   }
 }
 
@@ -635,6 +697,31 @@ function adaptStrategyVersion(raw: RawStrategyVersion): StrategyVersion {
     reason: raw.reason,
     reportId: raw.report_id ?? null,
     time: new Date(raw.created_at * 1000).toISOString(),
+  }
+}
+
+/** 后端研报提示词版本原始项（列表无 content，详情有；status 为 applied/draft/discarded） */
+interface RawResearchPromptVersion {
+  id: number
+  md5: string
+  created_by: string
+  reason: string
+  review_report_id: number | null
+  created_at: number
+  status: string
+  content?: string
+}
+
+/** 后端研报提示词版本 → 前端 ResearchPromptVersion：created_at(Unix秒) 转 ISO time */
+function adaptResearchPromptVersion(raw: RawResearchPromptVersion): ResearchPromptVersion {
+  return {
+    id: raw.id,
+    md5: raw.md5,
+    createdBy: raw.created_by,
+    reason: raw.reason,
+    reviewReportId: raw.review_report_id ?? null,
+    time: new Date(raw.created_at * 1000).toISOString(),
+    status: raw.status,
   }
 }
 
@@ -860,6 +947,13 @@ export const httpApi: ApiClient = {
         body: JSON.stringify({ report_type: reportType, hours }),
       }),
     ),
+  // 人工重评授权登记（R5-2）：404=目标不存在、409=未复盘、422=空理由，非 2xx 经 toApiError 抛 ApiError；
+  // 响应键 id/reused 无需 snake→camel 适配，直接透出
+  requestResearchRereview: (reportId, contract, reason): Promise<ResearchRereviewAck> =>
+    request<ResearchRereviewAck>('/review/research/rereview', {
+      method: 'POST',
+      body: JSON.stringify({ report_id: reportId, contract, reason }),
+    }),
   // 与 getReviewLive 同约定：响应契约即最终形态，无需适配；带 roundId 时按该轮直查，不带参返回最新一轮
   getResearchLive: (roundId?: string) =>
     request<ResearchLive>(roundId ? `/research/live?round_id=${encodeURIComponent(roundId)}` : '/research/live'),
@@ -888,5 +982,27 @@ export const httpApi: ApiClient = {
   rollbackStrategy: async (id) =>
     adaptRollback(
       await request<{ rolled_back_to: number; version: number }>(`/strategy/rollback/${id}`, { method: 'POST' }),
+    ),
+  // 研报提示词在线编辑与版本历史（issue #113）：GET/PUT 与 /strategy 同约 PlainText 原文
+  getResearchPrompt: () => requestText('/research/prompt'),
+  putResearchPrompt: (content) => requestText('/research/prompt', { method: 'PUT', body: content }),
+  getResearchPromptVersions: async () =>
+    (await request<{ items: RawResearchPromptVersion[] }>('/research/prompt/versions')).items.map(
+      adaptResearchPromptVersion,
+    ),
+  getResearchPromptVersion: async (id): Promise<ResearchPromptVersionDetail> => {
+    const raw = await request<RawResearchPromptVersion>(`/research/prompt/versions/${id}`)
+    return { ...adaptResearchPromptVersion(raw), content: raw.content ?? '' }
+  },
+  getResearchPromptDiff: (fromId, toId) => {
+    const qs = new URLSearchParams({ from: String(fromId), to: String(toId) })
+    return requestText(`/research/prompt/diff?${qs.toString()}`)
+  },
+  // 回滚响应键与策略回滚一致（{rolled_back_to, version}），复用同一适配
+  rollbackResearchPrompt: async (id) =>
+    adaptRollback(
+      await request<{ rolled_back_to: number; version: number }>(`/research/prompt/rollback/${id}`, {
+        method: 'POST',
+      }),
     ),
 }

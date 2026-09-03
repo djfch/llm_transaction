@@ -63,7 +63,7 @@ async def test_save_report_bundle_and_query_latest_asset(repo: Repo) -> None:
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None，断言 schema_version=2、摘要与标的顺序一致，且 ETH 最新结论的行情上下文原样读回
+        None，断言 schema_version=3、摘要与标的顺序一致，且 ETH 最新结论的行情上下文原样读回
     """
     report, views = await repo.research.save_report_bundle(
         report_type="us_open",
@@ -75,7 +75,7 @@ async def test_save_report_bundle_and_query_latest_asset(repo: Repo) -> None:
         asset_views=[_asset("BTC_USDT"), _asset("ETH_USDT")],
     )
 
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.summary == "美盘逐标的研报"
     assert [view.contract for view in views] == ["BTC_USDT", "ETH_USDT"]
     stored = await repo.research.list_asset_views_by_report(report.id)
@@ -206,7 +206,7 @@ async def test_failed_report_uses_current_schema_without_asset_views(repo: Repo)
         repo: Repo，临时数据库仓储夹具
 
     返回：
-        None，断言失败报告 schema_version=2、error 原样、summary 为空且逐标的结论列表为空
+        None，断言失败报告 schema_version=3、error 原样、summary 为空且逐标的结论列表为空
     """
     failed = await repo.research.save_failed_report(
         report_type="manual",
@@ -216,7 +216,45 @@ async def test_failed_report_uses_current_schema_without_asset_views(repo: Repo)
 
     loaded = await repo.research.get_report(failed.id)
     assert loaded is not None
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == 3
     assert loaded.error == "ValueError: 输出无效"
     assert loaded.summary == ""
     assert await repo.research.list_asset_views_by_report(failed.id) == []
+
+
+@pytest.mark.asyncio
+async def test_save_report_bundle_records_research_prompt_md5(repo: Repo) -> None:
+    """研报落库记录所用提示词正文 md5（与版本表关联键）；缺省为空串（issue #113）。
+
+    参数：
+        repo: Repo，临时数据库仓储夹具
+
+    返回：
+        None，断言 md5 随报告头落库并可读回；未传参的旧调用口径保持空串
+    """
+    report, _ = await repo.research.save_report_bundle(
+        report_type="manual",
+        summary="带提示词摘要",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="round-md5",
+        asset_views=[_asset("BTC_USDT")],
+        research_prompt_md5="abc123",
+    )
+    assert report.research_prompt_md5 == "abc123"
+    stored = await repo.research.get_report(report.id)
+    assert stored is not None and stored.research_prompt_md5 == "abc123"
+
+    legacy, _ = await repo.research.save_report_bundle(
+        report_type="manual",
+        summary="未接线 md5 的旧口径",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="round-legacy",
+        asset_views=[_asset("BTC_USDT")],
+    )
+    assert legacy.research_prompt_md5 == ""
+    stored_legacy = await repo.research.get_report(legacy.id)
+    assert stored_legacy is not None and stored_legacy.research_prompt_md5 == ""

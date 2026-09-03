@@ -4,11 +4,15 @@
 - 写前校验：strip 后 ≥100 字符、UTF-8 体积 ≤32KB、与当前版本有差异；
   任一不过即拒绝（StrategyValidationError 携带全部原因），原文件不动、不落版本；
 - 文件替换走 .tmp 临时文件 + os.replace 原子提交，避免写一半的策略书被决策循环读到；
-- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）。
+- 回滚 = 写回历史内容 + 记 created_by='rollback' 新版本（历史版本行不改写）；
+- 草稿基线 CAS（issue #113）：复盘草稿落库时盖章轮初采样的生效内容 md5（base_md5），
+  生效锁内发现最新 applied 内容已偏离基线（人工中途变更）即废弃草稿——id 只代表
+  落库先后，不代表分析基线新旧；base_md5 为 NULL 的历史/人工行回退旧 id 比较。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -36,6 +40,54 @@ def content_md5(content: str) -> str:
 
 
 _NO_DIFF_REASON = "与当前策略书无差异"
+
+
+def _staleness_reason(
+    version: StrategyVersion, latest: StrategyVersion | None, current_md5: str
+) -> str | None:
+    """判定草稿基线是否失效（issue #113 CAS，R6-3/R7-1 加固）；失效返回原因文本，否则 None。
+
+    判定顺序：latest 即本版本自身（轮末生效成功后被打断的幂等重放）→ 有效；
+    无基线章（历史行/人工即时生效行）→ 回退旧 id 比较；有基线章且身份基线仍在位、
+    当前文件内容已等于本草稿正文 → 上轮写文件成功、置状态前中断的恢复态（R7-1），
+    有效放行以补置状态；除此之外，实读时点的 applied 身份已不在位（人工变更/回滚/
+    ABA）或当前文件内容偏离实读基线（热编辑）均失效；兼容章（采样时无 applied
+    版本，无身份可言）额外保留旧「更高 applied 取代」判定。
+
+    参数：
+        version: StrategyVersion，待生效的草稿版本
+        latest: StrategyVersion | None，当前最新 applied 版本
+        current_md5: str，当前文件内容 md5（调用方在生效锁内采样）
+
+    返回：
+        str | None：失效原因（供告警日志）；None 表示基线有效、可生效
+    """
+    if latest is not None and latest.id == version.id:
+        return None  # 幂等重放：该版本自身即最新生效，其内容本就异于基线
+    if version.base_md5 is None:
+        if latest is not None and latest.id > version.id:
+            return f"已被更高的 applied 版本 v{latest.id} 取代"
+        return None
+    # R7-1 中断恢复态：身份基线仍在位且文件已是本草稿正文——上轮 _atomic_write
+    # 成功、set_version_status(applied) 前被打断，文件与库只差一个状态位；
+    # 放行让生效路径重写同内容文件（幂等）并补置 applied，不得误判为热编辑废弃
+    if (
+        version.base_applied_version_id is not None
+        and latest is not None
+        and latest.id == version.base_applied_version_id
+        and current_md5 == version.md5
+    ):
+        return None
+    if version.base_applied_version_id is not None and (
+        latest is None or latest.id != version.base_applied_version_id
+    ):
+        current_id = f"v{latest.id}" if latest is not None else "无"
+        return f"实读基线版本 v{version.base_applied_version_id} 已不在位（当前生效 {current_id}）"
+    if current_md5 != version.base_md5:
+        return f"当前文件内容已偏离实读基线（基线 md5={version.base_md5[:8]}…）"
+    if version.base_applied_version_id is None and latest is not None and latest.id > version.id:
+        return f"已被更高的 applied 版本 v{latest.id} 取代"
+    return None
 
 
 class StrategyValidationError(Exception):
@@ -93,6 +145,9 @@ class StrategyStore:
         self._repo = repo
         # 策略书变更回调（revise/rollback 落版本后触发，如广播 WS 事件）；未接线为 None
         self._on_change = on_change
+        # 生效临界区锁（issue #113 F11）：apply_version/revise_applied 全收锁，
+        # 锁内重读最新 applied——旧草稿晚于人工更高版本到达时不覆盖人工内容
+        self._apply_lock = asyncio.Lock()
 
     def _notify_change(self) -> None:
         """变更即通知（前端据此立即重拉策略面板）；未接线时静默跳过。
@@ -132,8 +187,32 @@ class StrategyStore:
         except FileNotFoundError:
             return ""
 
+    async def sample_current_base(self) -> tuple[str, str, int | None]:
+        """在生效锁内原子采样当前生效内容三元组：文件正文、其 md5、最新 applied 版本 id。
+
+        供 LLM 读取时点给本轮草稿盖基线章（issue #113 R6-3）：正文即 LLM 所见
+        内容（调用方直接嵌入展示，避免二次读文件的竞态窗口），md5 与 applied id
+        一并写入草稿；轮末生效时按身份 + 文件内容双重比对，防 ABA 与热编辑漏检。
+
+        参数：无
+
+        返回：
+            tuple[str, str, int | None]：当前文件正文（不存在为 ''）、正文 md5、
+            最新 applied 版本 id（无 applied 版本时 None）
+        """
+        async with self._apply_lock:
+            content = self.current()
+            latest = await self._repo.review.latest_applied_strategy_version()
+            return content, content_md5(content), latest.id if latest is not None else None
+
     async def revise(
-        self, content: str, reason: str, created_by: str, report_id: int | None = None
+        self,
+        content: str,
+        reason: str,
+        created_by: str,
+        report_id: int | None = None,
+        base_md5: str | None = None,
+        base_applied_version_id: int | None = None,
     ) -> StrategyVersion:
         """校验通过后落 draft 草稿版本；文件不动，报告成功后经 apply_version 生效。
 
@@ -142,6 +221,11 @@ class StrategyStore:
             reason: str，清空或变更原因
             created_by: str，版本创建来源
             report_id: int | None，关联报告标识
+            base_md5: str | None，草稿基线 md5（LLM 实读时点的生效内容摘要，
+                issue #113 CAS/R6-3）；人工即时生效路径（revise_applied）锁内落库
+                即生效、无竞态窗口，不传（None 回退旧 id 比较）
+            base_applied_version_id: int | None，草稿基线的 applied 版本身份
+                （issue #113 R6-3，与 base_md5 同时取自 sample_current_base）
         返回：
             StrategyVersion，校验通过后落库的 draft 版本（策略书文件未改动，
             issue #62/#73：先记账后生效）；校验失败抛 StrategyValidationError
@@ -155,6 +239,8 @@ class StrategyStore:
             reason,
             report_id,
             status="draft",
+            base_md5=base_md5,
+            base_applied_version_id=base_applied_version_id,
         )
 
     async def revise_applied(
@@ -164,6 +250,7 @@ class StrategyStore:
 
         复盘 agent 走 revise（draft）+ 报告成功后 apply_version；本方法是
         监控接口等"人按下按钮即刻生效"场景的合并入口（issue #62/#73 语义分界）。
+        落草稿与生效全程在生效锁内完成，避免与轮末草稿生效交错（issue #113 F11）。
 
         参数：
             content: str，待保存的完整文本
@@ -172,18 +259,55 @@ class StrategyStore:
 
         返回：
             StrategyVersion：已生效（applied）的版本对象
-        """
-        version = await self.revise(content, reason, created_by)
-        return await self.apply_version(version.id)
 
-    async def apply_version(self, version_id: int) -> StrategyVersion:
+        异常：
+            StrategyValidationError：内容校验失败，或新版本已被更高 applied 版本
+                取代（锁内防御分支，理论上不可达）时抛出
+        """
+        async with self._apply_lock:
+            version = await self.revise(content, reason, created_by)
+            applied = await self._apply_version_locked(version.id)
+            if applied is None:  # 锁内落的新版本不可能被取代，防御性检查
+                raise StrategyValidationError(
+                    [f"策略版本 v{version.id} 生效失败：已被更高版本取代"]
+                )
+            return applied
+
+    async def apply_version(self, version_id: int) -> StrategyVersion | None:
         """把草稿（或历史）版本原子写入策略书文件并置为 applied——统一生效入口。
+
+        全程在生效锁内；锁内重读最新 applied 版本与当前文件内容：草稿基线章
+        （base_md5/base_applied_version_id，issue #113 CAS/R6-3）失效——实读时点
+        的 applied 身份不在位（人工变更/回滚/ABA）或文件被热编辑偏离实读内容——
+        或无基线章但已被更高 applied 版本取代时，均置 discarded 并返回 None，
+        不覆盖人工新内容（issue #113 F11）。
 
         参数：
             version_id: int，待生效的版本编号
 
         返回：
-            StrategyVersion：已生效（applied）的版本对象
+            StrategyVersion | None：已生效的版本对象；目标版本已是 applied 且最新
+            生效已前移时幂等返回该版本（不写文件、不改状态，issue #113 R9 守卫）；
+            基线已失效（语义见上文）或已被更高 applied 版本取代时返回 None
+            （本版本已置 discarded）
+
+        异常：
+            StrategyValidationError，目标版本不存在时抛出
+        """
+        async with self._apply_lock:
+            return await self._apply_version_locked(version_id)
+
+    async def _apply_version_locked(self, version_id: int) -> StrategyVersion | None:
+        """apply_version 的无锁核心（调用方必须已持有 _apply_lock）。
+
+        参数：
+            version_id: int，待生效的版本编号
+
+        返回：
+            StrategyVersion | None：已生效版本；目标版本已是 applied 且最新生效已
+            前移（幂等重放守卫，issue #113 R9）时直接返回该版本，不写文件、不改状态；
+            草稿基线已失效（CAS：人工变更/回滚/ABA 致实读时点 applied 身份不在位，
+            或文件被热编辑偏离实读内容）或被更高 applied 版本取代时返回 None
 
         异常：
             StrategyValidationError，目标版本不存在时抛出
@@ -191,6 +315,25 @@ class StrategyStore:
         version = await self._repo.review.get_strategy_version(version_id)
         if version is None:
             raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法生效"])
+        latest = await self._repo.review.latest_applied_strategy_version()
+        # 已生效版本幂等重放守卫（issue #113 R9）：轮末生效成功后收尾被打断、窗口内
+        # 人工已生效更新版本（latest 前移）时，_complete_interrupted 的重放不得把
+        # 本版本当草稿重过 CAS——它确实生效过，直接返回，不写文件、不改状态，
+        # 避免被「实读基线已不在位」误反标 discarded（版本历史被静默改写）
+        if version.status == "applied" and latest is not None and latest.id != version.id:
+            logger.debug(
+                "策略版本 v%d 已生效过，重放幂等返回（当前生效 v%d）", version_id, latest.id
+            )
+            return version
+        # 草稿基线 CAS（issue #113，R6-3 加固）：基线章绑定 LLM 实读时点的文件
+        # 内容 md5 与最新 applied 版本身份——id 只代表落库先后，不代表分析基线
+        # 新旧；人工变更/回滚/ABA 导致身份不在位、或文件被热编辑偏离实读内容，
+        # 均判基线失效、废弃草稿不生效，不覆盖人工内容（issue #113 F11）
+        reason = _staleness_reason(version, latest, content_md5(self.current()))
+        if reason is not None:
+            await self._repo.review.set_version_status(version_id, "discarded")
+            logger.warning("策略草稿 v%d 的基线已失效（%s），废弃不生效", version_id, reason)
+            return None
         self._atomic_write(version.content)
         await self._repo.review.set_version_status(version_id, "applied")
         self._notify_change()
@@ -232,6 +375,10 @@ class StrategyStore:
     async def rollback(self, version_id: int) -> StrategyVersion:
         """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本。
 
+        全程在生效锁内（与 apply_version/revise_applied 互斥）：读目标→写文件→
+        记新版本之间不得被并发生效插队，否则文件与库内最新 applied 版本会错位
+        （issue #113 R7）。
+
         参数：
             version_id: int，目标历史版本标识
         返回：
@@ -239,16 +386,17 @@ class StrategyStore:
         异常：
             StrategyValidationError，目标策略版本不存在时抛出
         """
-        version = await self._repo.review.get_strategy_version(version_id)
-        if version is None:
-            raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
-        content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
-        self._atomic_write(content)
-        new_version = await self._repo.review.save_strategy_version(
-            content, content_md5(content), "rollback", f"回滚到 v{version_id}"
-        )
-        self._notify_change()
-        return new_version
+        async with self._apply_lock:
+            version = await self._repo.review.get_strategy_version(version_id)
+            if version is None:
+                raise StrategyValidationError([f"策略版本 v{version_id} 不存在，无法回滚"])
+            content = version.content.replace("\r\n", "\n")  # 历史脏行归一化后写回并重算 md5
+            self._atomic_write(content)
+            new_version = await self._repo.review.save_strategy_version(
+                content, content_md5(content), "rollback", f"回滚到 v{version_id}"
+            )
+            self._notify_change()
+            return new_version
 
     async def list_versions(self) -> list[StrategyVersion]:
         """列出全部策略书历史版本，最新版本排在最前。

@@ -1,4 +1,4 @@
-"""src/review 工具层测试：12 个工具经 ReviewToolRegistry.execute 逐一验证。
+"""src/review 工具层测试：16 个工具经 ReviewToolRegistry.execute 逐一验证。
 
 覆盖：正常返回文本、参数非法转错误文本、未知工具、截断行为、limit 钳制、
 calc 计算、submit 成功置 created_version_id、submit 校验拒绝返回原因文本。
@@ -290,7 +290,7 @@ async def test_get_tool_call_chain_empty(registry):
 
 
 async def test_calc_tool(registry):
-    """calc 已注册且可算；参数缺失转错误文本；工具总数 12。
+    """calc 已注册且可算；参数缺失转错误文本；工具总数 20。
 
     参数：
         registry: ToolRegistry，待调用的工具注册表
@@ -300,7 +300,7 @@ async def test_calc_tool(registry):
     """
     assert await registry.execute("calc", {"expression": "2*(3-1)^2"}) == "8"
     assert "参数错误" in await registry.execute("calc", {})
-    assert len(registry.specs) == 12
+    assert len(registry.specs) == 20
 
 
 # ---------- list_trades ----------
@@ -479,6 +479,51 @@ async def test_submit_strategy_revision_rejected(registry, deps):
     )
     assert "校验拒绝" in text and "100" in text
     assert deps.created_version_id is None  # 拒绝不置位
+
+
+async def test_submit_strategy_revision_twice_discards_older_draft(registry, deps):
+    """同轮重复提交策略修订时先废弃旧草稿，本轮只保留最新一份待生效（issue #113 F11）。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合
+
+    返回：
+        None，断言旧草稿状态为 discarded、草稿列表只含新 id、最新生效内容为新提交
+    """
+    first = "策略书甲：" + "顺势加仓，严格止损。" * 10
+    second = "策略书乙：" + "轻仓试错，分批止盈。" * 10
+    await registry.execute("submit_strategy_revision", {"new_prompt_md": first, "reason": "第一版"})
+    old_id = deps.created_version_id
+    await registry.execute(
+        "submit_strategy_revision", {"new_prompt_md": second, "reason": "第二版"}
+    )
+    assert deps.strategy_draft_ids == [deps.created_version_id]
+    assert deps.created_version_id != old_id
+    assert (await deps.store.get_version(old_id)).status == "discarded"
+    await deps.store.apply_version(deps.created_version_id)
+    assert deps.store.current() == second
+
+
+async def test_submit_strategy_revision_stamps_base_md5(registry, deps):
+    """轮初采样基线写入 deps 后，策略修订草稿盖 base_md5 章且端到端正常生效。
+
+    参数：
+        registry: ToolRegistry，待调用的工具注册表
+        deps: 依赖对象，测试应用或工具的依赖集合（已播种 v1）
+
+    返回：
+        None，断言草稿版本行 base_md5 等于轮初基线、apply 按 CAS 正路径生效
+    """
+    v1 = (await deps.store.list_versions())[0]
+    deps.base_md5_by_channel["strategy"] = v1.md5  # 模拟轮初采样（agent._sample_base_md5s）
+    new = "新策略书：" + "顺势加仓，严格止损。" * 10
+    await registry.execute("submit_strategy_revision", {"new_prompt_md": new, "reason": "收紧止损"})
+    version = await deps.store.get_version(deps.created_version_id)
+    assert version.base_md5 == v1.md5
+    applied = await deps.store.apply_version(deps.created_version_id)
+    assert applied is not None and applied.status == "applied"
+    assert deps.store.current() == new
 
 
 # ---------- 注册表统一错误 ----------

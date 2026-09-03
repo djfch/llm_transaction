@@ -5,6 +5,7 @@
  * 数据装配：status/account/positions/openOrders/alerts/equity/daily 七路查询经 useApiData 注入面板 props；
  * WS round_start/round 事件联动刷新账户、持仓、挂单、价格唤醒、权益、当日统计与策略/计划面板(refreshKey)；
  * strategy_updated/plan_updated 事件在 LLM 改完的瞬间即时重拉对应面板（不等轮末/下一轮）；
+ * research_prompt_updated 事件（复盘 agent 修订研报提示词落版本即推）即时重拉抽屉内研报 Prompt 区块；
  * 研报/复盘面板各自消费 research_round_start/research_round 与 review_round_start/review_round 事件（进度条与列表刷新）；
  * 时间线与笔记各自管理分页；
  * K线买卖点 / 成交行点击定位决策轮由 RoundFocusProvider 贯通。
@@ -50,6 +51,10 @@ function useConsoleData() {
   // 交易计划面板刷新信号：WS plan_updated（工具轮中即推，不等轮末）或决策轮事件（兜底）时 bump
   const [planTick, setPlanTick] = useState(0)
   const bumpPlan = useCallback(() => setPlanTick((t) => t + 1), [])
+  // 抽屉内研报 Prompt 区块刷新信号：WS research_prompt_updated（复盘修订落版本即推）时 bump；
+  // 抽屉关闭时 DrawerBody 未挂载，tick 仅累积不消费，下次打开重新全量拉取，无需补偿
+  const [researchPromptTick, setResearchPromptTick] = useState(0)
+  const bumpResearchPrompt = useCallback(() => setResearchPromptTick((t) => t + 1), [])
   const { connected, lastMessage } = portfolio
   const { reload: reloadStatus } = status
   const { reload: reloadOpenOrders } = openOrders
@@ -72,6 +77,7 @@ function useConsoleData() {
   useEffect(() => {
     if (lastMessage?.type === 'strategy_updated') bumpStrategy()
     if (lastMessage?.type === 'plan_updated') bumpPlan()
+    if (lastMessage?.type === 'research_prompt_updated') bumpResearchPrompt()
     if (lastMessage?.type !== 'round_start' && lastMessage?.type !== 'round') return
     reloadOpenOrders()
     reloadAlerts() // LLM 设置/触发唤醒都伴随决策轮事件
@@ -79,7 +85,7 @@ function useConsoleData() {
     reloadDaily() // 新轮成交改变当日已实现/开仓单口径
     bumpStrategy()
     bumpPlan()
-  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily, bumpStrategy, bumpPlan])
+  }, [lastMessage, reloadOpenOrders, reloadAlerts, reloadEquity, reloadDaily, bumpStrategy, bumpPlan, bumpResearchPrompt])
   return {
     status,
     portfolio,
@@ -90,6 +96,7 @@ function useConsoleData() {
     connected,
     strategyTick,
     planTick,
+    researchPromptTick,
     bumpStrategy,
   }
 }
@@ -189,7 +196,7 @@ function LoadErrorBanner({ errors }: { errors: Array<[string, string | null]> })
 }
 
 export default function ConsolePage() {
-  const { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, planTick, bumpStrategy } =
+  const { status, portfolio, openOrders, alerts, equity, daily, connected, strategyTick, planTick, researchPromptTick, bumpStrategy } =
     useConsoleData()
   const [configOpen, setConfigOpen] = useState(false)
   const account = portfolio.data?.account ?? null
@@ -269,7 +276,7 @@ export default function ConsolePage() {
         />
         <SecondScreen />
       </main>
-      <ConfigDrawer open={configOpen} onClose={closeConfig} onReset={onPaperReset} />
+      <ConfigDrawer open={configOpen} onClose={closeConfig} onReset={onPaperReset} researchPromptTick={researchPromptTick} />
     </RoundFocusProvider>
   )
 }

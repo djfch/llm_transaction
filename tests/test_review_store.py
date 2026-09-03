@@ -5,6 +5,7 @@
 created_by='rollback'）、版本不存在报错。
 """
 
+import asyncio
 import hashlib
 
 import pytest
@@ -368,3 +369,518 @@ async def test_on_change_absent_is_noop(store, repo):
     """
     v = await store.revise(_NEW, "改进", "review_agent")
     assert v.md5 == content_md5(_NEW)
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(store, repo, prompt_path):
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    串行模拟"复盘草稿与人工即时修改交错"的竞态：草稿 v2 落库后，人工
+    revise_applied 先生效 v3，轮末再 apply v2 时锁内重读到 v3，放弃生效。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言 apply 返回 None、文件保留人工内容、旧草稿状态为 discarded
+    """
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    human = await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
+    applied = await store.apply_version(draft.id)
+    assert applied is None  # 已被更高 applied 版本取代
+    assert store.current() == human.content  # 文件保留人工内容
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert (await store.get_version(human.id)).status == "applied"
+
+
+async def test_apply_drafts_skips_superseded_without_failure(store, repo, prompt_path):
+    """apply_drafts 遇被取代草稿（apply_version 返回 None）只跳过，不计入失败列表。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，当前策略书文件路径
+
+    返回：
+        None，断言 apply_failed_ids 为空、被取代草稿为 discarded、文件保留人工内容
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)
+    assert deps.apply_failed_ids == []  # 被取代不算失败
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current().startswith("人工策略书")
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(
+    store, repo, prompt_path, monkeypatch
+):
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容——文件与库内最新
+    applied 错位；rollback 收进生效锁后两者串行，二者必然一致（issue #113 R7）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    await store.seed_if_empty()
+    v1 = (await store.list_versions())[0]
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+    original_save = repo.review.save_strategy_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_strategy_version 的位置参数
+            **kwargs: 原 save_strategy_version 的关键字参数
+
+        返回：
+            原 save_strategy_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo.review, "save_strategy_version", slow_save)
+    await asyncio.gather(store.rollback(v1.id), store.apply_version(draft.id))
+    latest = await repo.review.latest_applied_strategy_version()
+    assert latest is not None
+    assert store.current() == latest.content
+
+
+async def test_apply_drafts_failure_records_channel_and_formats(store, repo, monkeypatch):
+    """apply 抛异常时按 (通道键, 草稿 id) 记入失败列表，格式化助手指明文件名（R9）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，临时数据库仓储，本用例通过 store 间接使用
+        monkeypatch: MonkeyPatch，用于让 apply_version 抛持久性异常
+
+    返回：
+        None，断言失败条目带 strategy 通道、文件未被改动、文件名助手输出正确
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts, apply_failed_files, format_apply_failures
+
+    await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")
+
+    async def _boom(version_id):
+        """模拟磁盘满等持久性失败：任何生效调用直接抛错。
+
+        参数：
+            version_id: int，待生效的版本编号（本桩不使用）
+
+        返回：
+            无正常返回，恒抛 RuntimeError
+
+        异常：
+            RuntimeError：模拟磁盘满等持久性失败
+        """
+        raise RuntimeError("磁盘已满")
+
+    monkeypatch.setattr(store, "apply_version", _boom)
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)
+    assert deps.apply_failed_ids == [("strategy", draft.id)]
+    assert apply_failed_files(deps.apply_failed_ids) == ["system_prompt.md"]
+    assert format_apply_failures(deps.apply_failed_ids) == f"system_prompt.md 草稿 v{draft.id}"
+    assert store.current().startswith("初始策略书")  # 生效失败，文件未被改动
+
+
+# ---------- 草稿基线 CAS（issue #113） ----------
+
+
+async def test_cas_discards_stale_draft_after_human_intervenes(
+    store, repo, prompt_path, monkeypatch, caplog
+):
+    """交错复现竞态：人工持锁落库让出期间 agent 草稿以更大 id 插队，轮末生效被 CAS 废弃。
+
+    人工 revise_applied(C) 在生效锁内落库后、写文件前让出事件循环，复盘整改
+    revise(B, base_md5=md5(初始内容)) 无锁落 draft v3（id 大于人工 v2）；
+    无 CAS 时旧 id 比较（v3 > v2）不会判取代，陈旧 B 会覆盖人工 C（PR #114 R6）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        monkeypatch: MonkeyPatch，用于在人工落库点插入确定性让出
+        caplog: LogCaptureFixture，用于断言基线取代告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留人工内容、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    base = content_md5(_INIT)
+    human_content = "人工策略书：" + "人工优先，覆盖草稿。" * 10
+    human_saved = asyncio.Event()
+    agent_done = asyncio.Event()
+    original_save = repo.review.save_strategy_version
+
+    async def gated_save(content, md5, created_by, *args, **kwargs):
+        """人工落库完成后让出事件循环，等 agent 草稿插队落库后再放行。
+
+        参数：
+            content: str，版本内容（透传）
+            md5: str，内容摘要（透传）
+            created_by: str，创建来源；为 "human" 时触发让出门（agent 草稿不拦）
+            *args: 其余位置参数（透传）
+            **kwargs: 其余关键字参数（透传）
+
+        返回：
+            原 save_strategy_version 的返回（透传）
+        """
+        version = await original_save(content, md5, created_by, *args, **kwargs)
+        if created_by == "human":
+            human_saved.set()  # 人工 draft 已落库但仍持生效锁、尚未写文件置 applied
+            await agent_done.wait()
+        return version
+
+    monkeypatch.setattr(repo.review, "save_strategy_version", gated_save)
+    human_task = asyncio.create_task(store.revise_applied(human_content, "人工修改"))
+    await human_saved.wait()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent", base_md5=base)
+    assert draft.id > 2  # agent 草稿以更大 id 插队（v1 种子、v2 人工、v3 草稿）
+    agent_done.set()
+    human = await human_task
+    assert human.status == "applied"
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None  # 基线已失效（人工变更取代实读基线）
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == human_content  # 陈旧草稿未覆盖人工内容
+    assert any("基线已失效" in r.message for r in caplog.records)
+
+
+async def test_cas_applies_draft_when_base_matches(store, repo, prompt_path):
+    """草稿基线与最新 applied 内容一致时正常生效（CAS 正路径）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言草稿生效、文件替换、版本行 base_md5 落库
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent", base_md5=v1.md5)
+    assert draft.base_md5 == v1.md5
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"
+    assert prompt_path.read_text(encoding="utf-8") == _NEW
+
+
+async def test_cas_null_base_falls_back_to_id_compare(store, repo, prompt_path):
+    """base_md5 为 NULL 的历史/人工行回退旧 id 比较：id 更大的草稿照常生效。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言无基线草稿按旧行为生效覆盖、文件为新内容
+    """
+    await store.seed_if_empty()
+    await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工修改")
+    draft = await store.revise(_NEW, "复盘改进", "review_agent")  # 不盖基线章
+    assert draft.base_md5 is None
+    applied = await store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"  # id 更大，按旧行为生效
+    assert prompt_path.read_text(encoding="utf-8") == _NEW
+
+
+async def test_cas_replay_of_applied_draft_is_idempotent(store, repo, prompt_path):
+    """已生效草稿的幂等重放不被 CAS 误判：latest 即本版本自身时跳过比对。
+
+    轮末生效成功后被打断、启动重放 apply_drafts 的场景（_complete_interrupted）：
+    草稿自身即最新 applied，其内容必然异于基线，无 latest.id == version_id 豁免
+    会把已生效草稿误判废弃。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言二次 apply 仍返回生效版本、文件与状态保持不变
+    """
+    v1 = await store.seed_if_empty()
+    draft = await store.revise(_NEW, "复盘改进", "review_agent", base_md5=v1.md5)
+    first = await store.apply_version(draft.id)
+    assert first is not None and first.status == "applied"
+    second = await store.apply_version(draft.id)  # 幂等重放
+    assert second is not None and second.status == "applied"
+    assert prompt_path.read_text(encoding="utf-8") == _NEW
+    assert (await store.get_version(draft.id)).status == "applied"
+
+
+async def test_sample_current_base(store, repo, prompt_path):
+    """读取时点基线采样（issue #113 R6-3）：返回（文件正文, 正文 md5, 最新 applied id）三元组。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言无版本/seed 后/人工生效后三种状态下采样三元组的正文、md5 与 id
+    """
+    assert await store.sample_current_base() == (_INIT, content_md5(_INIT), None)  # 无版本
+    v1 = await store.seed_if_empty()
+    assert await store.sample_current_base() == (_INIT, v1.md5, v1.id)  # 有 applied
+    human = "人工策略书：" + "人工优先，覆盖草稿。" * 10
+    v2 = await store.revise_applied(human, "人工修改")
+    assert await store.sample_current_base() == (human, v2.md5, v2.id)
+
+
+async def test_cas_discards_draft_when_base_version_aba_replaced(store, repo, prompt_path, caplog):
+    """基线版本 ABA 回绕：草稿基于 v1(A) 实读盖章后，人工改 B(v2) 又回滚 A(v3)，轮末废弃。
+
+    内容回绕后当前文件 md5 与基线一致（都是 A），仅凭 md5 比对的旧 CAS 会放行；
+    新 CAS 按实读基线身份检出失效（base_applied_version_id=v1 ≠ 当前生效 v3，
+    issue #113 R6-3）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留回滚后内容、告警落日志
+    """
+    import logging
+
+    v1 = await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    await store.revise_applied("人工策略书：" + "人工优先，覆盖草稿。" * 10, "人工改 B")  # v2
+    await store.rollback(v1.id)  # v3：内容回绕为 A，id 前进
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == _INIT  # 文件保留回滚后的 A
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_discards_draft_when_file_hot_edited(store, repo, prompt_path, caplog):
+    """文件热编辑：草稿盖章后文件被绕过 store 直接改写（库中 applied 不动），轮末废弃。
+
+    实读基线身份仍在位（v1），但当前文件内容 md5 已偏离实读基线——防"库不变、
+    文件被外部编辑"的漏检（issue #113 R6-3）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、热编辑内容不被覆盖、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    hot = "热编辑策略书：" + "绕过存储直接改文件。" * 10
+    prompt_path.write_text(hot, encoding="utf-8")  # 热编辑：动文件不动库
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == hot  # 热编辑内容不被草稿覆盖
+    assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
+
+
+async def test_interrupted_after_write_recovers_on_apply_retry(
+    store, repo, prompt_path, monkeypatch
+):
+    """写文件成功、置状态前中断的草稿：重试识别恢复态补置 applied，不误判热编辑废弃（R7-1）。
+
+    首轮 apply 在原子写成功后让 set_version_status("applied") 抛错，留下「文件已是
+    草稿正文、库内仍是旧 applied + 本草稿 draft」的中断现场；随后经 apply_drafts
+    重试（_complete_interrupted 的幂等收尾路径）：身份基线仍在位且文件内容已等于
+    草稿正文 → 恢复态放行，幂等重写同内容文件并补置 applied，失败集合保持为空
+    （轮末事件 applied=True 名实相符）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        monkeypatch: MonkeyPatch，用于让首次置 applied 抛错模拟进程中断
+
+    返回：
+        None，断言重试后草稿 applied、文件与库内最新 applied 一致、失败集合为空
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    original_set = repo.review.set_version_status
+    tripped = {"done": False}
+
+    async def flaky_set_status(version_id, status):
+        """首次置 applied 时模拟「写文件已成功、状态未落库」的进程中断。
+
+        参数：
+            version_id: int，版本编号（透传）
+            status: str，目标状态（透传）
+
+        返回：
+            原 set_version_status 的返回（透传）
+
+        异常：
+            RuntimeError：首次置 applied 时抛出，模拟置状态前进程中断
+        """
+        if status == "applied" and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("模拟置状态前进程中断")
+        return await original_set(version_id, status)
+
+    monkeypatch.setattr(repo.review, "set_version_status", flaky_set_status)
+    with pytest.raises(RuntimeError):
+        await store.apply_version(draft.id)
+    # 中断现场：文件已是草稿正文，库内仍是 v1 applied + 本草稿 draft
+    assert store.current() == _NEW
+    assert (await store.get_version(draft.id)).status == "draft"
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重试路径
+    assert deps.apply_failed_ids == []  # 轮末事件 applied=True 名实相符
+    assert (await store.get_version(draft.id)).status == "applied"
+    latest = await repo.review.latest_applied_strategy_version()
+    assert latest is not None and latest.id == draft.id
+    assert store.current() == latest.content == _NEW
+
+
+async def test_content_match_without_identity_baseline_is_stale(store, repo, prompt_path, caplog):
+    """身份基线不在位但文件恰等于草稿正文：仍判失效废弃，不得走 R7-1 恢复态。
+
+    恢复态的前提是「身份基线仍在位 ∧ 文件已是草稿正文」同时成立；本组合负例
+    钉死判定顺序——草稿盖章后人工直改生效了新版本（身份基线前移），随后文件
+    被写成与草稿相同的内容（如过期生效世界的延迟落盘）：仅内容吻合不得放行
+    补状态，必须按「实读基线已不在位」废弃，避免把已前移的生效序列当作
+    自己的中断现场而错位补章。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保持现状、告警落日志
+    """
+    import logging
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    await store.revise_applied("人工策略书：" + "人工优先，身份基线前移。" * 10, "人工改")  # v2
+    prompt_path.write_text(_NEW, encoding="utf-8")  # 文件恰等于草稿正文，但基线已不在位
+    with caplog.at_level(logging.WARNING):
+        applied = await store.apply_version(draft.id)
+    assert applied is None
+    assert (await store.get_version(draft.id)).status == "discarded"
+    assert store.current() == _NEW  # 文件保持现状，不被回滚也不错位补章
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(
+    store, repo, prompt_path
+):
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工经 revise_applied 生效了更新版本
+    （latest 前移）。_complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被
+    当草稿重过 CAS，会因「实读基线已不在位」被反标 discarded——它确实生效过，
+    版本历史不得被静默改写（issue #113 R9）。
+
+    参数：
+        store: StrategyStore，store 夹具提供的策略版本管理对象
+        repo: Repo，repo 夹具提供的临时数据库仓储，本用例通过 store 间接使用
+        prompt_path: Path，prompt_path 夹具返回的初始策略书文件路径
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工内容
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await store.seed_if_empty()
+    _, base_md5, base_vid = await store.sample_current_base()
+    draft = await store.revise(
+        _NEW, "复盘改进", "review_agent", base_md5=base_md5, base_applied_version_id=base_vid
+    )
+    first = await store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（v3，latest 前移）
+    human_content = "人工策略书：" + "人工优先，覆盖草稿。" * 10
+    human = await store.revise_applied(human_content, "人工修改")
+    assert human.id > draft.id
+    deps = SimpleNamespace(
+        store=store,
+        strategy_draft_ids=[draft.id],
+        indicator_config_store=None,
+        research_prompt_store=None,
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert store.current() == human_content  # 人工内容不被回写

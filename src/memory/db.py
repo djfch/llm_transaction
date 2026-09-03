@@ -9,6 +9,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from src.memory.migrate_v3 import migrate_research_v3
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -143,14 +145,16 @@ CREATE TABLE IF NOT EXISTS timeline (
 CREATE TABLE IF NOT EXISTS research_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_type TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 2,
+    schema_version INTEGER NOT NULL DEFAULT 3,
     summary TEXT NOT NULL DEFAULT '',
     cross_market_view TEXT NOT NULL DEFAULT '',
     global_risks_json TEXT NOT NULL DEFAULT '[]',
     raw_json TEXT NOT NULL DEFAULT '{}',
     error TEXT NOT NULL DEFAULT '',
     round_id TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    research_prompt_md5 TEXT NOT NULL DEFAULT '',
+    research_prompt_version_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS research_schedule_runs (
     schedule_id TEXT NOT NULL,
@@ -173,7 +177,6 @@ CREATE TABLE IF NOT EXISTS research_asset_views (
     risks_json TEXT NOT NULL DEFAULT '[]',
     narrative TEXT NOT NULL DEFAULT '',
     market_context_json TEXT NOT NULL DEFAULT '{}',
-    verify_result TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     UNIQUE(report_id, contract)
 );
@@ -183,11 +186,65 @@ CREATE TABLE IF NOT EXISTS causal_links (
     chain_json TEXT NOT NULL,
     confidence REAL NOT NULL,
     evidence_json TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending',
-    broken_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'tracking',
     topic TEXT NOT NULL DEFAULT '',
     supersedes_id INTEGER,
-    await_verification INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL
+);
+-- 研报复盘记录（issue #113）：复盘 agent 对逐标的结论的批改；方向/推理/置信度为枚举 +
+-- 对应 *_reason 理由文本；outcome_json 由代码按历史 K 线计算（LLM 不可写）；
+-- 同一复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘；
+-- review_kind=manual 的行为人工授权重评（R5-2），rereview_reason 存授权理由原文，
+-- rereview_of_id 指向被替代的上一条复盘记录
+CREATE TABLE IF NOT EXISTS research_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_report_id INTEGER NOT NULL,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    direction_relation TEXT NOT NULL DEFAULT '',
+    direction_reason TEXT NOT NULL DEFAULT '',
+    reasoning_quality TEXT NOT NULL DEFAULT '',
+    reasoning_review TEXT NOT NULL DEFAULT '',
+    evidence_reviews_json TEXT NOT NULL DEFAULT '[]',
+    confidence_assessment TEXT NOT NULL DEFAULT '',
+    confidence_reason TEXT NOT NULL DEFAULT '',
+    improvement_advice TEXT NOT NULL DEFAULT '',
+    outcome_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    review_kind TEXT NOT NULL DEFAULT 'auto',
+    rereview_reason TEXT NOT NULL DEFAULT '',
+    rereview_of_id INTEGER,
+    UNIQUE(review_report_id, report_id, contract)
+);
+-- 研报复盘候选扫描游标（issue #113 R5）：单行表，记录 keyset 续扫位置
+-- （last_due_at/last_report_id/last_contract 三元组）；扫到候选集尾部时重置为全 NULL，
+-- 下轮从头重扫（被跳过的数据不足候选才有机会复检）
+CREATE TABLE IF NOT EXISTS research_review_scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_due_at REAL,
+    last_report_id INTEGER,
+    last_contract TEXT
+);
+-- 人工重评授权（issue #113 R5-2）：同一目标最多一条未消费授权（部分唯一索引
+-- idx_rereview_pending 强制）；consumed_round_id 空串 = 待消费，消费时绑定复盘轮次
+CREATE TABLE IF NOT EXISTS research_rereview_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    contract TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_by TEXT NOT NULL DEFAULT 'human',
+    created_at REAL NOT NULL,
+    consumed_round_id TEXT NOT NULL DEFAULT ''
+);
+-- 研报提示词版本（issue #113）：research_prompt.md 正文版本化存证，状态机同 strategy_versions
+CREATE TABLE IF NOT EXISTS research_prompt_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'applied',
+    review_report_id INTEGER,
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
@@ -202,6 +259,11 @@ CREATE INDEX IF NOT EXISTS idx_research_reports_created ON research_reports(crea
 CREATE INDEX IF NOT EXISTS idx_research_asset_report ON research_asset_views(report_id);
 CREATE INDEX IF NOT EXISTS idx_research_asset_contract ON research_asset_views(contract, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_causal_links_report ON causal_links(report_id);
+CREATE INDEX IF NOT EXISTS idx_research_reviews_target ON research_reviews(report_id, contract);
+CREATE INDEX IF NOT EXISTS idx_research_reviews_created ON research_reviews(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rereview_pending
+    ON research_rereview_requests(report_id, contract) WHERE consumed_round_id='';
+CREATE INDEX IF NOT EXISTS idx_research_prompt_versions_md5 ON research_prompt_versions(md5);
 """
 
 _RESEARCH_REPORT_COLUMNS = {
@@ -215,6 +277,8 @@ _RESEARCH_REPORT_COLUMNS = {
     "error",
     "round_id",
     "created_at",
+    "research_prompt_md5",
+    "research_prompt_version_id",
 }
 _RESEARCH_ASSET_COLUMNS = {
     "id",
@@ -231,9 +295,14 @@ _RESEARCH_ASSET_COLUMNS = {
     "risks_json",
     "narrative",
     "market_context_json",
-    "verify_result",
     "created_at",
 }
+# 可自动迁移的旧列集：R5-4 前（有 md5 无 version_id，由 _migrate 补列）与上一代
+# （schema_version=2，由 migrate_v3 重建/加列）；除此之外的列集既非当前代际也
+# 不可迁移，校验拒绝启动
+_RESEARCH_REPORT_COLUMNS_PRE_R5 = _RESEARCH_REPORT_COLUMNS - {"research_prompt_version_id"}
+_RESEARCH_REPORT_COLUMNS_LEGACY = _RESEARCH_REPORT_COLUMNS_PRE_R5 - {"research_prompt_md5"}
+_RESEARCH_ASSET_COLUMNS_LEGACY = _RESEARCH_ASSET_COLUMNS | {"verify_result"}
 
 
 class Database:
@@ -297,30 +366,37 @@ class Database:
             raise
 
     async def _validate_research_schema(self) -> None:
-        """只接受当前逐标的研报结构；生产基线无研报表时允许直接建表。
+        """只接受当前代际（v3）或可自动迁移的上一代（v2）研报表结构，其余拒绝启动。
+
+        当前代际：research_reports 含 research_prompt_md5、research_asset_views 无
+        verify_result；上一代结构由 migrate_v3 自动迁移（迁移前做异常值检查，
+        有未知数据即拒绝启动并提示备份）。生产基线无研报表时跳过校验直接建表。
 
         参数：
             无
 
         返回：
-            None：只接受当前逐标的研报结构；生产基线无研报表时允许直接建表
+            None：结构为当前代际或可迁移旧代际时不抛错
 
         异常：
-            RuntimeError：'检测到旧版研报表 research_reports；当前版本不执行兼容迁移，请先备份数据库并按部署文档重建研报数据' 所描述的条件发生时
+            RuntimeError：'研报表结构未知：research_reports 字段不符合当前协议且无法自动迁移，请先备份数据库并按部署文档重建研报数据' 所描述的条件发生时
             RuntimeError：'研报表结构不完整：缺少 research_asset_views' 所描述的条件发生时
-            RuntimeError：'研报表结构不完整：research_asset_views 字段不符合当前协议' 所描述的条件发生时
-            RuntimeError：'检测到非 schema_version=2 的研报数据；请先备份数据库并重建研报数据' 所描述的条件发生时
+            RuntimeError：'研报表结构未知：research_asset_views 字段不符合当前协议且无法自动迁移，请先备份数据库并按部署文档重建研报数据' 所描述的条件发生时
+            RuntimeError：'检测到非 schema_version∈{2,3} 的研报数据；请先备份数据库并重建研报数据' 所描述的条件发生时
         """
         cur = await self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_reports'"
         )
         if await cur.fetchone() is None:
             return
-        cur = await self._conn.execute("PRAGMA table_info(research_reports)")
-        report_columns = {row["name"] for row in await cur.fetchall()}
-        if report_columns != _RESEARCH_REPORT_COLUMNS:
+        report_columns = await self._table_columns("research_reports")
+        if report_columns not in (
+            _RESEARCH_REPORT_COLUMNS,
+            _RESEARCH_REPORT_COLUMNS_PRE_R5,
+            _RESEARCH_REPORT_COLUMNS_LEGACY,
+        ):
             raise RuntimeError(
-                "检测到旧版研报表 research_reports；当前版本不执行兼容迁移，"
+                "研报表结构未知：research_reports 字段不符合当前协议且无法自动迁移，"
                 "请先备份数据库并按部署文档重建研报数据"
             )
         cur = await self._conn.execute(
@@ -328,15 +404,31 @@ class Database:
         )
         if await cur.fetchone() is None:
             raise RuntimeError("研报表结构不完整：缺少 research_asset_views")
-        cur = await self._conn.execute("PRAGMA table_info(research_asset_views)")
-        asset_columns = {row["name"] for row in await cur.fetchall()}
-        if asset_columns != _RESEARCH_ASSET_COLUMNS:
-            raise RuntimeError("研报表结构不完整：research_asset_views 字段不符合当前协议")
+        asset_columns = await self._table_columns("research_asset_views")
+        if asset_columns not in (_RESEARCH_ASSET_COLUMNS, _RESEARCH_ASSET_COLUMNS_LEGACY):
+            raise RuntimeError(
+                "研报表结构未知：research_asset_views 字段不符合当前协议且无法自动迁移，"
+                "请先备份数据库并按部署文档重建研报数据"
+            )
         cur = await self._conn.execute(
-            "SELECT 1 FROM research_reports WHERE schema_version != 2 LIMIT 1"
+            "SELECT 1 FROM research_reports WHERE schema_version NOT IN (2, 3) LIMIT 1"
         )
         if await cur.fetchone() is not None:
-            raise RuntimeError("检测到非 schema_version=2 的研报数据；请先备份数据库并重建研报数据")
+            raise RuntimeError(
+                "检测到非 schema_version∈{2,3} 的研报数据；请先备份数据库并重建研报数据"
+            )
+
+    async def _table_columns(self, table: str) -> set[str]:
+        """读取指定表的列名集合（表名仅限代码常量，不作外部输入）。
+
+        参数：
+            table: str，表名（代码常量）
+
+        返回：
+            set[str]：指定表的列名集合
+        """
+        cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
+        return {row["name"] for row in await cur.fetchall()}
 
     @property
     def path(self) -> Path:
@@ -377,6 +469,26 @@ class Database:
         - causal_links.topic/supersedes_id/await_verification：旧链无主题（''）、无替代关系
           （NULL）、按待验证处理（1），不回填；supersedes 索引只在迁移末尾建（旧库须先补列，
           SCHEMA 阶段建会因缺列报错，同 trades.exchange_trade_id）。
+        - 研报表 v2→v3（issue #113，由 migrate_v3 执行）：research_reports 补
+          research_prompt_md5（历史研报无正文 md5 可循，保持默认 ''，不回填）；
+          research_asset_views 去 verify_result 死字段、causal_links 双字段合并为
+          tracking/concluded/superseded 三态（均重建表）；迁移前做异常值检查，
+          有未知数据即拒绝启动并提示备份，不静默丢弃。
+        - research_reviews.review_kind/rereview_reason/rereview_of_id（issue #113 R5-2）：
+          历史批改均为自动复盘产物，review_kind 默认 'auto'、授权理由与替代指向无旧档
+          可循（'' / NULL），不回填；research_rereview_requests 为新增表，由
+          CREATE TABLE IF NOT EXISTS 覆盖。
+        - research_reports.research_prompt_version_id（issue #113 R5-4）：构建 prompt
+          时点解析的版本 id；历史研报无此归因可循，保持 NULL（复盘侧回退 md5 反解），
+          不回填。
+        - strategy_versions/indicator_config_versions/research_prompt_versions.base_md5
+          （issue #113 CAS）：草稿的基线内容 md5（轮初采样），生效时与最新 applied
+          版本比对，防止「草稿 id 更大但基线更旧」的陈旧草稿覆盖人工变更；历史行与
+          人工即时生效行无基线可循，保持 NULL（生效判定回退旧 id 比较），不回填。
+        - 同三表 .base_applied_version_id（issue #113 R6-3）：草稿基线的 applied
+          版本身份（LLM 实读时点采样），生效时身份比对防 ABA（人工改走又改回
+          同内容时 md5 不变、md5 比对漏检）；历史行保持 NULL（只做文件 md5 校验
+          或回退旧 id 比较），不回填。
 
         参数：
             无
@@ -418,6 +530,11 @@ class Database:
         # 版本状态列（issue #62/#73）：复盘改写先落 draft 草稿、报告成功才置 applied
         # 生效；失败/取消置 discarded。历史行默认 applied 与既有语义一致。
         await self._ensure_version_status_columns()
+        # 草稿基线列（issue #113 CAS）：三张版本表统一补 base_md5，历史行 NULL 回退旧行为
+        await self._ensure_version_base_md5_columns()
+        # 基线 applied 身份列（issue #113 R6-3）：三张版本表统一补
+        # base_applied_version_id，历史行 NULL（只做文件 md5 校验或回退旧 id 比较）
+        await self._ensure_version_base_applied_id_columns()
         # 模型身份四列（跨模型效果对比）：历史轮次无法可靠推断当时所用模型，保持默认 ''，不回填
         await self._ensure_audit_llm_identity_columns()
         # 权益曲线按模式+时间的窗口扫描索引（issue #79）
@@ -437,10 +554,18 @@ class Database:
             )
         if "supersedes_id" not in link_cols:
             await self._conn.execute("ALTER TABLE causal_links ADD COLUMN supersedes_id INTEGER")
-        if "await_verification" not in link_cols:
+        # await_verification 只补给版本化前的旧表（有 broken_at 但缺该列）；v3 新表
+        # （无 broken_at）不补——补上会被 migrate_v3 误判为待迁移旧表而重建出错
+        if "await_verification" not in link_cols and "broken_at" in link_cols:
             await self._conn.execute(
                 "ALTER TABLE causal_links ADD COLUMN await_verification INTEGER NOT NULL DEFAULT 1"
             )
+        # 研报表 v3 结构迁移（issue #113）：加列/重建表/三态映射，含异常值前置检查
+        await migrate_research_v3(self._conn)
+        # 研报复盘重评三列（issue #113 R5-2）：历史批改全为自动复盘产物
+        await self._ensure_research_rereview_columns()
+        # 研报提示词版本归因列（issue #113 R5-4）：构建时点精确归因，历史行 NULL
+        await self._ensure_research_prompt_version_column()
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_causal_links_supersedes ON causal_links(supersedes_id)"
         )
@@ -473,6 +598,36 @@ class Database:
                     f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'applied'"
                 )
 
+    async def _ensure_version_base_md5_columns(self) -> None:
+        """为三张版本表补 base_md5 列（幂等）：草稿基线 CAS 的比较键（issue #113）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（无基线可循，
+            生效判定回退旧 id 比较行为），不回填
+        """
+        for table in ("strategy_versions", "indicator_config_versions", "research_prompt_versions"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
+            if "base_md5" not in {row["name"] for row in await cur.fetchall()}:
+                await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN base_md5 TEXT")
+
+    async def _ensure_version_base_applied_id_columns(self) -> None:
+        """为三张版本表补 base_applied_version_id 列（幂等）：基线 applied 身份（issue #113 R6-3）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（无身份可循，
+            生效判定只做文件 md5 校验或回退旧 id 比较），不回填
+        """
+        for table in ("strategy_versions", "indicator_config_versions", "research_prompt_versions"):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")  # 表名为代码常量
+            if "base_applied_version_id" not in {row["name"] for row in await cur.fetchall()}:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN base_applied_version_id INTEGER"
+                )
+
     async def _ensure_audit_llm_identity_columns(self) -> None:
         """为审计主表补模型身份四列（幂等）：开轮快照落库，供跨模型效果对比。
 
@@ -488,3 +643,42 @@ class Database:
                 await self._conn.execute(  # 列名为代码常量
                     f"ALTER TABLE audit_rounds ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+
+    async def _ensure_research_rereview_columns(self) -> None:
+        """为研报复盘表补人工重评三列（幂等，issue #113 R5-2）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行 review_kind 默认 'auto'、
+            rereview_reason 默认 ''、rereview_of_id 默认 NULL，均与既有语义一致
+        """
+        cur = await self._conn.execute("PRAGMA table_info(research_reviews)")
+        review_cols = {row["name"] for row in await cur.fetchall()}
+        if "review_kind" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN review_kind TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "rereview_reason" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_reason TEXT NOT NULL DEFAULT ''"
+            )
+        if "rereview_of_id" not in review_cols:
+            await self._conn.execute(
+                "ALTER TABLE research_reviews ADD COLUMN rereview_of_id INTEGER"
+            )
+
+    async def _ensure_research_prompt_version_column(self) -> None:
+        """为 research_reports 补提示词版本归因列（幂等，issue #113 R5-4）。
+
+        参数：无
+
+        返回：
+            None，缺列时 ALTER TABLE 补齐；历史行保持 NULL（复盘侧回退 md5 反解），
+            不回填
+        """
+        cur = await self._conn.execute("PRAGMA table_info(research_reports)")
+        if "research_prompt_version_id" not in {row["name"] for row in await cur.fetchall()}:
+            await self._conn.execute(
+                "ALTER TABLE research_reports ADD COLUMN research_prompt_version_id INTEGER"
+            )

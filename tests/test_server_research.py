@@ -129,6 +129,7 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
         confidence="中",
         narrative=_LONG_NARRATIVE,
         round_id="rs-round-1",
+        research_prompt_md5="0123456789abcdef0123456789abcdef",
     )
     r3 = await save_report_fixture(repo, report_type="us", error="LLM 超时")
     async with _client_of(_deps(repo, tmp_path)) as c:
@@ -145,6 +146,8 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "global_risks",
             "error",
             "round_id",
+            "research_prompt_md5",
+            "research_prompt_version_id",
             "created_at",
             "llm_credential_name",
             "llm_provider",
@@ -153,6 +156,8 @@ async def test_reports_list_pagination_and_asset_summaries(repo: Repo, tmp_path:
             "asset_views",
         }
         assert item["round_id"] == "rs-round-1"
+        assert item["research_prompt_md5"] == "0123456789abcdef0123456789abcdef"
+        assert item["research_prompt_version_id"] is None  # 未传版本 id 的研报为 null
         assert item["asset_views"][0]["direction"] == "偏空"
         assert "narrative" not in item["asset_views"][0]
         assert body["items"][0]["error"] == "LLM 超时"
@@ -228,7 +233,7 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
         confidence=0.8,
         evidence_json='[{"timeline_id": 3}]',
         topic="利率",
-        await_verification=False,
+        status="concluded",
     )
     await repo.research.save_causal_link(report_id=r2.id, chain_json="[]", confidence=0.5)
     async with _client_of(_deps(repo, tmp_path)) as c:
@@ -242,10 +247,8 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
             "confidence",
             "evidence",
             "status",
-            "broken_at",
             "topic",
             "supersedes_id",
-            "await_verification",
             "created_at",
         }
         assert links[0]["id"] == link.id
@@ -254,10 +257,115 @@ async def test_report_detail_causal_links(repo: Repo, tmp_path: Path):
         assert links[0]["confidence"] == 0.8
         assert links[0]["topic"] == "利率"
         assert links[0]["supersedes_id"] is None
-        assert links[0]["await_verification"] is False
         assert links[0]["evidence"] == [{"timeline_id": 3}]
-        assert links[0]["status"] == "pending"
-        assert links[0]["broken_at"] is None
+        assert links[0]["status"] == "concluded"
+
+
+def _asset_view_row(contract: str) -> dict[str, Any]:
+    """构造最小逐标的结论字典（多标的研报夹具用，键集同 save_report_fixture 内部行）。
+
+    参数：
+        contract: str，合约名
+
+    返回：
+        dict[str, Any]：可直接传给 save_report_bundle 的逐标的结论行
+    """
+    return {
+        "contract": contract,
+        "direction": "中性",
+        "confidence": "低",
+        "horizon": "当日",
+        "market_regime": "震荡",
+        "technical_confirmation": "中性",
+        "basis_type": "混合",
+        "data_status": "完整",
+        "evidence_json": "[]",
+        "risks_json": "[]",
+        "narrative": "",
+        "market_context_json": "{}",
+    }
+
+
+async def test_report_detail_research_reviews(repo: Repo, tmp_path: Path):
+    """详情研报复盘：复盘记录按 contract 分组挂到对应逐标的详情键（issue #113 C8）。
+
+    同一研报可被多次复盘，故同一标的下是多条记录（按 id 正序）；
+    未被复盘的标的 research_reviews 为空数组；evidence_reviews/outcome 解析为对象。
+
+    参数：
+        repo: Repo，连接测试数据库的仓储实例
+        tmp_path: Path，pytest 提供的临时目录
+
+    返回：
+        None，通过断言验证分组挂载、键集契约与 JSON 解析，无返回值
+    """
+    report, _views = await repo.research.save_report_bundle(
+        report_type="manual",
+        summary="",
+        cross_market_view="",
+        global_risks_json="[]",
+        raw_json="{}",
+        round_id="",
+        asset_views=[_asset_view_row("BTC_USDT"), _asset_view_row("ETH_USDT")],
+    )
+    first = await repo.research_review.save_review(
+        review_report_id=1,
+        report_id=report.id,
+        contract="BTC_USDT",
+        direction_relation="realized",
+        direction_reason="方向正确",
+        reasoning_quality="sound",
+        reasoning_review="链条完整",
+        evidence_reviews_json=(
+            '[{"evidence_index": 1, "fact_status": "confirmed",'
+            ' "reasoning_status": "supported", "explanation": "依据成立"}]'
+        ),
+        confidence_assessment="appropriate",
+        confidence_reason="置信度合规",
+        improvement_advice="继续保持",
+        outcome_json='{"data_status": "ok", "return_pct": 1.2}',
+    )
+    second = await repo.research_review.save_review(
+        review_report_id=2,
+        report_id=report.id,
+        contract="BTC_USDT",
+        direction_relation="diverged",
+    )
+    async with _client_of(_deps(repo, tmp_path)) as c:
+        detail = (await c.get(f"/api/research/reports/{report.id}")).json()
+        by_contract = {v["contract"]: v for v in detail["asset_views"]}
+        btc_reviews = by_contract["BTC_USDT"]["research_reviews"]
+        assert [r["id"] for r in btc_reviews] == [first.id, second.id]  # 多条按 id 正序
+        assert set(btc_reviews[0]) == {
+            "id",
+            "review_report_id",
+            "direction_relation",
+            "direction_reason",
+            "reasoning_quality",
+            "reasoning_review",
+            "evidence_reviews",
+            "confidence_assessment",
+            "confidence_reason",
+            "improvement_advice",
+            "outcome",
+            "created_at",
+            "review_kind",  # R5-2 新增契约键：auto 自动 / manual 人工授权重评
+            "rereview_reason",  # R5-2 新增契约键：授权理由（自动复盘为空串）
+        }
+        assert btc_reviews[0]["review_report_id"] == 1
+        assert btc_reviews[0]["review_kind"] == "auto"  # 默认值为 auto
+        assert btc_reviews[0]["rereview_reason"] == ""
+        assert btc_reviews[0]["evidence_reviews"] == [
+            {
+                "evidence_index": 1,
+                "fact_status": "confirmed",
+                "reasoning_status": "supported",
+                "explanation": "依据成立",
+            }
+        ]
+        assert btc_reviews[0]["outcome"] == {"data_status": "ok", "return_pct": 1.2}
+        assert btc_reviews[1]["outcome"] == {}  # 默认 outcome_json '{}' 解析为空对象
+        assert by_contract["ETH_USDT"]["research_reviews"] == []  # 未复盘标的给空数组
 
 
 # ---------- GET /api/research/live ----------

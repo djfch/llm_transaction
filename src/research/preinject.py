@@ -1,4 +1,4 @@
-"""预注入组装：冻结白名单与七类研报上下文（时间→日历→指标→快讯→时间线→判断史→因果链）。
+"""预注入组装：冻结白名单与八类研报上下文（时间→日历→指标→快讯→时间线→判断史→因果链→复盘记录）。
 
 数据源失败段标注不可用（不中断研报轮）；返回 Markdown 文本。
 从 tool_handlers 复用 ResearchToolDeps / 时间格式化 / 日期标记（单向依赖，无循环）。
@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from typing import Any
+
+from src.memory.models import ResearchReview
 from src.research.judgments import render_judgments
 
 from src.research.providers.base import (
@@ -157,7 +160,7 @@ async def _section_timeline(deps: ResearchToolDeps, hours: int = 24) -> str:
 
 
 async def _section_judgments(deps: ResearchToolDeps) -> str:
-    """读取近七天研报并按报告与合约渲染带验证结果的历史判断段落。
+    """读取近七天研报并按报告与合约渲染历史判断段落。
 
     参数：
         deps: ResearchToolDeps，提供研报仓库的共享依赖
@@ -168,12 +171,12 @@ async def _section_judgments(deps: ResearchToolDeps) -> str:
     reports = await deps.repo.research.list_reports(7)
     if not reports:
         return "## 历史研报结论\n（暂无记录，这是你的首次研报）"
-    title = f"## 历史研报结论（近 7 天，{len(reports)} 份，含验证结果）"
+    title = f"## 历史研报结论（近 7 天，{len(reports)} 份）"
     return await render_judgments(deps.repo.research, reports, title)
 
 
 async def _section_pending_links(deps: ResearchToolDeps) -> str:
-    """未闭合因果链段：前 10 条待验证当前版，带链 id 供 supersedes_id 引用。
+    """待跟踪因果链段：前 10 条待跟踪当前版，带链 id 供 supersedes_id 引用。
 
     不按时间淘汰（事件发展需要时间）；提示 LLM 事件有新进展时提交修正版。
 
@@ -181,14 +184,14 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
         deps: ResearchToolDeps，提供因果链仓库的共享依赖
 
     返回：
-        str，最多十条待验证当前版因果链及其编号的 Markdown 段落
+        str，最多十条待跟踪当前版因果链及其编号的 Markdown 段落
     """
     links = await deps.repo.research.list_pending_causal_links(limit=10)
     if not links:
-        return "## 未闭合因果链\n（暂无）"
+        return "## 待跟踪因果链\n（暂无）"
     lines = [
-        "## 未闭合因果链"
-        f"（前 {len(links)} 条，待验证中；事件有新进展请提交修正版并声明 supersedes_id）"
+        "## 待跟踪因果链"
+        f"（前 {len(links)} 条，跟踪中；事件有新进展请提交修正版并声明 supersedes_id）"
     ]
     for link in links:
         try:
@@ -199,6 +202,136 @@ async def _section_pending_links(deps: ResearchToolDeps) -> str:
         lines.append(
             f"- [链#{link.id}][{link.topic or '无主题'}] {nodes}（置信度 {link.confidence}）"
         )
+    return "\n".join(lines)
+
+
+_REVIEW_ENTRY_MAX_CHARS = 2000
+
+
+def _truncate_entry(text: str, max_chars: int) -> str:
+    """超长截断并标注原文长度（与复盘层同口径；本包自包含，不 import src/review/*）。
+
+    参数：
+        text: str，待处理的文本
+        max_chars: int，允许保留的最大字符数
+
+    返回：
+        str：未超限时原样返回；超限时截断并追加"…（已截断，原文共 N 字符）"
+    """
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n…（已截断，原文共 {len(text)} 字符）"
+
+
+def _format_review_outcome(outcome: dict[str, Any]) -> str:
+    """把复盘客观行情结果字典渲染成一行摘要（与复盘层口径一致的本地实现）。
+
+    参数：
+        outcome: dict[str, Any]，复盘记录 outcome_json 解析后的字典
+
+    返回：
+        str：一行客观结果摘要；无价格数据时只呈现状态与说明
+    """
+    status = outcome.get("data_status", "unknown")
+    if outcome.get("start_price") is None:
+        error = outcome.get("error") or ""
+        return f"data_status={status}（{error or '无价格数据'}）"
+    head = (
+        f"data_status={status}"
+        f"（K线 {outcome.get('candles_actual')}/{outcome.get('candles_expected')}）"
+        f" | 起价 {outcome['start_price']}"
+    )
+    tail = (
+        f" | 区间最高 {outcome.get('high')}（{outcome.get('max_up_pct')}%）"
+        f" | 区间最低 {outcome.get('low')}（{outcome.get('max_down_pct')}%）"
+    )
+    if outcome.get("end_price") is None:
+        # 窗口末端无完整 K 线：止价与涨跌幅缺失，只呈现起价与区间高低
+        return f"{head} → {outcome.get('error') or '止价缺失'}{tail}"
+    return f"{head} → 止价 {outcome['end_price']} | 涨跌 {outcome.get('return_pct')}%{tail}"
+
+
+def _format_review_entry(review: ResearchReview) -> str:
+    """把单条复盘记录渲染为多行完整文本（枚举+理由+逐项依据核对+改进建议+客观结果）。
+
+    空值字段整行跳过；坏 JSON 字段降级为空，不拖垮整段预注入。
+    首行主标识为复盘记录自身编号（复盘#{id}），与复盘工具历史查询
+    （tool_research._format_review_row）同命名空间，避免同一数字在「复盘记录」
+    与「复盘报告」两个序列间错配；复盘报告编号仅作附带标注（R7-3）。
+
+    参数：
+        review: ResearchReview，单条正式复盘批改记录
+
+    返回：
+        str：多行完整复盘文本（截断由调用方 _truncate_entry 统一负责）
+    """
+    lines = [
+        f"- [{_fmt_ts(review.created_at)}] 复盘#{review.id}"
+        f"（复盘报告#{review.review_report_id}） → "
+        f"研报#{review.report_id}/{review.contract}"
+        + (
+            f"（人工重评，替代复盘#{review.rereview_of_id or '—'}；"
+            f"授权理由：{review.rereview_reason}）"
+            if review.review_kind == "manual"
+            else ""
+        )
+        + "："
+    ]
+    for label, value, reason in (
+        ("方向关系", review.direction_relation, review.direction_reason),
+        ("推理质量", review.reasoning_quality, review.reasoning_review),
+        ("置信度合规", review.confidence_assessment, review.confidence_reason),
+    ):
+        if value:
+            lines.append(f"  {label}：{value}" + (f" —— {reason}" if reason else ""))
+    try:
+        evidence = json.loads(review.evidence_reviews_json)
+    except (TypeError, ValueError):
+        evidence = []
+    if isinstance(evidence, list) and evidence:
+        lines.append(
+            "  依据评价："
+            + "；".join(
+                f"[{e.get('evidence_index')}] 事实={e.get('fact_status')}"
+                f" 推理={e.get('reasoning_status')}：{e.get('explanation')}"
+                for e in evidence
+                if isinstance(e, dict)
+            )
+        )
+    if review.improvement_advice:
+        lines.append(f"  改进建议：{review.improvement_advice}")
+    try:
+        outcome = json.loads(review.outcome_json)
+    except (TypeError, ValueError):
+        outcome = {}
+    if isinstance(outcome, dict) and outcome:
+        lines.append(f"  客观结果：{_format_review_outcome(outcome)}")
+    return "\n".join(lines)
+
+
+async def _section_recent_reviews(deps: ResearchToolDeps) -> str:
+    """近期研报复盘记录段：最近 20 条正式复盘批改完整记录，按时间正序、单条超限截断。
+
+    不依附原研报是否在近 7 天窗口；同一研报被多次复盘时全部保留，
+    供研报 agent 识别反复出现的偏差（复盘记录是历史反馈，不是方向信号）。
+    每条渲染全部评价维度（枚举+理由）、逐项依据核对与客观结果，让研报
+    agent 能看到"为什么被这样批改"，而非只看到一个结论枚举。
+
+    参数：
+        deps: ResearchToolDeps，提供研报复盘仓库的共享依赖
+
+    返回：
+        str，近期复盘记录 Markdown 段落；无记录时返回空态说明
+    """
+    reviews = await deps.repo.research_review.list_reviews(limit=20)
+    if not reviews:
+        return "## 近期研报复盘记录\n（暂无）"
+    lines = [
+        f"## 近期研报复盘记录（最近 {len(reviews)} 条，按时间正序；"
+        f"每条超 {_REVIEW_ENTRY_MAX_CHARS} 字符截断）"
+    ]
+    for review in reviews:
+        lines.append(_truncate_entry(_format_review_entry(review), _REVIEW_ENTRY_MAX_CHARS))
     return "\n".join(lines)
 
 
@@ -223,7 +356,7 @@ def _section_watchlist(deps: ResearchToolDeps) -> str:
 
 
 async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
-    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→未闭合因果链）。
+    """组装第一轮 user 消息的预注入数据段（时间→日历→指标→快讯→时间线→判断史→待跟踪因果链→复盘记录）。
 
     日历与快讯拉取结果先增量写入事实层（timeline，代码管辖、LLM 零写权限）；
     首段标注当前北京时间（M12：给 LLM 提供时间锚点，防臆测未来数据；与数据源
@@ -247,5 +380,6 @@ async def build_preinjection(deps: ResearchToolDeps, hours: int = 24) -> str:
             await _section_timeline(deps, hours),
             await _section_judgments(deps),
             await _section_pending_links(deps),
+            await _section_recent_reviews(deps),
         ]
     )

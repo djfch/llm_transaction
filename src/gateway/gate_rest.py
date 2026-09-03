@@ -986,10 +986,12 @@ class GateRestGateway(GateOpenInterestMixin):
         from_ts: int | None = None,
         to_ts: int | None = None,
     ) -> list[Candle]:
-        """K 线查询：limit 路径可用，单次最多 2000 点。
+        """K 线查询：limit 与 from/to 区间两条路径均可用，limit 单次最多 2000 点。
 
-        公开参数 from_ts/to_ts 对应 SDK 的 _from/to；当前区间关键字尚未正确映射，
-        传入历史区间会被 gate-api 拒绝，修复前不要依赖该路径。
+        公开参数 from_ts/to_ts 映射到 SDK 的 _from/to（gate-api 的关键字参数名，
+        from 为 Python 关键字故 SDK 用 _from）；区间查询不带 limit 时单段窗口
+        不宜超过 2000 根 × 周期秒数，超宽窗口由调用方分段（见
+        review.research_outcome.GatewayAsyncCandleSource）。
 
         参数：
             contract: str，合约名称
@@ -999,7 +1001,7 @@ class GateRestGateway(GateOpenInterestMixin):
             to_ts: int | None，查询窗口结束时间戳
 
         返回：
-            list[Candle]：K 线查询：limit 路径可用，单次最多 2000 点
+            list[Candle]：K 线列表
 
         异常：
             ValueError：'limit 与 from/to 互斥，不能同时传' 所描述的条件发生时
@@ -1014,9 +1016,9 @@ class GateRestGateway(GateOpenInterestMixin):
         if limit is not None:
             kwargs["limit"] = limit
         if from_ts is not None:
-            kwargs["from_ts"] = from_ts
+            kwargs["_from"] = from_ts
         if to_ts is not None:
-            kwargs["to_ts"] = to_ts
+            kwargs["to"] = to_ts
         try:
             candles = self._api.list_futures_candlesticks(self._settle, contract, **kwargs)
             return [_to_candle(k) for k in candles]

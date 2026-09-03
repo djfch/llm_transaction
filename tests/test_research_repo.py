@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pytest
@@ -158,7 +159,7 @@ async def test_save_and_list_reports(repo: Repo) -> None:
 
 
 async def test_save_and_list_causal_links(repo: Repo) -> None:
-    """因果链落库：默认 pending 状态，按 report_id 关联。
+    """因果链落库：默认 tracking 状态，按 report_id 关联。
 
     参数：
         repo: Repo，测试数据库仓库
@@ -172,7 +173,7 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
         confidence=0.7,
         evidence_json='["金十"]',
     )
-    assert link.status == "pending"
+    assert link.status == "tracking"
     links = await repo.research.list_causal_links(days=7)
     assert len(links) == 1
     assert links[0].report_id == report.id
@@ -180,7 +181,7 @@ async def test_save_and_list_causal_links(repo: Repo) -> None:
 
 
 async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
-    """版本化字段落库：topic/supersedes_id/await_verification 存取一致。
+    """版本化字段落库：topic/supersedes_id/status 存取一致。
 
     参数：
         repo: Repo，测试数据库仓库
@@ -194,20 +195,20 @@ async def test_save_causal_link_versioning_fields(repo: Repo) -> None:
         confidence=0.6,
         topic="关税",
         supersedes_id=3,
-        await_verification=False,
+        status="concluded",
     )
     assert link.topic == "关税"
     assert link.supersedes_id == 3
-    assert link.await_verification is False
+    assert link.status == "concluded"
     got = await repo.research.get_causal_link(link.id)
     assert got is not None
-    assert got.topic == "关税" and got.supersedes_id == 3 and got.await_verification is False
-    # 缺省口径：无 supersedes_id / 未传 await_verification → 非修正版、按待验证
+    assert got.topic == "关税" and got.supersedes_id == 3 and got.status == "concluded"
+    # 缺省口径：无 supersedes_id / 未传 status → 非修正版、按待跟踪
     plain = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "b"}]', confidence=0.5, topic="关税"
     )
     assert plain.supersedes_id is None
-    assert plain.await_verification is True
+    assert plain.status == "tracking"
 
 
 async def test_save_causal_link_supersede_marks_old(repo: Repo) -> None:
@@ -249,7 +250,7 @@ async def test_get_causal_link_missing(repo: Repo) -> None:
 
 
 async def test_list_pending_causal_links(repo: Repo) -> None:
-    """未闭合池口径：只收 待验证声明 + 未被替代；排除 结论链/已被替代；按时间正序取前 N。
+    """待跟踪池口径：只收 status=tracking；排除 结论链/已被替代；按时间正序取前 N。
 
     参数：
         repo: Repo，测试数据库仓库
@@ -259,13 +260,13 @@ async def test_list_pending_causal_links(repo: Repo) -> None:
     report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
     p1 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "a"}]', confidence=0.6, topic="关税"
-    )  # 待验证（默认）
+    )  # 待跟踪（默认）
     await repo.research.save_causal_link(
         report_id=report.id,
         chain_json='[{"node": "b"}]',
         confidence=0.7,
         topic="关税",
-        await_verification=False,  # 结论链 → 不进池
+        status="concluded",  # 结论链 → 不进池
     )
     p2 = await repo.research.save_causal_link(
         report_id=report.id, chain_json='[{"node": "c"}]', confidence=0.8, topic="非农"
@@ -282,8 +283,7 @@ async def test_list_pending_causal_links(repo: Repo) -> None:
     )
     pending = await repo.research.list_pending_causal_links(limit=10)
     assert [link.id for link in pending] == [p1.id, p2.id, replacer.id]
-    assert all(link.status == "pending" for link in pending)
-    assert all(link.await_verification for link in pending)
+    assert all(link.status == "tracking" for link in pending)
     assert superseded.id not in [link.id for link in pending]
     # limit 截取：只取最新 2 条（正序返回）
     top2 = await repo.research.list_pending_causal_links(limit=2)
@@ -315,6 +315,31 @@ async def test_list_causal_links_topic_filter(repo: Repo) -> None:
     # limit 截取：最新 1 条
     top1 = await repo.research.list_causal_links(days=7, limit=1)
     assert [link.id for link in top1] == [a2.id]
+
+
+async def test_list_causal_links_topic_ignores_days(repo: Repo) -> None:
+    """指定主题查族谱不受 days 窗口限制：窗口外同主题旧链仍返回。
+
+    参数：
+        repo: Repo，测试数据库仓库
+    返回：
+        None，执行断言验证目标行为
+    """
+    report = await save_report_fixture(repo, report_type="us", direction="看空", confidence="高")
+    old = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "旧链"}]', confidence=0.6, topic="关税"
+    )
+    new = await repo.research.save_causal_link(
+        report_id=report.id, chain_json='[{"node": "新链"}]', confidence=0.6, topic="关税"
+    )
+    await repo._conn.execute(
+        "UPDATE causal_links SET created_at=? WHERE id=?", (time.time() - 30 * 86400, old.id)
+    )
+    await repo._conn.commit()
+    family = await repo.research.list_causal_links(days=7, topic="关税")
+    assert [link.id for link in family] == [old.id, new.id]  # 族谱含 30 天前旧链
+    recent = await repo.research.list_causal_links(days=7)
+    assert [link.id for link in recent] == [new.id]  # 无主题时窗口仍然生效
 
 
 async def test_list_reports_page(repo: Repo) -> None:

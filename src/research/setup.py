@@ -2,6 +2,8 @@
 
 密钥只从 .env 读取（JIN10_MCP_TOKEN / BLOCKBEATS_API_KEY / FRED_API_KEY）；
 key 缺失的源不装配（对应工具返回"未装配"哨兵），不阻塞其余源。
+bootstrap 只做编排；研报提示词写回调（research_prompt_save/research_prompt_rollback，
+供 server 端点注入）集中在这里（形状与 src/review/setup.py 的策略写回调一致）。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from src.config import ROOT, ResearchConfig, Settings
 from src.memory.repo import Repo
 from src.research.agent import ResearchAgent
 from src.research.market_data import ResearchMarketDataService
+from src.research.prompt_store import ResearchPromptStore, ResearchPromptValidationError
 from src.research.providers.base import ResearchDataProvider
 from src.research.providers.blockbeats import BlockbeatsSource
 from src.research.providers.fred import FredSource
@@ -26,11 +29,73 @@ from src.research.scheduler import ResearchScheduler
 
 @dataclass
 class ResearchComponents:
-    """研报子系统组件束：agent / 数据聚合器 / 定时调度器。"""
+    """研报子系统组件束：agent / 数据聚合器 / 定时调度器 / 提示词版本存储。"""
 
     agent: ResearchAgent
     data_provider: ResearchDataProvider
     scheduler: ResearchScheduler
+    # 研报提示词版本存储（issue #113）：bootstrap 创建并完成播种/对账后注入，
+    # 供 server 端版本查询与人工保存/回滚；测试直建组件束时可为 None
+    prompt_store: ResearchPromptStore | None = None
+
+    def _require_prompt_store(self) -> ResearchPromptStore:
+        """取研报提示词版本存储；未装配（None）时抛 RuntimeError。
+
+        参数：无
+
+        返回：
+            ResearchPromptStore：已装配的研报提示词版本存储
+
+        异常：
+            RuntimeError：prompt_store 为 None（组件束未经 bootstrap 完整装配）时抛出
+        """
+        if self.prompt_store is None:
+            raise RuntimeError("研报提示词版本存储未装配")
+        return self.prompt_store
+
+    async def research_prompt_save(self, content: str) -> dict:
+        """前端手动保存研报提示词：走 ResearchPromptStore（校验 + 版本落库 + 原子生效）。
+
+        特殊语义：仅"与当前提示词无差异"一条校验失败时视为幂等成功（重复保存不产新版本）；
+        其余校验失败原样上抛 ResearchPromptValidationError，由路由映 422。
+
+        参数：
+            content: str，前端提交的完整研报提示词文本
+
+        返回：
+            dict，保存状态及新版本编号；幂等保存时版本编号为 None
+            （{"saved", "version"}，与策略保存同一返回键结构）
+
+        异常：
+            RuntimeError：研报提示词版本存储未装配时抛出
+            ResearchPromptValidationError：内容存在无差异以外的校验错误时抛出
+        """
+        store = self._require_prompt_store()
+        try:
+            version = await store.revise_applied(content, reason="前端手动保存")
+        except ResearchPromptValidationError as exc:
+            if exc.no_diff_only:  # 唯一原因是"无差异"：结构化判定，不做文案子串匹配
+                return {"saved": True, "version": None}
+            raise
+        return {"saved": True, "version": version.id}
+
+    async def research_prompt_rollback(self, version_id: int) -> dict:
+        """把研报提示词回滚到指定历史版本，并记录一条新的回滚版本。
+
+        参数：
+            version_id: int，作为回滚来源的历史版本编号
+
+        返回：
+            dict，来源版本编号与回滚后新版本编号
+            （{"rolled_back_to", "version"}，与策略回滚同一返回键结构）
+
+        异常：
+            RuntimeError：研报提示词版本存储未装配时抛出
+            ResearchPromptValidationError：目标版本不存在时抛出（路由映 404）
+        """
+        store = self._require_prompt_store()
+        version = await store.rollback(version_id)
+        return {"rolled_back_to": version_id, "version": version.id}
 
 
 def _build_data_provider(cfg: ResearchConfig) -> ResearchDataProvider:
@@ -72,6 +137,7 @@ def build_research(
     candle_cache: object | None = None,
     gateway: object | None = None,
     watchlist: list[str] | None = None,
+    prompt_store: ResearchPromptStore | None = None,
 ) -> ResearchComponents:
     """装配研报代理、数据聚合器和调度器，并建立可选市场数据与事件通道。
 
@@ -84,6 +150,8 @@ def build_research(
         candle_cache: object | None，逐标的 K 线缓存
         gateway: object | None，逐标的行情与合约查询网关
         watchlist: list[str] | None，本轮允许研究的合约白名单
+        prompt_store: ResearchPromptStore | None，研报提示词版本存储（bootstrap 已播种/对账，
+            issue #113）；None 时组件束仅不携带该引用，不影响研报运行
 
     返回：
         ResearchComponents，已接线的研报代理、数据聚合器与调度器
@@ -105,6 +173,9 @@ def build_research(
         market_data=market_data,
         watchlist=watchlist or [],
         timeout_seconds=cfg.timeout_seconds,
+        prompt_store=prompt_store,  # R6-4：prompt 正文/md5/版本归因经其锁内快照同刻取齐
     )
     scheduler = ResearchScheduler(settings, agent, repo)
-    return ResearchComponents(agent=agent, data_provider=data_provider, scheduler=scheduler)
+    return ResearchComponents(
+        agent=agent, data_provider=data_provider, scheduler=scheduler, prompt_store=prompt_store
+    )

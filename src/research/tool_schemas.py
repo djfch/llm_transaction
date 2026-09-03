@@ -49,7 +49,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "get_macro_series": {
-        "description": "获取 FRED 宏观历史序列（趋势判断用）：最新值+窗口变化+最近观测表格。别名：cpi/pce/fed_funds_rate/10y_treasury/m2/dollar_index/vix/unemployment/nonfarm_payrolls 等，或直接传 FRED series ID",
+        "description": "获取 FRED 宏观历史序列（趋势判断用）：最新值+窗口变化+最近观测表格。别名：cpi/pce/fed_funds_rate/10y_treasury/m2/dollar_index/vix/unemployment/nonfarm_payrolls 等，或直接传 FRED series ID。默认回溯近一年；复盘回看历史区间时用 start_ts/end_ts 指定窗口",
         "parameters": {
             "type": "object",
             "properties": {
@@ -57,7 +57,18 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "指标别名或 FRED series ID，如 cpi / DGS10",
                 },
-                "look_back": {"type": "integer", "description": "回溯天数（30-1825），默认 365"},
+                "look_back": {
+                    "type": "integer",
+                    "description": "回溯天数（30-1825），默认 365；提供 start_ts 后失效",
+                },
+                "start_ts": {
+                    "type": "number",
+                    "description": "窗口起点 Unix 秒（可选；提供后按 start_ts 至 end_ts/当前时间 取数）",
+                },
+                "end_ts": {
+                    "type": "number",
+                    "description": "窗口终点 Unix 秒（可选，缺省为当前时间；须大于 start_ts）",
+                },
             },
             "required": ["indicator"],
         },
@@ -93,12 +104,32 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "read_timeline": {
-        "description": "读取事件时间线（事实层，近 N 天客观记录：时间+事件+来源），看跨天因果链",
+        "description": "读取事件时间线（事实层客观记录：时间+事件+来源），看跨天因果链。默认近 N 天；复盘回看历史区间时用 start_ts/end_ts 精确窗口，可按关键词/类型/来源过滤",
         "parameters": {
             "type": "object",
             "properties": {
-                "days": {"type": "integer", "description": "回溯天数（1-30），默认 7"},
+                "days": {
+                    "type": "integer",
+                    "description": "回溯天数（1-30），默认 7；提供 start_ts 后失效",
+                },
                 "limit": {"type": "integer", "description": "条数上限（1-500），默认 200"},
+                "start_ts": {
+                    "type": "number",
+                    "description": "窗口起点 Unix 秒（可选；提供后按精确窗口取数）",
+                },
+                "end_ts": {
+                    "type": "number",
+                    "description": "窗口终点 Unix 秒（可选；须大于 start_ts）",
+                },
+                "keyword": {"type": "string", "description": "标题关键词过滤（可选）"},
+                "kind": {
+                    "type": "string",
+                    "description": "记录类型过滤（可选）：flash 快讯 / calendar 日历事件 / indicator 指标快照",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "来源过滤（可选）：jin10 / blockbeats",
+                },
             },
             "required": [],
         },
@@ -115,15 +146,16 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "read_causal_links": {
         "description": (
-            "读取已提交因果链（含历史版与全部状态，近 N 天）：链 id/主题/待验证或结论/"
-            "状态/节点链/置信度。判断某主题事件是否已提交过链、是否该提交修正版时用"
+            "读取已提交因果链（含历史版与全部状态；指定 topic 查该主题全历史族谱，"
+            "否则近 N 天）：链 id/主题/待跟踪或结论/状态/节点链/置信度。"
+            "判断某主题事件是否已提交过链、是否该提交修正版时用"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "topic": {
                     "type": "string",
-                    "description": "事件主题过滤（如 非农/关税），缺省返回最近链",
+                    "description": "事件主题过滤（如 非农/关税），指定后查全历史族谱（days 失效）",
                 },
                 "days": {"type": "integer", "description": "回溯天数（1-30），默认 7"},
                 "limit": {"type": "integer", "description": "条数上限（1-50），默认 20"},
@@ -136,8 +168,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "提交本次分析得出的链式因果链（唯一写工具）：chain 为有序节点数组"
             "（事件→推断→市场反应→标的结论），节点可带 kind 与 timeline_id 引用事实层；"
             "整链带 confidence(0-1)、evidence 依据与 topic（事件主题，必填）。"
-            "默认待验证（await_verification=true，事件未走完可提交 1 节点起的半成品，"
-            "进入未闭合监控池继续跟进）；事件已定论传 false（须 2-6 节点完整推理）。"
+            "默认待跟踪（concluded=false，事件未走完可提交 1 节点起的半成品，"
+            "进入待跟踪池继续跟进）；事件已定论传 concluded=true（须 2-6 节点完整推理）。"
             "修正旧链时传 supersedes_id（同主题当前版），旧链自动标记已被替代。"
             "无需传研报 id——代码在本轮研报落库后自动回填关联。提交真实推导过的链，不要凑数"
         ),
@@ -146,7 +178,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "properties": {
                 "chain": {
                     "type": "array",
-                    "description": "有序节点链（待验证 1-6 个节点，结论 2-6 个节点）",
+                    "description": "有序节点链（待跟踪 1-6 个节点，结论 2-6 个节点）",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -180,9 +212,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "type": "integer",
                     "description": "被本链替代的旧链 id（修正版用；须同主题且为当前版，可空）",
                 },
-                "await_verification": {
+                "concluded": {
                     "type": "boolean",
-                    "description": "是否待验证（默认 true）：true=事件未走完的中间态，继续监控；false=事件已定论的结论链",
+                    "description": "事件是否已定论（默认 false）：false=待跟踪中间态（可 1 节点起，继续监控）；true=结论链（须 2-6 节点完整推理）",
                 },
             },
             "required": ["chain", "confidence", "topic"],

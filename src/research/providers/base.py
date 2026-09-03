@@ -138,12 +138,16 @@ class _BlockbeatsLike(Protocol):
 class _FredLike(Protocol):
     """FRED 源接口（鸭子类型）。"""
 
-    async def get_macro_series(self, indicator: str, look_back: int = 365) -> str:
+    async def get_macro_series(
+        self, indicator: str, look_back: int = 365, end_ts: float | None = None
+    ) -> str:
         """拉取一条 FRED 宏观序列并格式化为 Markdown 文本。
 
         参数：
             indicator: str，宏观指标名（由实现方解析为 FRED 序列 id）
             look_back: int，回溯天数，缺省为 365
+            end_ts: float | None，窗口终点 Unix 秒；缺省为当前时间
+                （复盘类场景回看历史区间用）
 
         返回：
             str：Markdown 文本（最新值 + 窗口变化 + 最近观测表格）
@@ -350,12 +354,15 @@ class ResearchDataProvider:
         self.flash_cache.update({i.id: i for i in items})
         return items[:limit]
 
-    async def get_macro_series(self, indicator: str, look_back: int = 365) -> str:
+    async def get_macro_series(
+        self, indicator: str, look_back: int = 365, end_ts: float | None = None
+    ) -> str:
         """FRED 宏观序列。
 
         参数：
             indicator: str，宏观指标代码
             look_back: int，宏观序列回溯长度
+            end_ts: float | None，窗口终点 Unix 秒；缺省为当前时间
         返回：
             str，FRED 宏观序列
         异常：
@@ -363,7 +370,7 @@ class ResearchDataProvider:
         """
         if self._fred is None:
             raise ResearchSourceError("FRED 源未装配")
-        return await self._fred.get_macro_series(indicator, look_back)
+        return await self._fred.get_macro_series(indicator, look_back, end_ts=end_ts)
 
     async def get_prediction_markets(self, topic: str, limit: int = 6) -> str:
         """Polymarket 预测概率。

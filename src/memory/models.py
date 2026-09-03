@@ -123,6 +123,13 @@ class StrategyVersion(BaseModel):
     report_id: int | None = None
     created_at: float
     status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
+    # 草稿基线 md5（issue #113 CAS）：复盘轮初采样的「当前生效内容」摘要，生效时与最新
+    # applied 版本比对防陈旧草稿覆盖人工变更；None = 历史行/人工即时生效行，回退旧 id 比较
+    base_md5: str | None = None
+    # 草稿基线 applied 身份（issue #113 R6-3）：LLM 实读时点的最新 applied 版本 id，
+    # 生效时身份比对防 ABA（人工改走又改回同内容时 md5 不变、md5 比对漏检）；
+    # None = 采样时无 applied 版本/历史行/人工即时生效行，只做文件 md5 校验
+    base_applied_version_id: int | None = None
 
 
 class IndicatorConfigVersion(BaseModel):
@@ -140,6 +147,10 @@ class IndicatorConfigVersion(BaseModel):
     report_id: int | None = None
     created_at: float
     status: str = "applied"  # applied 已生效 / draft 草稿 / discarded 已废弃（issue #62/#73）
+    # 草稿基线 md5（issue #113 CAS）：语义同 StrategyVersion.base_md5
+    base_md5: str | None = None
+    # 草稿基线 applied 身份（issue #113 R6-3）：语义同 StrategyVersion.base_applied_version_id
+    base_applied_version_id: int | None = None
 
 
 class ReviewReport(BaseModel):
@@ -198,13 +209,18 @@ class ResearchReport(BaseModel):
     """研报报告头：逐标的结论统一存于 ResearchAssetView。
 
     report_type 取值：manual（手动触发）/ asia_open / europe_open / us_open（三盘定时 slot）；
-    schema_version 固定为 2；error 非空表示本次研报失败且没有逐标的结论；
-    round_id 为产生本研报的审计轮 id。
+    schema_version 取值：2（历史代际）/ 3（当前代际，issue #113 起写入）；error 非空表示
+    本次研报失败且没有逐标的结论；round_id 为产生本研报的审计轮 id；
+    research_prompt_md5 为生成本研报所用的 research_prompt.md 正文 md5（与
+    research_prompt_versions.md5 关联；空串 = 功能上线前的历史研报，不回填）；
+    research_prompt_version_id 为构建 prompt 时点解析到的版本 id（R5-4 起写入，
+    消除复盘侧按 md5+时点反解的歧义；NULL = 历史研报或构建时版本表无对应 applied
+    版本，不回填，复盘侧回退 md5 反解）。
     """
 
     id: int
     report_type: str
-    schema_version: int = 2
+    schema_version: int = 3
     summary: str = ""
     cross_market_view: str = ""
     global_risks_json: str = "[]"
@@ -212,6 +228,8 @@ class ResearchReport(BaseModel):
     error: str = ""
     round_id: str = ""
     created_at: float
+    research_prompt_md5: str = ""
+    research_prompt_version_id: int | None = None
 
 
 class ResearchAssetView(BaseModel):
@@ -231,21 +249,17 @@ class ResearchAssetView(BaseModel):
     risks_json: str = "[]"
     narrative: str = ""
     market_context_json: str = "{}"
-    verify_result: str = ""
     created_at: float
 
 
 class CausalLink(BaseModel):
-    """因果链（分析笔记）：研报 agent 提交的链式因果推导，复盘验证状态。
+    """因果链（分析笔记）：研报 agent 提交的链式因果推导。
 
     chain_json 为有序节点链 JSON（node/kind/timeline_id）；
-    status 取值：pending（待验证）/ verified（复盘确认）/ failed（复盘否决）/
+    status 取值：tracking（待跟踪，事件仍在发展）/ concluded（已结论）/
     superseded（已被更新版替代）；
-    broken_at 为断点节点下标（复盘标记，None = 未定位）；
     topic 为事件主题（同主题多次提交聚合成族）；
-    supersedes_id 为新链声明的替代目标（版本化：旧链保留留档）；
-    await_verification 为 agent 显式声明（True=待验证中间态，允许半成品，
-    进入未闭合监控池；False=结论链）。
+    supersedes_id 为新链声明的替代目标（版本化：旧链保留留档）。
     """
 
     id: int
@@ -253,9 +267,100 @@ class CausalLink(BaseModel):
     chain_json: str
     confidence: float
     evidence_json: str = "[]"
-    status: str = "pending"
-    broken_at: int | None = None
+    status: str = "tracking"
     topic: str = ""
     supersedes_id: int | None = None
-    await_verification: bool = True
     created_at: float
+
+
+class ResearchReview(BaseModel):
+    """研报复盘记录：复盘 agent 对一份研报中单个合约结论的批改（issue #113）。
+
+    review_report_id 指向产生本记录的复盘报告；report_id+contract 定位被复盘的
+    逐标的结论；同一份复盘报告内 (report_id, contract) 唯一，同一研报可被多次复盘。
+    direction_relation（方向关系）/reasoning_quality（推理质量）/confidence_assessment
+    （置信度合规）为枚举评价，对应 direction_reason/reasoning_review/confidence_reason
+    为各枚举的评价理由文本；improvement_advice（改进建议）为自由文本；
+    evidence_reviews_json 为逐条依据评价列表（与原研报 evidence 一一对应，后端强制
+    1:1 校验，每条含 evidence_index/fact_status/reasoning_status/explanation）；
+    outcome_json 为代码按历史 K 线计算的客观行情结果（LLM 不可写）。
+    review_kind 取值：auto（自动复盘）/ manual（人工授权重评，issue #113 R5-2）；
+    rereview_reason 为人工授权理由原文（自动复盘为空串）；rereview_of_id 指向被
+    本条重评替代的上一条复盘记录（首次复盘为 None）。
+    """
+
+    id: int
+    review_report_id: int
+    report_id: int
+    contract: str
+    direction_relation: str = ""
+    direction_reason: str = ""
+    reasoning_quality: str = ""
+    reasoning_review: str = ""
+    evidence_reviews_json: str = "[]"
+    confidence_assessment: str = ""
+    confidence_reason: str = ""
+    improvement_advice: str = ""
+    outcome_json: str = "{}"
+    created_at: float
+    review_kind: str = "auto"
+    rereview_reason: str = ""
+    rereview_of_id: int | None = None
+
+
+class ResearchRereviewRequest(BaseModel):
+    """人工重评授权（issue #113 R5-2）：人工在研报详情页登记的复权重评许可。
+
+    同一 (report_id, contract) 最多一条未消费授权（部分唯一索引强制）；复盘
+    submit 命中未消费授权才放行人工重评记录，落库同事务把 consumed_round_id
+    绑定为消费它的复盘轮次编号（空串 = 待消费）。授权行本身即创建审计记录
+    （reason/requested_by/created_at），不另走审计层。
+    """
+
+    id: int
+    report_id: int
+    contract: str
+    reason: str
+    requested_by: str = "human"
+    created_at: float
+    consumed_round_id: str = ""
+
+
+class ResearchPromptVersion(BaseModel):
+    """研报提示词版本：content 为 research_prompt.md 正文完整原文（issue #113）。
+
+    md5 与 research_reports.research_prompt_md5 关联（研报落库时记录所用正文 md5）。
+    created_by 取值：human（人工修改/初始播种）/ review_agent（复盘 agent 改写）/
+    rollback（回滚）。review_report_id 指向触发本版本的复盘报告（人工版本为 None）。
+    status 取值：applied 已生效 / draft 草稿 / discarded 已废弃。
+    """
+
+    id: int
+    content: str
+    md5: str
+    created_by: str
+    reason: str
+    review_report_id: int | None = None
+    created_at: float
+    status: str = "applied"
+    # 草稿基线 md5（issue #113 CAS）：语义同 StrategyVersion.base_md5
+    base_md5: str | None = None
+    # 草稿基线 applied 身份（issue #113 R6-3）：语义同 StrategyVersion.base_applied_version_id
+    base_applied_version_id: int | None = None
+
+
+class ResearchReviewCandidate(BaseModel):
+    """研报复盘候选：一份研报中已到期且尚未被正式复盘的单条逐标的结论（issue #113）。
+
+    由 research_review_repo.list_review_candidates 的联表查询构造（非数据表行）；
+    due_at 为报告创建时间 + horizon 窗口秒数（到期时刻），按它升序返回。
+    """
+
+    report_id: int
+    contract: str
+    direction: str
+    confidence: str
+    horizon: str
+    report_type: str
+    report_created_at: float
+    due_at: float

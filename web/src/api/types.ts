@@ -526,13 +526,43 @@ export interface ResearchAssetSummary {
   dataStatus: string
 }
 
+/** 逐条依据评价：与原研报 evidence 一一对应（evidenceIndex 为原依据序号，从 0 开始） */
+export interface ResearchEvidenceReview {
+  evidenceIndex: number // 原研报 evidence 的序号（从 0 开始）
+  factStatus: string // 事实核对枚举：confirmed/contradicted/unverifiable
+  reasoningStatus: string // 推理支撑枚举：supported/partially_supported/unsupported/counterevidence/unverifiable
+  explanation: string // 评价说明（含核对来源）
+}
+
+/**
+ * 研报复盘记录：复盘 agent 对一份研报中单个合约结论的批改（issue #113）。
+ * 挂在研报详情 assetViews[].researchReviews 下（同一研报可被多次复盘，故为数组）；
+ * GET /api/research/reports/{id} 返回（evidence_reviews/outcome 已由后端解析为对象）。
+ */
+export interface ResearchReviewItem {
+  id: number // 复盘记录 ID
+  reviewReportId: number // 产生本记录的复盘报告 ID（由 review_report_id 适配）
+  directionRelation: string // 方向关系枚举：realized/diverged/digested/invalidated/unverifiable
+  directionReason: string // 方向关系评价理由
+  reasoningQuality: string // 推理质量枚举：sound/partial/flawed/unreviewable
+  reasoningReview: string // 推理质量评价复核文本
+  evidenceReviews: ResearchEvidenceReview[] // 逐条依据评价（与原研报 evidence 1:1）
+  confidenceAssessment: string // 置信度合规枚举：appropriate/too_high/too_low/unreviewable
+  confidenceReason: string // 置信度合规评价理由
+  improvementAdvice: string // 改进建议
+  outcome: Record<string, unknown> // 代码按历史 K 线计算的客观行情结果（LLM 不可写）
+  createdAt: string // 复盘时间（ISO 字符串，由 created_at(Unix秒) 适配）
+  reviewKind?: string // 复盘种类：auto 自动复盘 / manual 人工授权重评（旧契约缺省视为 auto）
+  rereviewReason?: string // 人工重评授权理由（仅 manual 记录有值，auto 为空串）
+}
+
 /** 逐标的结论详情；marketContext(市场快照)只保存在后端，不进入 API。 */
 export interface ResearchAssetDetail extends ResearchAssetSummary {
   evidence: string[]
   risks: string[]
   narrative: string
-  verifyResult: string
   time: string
+  researchReviews?: ResearchReviewItem[] // 该标的的研报复盘记录（无复盘为 []；旧契约缺省）
 }
 
 /** 研报摘要：报告头只含当前协议字段，成功项必须有逐标的摘要。 */
@@ -546,11 +576,18 @@ export interface ResearchReportSummary extends LLMIdentityInfo {
   assetViews: ResearchAssetSummary[]
   error: string
   roundId: string
+  researchPromptMd5?: string // 生成本研报所用 research_prompt.md 正文 md5（旧数据缺省）
+  researchPromptVersionId?: number // 构建时点精确归因的提示词版本 id（R5-4；旧数据缺省/为 null）
   time: string
 }
+/** 人工重评授权登记响应（POST /api/review/research/rereview，R5-2）：只需 id 与幂等标记，其余为请求回显 */
+export interface ResearchRereviewAck {
+  id: number // 授权记录 ID（界面用于回显授权编号）
+  reused: boolean // true = 幂等命中既有未消费授权（未新建，理由保持首次登记值）
+}
+
 /** 因果链节点：chain 已解析为有序数组（timeline_id 溯源事实层 timeline 条目，可缺省） */
-export interface ChainNode {
-  node: string // 节点内容（事件/数据/判断的描述文本）
+export interface ChainNode {  node: string // 节点内容（事件/数据/判断的描述文本）
   kind: string // 节点类型（中文自由文本：事件/推断/市场反应/标的结论；空串降级）
   timeline_id?: number // 溯源 timeline 条目 ID（有值时小字标注）
 }
@@ -559,14 +596,12 @@ export interface ChainNode {
 export interface CausalLinkView {
   id: number // 因果链 ID
   reportId: number // 归属研报 ID（由 report_id 适配）
-  chain: ChainNode[] // 有序节点链（待验证 1-6 节点 / 结论 2-6 节点）
+  chain: ChainNode[] // 有序节点链（跟踪中 1-6 节点 / 已结论 2-6 节点）
   confidence: number // 链式置信度（0-1）
   evidence: string[] // 支撑证据列表
-  status: string // 状态：pending(待验证) / verified(已确认) / failed(已否决) / superseded(已被替代)
-  brokenAt: number | null // 断点节点下标（复盘标记；null = 未定位）
+  status: string // 状态：tracking(跟踪中) / concluded(已结论) / superseded(已被替代)
   topic: string // 事件主题（同主题链聚合成族；空串 = 旧数据无主题）
   supersedesId: number | null // 本链替代的旧链 ID（修正版有值；null = 非修正版）
-  awaitVerification: boolean // 待验证声明：true=未闭合中间态（继续监控）/ false=结论链
   time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
 }
 
@@ -629,6 +664,22 @@ export interface StrategyVersionDetail extends StrategyVersion {
   content: string // 策略书完整原文
 }
 
+/** 研报提示词版本（列表项不含 content 全文）：GET /api/research/prompt/versions */
+export interface ResearchPromptVersion {
+  id: number // 版本号（vN 的 N）
+  md5: string // 提示词原文 md5（与研报记录 research_prompt_md5 关联）
+  createdBy: string // 来源：human(人工) / review_agent(复盘) / rollback(回滚)
+  reason: string // 变更理由
+  reviewReportId: number | null // 触发本版本的复盘报告 ID（人工版本为 null）
+  time: string // 创建时间（ISO 字符串，由 created_at(Unix秒) 适配）
+  status: string // 状态：applied(已生效) / draft(草稿) / discarded(已废弃)
+}
+
+/** 研报提示词版本详情：GET /api/research/prompt/versions/{id}（含 content 全文） */
+export interface ResearchPromptVersionDetail extends ResearchPromptVersion {
+  content: string // 研报提示词完整原文
+}
+
 /** 回滚结果：POST /api/strategy/rollback/{id}（回滚 = 写回历史内容 + 记 rollback 新版本） */
 export interface RollbackResult {
   rolledBackTo: number // 回滚目标版本号
@@ -641,7 +692,8 @@ export interface RollbackResult {
  * round(data={round_id, ok, wake_source}) / ticker（按合约节流，data={contract,last}） /
  * trades_updated(data={contracts, count}，成交落库成功，本批合约去重+笔数) /
  * review_round_start(data={round_id}) / review_round(data={round_id, ok})（复盘轮开始/结束）/
- * research_round_start(data={round_id}) / research_round(data={round_id, ok})（研报轮开始/结束）；
+ * research_round_start(data={round_id}) / research_round(data={round_id, ok})（研报轮开始/结束）/
+ * research_prompt_updated（复盘 agent 修订研报提示词落版本即推，无 payload，仅失效信号）；
  * 注意 round 的 data 并非完整 RoundSummary（无 started_at/summary），trades_updated
  * 也不携带成交明细，两者均只作失效信号——消费方应据事件重拉 REST，勿把 payload 当数据直接渲染；
  * 后端当前不生产 trade/position；类型仅供 mock 使用，真实消费前必须按后端实际事件接线。
@@ -657,9 +709,10 @@ export type WsMessage =
   | { type: 'strategy_updated' }
   | { type: 'indicator_config_updated' } // 指标短名单变更：payload 无约定，仅作失效信号重拉 REST
   | { type: 'review_round_start'; data: { round_id: string } } // 复盘轮开始：进度条进入进行中态，实时数据走 /api/review/live
-  | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）
+  | { type: 'review_round'; data: { round_id: string; ok: boolean; applied?: boolean; apply_failed_files?: string[] } } // 复盘轮结束：失效信号；applied=false 表示草稿未生效需人工核对（issue #102）；apply_failed_files 按通道指明未生效文件（issue #113 R9，仅失败时携带）
   | { type: 'research_round_start'; data: { round_id: string } } // 研报轮开始：进度条进入进行中态，实时数据走 /api/research/live
   | { type: 'research_round'; data: { round_id: string; ok: boolean } } // 研报轮结束：仅作失效信号，消费方重拉研报列表
+  | { type: 'research_prompt_updated' } // 复盘修订研报提示词落版本即推：仅失效信号，抽屉内编辑器与版本列表重拉 REST
 
 /** REST 客户端统一接口（http.ts 真实实现 / mock.ts 假数据实现） */
 export interface ApiClient {
@@ -725,6 +778,12 @@ export interface ApiClient {
   getResearchReport(id: number): Promise<ResearchReportDetail>
   /** 手动触发研报；409=生成中、503=LLM 未配置、422=hours 越界（ApiError.detail 可读）。 */
   runResearch(reportType?: string, hours?: number): Promise<RunResearchResult>
+  /** 登记人工重评授权（R5-2）；404=目标不存在、409=目标未被正式复盘、422=理由为空（ApiError.detail 可读）。 */
+  requestResearchRereview(
+    reportId: number,
+    contract: string,
+    reason: string,
+  ): Promise<ResearchRereviewAck>
   /** 实时研报状态：形状同 getReviewLive（进行中 ended_at 为 null），无研报轮时 round 为 null；带 roundId 时按该轮直查（查无此轮/他类轮回 round null）。 */
   getResearchLive(roundId?: string): Promise<ResearchLive>
   /** 自动研报的下次执行时间与官方日历状态。 */
@@ -739,4 +798,16 @@ export interface ApiClient {
   getStrategyDiff(fromId: number, toId: number): Promise<string>
   /** 回滚到指定策略版本（生成 rollback 新版本）；404 经 ApiError 抛出。 */
   rollbackStrategy(id: number): Promise<RollbackResult>
+  /** 当前研报提示词原文（text/plain）。 */
+  getResearchPrompt(): Promise<string>
+  /** 保存研报提示词（校验失败 422 经 ApiError 抛出）；响应为原文回显。 */
+  putResearchPrompt(content: string): Promise<string>
+  /** 研报提示词版本列表（最新在前，不含 content 全文）。 */
+  getResearchPromptVersions(): Promise<ResearchPromptVersion[]>
+  /** 研报提示词版本详情（含 content 全文）；404 经 ApiError 抛出。 */
+  getResearchPromptVersion(id: number): Promise<ResearchPromptVersionDetail>
+  /** 两版本研报提示词 unified diff（纯文本）。 */
+  getResearchPromptDiff(fromId: number, toId: number): Promise<string>
+  /** 回滚到指定研报提示词版本（生成 rollback 新版本）；404 经 ApiError 抛出。 */
+  rollbackResearchPrompt(id: number): Promise<RollbackResult>
 }

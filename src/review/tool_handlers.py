@@ -57,9 +57,47 @@ class ReviewToolDeps:
     # 失败/取消置 discarded——写工具不再直接改文件
     strategy_draft_ids: list[int] = dataclass_field(default_factory=list)
     indicator_draft_ids: list[int] = dataclass_field(default_factory=list)
-    # 生效失败的草稿 id（磁盘满等持久性失败）：随 review_round 事件暴露给前端
-    # （issue #100：报告成功但文件未更新必须可观察）
-    apply_failed_ids: list[int] = dataclass_field(default_factory=list)
+    # 生效失败的草稿（磁盘满等持久性失败）：(通道键, 草稿版本 id)，通道键取值
+    # strategy/indicator_config/research_prompt；随 review_round 事件暴露给前端
+    # （issue #100：报告成功但文件未更新必须可观察；issue #113 R9：带通道以指明文件）
+    apply_failed_ids: list[tuple[str, int]] = dataclass_field(default_factory=list)
+    # 研报复盘（issue #113）：已读案例缓存（(report_id, contract) → outcome/evidence_count），
+    # submit_research_review 的前置校验与 outcome 附加来源
+    loaded_research_cases: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
+    # 研报复盘暂存区：submit 校验通过的草稿随复盘报告单事务落库（C4 bundle），报告失败随 deps 丢弃
+    pending_research_reviews: dict[tuple[int, str], dict] = dataclass_field(default_factory=dict)
+    # K 线只读来源（AsyncCandleSource 异步窄协议，生产为 GatewayAsyncCandleSource 包网关）；
+    # None 时案例客观结果降级为 unavailable
+    candle_source: Any | None = None
+    # 研报数据聚合器（issue #113 F9，复盘侧 get_macro_series 的数据源）；
+    # None（未装配）时该工具返回「未装配」降级提示
+    research_data_provider: Any | None = None
+    # 研报提示词版本存储（issue #113 草稿模式同策略书）：None（未装配）时
+    # submit_research_prompt_revision / get_research_prompt_versions 返回「未装配」降级提示；
+    # research_prompt_version_id 为 submit 成功时置位（轮末版本↔报告关联），
+    # research_prompt_draft_ids 为本轮草稿（成功统一生效、失败废弃）
+    research_prompt_store: Any | None = None
+    research_prompt_version_id: int | None = None
+    research_prompt_draft_ids: list[int] = dataclass_field(default_factory=list)
+    # 本轮三通道草稿基线 md5（issue #113 CAS）：LLM 实读时点的「当前生效内容」摘要，
+    # 键为通道键（strategy/indicator_config/research_prompt）；三个修订工具落草稿时
+    # 取本通道值盖章，轮末生效按基线比对防陈旧草稿覆盖人工变更；空字典（未采样，
+    # 如测试直接构造 deps）时草稿 base_md5 落 NULL，回退旧 id 比较行为
+    base_md5_by_channel: dict[str, str] = dataclass_field(default_factory=dict)
+    # 与 base_md5_by_channel 同点采样的基线 applied 版本身份（issue #113 R6-3）：
+    # 键同为通道键；轮末生效时先按此身份判定基线版本是否仍在位（防人工变更/回滚/
+    # ABA），再按文件内容 md5 比对（防热编辑）；采样时无 applied 版本则该通道无此键
+    base_applied_id_by_channel: dict[str, int] = dataclass_field(default_factory=dict)
+    # 候选扫描游标本轮 lease（issue #113 R6-1）：list_research_review_candidates
+    # 首次扫描时把库中游标读入内存（scan_cursor_loaded=True），本轮所有扫描只在内存
+    # 推进（scan_cursor/scan_tail 以最后一次调用为准，不 sticky），每条预检追加
+    # scan_log（(due_at, report_id, contract, usable)）；游标不再随列出落库——本轮
+    # 复盘报告成功时由 bundle 事务按「已复盘 + 已跳过」一次性 ack 落库，本轮失败
+    # 或未提交报告时库中游标原地不动、下轮从未复盘的可用候选重扫
+    scan_cursor: tuple[float, int, str] | None = None
+    scan_cursor_loaded: bool = False
+    scan_tail: bool = False
+    scan_log: list[tuple[float, int, str, bool]] = dataclass_field(default_factory=list)
 
 
 # ---------- 参数校验辅助 ----------
@@ -458,11 +496,21 @@ async def submit_strategy_revision(deps: ReviewToolDeps, args: dict) -> str:
     new_prompt_md = _need_str(args, "new_prompt_md")
     reason = _need_str(args, "reason")
     try:
-        version = await deps.store.revise(new_prompt_md, reason, created_by="review_agent")
+        # 草稿盖基线章（issue #113 CAS）：轮末生效时按基线比对，防陈旧草稿覆盖人工变更
+        version = await deps.store.revise(
+            new_prompt_md,
+            reason,
+            created_by="review_agent",
+            base_md5=deps.base_md5_by_channel.get("strategy"),
+            base_applied_version_id=deps.base_applied_id_by_channel.get("strategy"),
+        )
     except StrategyValidationError as e:
         return "校验拒绝：" + "；".join(e.reasons) + "（原策略书未改动，修正后可重新提交）"
     deps.created_version_id = version.id
-    deps.strategy_draft_ids.append(version.id)
+    # issue #113 F11：同轮重复提交先废弃旧草稿，保证本轮最多一份草稿待生效
+    for old_id in deps.strategy_draft_ids:
+        await deps.store.discard_draft(old_id)
+    deps.strategy_draft_ids = [version.id]
     return (
         f"校验通过，修订已存为草稿 v{version.id}（md5={version.md5[:8]}）；"
         "本轮复盘报告提交成功后统一生效，报告失败则自动废弃"

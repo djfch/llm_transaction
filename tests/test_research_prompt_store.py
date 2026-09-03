@@ -1,0 +1,645 @@
+"""研报提示词版本存储（ResearchPromptStore）生命周期测试（issue #113）。
+
+覆盖：启动播种、草稿修订→生效、即时修订、写前校验拒绝、失败废弃、
+启动对账（孤儿草稿清理 + 文件与库不一致恢复）、回滚记新版本。
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from src.memory.db import Database
+from src.memory.repo import Repo
+from src.research.prompt_store import ResearchPromptStore, ResearchPromptValidationError
+
+_INIT = "初始研报提示词：" + "先事实后判断，逐标的给结论。" * 10
+
+
+@pytest.fixture
+async def env(tmp_path):
+    """构造研报提示词存储测试环境：临时数据库 + 临时提示词文件。
+
+    参数：
+        tmp_path: pytest 临时目录夹具
+
+    返回：
+        AsyncIterator[SimpleNamespace]，含 store/repo/path 的测试环境，结束后关闭数据库
+    """
+    from types import SimpleNamespace
+
+    db = Database()
+    await db.open(tmp_path / "research-prompt-store.db")
+    repo = Repo(db)
+    path = tmp_path / "research_prompt.md"
+    path.write_text(_INIT, encoding="utf-8")
+    events: list[str] = []
+    store = ResearchPromptStore(path, repo, on_change=lambda: events.append("changed"))
+    try:
+        yield SimpleNamespace(store=store, repo=repo, path=path, events=events)
+    finally:
+        await db.close()
+
+
+async def test_seed_if_empty(env) -> None:
+    """版本表为空且文件存在时播种 v1（human/初始版本）；重复播种不再新增。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言播种只发生一次且内容来自文件
+    """
+    v1 = await env.store.seed_if_empty()
+    assert v1 is not None and v1.created_by == "human" and v1.content == _INIT
+    assert await env.store.seed_if_empty() is None
+    assert len(await env.repo.research_prompt.list_versions()) == 1
+
+
+async def test_seed_skipped_when_file_missing(env) -> None:
+    """提示词文件不存在且无缓存正文时不播种（版本表保持为空）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言删文件后播种返回 None
+    """
+    env.path.unlink()
+    assert await env.store.seed_if_empty() is None
+    assert await env.repo.research_prompt.list_versions() == []
+
+
+async def test_revise_draft_then_apply(env) -> None:
+    """revise 只落 draft 不动文件；apply_version 原子写文件并置 applied、触发变更回调。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言草稿期间文件不变、生效后文件与状态一致
+    """
+    await env.store.seed_if_empty()
+    new_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", created_by="review_agent")
+    assert draft.status == "draft"
+    assert env.store.current() == _INIT  # 草稿期文件不动
+    applied = await env.store.apply_version(draft.id)
+    assert applied.status == "applied"
+    assert env.store.current() == new_content
+    assert env.events == ["changed"]
+
+
+async def test_revise_validation_rejects(env) -> None:
+    """过短与无差异内容均被拒：不落版本、文件不动。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言两种拒绝各携带对应原因
+    """
+    await env.store.seed_if_empty()
+    with pytest.raises(ResearchPromptValidationError) as short_err:
+        await env.store.revise("太短", "x", created_by="review_agent")
+    assert any("过短" in r for r in short_err.value.reasons)
+    with pytest.raises(ResearchPromptValidationError) as same_err:
+        await env.store.revise(_INIT, "x", created_by="review_agent")
+    assert same_err.value.no_diff_only is True
+    assert len(await env.repo.research_prompt.list_versions()) == 1  # 只有种子版本
+
+
+async def test_revise_applied_immediate(env) -> None:
+    """人工即时修订：落库即生效（文件已更新、版本 applied、默认 human 来源）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言 revise_applied 一步完成写文件与生效
+    """
+    await env.store.seed_if_empty()
+    new_content = "人工修订：" + "提高证据门槛。" * 20
+    version = await env.store.revise_applied(new_content, "人工调优")
+    assert version.status == "applied" and version.created_by == "human"
+    assert env.store.current() == new_content
+
+
+async def test_discard_draft(env) -> None:
+    """报告失败路径：草稿置 discarded，文件保持旧内容。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言草稿状态与文件内容
+    """
+    await env.store.seed_if_empty()
+    draft = await env.store.revise(
+        "修订：" + "不会生效。" * 30, "注定失败", created_by="review_agent"
+    )
+    await env.store.discard_draft(draft.id)
+    got = await env.repo.research_prompt.get_version(draft.id)
+    assert got is not None and got.status == "discarded"
+    assert env.store.current() == _INIT
+
+
+async def test_reconcile_restores_file_and_discards_orphans(env) -> None:
+    """启动对账：孤儿草稿废弃；文件被外部改动后以最新 applied 版本为准恢复并通知。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言草稿被清、文件被恢复、回调被触发
+    """
+    await env.store.seed_if_empty()
+    await env.store.revise("孤儿草稿：" + "残留内容。" * 30, "上轮遗留", created_by="review_agent")
+    env.path.write_text("被外部改坏的文件", encoding="utf-8")
+    await env.store.reconcile()
+    drafts = [v for v in await env.repo.research_prompt.list_versions() if v.status == "draft"]
+    assert drafts == []
+    assert env.store.current() == _INIT
+    assert env.events == ["changed"]
+
+
+async def test_reconcile_noop_when_consistent(env) -> None:
+    """文件与最新 applied 一致时对账静默通过：不触发回调、不改文件。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言无通知且文件不变
+    """
+    await env.store.seed_if_empty()
+    await env.store.reconcile()
+    assert env.events == []
+    assert env.store.current() == _INIT
+
+
+async def test_rollback_writes_content_and_records_new_version(env) -> None:
+    """回滚到历史版本：写回其内容并记 created_by='rollback' 的新版本；不存在版本报错。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言回滚后文件内容、版本来源与异常分支
+    """
+    await env.store.seed_if_empty()
+    v2 = await env.store.revise_applied("第二版：" + "加一段宏观纪律。" * 20, "人工修订")
+    rolled = await env.store.rollback(1)
+    assert rolled.created_by == "rollback" and rolled.status == "applied"
+    assert env.store.current() == _INIT
+    assert rolled.id > v2.id
+    with pytest.raises(ResearchPromptValidationError):
+        await env.store.rollback(9999)
+
+
+async def test_rollback_rejects_non_applied_version(env) -> None:
+    """回滚目标为草稿/已废弃版本时拒绝（审查 P2-4）：文件不动、不落新版本。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言两种非 applied 状态均抛 ResearchPromptValidationError 且无副作用
+    """
+    await env.store.seed_if_empty()
+    draft = await env.store.revise("草稿版：" + "未生效内容。" * 20, "复盘草稿", "review_agent")
+    with pytest.raises(ResearchPromptValidationError, match="只能回滚到已生效版本"):
+        await env.store.rollback(draft.id)
+    await env.store.discard_draft(draft.id)
+    with pytest.raises(ResearchPromptValidationError, match="只能回滚到已生效版本"):
+        await env.store.rollback(draft.id)
+    assert env.store.current() == _INIT
+    assert len(await env.repo.research_prompt.list_versions()) == 2  # v1 + 已废弃草稿，无新增
+    assert env.events == []
+
+
+# ---------- 生效锁取代检测（issue #113 F11） ----------
+
+
+async def test_apply_version_yields_to_newer_applied(env) -> None:
+    """旧草稿生效时若已存在更高 id 的 applied 版本，则被取代置 discarded 且不覆盖文件。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言 apply 返回 None、文件保留人工内容、旧草稿状态为 discarded
+    """
+    await env.store.seed_if_empty()
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10, "复盘修订", "review_agent"
+    )
+    human = await env.store.revise_applied("人工提示词：" + "提高证据门槛。" * 20, "人工调优")
+    applied = await env.store.apply_version(draft.id)
+    assert applied is None  # 已被更高 applied 版本取代
+    assert env.store.current() == human.content  # 文件保留人工内容
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert (await env.store.get_version(human.id)).status == "applied"
+
+
+async def test_rollback_and_apply_interleave_keeps_file_consistent(env, monkeypatch) -> None:
+    """rollback 与 apply_version 并发时全程互斥：文件始终等于库内最新 applied 版本内容。
+
+    在 rollback 记新版本前插入延时制造确定性交错：无锁时 apply_version 会插队先生效
+    草稿，rollback 随后落库更高 id 的回滚版本而文件停在草稿内容；rollback 收进
+    生效锁后两者串行，文件与库内最新 applied 版本必然一致（issue #113 R7）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        monkeypatch: MonkeyPatch，用于给记版本方法插入延时
+
+    返回：
+        None，断言文件内容与库内最新 applied 版本内容一致
+    """
+    v1 = await env.store.seed_if_empty()
+    assert v1 is not None
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10, "复盘修订", "review_agent"
+    )
+    original_save = env.repo.research_prompt.save_version
+
+    async def slow_save(*args, **kwargs):
+        """记版本前延时 50ms，制造 rollback 写文件后、记版本前的插队窗口。
+
+        参数：
+            *args: 原 save_version 的位置参数
+            **kwargs: 原 save_version 的关键字参数
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        await asyncio.sleep(0.05)
+        return await original_save(*args, **kwargs)
+
+    monkeypatch.setattr(env.repo.research_prompt, "save_version", slow_save)
+    await asyncio.gather(env.store.rollback(v1.id), env.store.apply_version(draft.id))
+    latest = await env.repo.research_prompt.latest_applied_version()
+    assert latest is not None
+    assert env.store.current() == latest.content
+
+
+# ---------- 草稿基线 CAS（issue #113） ----------
+
+
+async def test_cas_discards_stale_draft_after_human_intervenes(env, monkeypatch, caplog) -> None:
+    """交错复现竞态：人工持锁落库让出期间 agent 草稿以更大 id 插队，轮末生效被 CAS 废弃。
+
+    人工 revise_applied(C) 在生效锁内落库后、写文件前让出事件循环，复盘整改
+    revise(B, base_md5=md5(初始内容)) 无锁落 draft v3（id 大于人工 v2）；
+    无 CAS 时旧 id 比较（v3 > v2）不会判取代，陈旧 B 会覆盖人工 C（PR #114 R6）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        monkeypatch: MonkeyPatch，用于在人工落库点插入确定性让出
+        caplog: LogCaptureFixture，用于断言基线取代告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留人工内容、告警落日志
+    """
+    import logging
+
+    from src.research.prompt_store import content_md5
+
+    await env.store.seed_if_empty()
+    base = content_md5(_INIT)
+    human_content = "人工提示词：" + "提高证据门槛。" * 20
+    human_saved = asyncio.Event()
+    agent_done = asyncio.Event()
+    original_save = env.repo.research_prompt.save_version
+
+    async def gated_save(content, md5, created_by, *args, **kwargs):
+        """人工落库完成后让出事件循环，等 agent 草稿插队落库后再放行。
+
+        参数：
+            content: str，版本内容（透传）
+            md5: str，内容摘要（透传）
+            created_by: str，创建来源；为 "human" 时触发让出门（agent 草稿不拦）
+            *args: 其余位置参数（透传）
+            **kwargs: 其余关键字参数（透传）
+
+        返回：
+            原 save_version 的返回（透传）
+        """
+        version = await original_save(content, md5, created_by, *args, **kwargs)
+        if created_by == "human":
+            human_saved.set()  # 人工 draft 已落库但仍持生效锁、尚未写文件置 applied
+            await agent_done.wait()
+        return version
+
+    monkeypatch.setattr(env.repo.research_prompt, "save_version", gated_save)
+    human_task = asyncio.create_task(env.store.revise_applied(human_content, "人工调优"))
+    await human_saved.wait()
+    draft = await env.store.revise(
+        "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10,
+        "复盘修订",
+        "review_agent",
+        base_md5=base,
+    )
+    assert draft.id > 2  # agent 草稿以更大 id 插队（v1 种子、v2 人工、v3 草稿）
+    agent_done.set()
+    human = await human_task
+    assert human.status == "applied"
+    with caplog.at_level(logging.WARNING):
+        applied = await env.store.apply_version(draft.id)
+    assert applied is None  # 基线已失效（人工变更取代实读基线）
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert env.store.current() == human_content  # 陈旧草稿未覆盖人工内容
+    assert any("基线已失效" in r.message for r in caplog.records)
+
+
+async def test_cas_applies_draft_when_base_matches(env) -> None:
+    """草稿基线与最新 applied 内容一致时正常生效（CAS 正路径）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言草稿生效、文件替换、版本行 base_md5 落库
+    """
+    v1 = await env.store.seed_if_empty()
+    new_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent", base_md5=v1.md5)
+    assert draft.base_md5 == v1.md5
+    applied = await env.store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"
+    assert env.store.current() == new_content
+
+
+async def test_cas_null_base_falls_back_to_id_compare(env) -> None:
+    """base_md5 为 NULL 的历史/人工行回退旧 id 比较：id 更大的草稿照常生效。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言无基线草稿按旧行为生效覆盖、文件为新内容
+    """
+    await env.store.seed_if_empty()
+    await env.store.revise_applied("人工提示词：" + "提高证据门槛。" * 20, "人工调优")
+    new_content = "草稿版提示词：" + "先事实后判断，逐标的给结论。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent")  # 不盖基线章
+    assert draft.base_md5 is None
+    applied = await env.store.apply_version(draft.id)
+    assert applied is not None and applied.status == "applied"  # id 更大，按旧行为生效
+    assert env.store.current() == new_content
+
+
+async def test_cas_replay_of_applied_draft_is_idempotent(env) -> None:
+    """已生效草稿的幂等重放不被 CAS 误判：latest 即本版本自身时跳过比对。
+
+    轮末生效成功后被打断、启动重放 apply_drafts 的场景（_complete_interrupted）：
+    草稿自身即最新 applied，其内容必然异于基线，无 latest.id == version_id 豁免
+    会把已生效草稿误判废弃。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言二次 apply 仍返回生效版本、文件与状态保持不变
+    """
+    v1 = await env.store.seed_if_empty()
+    new_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(new_content, "复盘修订", "review_agent", base_md5=v1.md5)
+    first = await env.store.apply_version(draft.id)
+    assert first is not None and first.status == "applied"
+    second = await env.store.apply_version(draft.id)  # 幂等重放
+    assert second is not None and second.status == "applied"
+    assert env.store.current() == new_content
+    assert (await env.store.get_version(draft.id)).status == "applied"
+
+
+async def test_sample_current_base(env) -> None:
+    """读取时点基线采样（issue #113 R6-3）：返回（文件正文, 正文 md5, 最新 applied id）三元组。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言无版本与有 applied 两种状态下的采样三元组
+    """
+    from src.research.prompt_store import content_md5
+
+    assert await env.store.sample_current_base() == (_INIT, content_md5(_INIT), None)  # 无版本
+    v1 = await env.store.seed_if_empty()
+    assert await env.store.sample_current_base() == (_INIT, v1.md5, v1.id)  # 有 applied
+
+
+async def test_cas_discards_draft_when_base_version_aba_replaced(env, caplog) -> None:
+    """基线版本 ABA 回绕：草稿基于 v1(A) 实读盖章后，人工改 B(v2) 又回滚 A(v3)，轮末废弃。
+
+    内容回绕后当前文件 md5 与基线一致（都是 A），仅凭 md5 比对的旧 CAS 会放行；
+    新 CAS 按实读基线身份检出失效（base_applied_version_id=v1 ≠ 当前生效 v3，
+    issue #113 R6-3）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、文件保留回滚后内容、告警落日志
+    """
+    import logging
+
+    v1 = await env.store.seed_if_empty()
+    _, base_md5, base_vid = await env.store.sample_current_base()
+    draft = await env.store.revise(
+        "新提示词：" + "逐条核对证据，先找反对材料。" * 10,
+        "复盘改进",
+        "review_agent",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    await env.store.revise_applied("人工提示词：" + "提高证据门槛。" * 20, "人工改 B")  # v2
+    await env.store.rollback(v1.id)  # v3：内容回绕为 A，id 前进
+    with caplog.at_level(logging.WARNING):
+        applied = await env.store.apply_version(draft.id)
+    assert applied is None
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert env.store.current() == _INIT  # 文件保留回滚后的 A
+    assert any("基线已失效" in r.message and "已不在位" in r.message for r in caplog.records)
+
+
+async def test_cas_discards_draft_when_file_hot_edited(env, caplog) -> None:
+    """文件热编辑：草稿盖章后文件被绕过 store 直接改写（库中 applied 不动），轮末废弃。
+
+    实读基线身份仍在位（v1），但当前文件内容 md5 已偏离实读基线——防"库不变、
+    文件被外部编辑"的漏检（issue #113 R6-3）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        caplog: LogCaptureFixture，用于断言基线失效告警
+
+    返回：
+        None，断言草稿 apply 返回 None、置 discarded、热编辑内容不被覆盖、告警落日志
+    """
+    import logging
+
+    await env.store.seed_if_empty()
+    _, base_md5, base_vid = await env.store.sample_current_base()
+    draft = await env.store.revise(
+        "新提示词：" + "逐条核对证据，先找反对材料。" * 10,
+        "复盘改进",
+        "review_agent",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    hot = "热编辑提示词：" + "绕过存储直接改文件。" * 10
+    env.path.write_text(hot, encoding="utf-8")  # 热编辑：动文件不动库
+    with caplog.at_level(logging.WARNING):
+        applied = await env.store.apply_version(draft.id)
+    assert applied is None
+    assert (await env.store.get_version(draft.id)).status == "discarded"
+    assert env.store.current() == hot  # 热编辑内容不被草稿覆盖
+    assert any("基线已失效" in r.message and "偏离实读基线" in r.message for r in caplog.records)
+
+
+async def test_current_snapshot_attributes_version_by_content(env) -> None:
+    """研报运行快照（issue #113 R6-4）：内容一致的最新 applied 才归因其 id，热编辑不归因。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言快照三元组在「无版本 / 内容一致 / 文件热编辑」三种情形下的归因
+    """
+    from src.research.prompt_store import content_md5
+
+    assert await env.store.current_snapshot() == (_INIT, content_md5(_INIT), None)  # 无版本
+    v1 = await env.store.seed_if_empty()
+    assert await env.store.current_snapshot() == (_INIT, v1.md5, v1.id)  # 内容一致归因 v1
+    hot = "热编辑提示词：" + "绕过存储直接改文件。" * 10
+    env.path.write_text(hot, encoding="utf-8")  # 热编辑：动文件不动库
+    assert await env.store.current_snapshot() == (hot, content_md5(hot), None)  # 偏离不归因
+
+
+async def test_interrupted_after_write_recovers_on_apply_retry(env, monkeypatch) -> None:
+    """写文件成功、置状态前中断的草稿：重试识别恢复态补置 applied，不误判热编辑废弃（R7-1）。
+
+    首轮 apply 在原子写成功后让 set_version_status("applied") 抛错，留下「文件已是
+    草稿正文、库内仍是旧 applied + 本草稿 draft」的中断现场；随后经 apply_drafts
+    重试（_complete_interrupted 的幂等收尾路径）：身份基线仍在位且文件内容已等于
+    草稿正文 → 恢复态放行，幂等重写同内容文件并补置 applied，失败集合保持为空
+    （轮末事件 applied=True 名实相符）。
+
+    参数：
+        env: SimpleNamespace，测试环境
+        monkeypatch: MonkeyPatch，用于让首次置 applied 抛错模拟进程中断
+
+    返回：
+        None，断言重试后草稿 applied、文件与库内最新 applied 一致、失败集合为空
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await env.store.seed_if_empty()
+    _, base_md5, base_vid = await env.store.sample_current_base()
+    new_content = "新提示词：" + "逐条核对证据，先找反对材料。" * 10
+    draft = await env.store.revise(
+        new_content,
+        "复盘改进",
+        "review_agent",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    original_set = env.repo.research_prompt.set_version_status
+    tripped = {"done": False}
+
+    async def flaky_set_status(version_id, status):
+        """首次置 applied 时模拟「写文件已成功、状态未落库」的进程中断。
+
+        参数：
+            version_id: int，版本编号（透传）
+            status: str，目标状态（透传）
+
+        返回：
+            原 set_version_status 的返回（透传）
+
+        异常：
+            RuntimeError：首次置 applied 时抛出，模拟置状态前进程中断
+        """
+        if status == "applied" and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("模拟置状态前进程中断")
+        return await original_set(version_id, status)
+
+    monkeypatch.setattr(env.repo.research_prompt, "set_version_status", flaky_set_status)
+    with pytest.raises(RuntimeError):
+        await env.store.apply_version(draft.id)
+    # 中断现场：文件已是草稿正文，库内仍是 v1 applied + 本草稿 draft
+    assert env.store.current() == new_content
+    assert (await env.store.get_version(draft.id)).status == "draft"
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=None,
+        research_prompt_store=env.store,
+        research_prompt_draft_ids=[draft.id],
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重试路径
+    assert deps.apply_failed_ids == []  # 轮末事件 applied=True 名实相符
+    assert (await env.store.get_version(draft.id)).status == "applied"
+    latest = await env.repo.research_prompt.latest_applied_version()
+    assert latest is not None and latest.id == draft.id
+    assert env.store.current() == latest.content == new_content
+
+
+async def test_cas_replay_of_applied_version_after_human_advance_is_idempotent(env) -> None:
+    """已生效版本在收尾打断 + 人工插队后重放：R9 守卫幂等返回，不反标 discarded、不回写文件。
+
+    轮末 _finalize_success 先 apply_drafts 生效草稿（文件已写、状态 applied），随后
+    收尾（attach/end_round）之间被打断；窗口内人工经 revise_applied 生效了更新版本
+    （latest 前移）。_complete_interrupted 重放 apply_drafts 时，旧 applied 版本若被
+    当草稿重过 CAS，会因「实读基线已不在位」被反标 discarded——它确实生效过，
+    版本历史不得被静默改写（issue #113 R9）。本通道 rollback 校验
+    status=='applied'（prompt_store.py），被误反标的版本会永久不可回滚，
+    故额外断言重放后仍可回滚到该版本。
+
+    参数：
+        env: SimpleNamespace，测试环境
+
+    返回：
+        None，断言重放幂等成功、旧版本状态保持 applied、文件保持人工内容、
+        旧版本仍可回滚
+    """
+    from types import SimpleNamespace
+
+    from src.review.drafts import apply_drafts
+
+    await env.store.seed_if_empty()
+    _, base_md5, base_vid = await env.store.sample_current_base()
+    draft_content = "修订后提示词：" + "逐条依据评价，先看反对证据。" * 10
+    draft = await env.store.revise(
+        draft_content,
+        "复盘修订",
+        "review_agent",
+        base_md5=base_md5,
+        base_applied_version_id=base_vid,
+    )
+    first = await env.store.apply_version(draft.id)  # 轮末生效成功：文件已写、状态 applied
+    assert first is not None and first.status == "applied"
+    # 收尾被打断的窗口内人工生效更新版本（latest 前移）
+    human_content = "人工提示词：" + "提高证据门槛。" * 20
+    human = await env.store.revise_applied(human_content, "人工调优")
+    assert human.id > draft.id
+    deps = SimpleNamespace(
+        store=object(),  # 策略通道无草稿，不会被调用
+        strategy_draft_ids=[],
+        indicator_config_store=None,
+        research_prompt_store=env.store,
+        research_prompt_draft_ids=[draft.id],
+        apply_failed_ids=[],
+    )
+    await apply_drafts(deps)  # _complete_interrupted 的幂等重放路径
+    assert deps.apply_failed_ids == []  # 重放幂等成功，不误报失败
+    assert (await env.store.get_version(draft.id)).status == "applied"  # 不被反标 discarded
+    assert env.store.current() == human_content  # 人工内容不被回写
+    rolled = await env.store.rollback(draft.id)  # 状态保持 applied，仍可回滚到该版本
+    assert rolled.status == "applied" and env.store.current() == draft_content

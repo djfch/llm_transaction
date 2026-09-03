@@ -10,8 +10,8 @@ Repo.__init__ 挂载为 repo.research；本模块只依赖 db/models（不反向
 - causal_links 由工具 submit_causal_links 校验暂存、研报落库后由 agent 代码回填
   report_id 批量落库（LLM 无法预知本轮研报 id，H1 修复后口径）；
 - causal_links 版本化：新链可声明 supersedes_id 替代旧链（同事务把旧链 status 标记
-  superseded，旧链保留留档）；待验证链（await_verification=1）进入未闭合监控池，
-  由预注入持续跟进，直到被替代或复盘验证结案。
+  superseded，旧链保留留档）；待跟踪链（status=tracking）进入待跟踪监控池，
+  由预注入持续跟进，直到被替代或提交结论版结案。
 """
 
 from __future__ import annotations
@@ -101,14 +101,27 @@ class ResearchRepo(ResearchAssetRepoMixin):
         return self._conn.total_changes - before
 
     async def list_timeline(
-        self, start_ts: float = 0.0, end_ts: float | None = None, limit: int = 500
+        self,
+        start_ts: float = 0.0,
+        end_ts: float | None = None,
+        limit: int = 500,
+        *,
+        kind: str | None = None,
+        source: str | None = None,
+        keyword: str | None = None,
     ) -> list[Timeline]:
         """按时间范围查询事实记录（[start, end)），取窗口内**最新** limit 条按正序返回。
+
+        kind/source/keyword 为可选过滤（issue #113：复盘按窗口与主题回看事实层）；
+        keyword 匹配 title 子串（LIKE 通配符已转义，按字面匹配）。
 
         参数：
             start_ts: float，查询区间起始时间戳
             end_ts: float | None，查询区间结束时间戳；为空时不限制上界
             limit: int，每页最多返回的记录数量
+            kind: str | None，记录类型过滤（flash/calendar/indicator）；空不过滤
+            source: str | None，来源过滤（jin10/blockbeats）；空不过滤
+            keyword: str | None，标题子串过滤；空不过滤
 
         返回：
             list[Timeline]：按时间范围查询事实记录（[start, end)），取窗口内**最新** limit 条按正序返回
@@ -118,6 +131,16 @@ class ResearchRepo(ResearchAssetRepoMixin):
         if end_ts is not None:
             sql += " AND published_at < ?"
             params.append(end_ts)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if source is not None:
+            sql += " AND source = ?"
+            params.append(source)
+        if keyword:
+            sql += " AND title LIKE ? ESCAPE '\\'"
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
         sql += " ORDER BY published_at DESC LIMIT ?"
         params.append(limit)
         cur = await self._conn.execute(sql, params)
@@ -169,14 +192,14 @@ class ResearchRepo(ResearchAssetRepoMixin):
         cur = await self._conn.execute(
             "INSERT INTO research_reports(report_type,schema_version,summary,"
             "cross_market_view,global_risks_json,raw_json,error,round_id,created_at)"
-            " VALUES(?,2,?,?,?,?,?,?,?)",
+            " VALUES(?,3,?,?,?,?,?,?,?)",
             (report_type, "", "", "[]", raw_json, error, round_id, ts),
         )
         await self._conn.commit()
         return ResearchReport(
             id=cur.lastrowid or 0,
             report_type=report_type,
-            schema_version=2,
+            schema_version=3,
             raw_json=raw_json,
             error=error,
             round_id=round_id,
@@ -317,9 +340,9 @@ class ResearchRepo(ResearchAssetRepoMixin):
         evidence_json: str = "[]",
         topic: str = "",
         supersedes_id: int | None = None,
-        await_verification: bool = True,
+        status: str = "tracking",
     ) -> CausalLink:
-        """落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）。
+        """落库一条因果链；status 默认 tracking（待跟踪，事件仍在发展）。
 
         版本化：supersedes_id 非空时同一事务内先插入新链、再把旧链 status 标记为
         superseded（旧链保留留档，复盘可对比各版本）；任一步失败整体不 commit
@@ -332,25 +355,23 @@ class ResearchRepo(ResearchAssetRepoMixin):
             evidence_json: str，因果链证据 JSON
             topic: str，因果链主题
             supersedes_id: int | None，被当前链替代的旧链编号
-            await_verification: bool，该链是否仍需后续验证
+            status: str，链状态（tracking 待跟踪 / concluded 已结论）
 
         返回：
-            CausalLink：落库一条因果链；status 默认 pending（第二期复盘标记 verified/failed）
+            CausalLink：落库一条因果链；status 默认 tracking（待跟踪，事件仍在发展）
         """
         cur = await self._conn.execute(
             "INSERT INTO causal_links(report_id,chain_json,confidence,evidence_json,"
-            "status,broken_at,topic,supersedes_id,await_verification,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "status,topic,supersedes_id,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (
                 report_id,
                 chain_json,
                 confidence,
                 evidence_json,
-                "pending",
-                None,
+                status,
                 topic,
                 supersedes_id,
-                int(bool(await_verification)),
                 _now(),
             ),
         )
@@ -365,9 +386,9 @@ class ResearchRepo(ResearchAssetRepoMixin):
             chain_json=chain_json,
             confidence=confidence,
             evidence_json=evidence_json,
+            status=status,
             topic=topic,
             supersedes_id=supersedes_id,
-            await_verification=bool(await_verification),
             created_at=_now(),
         )
 
@@ -385,20 +406,19 @@ class ResearchRepo(ResearchAssetRepoMixin):
         return CausalLink(**dict(row)) if row else None
 
     async def list_pending_causal_links(self, limit: int = 10) -> list[CausalLink]:
-        """未闭合链：待验证声明（await_verification=1）且未被替代（status=pending）。
+        """待跟踪链（status=tracking）：事件仍在发展、未被替代也未结论的当前版。
 
         预注入用：最新在前取 limit 条后按 id 正序返回；不按时间淘汰——事件发展
-        需要时间，直到被替代或复盘盖章才闭合。
+        需要时间，直到被替代或提交结论版才结案。
 
         参数：
             limit: int，每页最多返回的记录数量
 
         返回：
-            list[CausalLink]：未闭合链：待验证声明（await_verification=1）且未被替代（status=pending）
+            list[CausalLink]：待跟踪链（status=tracking）：事件仍在发展、未被替代也未结论的当前版
         """
         cur = await self._conn.execute(
-            "SELECT * FROM causal_links WHERE status='pending' AND await_verification=1"
-            " ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM causal_links WHERE status='tracking' ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         rows = [CausalLink(**dict(r)) for r in await cur.fetchall()]
@@ -410,21 +430,25 @@ class ResearchRepo(ResearchAssetRepoMixin):
     ) -> list[CausalLink]:
         """近 days 天因果链（含历史版与全部状态），按创建时间正序。
 
-        topic 非空时只取该主题的链（read_causal_links 工具按主题查族谱用）。
+        topic 非空时只取该主题的链且不受 days 窗口限制（read_causal_links
+        工具按主题查族谱用，族谱追溯须完整覆盖历史版本）。
 
         参数：
-            days: int，向前查询的自然日数
+            days: int，向前查询的自然日数（topic 非空时失效）
             topic: str | None，因果链主题
             limit: int，每页最多返回的记录数量
 
         返回：
             list[CausalLink]：近 days 天因果链（含历史版与全部状态），按创建时间正序
         """
-        sql = "SELECT * FROM causal_links WHERE created_at >= ?"
-        params: list = [_now() - days * 86400]
+        sql = "SELECT * FROM causal_links"
+        params: list = []
         if topic:
-            sql += " AND topic = ?"
+            sql += " WHERE topic = ?"
             params.append(topic)
+        else:
+            sql += " WHERE created_at >= ?"
+            params.append(_now() - days * 86400)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         cur = await self._conn.execute(sql, params)

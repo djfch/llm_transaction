@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -97,6 +98,24 @@ def _today_markers() -> tuple[str, str]:
     """
     now = datetime.now(BEIJING_TZ)
     return now.strftime("%Y-%m-%d"), (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _parse_ts(args: dict, key: str) -> tuple[float | None, str | None]:
+    """解析可选秒级时间戳参数：缺失返回 (None, None)；非数值返回错误文本。
+
+    参数：
+        args: dict，调用方传入的工具参数字典
+        key: str，要读取的参数键
+
+    返回：
+        tuple[float | None, str | None]：(时间戳, 错误文本)；缺失或合法时错误文本为 None
+    """
+    raw = args.get(key)
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None, f"参数错误：{key} 必须为秒级时间戳数值"
+    return float(raw), None
 
 
 # ---------- 只读工具 ----------
@@ -215,7 +234,7 @@ async def fetch_indicators(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
-    """FRED 宏观序列。
+    """FRED 宏观序列；可用 start_ts/end_ts 指定历史窗口（复盘回看用）。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -230,8 +249,20 @@ async def get_macro_series(deps: ResearchToolDeps, args: dict) -> str:
     look_back, err = _parse_int(args, "look_back", 365, 30, 1825)
     if err:
         return err
+    start_ts, err = _parse_ts(args, "start_ts")
+    if err:
+        return err
+    end_ts, err = _parse_ts(args, "end_ts")
+    if err:
+        return err
+    if start_ts is not None:
+        # 指定历史窗口：look_back 由窗口跨度推导（向上取整天数），end_ts 透传 FRED
+        end = end_ts if end_ts is not None else time.time()
+        if end <= start_ts:
+            return "参数错误：end_ts 须大于 start_ts"
+        look_back = max(1, math.ceil((end - start_ts) / 86400))
     try:
-        return await deps.provider.get_macro_series(indicator, look_back)
+        return await deps.provider.get_macro_series(indicator, look_back, end_ts=end_ts)
     except ResearchSourceError as exc:
         return f"FRED 数据不可用：{exc}"
 
@@ -307,7 +338,7 @@ async def search_news(deps: ResearchToolDeps, args: dict) -> str:
 
 
 async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
-    """事实层近 N 天（客观记录）。
+    """事实层事件时间线：days 快捷回溯或 start_ts/end_ts 精确窗口，可按关键词/类型/来源过滤。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -322,10 +353,42 @@ async def read_timeline(deps: ResearchToolDeps, args: dict) -> str:
     limit, err = _parse_int(args, "limit", 200, 1, 500)
     if err:
         return err
-    rows = await deps.repo.research.list_timeline(time.time() - days * 86400, limit=limit)
+    start_ts, err = _parse_ts(args, "start_ts")
+    if err:
+        return err
+    end_ts, err = _parse_ts(args, "end_ts")
+    if err:
+        return err
+    explicit_window = start_ts is not None
+    if explicit_window:
+        if end_ts is not None and end_ts <= start_ts:
+            return "参数错误：end_ts 须大于 start_ts"
+    else:
+        start_ts = time.time() - days * 86400
+    kind = str(args.get("kind") or "").strip() or None
+    if kind is not None and kind not in ("flash", "calendar", "indicator"):
+        return "参数错误：kind 须为 flash/calendar/indicator"
+    source = str(args.get("source") or "").strip() or None
+    if source is not None and source not in ("jin10", "blockbeats"):
+        return "参数错误：source 须为 jin10/blockbeats"
+    keyword = str(args.get("keyword") or "").strip() or None
+    rows = await deps.repo.research.list_timeline(
+        start_ts, end_ts=end_ts, limit=limit, kind=kind, source=source, keyword=keyword
+    )
+    filters = "；".join(
+        f"{k}={v}"
+        for k, v in (("kind", kind), ("source", source), ("keyword", keyword))
+        if v is not None
+    )
+    suffix = f"（过滤：{filters}）" if filters else ""
+    window_txt = (
+        f"{_fmt_ts(start_ts)} 起" + (f" 至 {_fmt_ts(end_ts)}" if end_ts is not None else "")
+        if explicit_window
+        else f"近 {days} 天"
+    )
     if not rows:
-        return f"近 {days} 天事实层无记录"
-    lines = [f"## 事件时间线（近 {days} 天，{len(rows)} 条）"]
+        return f"{window_txt}事实层无符合条件的记录{suffix}"
+    lines = [f"## 事件时间线（{window_txt}，{len(rows)} 条）{suffix}"]
     for r in rows:
         lines.append(f"- [{_fmt_ts(r.published_at)}] [{r.source}] {r.title}")
     return "\n".join(lines)
@@ -354,6 +417,8 @@ async def read_judgments(deps: ResearchToolDeps, args: dict) -> str:
 async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     """读取已提交因果链（含历史版与全部状态）：判断某主题是否已提交过、是否该提交修正版。
 
+    指定 topic 时查该主题全历史族谱（不受 days 窗口限制，族谱追溯须完整）。
+
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
         args: dict，调用方传入的工具参数字典
@@ -370,26 +435,22 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     topic = str(args.get("topic") or "").strip() or None
     links = await deps.repo.research.list_causal_links(days=days, topic=topic, limit=limit)
     if not links:
-        scope = f"主题 {topic!r} " if topic else ""
-        return f"近 {days} 天{scope}无已提交因果链"
-    scope = f"，主题 {topic}" if topic else ""
-    lines = [f"## 已提交因果链（近 {days} 天{scope}，{len(links)} 条）"]
+        if topic:
+            return f"主题 {topic!r} 无已提交因果链"
+        return f"近 {days} 天无已提交因果链"
+    window = f"主题 {topic} 全历史" if topic else f"近 {days} 天"
+    lines = [f"## 已提交因果链（{window}，{len(links)} 条）"]
     for link in links:
         try:
             chain = json.loads(link.chain_json)
         except (TypeError, ValueError):
             chain = []
         nodes = " → ".join(str(n.get("node", ""))[:25] for n in chain if isinstance(n, dict))
-        tag = "待验证" if link.await_verification else "结论"
+        tag = "待跟踪" if link.status == "tracking" else "结论"
         if link.supersedes_id is not None:
             status = f"替代链#{link.supersedes_id}"  # 本链替代了旧链 X
         else:
-            status = {
-                "pending": "当前版",
-                "verified": "已验证",
-                "failed": "已否决",
-                "superseded": "已被替代",
-            }.get(link.status, link.status)
+            status = {"superseded": "已被替代"}.get(link.status, "当前版")
         lines.append(
             f"- [链#{link.id}][{link.topic or '无主题'}][{tag}][{status}] {nodes}"
             f"（置信度 {link.confidence}）"
@@ -400,17 +461,17 @@ async def read_causal_links(deps: ResearchToolDeps, args: dict) -> str:
 # ---------- 写工具 ----------
 
 
-def _parse_await_verification(raw: Any) -> bool | None:
-    """解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None。
+def _parse_concluded(raw: Any) -> bool | None:
+    """解析 concluded（是否已定论）：缺省 False；布尔/数字/常见字符串均可，非法返回 None。
 
     参数：
-        raw: Any，待解析或保留的原始数据
+        raw: Any，待解析的原始参数值
 
     返回：
-        bool | None：解析 await_verification：缺省 True；布尔/数字/常见字符串均可，非法返回 None
+        bool | None：解析出的布尔值；缺失时 False（默认待跟踪），非法值 None
     """
     if raw is None:
-        return True
+        return False
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, (int, float)):
@@ -471,8 +532,11 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     本轮研报失败时暂存链随 deps 丢弃，不会错挂历史研报。
 
     版本化（V1）：topic 必填（同主题聚合成族）；supersedes_id 声明替代旧链
-    （须同主题当前版），落库时旧链标记 superseded；await_verification 声明
-    待验证中间态（默认 true，允许 1 节点半成品观察）或结论链（须 2-6 节点）。
+    （须同主题当前版），落库时旧链标记 superseded；concluded 声明事件已定论
+    （默认 false：待跟踪中间态，允许 1 节点半成品观察；true：结论链，须 2-6 节点）。
+
+    兼容：旧运行时 research_prompt.md 仍传 await_verification（是否待验证），
+    未传 concluded 时按其取反解析为 concluded；生产基线提示词升级后该过渡别名可删除。
 
     参数：
         deps: ResearchToolDeps，当前模块所需的运行依赖集合
@@ -486,10 +550,16 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
     topic = str(args.get("topic") or "").strip()
     if not topic:
         return "参数错误：topic 必填（事件主题，如 非农/关税/美联储）"
-    await_verification = _parse_await_verification(args.get("await_verification"))
-    if await_verification is None:
-        return "参数错误：await_verification 必须为布尔值"
-    min_nodes, max_nodes = (1, 6) if await_verification else (2, 6)
+    concluded = _parse_concluded(args.get("concluded"))
+    if args.get("concluded") is None and "await_verification" in args:
+        # 旧运行时 research_prompt.md 的过渡别名：await_verification（待验证）取反即 concluded
+        awaiting = _parse_concluded(args["await_verification"])
+        if awaiting is None:
+            return "参数错误：await_verification 必须为布尔值"
+        concluded = not awaiting
+    if concluded is None:
+        return "参数错误：concluded 必须为布尔值"
+    min_nodes, max_nodes = (2, 6) if concluded else (1, 6)
     if not isinstance(chain, list) or not min_nodes <= len(chain) <= max_nodes:
         return f"参数错误：chain 必须为 {min_nodes}-{max_nodes} 个节点的有序数组"
     for node in chain:
@@ -514,9 +584,9 @@ async def submit_causal_links(deps: ResearchToolDeps, args: dict) -> str:
             "evidence_json": json.dumps(evidence, ensure_ascii=False),
             "topic": topic,
             "supersedes_id": supersedes_id,
-            "await_verification": await_verification,
+            "status": "concluded" if concluded else "tracking",
         }
     )
     nodes = " → ".join(str(n.get("node", ""))[:30] for n in chain)
-    tag = "待验证" if await_verification else "结论"
+    tag = "结论" if concluded else "待跟踪"
     return f"因果链已暂存（{len(chain)} 节点，{tag}）：{nodes}（将随本轮研报自动关联落库）"

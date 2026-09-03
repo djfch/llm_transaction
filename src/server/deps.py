@@ -140,6 +140,13 @@ class ServerDeps:
     # 手动触发研报（主程序接线；None 时端点 503）：点火即返回，生成在后台任务执行
     # 可选 report_type/hours 指定类型与回看窗口（409 进行中/503 LLM 未配置由路由按 error_code 映射）
     research_run: Callable[..., Awaitable[dict]] | None = None
+    # 研报提示词版本写回调（主程序接线；issue #113）：
+    # research_prompt_save 经 ResearchPromptStore 落版本（校验失败抛
+    # ResearchPromptValidationError，路由映 422；None 时 PUT 端点直写提示词文件）；
+    # research_prompt_rollback 回滚到指定版本（版本不存在抛同一异常，路由映 404；
+    # None 时回滚端点诚实 503）
+    research_prompt_save: Callable[[str], Awaitable[dict]] | None = None
+    research_prompt_rollback: Callable[[int], Awaitable[dict]] | None = None
     # 研报自动调度只读状态（总开关、下一次运行、官方日历健康度）：
     research_schedule_status: Callable[[], dict[str, Any]] | None = None
     # 指标子系统回调束（主程序装配注入；None 时 /api/indicators* 与 /api/indicator_config
@@ -151,6 +158,7 @@ class ServerDeps:
     config_path: Path = field(default_factory=lambda: ROOT / "config.yaml")
     watchlist_path: Path = field(default_factory=lambda: ROOT / "watchlist.yaml")
     prompt_path: Path = field(default_factory=lambda: ROOT / "system_prompt.md")
+    research_prompt_path: Path = field(default_factory=lambda: ROOT / "research_prompt.md")
     env_path: Path = field(default_factory=lambda: ROOT / ".env")
     web_dist: Path = field(default_factory=lambda: ROOT / "web" / "dist")
 

@@ -68,14 +68,13 @@ def _asset_lines(views: Sequence[ResearchAssetView]) -> list[str]:
 
     返回：
         list[str]：每个合约一行的缩进文本，含方向/信心/持有周期/市场结构/依据类型/
-            技术确认/数据状态/复盘验证结果；验证结果为空时显示「未验证」
+            技术确认/数据状态
     """
     lines = []
     for view in views:
-        verify = view.verify_result or "未验证"
         lines.append(
             f"  - {view.contract}：{view.direction}/{view.confidence}（{view.horizon}）"
             f" 结构={view.market_regime} 依据={view.basis_type} "
-            f"技术={view.technical_confirmation} 数据={view.data_status} 验证={verify}"
+            f"技术={view.technical_confirmation} 数据={view.data_status}"
         )
     return lines

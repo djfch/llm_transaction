@@ -46,7 +46,9 @@ from src.paper.engine import PaperGateway
 from src.paper.funding_patrol import funding_loop
 from src.market.candles import stale_watchdog
 from src.paper.setup import build_paper_gateway
+from src.review.research_outcome import GatewayAsyncCandleSource
 from src.review.setup import ReviewComponents, build_review
+from src.research.prompt_store import ResearchPromptStore
 from src.research.setup import ResearchComponents, build_research
 from src.risk.engine import RiskEngine
 from src.scheduler.wakeup import WakeupScheduler
@@ -425,6 +427,28 @@ async def build_app(
         fill_persister=fill_persister,
         indicators=indicators,
     )
+    # 研报提示词版本存储（issue #113）：启动播种 v1 + 对账（孤儿草稿废弃、文件以库为准），
+    # 复盘 agent 经它做草稿修订；变更即广播 research_prompt_updated
+    research_prompt_store = ResearchPromptStore(
+        ROOT / "research_prompt.md",
+        repo,
+        on_change=lambda: event_queue.put_nowait({"type": "research_prompt_updated"}),
+    )
+    await research_prompt_store.seed_if_empty()
+    await research_prompt_store.reconcile()
+    # 研报子系统先装配：复盘侧历史回看工具（get_macro_series，issue #113 F9）
+    # 复用其数据聚合器；build_research 为纯组装（同步），提前无初始化顺序风险
+    research_components = build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
+        settings,
+        repo,
+        audit,
+        researcher_provider,
+        notify_event=event_queue.put_nowait,
+        candle_cache=candles,
+        gateway=gateway,
+        watchlist=watchlist.contracts,
+        prompt_store=research_prompt_store,
+    )
     ctx = AppContext(
         settings=settings,
         db=db,
@@ -441,17 +465,12 @@ async def build_app(
             indicator_service=indicators.service,
             indicator_config_store=indicators.store,
             watchlist=watchlist.contracts,
+            # K 线窗口适配器：同步网关 → 异步真窗口源（from/to 透传 + 超宽分段，issue #113）
+            candle_source=GatewayAsyncCandleSource(gateway),
+            research_prompt_store=research_prompt_store,
+            research_data_provider=research_components.data_provider,
         ),
-        research=build_research(  # 研报子系统装配（轮始/轮末事件经 WS 广播）
-            settings,
-            repo,
-            audit,
-            researcher_provider,
-            notify_event=event_queue.put_nowait,
-            candle_cache=candles,
-            gateway=gateway,
-            watchlist=watchlist.contracts,
-        ),
+        research=research_components,
         scheduler=scheduler,
         event_queue=event_queue,
         candles=candles,
@@ -609,6 +628,10 @@ def _build_server(
         research_schedule_status=ctx.research.scheduler.status,
         strategy_save=ctx.review.strategy_save,
         strategy_rollback=ctx.review.strategy_rollback,
+        # 研报提示词版本写回调（issue #113）：store 由主程序恒装配（上方已播种/对账），
+        # 与策略写回调同口径无条件接线
+        research_prompt_save=ctx.research.research_prompt_save,
+        research_prompt_rollback=ctx.research.research_prompt_rollback,
         runtime_settings=settings,
         runtime_watchlist=ctx.watchlist,
         indicators=indicators,
