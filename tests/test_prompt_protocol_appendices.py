@@ -213,6 +213,10 @@ def test_prompt_templates_match_current_agent_contracts():
     assert "高置信度方向会被执行 agent 作为硬约束" not in research
     assert "事实、推断与预测" in research
     assert "实时数值、指标参数和历史事实只能来自本轮上下文或工具结果" in research
+    assert "以下场景必须用工具现场核实，不得因快照已含同类数据而跳过" in research
+    assert "调用 `get_macro_series`" in research
+    assert "调用 `get_prediction_markets`" in research
+    assert "只在确有增量信息时使用" not in research
     assert "因果链先暂存" not in research
     assert "书中概率" not in research
     assert "近期研报复盘记录" in research
